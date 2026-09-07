@@ -44,6 +44,20 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.goto(base + '/providers');
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
     await expect(page.getByRole('heading', { name: 'Model access', exact: true })).toBeVisible();
+    const pools = page.getByRole('region', { name: 'Shared model access' });
+    await expect(pools).toBeVisible();
+    await expect(pools).toContainText('Remaining subscription allowance is unknown');
+    if (process.env.HVO_PROVIDER_POOL_FIXTURE === '1') {
+      await expect(pools).toContainText('fixture-provider · Exhausted');
+      const resume = pools.getByRole('button', { name: 'Resume fixture-provider dispatch', exact: true });
+      await expect(resume).toBeDisabled();
+      await pools.getByRole('checkbox').check();
+      await resume.click();
+      await expect(pools).toContainText('fixture-provider · Available');
+      await page.reload();
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      await expect(pools).toContainText('fixture-provider · Available');
+    }
     const keyPanel = page.getByRole('region', { name: 'OpenCode Go key' });
     await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveAttribute('type', 'password');
     // This mutation is only allowed against a disposable, explicitly opted-in fixture.

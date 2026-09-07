@@ -2,6 +2,7 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -9,9 +10,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260907201617_ProviderPoolCircuit")]
+    partial class ProviderPoolCircuit
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -241,82 +244,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasIndex("WorkerId", "Sequence");
 
                     b.ToTable("Events");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.ModelUsageRecord", b =>
-                {
-                    b.Property<string>("RuntimeId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("NativeSessionId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("NativeMessageId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("CacheReadTokens")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("CacheWriteTokens")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("CompletedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("CostProvenance")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Currency")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("InputTokens")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ModelId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("ObservedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("OutputTokens")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<decimal?>("ProviderCost")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ProviderId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("ReasoningTokens")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("SeenInCommandResult")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("SeenInTranscript")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("SessionRole")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("TotalTokens")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("WorkerId")
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("RuntimeId", "NativeSessionId", "NativeMessageId");
-
-                    b.HasIndex("WorkerId", "CreatedAt");
-
-                    b.HasIndex("ProviderId", "ModelId", "CreatedAt");
-
-                    b.ToTable("ModelUsage");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.OperatorStatusUpdate", b =>
