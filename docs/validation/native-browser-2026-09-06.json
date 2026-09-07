@@ -1,0 +1,11 @@
+{
+  "version": "1.18.29",
+  "provider": "opencode",
+  "model": "big-pickle",
+  "runtimeId": "efc7545ebac44aeabff4317053d5e4ea",
+  "nativeSessionId": "ses_f874c26e4ffemRCtHmPpdeXCyX",
+  "directory": "/home/agent/workspaces/native-browser-135eeb9668",
+  "approvals": 2,
+  "questions": 1,
+  "output": "BROWSER_NATIVE_135eeb9668\nFOLLOWUP\n"
+}

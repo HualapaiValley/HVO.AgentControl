@@ -1,0 +1,54 @@
+// Read-only UI checks: opens a creation draft but never submits or changes a worker.
+const {chromium,expect} = require('@playwright/test');
+const fs = require('node:fs'); const path = require('node:path');
+const base = process.env.HVO_BASE_URL || 'http://127.0.0.1:5056';
+const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirname,'../../.fixture/secrets/owner-password');
+(async()=>{
+ const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+ try {
+  const context=await browser.newContext({viewport:{width:1440,height:1000}}); const page=await context.newPage(); const errors=[];
+  page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(base+'/login'); await page.getByLabel('Owner password').fill(fs.readFileSync(passwordFile,'utf8').trim());
+  await page.getByRole('button',{name:'Sign in',exact:true}).click();
+  await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+  const snapshot=await (await context.request.get(base+'/api/v1/snapshot')).json();
+  const worker=snapshot.workers.find(w=>w.name==='Home M4') || snapshot.workers.find(w=>w.role==='Worker'&&!w.archived);
+  if(!worker)throw new Error('An existing worker is required.');
+  const artifacts=path.resolve(__dirname,'../../artifacts/browser'); fs.mkdirSync(artifacts,{recursive:true});
+  await expect(page.getByRole('region',{name:'Worker conversation'})).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Available workers'})).toBeVisible();
+  await page.screenshot({path:path.join(artifacts,'ui-overview.png'),fullPage:true});
+  await page.goto(base+'/workers'); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+  const card=page.locator('.worker-inventory article').filter({has:page.getByRole('heading',{name:worker.name,exact:true})});
+  expect(await card.innerText()).not.toContain('NeedsReview');
+  expect(await card.innerText()).not.toContain('bash: completed');
+  expect(await card.innerText()).not.toContain('bash: error');
+  await expect(card.getByRole('button',{name:'Delete worker',exact:true})).toBeHidden();
+  await expect(card.getByRole('button',{name:'Edit worker',exact:true})).toBeVisible();
+  await page.screenshot({path:path.join(artifacts,'ui-workers.png'),fullPage:true});
+  await page.getByRole('button',{name:'New worker',exact:true}).click();
+  const form=page.getByRole('region',{name:'New worker'});
+  await form.getByLabel('Runtime').selectOption(worker.runtimeId);
+  await form.getByLabel('Remote workspace directory',{exact:true}).fill(worker.directory+'/');
+  await form.getByLabel('Worker name',{exact:true}).fill('Duplicate draft');
+  await expect(form.getByRole('link',{name:'Open existing worker',exact:true})).toHaveAttribute('href','/?worker='+worker.id);
+  await expect(form.getByRole('button',{name:'Create worker',exact:true})).toBeDisabled();
+  await page.screenshot({path:path.join(artifacts,'ui-workspace-conflict.png'),fullPage:true});
+  await form.getByRole('link',{name:'Open existing worker',exact:true}).click();
+  await expect(page.getByRole('region',{name:'Worker conversation'})).toBeVisible();
+  await expect(page.locator('.history-panel')).not.toHaveAttribute('open','');
+  await page.screenshot({path:path.join(artifacts,'ui-conversation.png'),fullPage:true});
+  for(const route of ['/', '/workers', '/runtimes', '/coordination']) {
+   await page.setViewportSize({width:390,height:844}); await page.goto(base+route);
+   await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
+  }
+  await page.goto(base+'/?worker='+worker.id); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
+  await page.screenshot({path:path.join(artifacts,'ui-conversation-mobile.png'),fullPage:true});
+  const after=await (await context.request.get(base+'/api/v1/snapshot')).json();
+  expect(after.workers.find(w=>w.id===worker.id).nativeSessionId).toBe(worker.nativeSessionId);
+  expect(errors).toEqual([]);
+  console.log('PASS: overview selection, compact cards, duplicate draft recovery, collapsed history, desktop/mobile layouts and preserved conversation. No worker changes submitted.');
+ } finally {await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1);});

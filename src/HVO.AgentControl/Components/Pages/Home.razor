@@ -1,0 +1,134 @@
+@page "/"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+@using HVO.AgentControl.Core
+
+<PageTitle>AgentControl · Overview</PageTitle>
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
+  <ControlHeader Title="@(selectedId is null ? "Overview" : "Conversation")" Description="@(selectedId is null ? "See what needs attention and choose a worker." : "Send a task, respond to questions, or continue your work.")" />
+  @if (!string.IsNullOrEmpty(error)) { <div class="notice error" role="alert">@error <button class="subtle" @onclick="() => error = null">Dismiss</button></div> }
+  @if (!string.IsNullOrEmpty(notice)) { <div class="notice" role="status">@notice</div> }
+  @if (snapshot is null) { <p>Loading saved state…</p> }
+  else
+  {
+    @if (selectedId is null)
+    {
+    <section class="metrics" aria-label="Fleet overview">
+      <div><strong>@snapshot.Runtimes.Count(x => x.Transport == "Connected")<small>/ @snapshot.Runtimes.Count</small></strong><span>Runtimes connected</span></div>
+      <div><strong>@snapshot.Workers.Count(x => x.Role == SessionRoles.Worker && x.Activity is "Active" or "Retrying")</strong><span>Workers active</span></div>
+      <div><strong>@snapshot.Requests.Count</strong><span>Need a response</span></div>
+      <div><strong>@snapshot.Commands.Count(x => x.State == Delivery.Queued)</strong><span>Instructions queued</span></div>
+    </section>
+    @if (snapshot.Runtimes.Any(x => x.Health != "Healthy")) { <p class="notice">Some runtimes are unavailable or reconnecting. <a href="/runtimes">View runtime status</a>.</p> }
+    }
+    @if (snapshot.Workers.Count == 0)
+    {
+      <div class="empty"><h2>Ready for your first conversation.</h2><p><a href="/runtimes">Connect a runtime</a>, then <a href="/workers">set up a worker</a> to send its first task.</p></div>
+    }
+    else
+    {
+      <div class="conversation-picker"><label>Agent conversation<select value="@selectedId" @onchange="SelectConversation"><option value="" disabled>Choose an agent</option>@foreach (var worker in snapshot.Workers.Where(x => !x.Archived || x.Id == selectedId)) { <option value="@worker.Id">@worker.Name · @DisplayStatus.Worker(worker)</option> }</select></label><a href="/workers">Manage workers</a></div>
+      @if (snapshot.Requests.Count > 0)
+      {
+        <div class="attention-links" aria-label="Agents needing a response">@foreach (var worker in snapshot.Workers.Where(x => snapshot.Requests.Any(r => r.WorkerId == x.Id))) { <a href="@ConversationUrl(worker.Id)">@worker.Name needs a response</a> }</div>
+      }
+    }
+    @if (selectedId is null && snapshot.Workers.Any(x => x.Role == SessionRoles.Worker && !x.Archived))
+    {
+      <div class="section-heading"><h2>Your workers</h2><a href="/workers?new=true">Set up a worker</a></div>
+      <section class="fleet-grid" aria-label="Available workers">
+      @foreach (var worker in snapshot.Workers.Where(x => x.Role == SessionRoles.Worker && !x.Archived))
+      { <a class="fleet-card" href="@ConversationUrl(worker.Id)"><div class="card-heading"><h3>@worker.Name</h3><span class="badge">@DisplayStatus.Worker(worker)</span></div><p class="muted">@RuntimeName(worker.RuntimeId) · @worker.Project</p><p>@worker.ProviderId / @worker.ModelId</p><span class="open-conversation">Open conversation →</span></a> }
+      </section>
+    }
+    @if (selectedId is not null)
+    {
+      <section class="worker-detail" aria-label="Worker conversation">
+        @if (detail is null) { <div class="empty"><h3>A conversation that stays with your work.</h3><p>Select a worker to inspect its transcript, send a follow-up, or resolve a pending request.</p></div> }
+        else
+        {
+          <div class="card-heading"><div><h2>@detail.Worker.Name</h2><p class="muted">@RuntimeName(detail.Worker.RuntimeId) · @detail.Worker.ProviderId / @detail.Worker.ModelId</p></div><span class="badge">@DisplayStatus.Worker(detail.Worker)</span></div>
+          <div class="actions"><a href="@("/workers?edit=" + detail.Worker.Id)">Edit worker / model</a><a href="@("/terminal?runtime=" + detail.Worker.RuntimeId)" target="_blank" rel="noopener">Open admin terminal</a><a href="/">All workers</a></div>
+          <details class="conversation-info"><summary>Connection &amp; conversation details</summary><p class="mono">@detail.Worker.Directory</p>
+          <p><a href="@("/workers?edit=" + detail.Worker.Id)">Edit worker and model</a> · Default for new instructions: @detail.Worker.ProviderId/@detail.Worker.ModelId · Last observed assistant model: @ActiveModel</p>
+          @if (detail.Worker.Archived) { <p class="notice">Archived. Restore this worker on the Workers page to send another instruction.</p> }
+          <p class="meta">Observed @Age(detail.Worker.LastObservedAt) · Model output @Age(detail.Worker.LastModelAt) · Tool activity @Age(detail.Worker.LastToolAt)</p>
+
+          @if (detail.Worker.HistoryGap) { <p class="notice">A connection gap occurred. Retained history was reconciled; transient events during the gap may be unavailable.</p> }
+          </details>
+          @if (detail.Worker.Stale) { <p class="notice">Reconnecting to this worker. Remote work may still be running; queued instructions wait for a fresh connection.</p> }
+          @if (detail.Worker.Archived) { <p class="notice">This worker is archived. Restore it on the Workers page to send instructions.</p> }
+          @foreach (var request in detail.Requests.Where(x => x.State is "Pending" or "ReplyUnknown"))
+          {
+            <article class="request" @key="request.Id"><h3>@(request.Kind == "permission" ? "Permission requested" : "Question from worker")</h3>
+              @if (request.Kind == "permission")
+              {
+                <pre>@InteractiveRequests.PermissionSummary(request.Json)</pre><details><summary>Full request details</summary><pre>@Pretty(request.Json)</pre></details><p>“Always” grants OpenCode's displayed remembered scope for this workspace. Review it before granting.</p>
+                <div class="actions"><button disabled="@(request.ReplyCommandId is not null)" @onclick='() => ReplyPermission(request, "once")'>Allow once</button><button class="subtle" disabled="@(request.ReplyCommandId is not null)" @onclick='() => ReplyPermission(request, "always")'>Allow remembered scope</button><button class="danger" disabled="@(request.ReplyCommandId is not null)" @onclick='() => ReplyPermission(request, "reject")'>Reject</button></div>
+              }
+              else
+              {
+                @foreach (var question in Questions(request))
+                {
+                  <fieldset disabled="@(request.ReplyCommandId is not null)"><legend>@question.Text</legend>
+                    @foreach (var option in question.Options)
+                    {
+                      <label class="question-choice"><input type="@(question.Multiple ? "checkbox" : "radio")" name="@(request.Id + ":" + question.Index)" checked="@Choices(request.Id, question.Index).Contains(option.Label)" @onchange="e => Choose(request.Id, question, option.Label, !question.Multiple || e.Value is true)" /> @option.Label <small>@option.Description</small></label>
+                    }
+                    @if (question.Custom) { <label>Custom answer<textarea aria-label="@question.Text" rows="2" value="@Answer(request.Id, question.Index)" @oninput="e => CustomAnswer(request.Id, question, e.Value?.ToString() ?? string.Empty)"></textarea></label> }
+                  </fieldset>
+                }
+                <div class="actions"><button disabled="@(request.ReplyCommandId is not null)" @onclick="() => ReplyQuestion(request, false)">Send answers</button><button class="subtle" disabled="@(request.ReplyCommandId is not null)" @onclick="() => ReplyQuestion(request, true)">Decline question</button></div>
+              }
+              @if (request.ReplyCommandId is not null) { <p>Reply recorded: @request.State. Inspect command delivery below.</p> }
+            </article>
+          }
+          <div class="transcript" role="region" aria-label="Transcript">
+            @foreach (var message in detail.Messages.OrderBy(x => x.NativeCreatedAt))
+            {
+              <article class="message @message.Role" @key="message.NativeId"><div class="message-heading"><strong>@message.Role</strong><time>@Timestamp(message.NativeCreatedAt)</time></div>
+                @foreach (var part in Parts(message))
+                {
+                  @if (part.Label is "text" or "error" && !(message.Role == "user" && part.Text.Length > 800)) { <div class="part"><pre>@part.Text</pre></div> }
+                  else { <details class="part"><summary>@(part.Label == "text" ? "Full instruction" : part.Label == "reasoning" ? "Reasoning" : part.Label)</summary><pre>@part.Text</pre></details> }
+                }
+                <details><summary>Native message details</summary><pre>@Pretty(message.Json)</pre></details>
+              </article>
+            }
+            @if (detail.Messages.Count == 0) { <p class="muted">No messages yet. Send the first task below.</p> }
+          </div>
+          <details><summary>Earlier retained messages</summary><button class="subtle" @onclick="OlderHistory">Load earlier page</button>@foreach (var message in olderMessages.OrderBy(x => x.NativeCreatedAt)) { <article class="message"><strong>@message.Role · @Timestamp(message.NativeCreatedAt)</strong>@foreach (var part in Parts(message)) { <pre>@part.Text</pre> }</article> }</details>
+
+          @if (detail.Worker.Role == SessionRoles.Coordinator) { <p class="notice">This is a routing-only conversation. Send instructions and follow-ups through <a href="/coordination">Coordination</a>.</p> }
+          else
+          {
+          <label class="check"><input type="checkbox" @bind="includeGuidance" /> Include coordination guidance</label>
+          @if (includeGuidance) { <label>Progress interval in minutes (0 for milestones only)<input type="number" min="0" max="1440" @bind="progressMinutes" /></label> }
+          <div class="composer"><label>Task or follow-up<textarea rows="5" @bind="promptText" @bind:event="oninput" placeholder="Describe the task, scope, and validation you expect."></textarea></label><div class="actions"><button disabled="@(busy || detail.Worker.Archived || string.IsNullOrWhiteSpace(promptText))" @onclick="SendPrompt">@(detail.Worker.Activity == "Idle" ? "Send instruction" : "Queue follow-up")</button><button class="subtle" disabled="@(busy || detail.Worker.Archived)" @onclick="StatusInquiry">Request progress report</button><button class="danger" disabled="@(busy || detail.Worker.Stale || detail.Worker.Activity == "Idle" && !detail.Commands.Any(x => x.Kind == "Prompt" && Delivery.InFlight(x.State)))" @onclick="Abort">Request cancellation</button></div><p class="meta">Instructions sent while busy wait their turn. Closing this page leaves work running.</p></div>
+          }
+          @if (detail.Commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown))
+          { <section class="pending-work" aria-label="Current instructions"><h3>Current instructions</h3>
+            @foreach (var pending in detail.Commands.Where(x => x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown).OrderBy(x => x.QueueOrder))
+            { <div class="command"><strong>@DisplayStatus.DeliveryState(pending.State)</strong><p class="instruction-preview">@CommandText(pending)</p>
+              @if (pending.Kind == "Prompt" && pending.State == Delivery.Queued) { <div class="actions"><button class="subtle" @onclick='() => QueueAction(pending.Id, "first")'>Move first</button><button class="subtle" @onclick='() => QueueAction(pending.Id, "cancel")'>Cancel queued</button></div> }
+              @if (pending.State == Delivery.Unknown) { <p>Check the conversation before resolving uncertain delivery.</p><button class="danger" @onclick='() => QueueAction(pending.Id, "resolveUnknown")'>Acknowledge uncertainty; never resend</button> }
+            </div> }
+          </section> }
+          <details class="history-panel"><summary>Instruction history &amp; delivery details (@detail.Commands.Count)</summary>
+          @foreach (var command in detail.Commands.OrderBy(x => x.QueueOrder))
+          {
+            <div class="command" @key="command.Id"><div><strong>@command.Kind</strong> <span class="badge @(command.State == Delivery.Unknown ? "attention" : "")">@command.State</span><p>@CommandText(command)</p><p class="meta">@CommandModel(command)</p><small>@command.Detail</small><p class="meta">@AssignmentGuidance.ProgressStatus(command)</p>
+              @if (command.Kind == "Prompt") { <details><summary>Exact submitted instruction</summary><pre>@(Json.Read<PromptInput>(command.ExecutionPayload.Length > 0 ? command.ExecutionPayload : command.Payload).Text)</pre></details> }<details><summary>Request identity</summary><code>@command.Id</code></details></div><div class="actions">
+              @if (command.Kind == "Prompt" && command.State == Delivery.Queued) { <button class="subtle" @onclick='() => QueueAction(command.Id, "first")'>Move first</button><button class="subtle" @onclick='() => QueueAction(command.Id, "cancel")'>Cancel queued</button> }
+              @if (command.State == Delivery.Unknown) { <button class="danger" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty; never resend</button> }
+            </div></div>
+          }
+          </details>
+          <details><summary>Review previous assignment · @DisplayStatus.Outcome(detail.Worker.Outcome)</summary><p>Native idle alone does not establish success. Record the evidence you reviewed.</p><label>Outcome<select @bind="outcome"><option value="ReportedComplete">Agent reported completion</option><option value="VerifiedComplete">Completion verified</option><option>Blocked</option><option>Failed</option><option>Cancelled</option></select></label><label>Evidence<textarea @bind="evidence"></textarea></label><button @onclick="RecordOutcome">Record reviewed outcome</button></details>
+        }
+      </section>
+    }
+    <footer>Work continues when you close this page.</footer>
+  }
+</div>

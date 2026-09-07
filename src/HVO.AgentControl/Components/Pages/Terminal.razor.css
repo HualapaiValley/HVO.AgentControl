@@ -1,0 +1,4 @@
+.shell { max-width: 1200px; margin: auto; padding: 1rem; }
+.terminal { height: 65vh; min-height: 260px; background: #111827; padding: .7rem; border-radius: .5rem; overflow: hidden; }
+.actions { display: flex; gap: .5rem; margin: 1rem 0; }
+select { max-width: 100%; }

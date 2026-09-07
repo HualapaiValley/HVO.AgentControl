@@ -1,0 +1,2 @@
+dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: .35rem 1rem; font-size: .85rem; }
+dt, dd { margin: 0; overflow-wrap: anywhere; }

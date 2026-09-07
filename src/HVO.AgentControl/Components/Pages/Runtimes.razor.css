@@ -1,0 +1,7 @@
+fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.runtime-options { margin: 1rem 0; padding: .7rem 0; border-top: 1px solid var(--line); }
+.verification { margin: 1rem 0; padding: 1rem; background: var(--surface-hover); border: 1px solid var(--line); border-radius: 8px; }
+.verification li { margin: .4rem 0; font-size: .85rem; }
+
+.runtime-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 1rem; }.runtime-card { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 1.2rem; }.runtime-card p { font-size: .8rem; }.runtime-card .actions { font-size: .75rem; }
+@media (max-width: 500px) { .runtime-grid { grid-template-columns: 1fr; } }

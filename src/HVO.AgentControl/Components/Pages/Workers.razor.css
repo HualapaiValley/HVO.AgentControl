@@ -1,0 +1,10 @@
+.worker-inventory { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }.worker-card { background: var(--surface); padding: 1.2rem; border: 1px solid var(--line); border-radius: 8px; }.worker-card p { font-size: .85rem; }.worker-card .button-link { margin-top: .6rem; }.operation { padding: .8rem 0; border-top: 1px solid var(--line); }.operation button, .operation a { margin-left: .7rem; }
+@media (max-width: 500px) { .worker-inventory { grid-template-columns: 1fr; } }
+
+.capability-report { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+
+.worker-card { background: linear-gradient(145deg, #0f172af0, #0f172aa6); border-radius: .85rem; display: flex; flex-direction: column; }
+.worker-card > .actions { margin-top: auto; padding-top: .6rem; }
+.worker-card > details { border-top: 1px solid var(--line); padding-top: .8rem; }
+.worker-card .button-link { margin-top: 0; }
+.creation-card { border-color: #3b82f655; }

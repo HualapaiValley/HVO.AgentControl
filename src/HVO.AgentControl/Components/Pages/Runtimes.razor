@@ -1,0 +1,115 @@
+@page "/runtimes"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+@using HVO.AgentControl.Core
+
+<PageTitle>AgentControl · Runtimes</PageTitle>
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
+  <ControlHeader Title="Runtimes" Description="Connect hosts, verify access, and manage OpenCode servers." />
+  @if (!string.IsNullOrEmpty(error)) { <div class="notice error" role="alert">@error <button class="subtle" @onclick="() => error = null">Dismiss</button></div> }
+  @if (!string.IsNullOrEmpty(notice)) { <div class="notice" role="status">@notice</div> }
+  @if (snapshot is null) { <p>Loading saved state…</p> }
+  else
+  {
+    <div class="section-heading"><h2>Runtimes</h2><button @onclick="NewRuntime">Add runtime</button></div>
+    @if (snapshot.Runtimes.Count == 0) { <div class="empty">Add an SSH host and login, then use Verify to check access and prepare your runtime.</div> }
+    @if (runtimeEdit is not null)
+    {
+      <section class="panel" aria-label="Runtime profile">
+        <h2>@(snapshot.Runtimes.Any(x => x.Id == runtimeEdit.Id) ? "Edit runtime" : "Add runtime")</h2>
+        <p>Verify checks SSH access and host requirements. A successful SSH login lets you save securely and open a terminal even when agent dependencies are missing.</p>
+        <fieldset disabled="@busy" @oninput="ClearVerification" @onchange="ClearVerification">
+        <div class="form-grid">
+          <label>Name<input @bind="runtimeEdit.Name" /></label><label>SSH host<input @bind="runtimeEdit.Host" /></label>
+          <label>SSH port<input type="number" @bind="runtimeEdit.Port" /></label><label>SSH username<input @bind="runtimeEdit.Username" /></label>
+          <label>SSH authentication<select @bind="runtimeEdit.Authentication" @bind:after="AuthenticationChanged"><option value="privateKey">Private key</option><option value="password">Password</option></select></label>
+          @if (runtimeEdit.Authentication == "password")
+          { <label>SSH password<input type="password" @bind="sshPassword" autocomplete="new-password" maxlength="64000" /><small>@(string.IsNullOrEmpty(runtimeEdit.CredentialReference) ? "Enter now, or Verify first to discover the host key." : "Leave blank to reuse the saved credential.")</small></label> }
+          else
+          {
+            <label class="wide">SSH private key<textarea @bind="sshPrivateKey" autocomplete="off" spellcheck="false" rows="3" maxlength="64000" placeholder="Paste a private key, or use a saved/mounted reference below."></textarea></label>
+            <label>SSH key passphrase (optional)<input type="password" @bind="sshPassphrase" autocomplete="new-password" maxlength="1024" /></label>
+          }
+          <label class="wide">Allowed remote workspace roots (one per line)<textarea @bind="runtimeEdit.AllowedRoots" rows="2" placeholder="Optional: defaults to the SSH user's ~/workspaces"></textarea><small>Blank creates ~/workspaces if missing. Choose your existing project directories when available.</small></label>
+          <label class="check"><input type="checkbox" @bind="runtimeEdit.InstallIfMissing" />Install pinned OpenCode if missing</label>
+        </div>
+        <details class="runtime-options"><summary>OpenCode startup options</summary>
+          <div class="form-grid">
+            <label class="check"><input type="checkbox" @bind="runtimeEdit.PureMode" />Disable external plugins (--pure)</label>
+            <label class="check"><input type="checkbox" @bind="runtimeEdit.PrintLogs" />Write diagnostic logs (--print-logs)</label>
+            <label>Log level<select @bind="runtimeEdit.LogLevel"><option value="">Default</option><option>DEBUG</option><option>INFO</option><option>WARN</option><option>ERROR</option></select></label>
+          </div>
+          <p class="meta">OpenCode 1.18.29 supports these server options. --auto belongs to its interactive/run modes and cannot be passed to serve. Native permission controls remain available on each worker.</p>
+          <p class="meta">To change options on a running server, stop its owned server first, then edit and reconnect. Disconnect alone keeps the existing process running.</p>
+        </details>
+        <details class="runtime-options"><summary>Advanced connection settings</summary><div class="form-grid">
+          <label class="wide">Trusted host key (SHA256 fingerprint)<input @bind="runtimeEdit.HostKeySha256" placeholder="Discovered by Verify" /><small>You can also enter a fingerprint verified through another trusted channel.</small></label>
+          <label>SSH host-key algorithm<select @bind="runtimeEdit.HostKeyAlgorithm"><option value="ssh-ed25519">Ed25519</option><option value="ecdsa-sha2-nistp256">ECDSA P-256</option><option value="rsa-sha2-512">RSA SHA-512</option></select></label>
+          <label>Credential file reference<input @bind="runtimeEdit.CredentialReference" placeholder="Optional mounted file or saved credential" /></label>
+          <label>Key passphrase reference (optional)<input @bind="runtimeEdit.PassphraseReference" /></label>
+          <label>OpenCode password reference<input @bind="runtimeEdit.ServerPasswordReference" placeholder="Generated automatically by Verify" /></label>
+          <label>Remote state directory (outside repositories)<input @bind="runtimeEdit.StateDirectory" placeholder="Discovered automatically by Verify" /></label>
+          <label>Absolute OpenCode executable (optional)<input @bind="runtimeEdit.Executable" /></label>
+          <label>Remote API port<input type="number" @bind="runtimeEdit.ApiPort" /></label><label>Maximum active turns<input type="number" @bind="runtimeEdit.Capacity" /></label>
+          <label>Labels<input @bind="runtimeEdit.Labels" /></label>
+        </div><button class="subtle" @onclick="SaveRuntime">Save runtime</button><small>Manual save requires all credential references and a trusted fingerprint.</small></details>
+        </fieldset>
+        @if (runtimeVerification is { } verified)
+        {
+          <div class="verification" role="status"><p>@verified.Message</p>
+            @if (verified.Status == "TrustRequired")
+            {
+              <p class="mono">@verified.Profile.Host:@verified.Profile.Port · @verified.Profile.HostKeyAlgorithm<br />@verified.Profile.HostKeySha256</p>
+              <button disabled="@busy" @onclick="() => VerifyRuntime(true)">Trust this host and verify</button>
+            }
+            @if (verified.Checks.Count > 0)
+            { <ul>@foreach (var check in verified.Checks) { <li><strong>@(check.Planned ? "Planned" : check.Passed ? "✓" : check.Required ? "✗" : "Optional") @check.Name</strong> — @check.Detail</li> }</ul> }
+          </div>
+        }
+        <div class="actions">
+          <button disabled="@busy" @onclick="() => VerifyRuntime()">@(busy ? "Verifying…" : "Verify")</button>
+          @if (runtimeVerification?.SaveToken is not null) { <button class="subtle" disabled="@busy" @onclick="SaveForSetup">Save for setup</button> }
+          @if (runtimeVerification?.Status == "Verified") { <button disabled="@busy" @onclick="SaveVerifiedRuntime">Save and set up workers</button> }
+          <button class="subtle" disabled="@busy" @onclick="CancelRuntime">Cancel</button>
+        </div>
+      </section>
+    }
+    <div class="runtime-grid">
+      @foreach (var runtime in snapshot.Runtimes)
+      {
+        <article class="runtime-card" @key="runtime.Id">
+          <div class="card-heading"><h3>@runtime.Name</h3><span class="badge @(runtime.Transport == "Connected" ? "good" : "")">@runtime.Transport</span></div>
+          <p class="mono">@runtime.Username@@@runtime.Host:@runtime.Port</p>
+          <p>OpenCode @runtime.Version · @snapshot.Workers.Count(x => x.RuntimeId == runtime.Id) registered agent(s)</p>
+          @if (runtime.Health != "Healthy") { <p class="notice">@runtime.Diagnostic</p> }
+          <div class="actions">
+            <a class="button-link subtle" href="@("/terminal?runtime=" + runtime.Id)" target="_blank" rel="noopener">Open admin terminal</a>
+            <button class="subtle" @onclick='() => RuntimeAction(runtime.Id, "EnsureServer")'>Connect / ensure</button>
+            <button class="subtle" @onclick='() => RuntimeAction(runtime.Id, "RefreshState")'>Refresh</button>
+            <button class="subtle" @onclick='() => RuntimeAction(runtime.Id, "DisconnectRuntime")'>Disconnect</button>
+            @if (runtime.Transport == "Connected") { <a class="button-link subtle" href="@WorkerSetupUrl(runtime.Id)">Set up worker</a> }
+            <button class="subtle" @onclick="() => deletingRuntimeId = runtime.Id">Delete runtime</button>
+            <button class="subtle" disabled="@runtime.DesiredConnected" @onclick="() => EditRuntime(runtime)">Edit</button>
+          </div>
+          @if (deletingRuntimeId == runtime.Id)
+          { <p>Delete @runtime.Name from AgentControl? It must be disconnected with no workers, coordinators, pending operations or open admin terminals. Remote files/processes and credentials are retained.</p><div class="actions"><button class="danger" disabled="@busy" @onclick="() => DeleteRuntime(runtime)">Confirm delete runtime</button><button class="subtle" @onclick="() => deletingRuntimeId = null">Keep runtime</button></div> }
+          <details><summary>Connection details &amp; installed tools</summary>
+          <p>OpenCode @runtime.Version · @runtime.Health · @runtime.ProviderState</p>
+          <p class="muted">@runtime.Diagnostic</p>
+          @if (runtime.InstalledExecutable.Length > 0) { <p class="meta">Installed OpenCode: <code>@runtime.InstalledExecutable</code>. Admin terminals include this location in PATH.</p> }
+          <p class="meta">@runtime.Platform · @runtime.Capacity active turns max · Last healthy @Age(runtime.LastHealthyAt)</p>
+          <details><summary>Machine capabilities</summary><CapabilityFacts Json="@runtime.CapabilitiesJson" /></details>
+          </details>
+          <details><summary>Server lifecycle & diagnostics</summary><p class="mono">@runtime.TmuxName · Port @runtime.ApiPort · Generation @runtime.Generation</p><p>Last stream event @Age(runtime.LastEventAt) · @runtime.ReconnectAttempts reconnect attempts</p>
+            <p>Startup options: @(string.IsNullOrEmpty(HVO.AgentControl.Ssh.StartupOptions.Arguments(runtime)) ? "Defaults" : HVO.AgentControl.Ssh.StartupOptions.Arguments(runtime))</p>
+            <p>Stopping this server affects: @string.Join(", ", snapshot.Workers.Where(x => x.RuntimeId == runtime.Id).Select(x => x.Name).DefaultIfEmpty("no managed workers"))</p>
+            <button class="danger" disabled='@(runtime.Transport != "Connected")' @onclick='() => RuntimeAction(runtime.Id, "StopManagedServer")'>Stop owned server and its workers</button>
+          </details>
+        </article>
+      }
+    </div>
+    <details class="panel"><summary>Runtime operations & recent delivery</summary>@foreach (var command in snapshot.Commands.Where(x => x.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer").OrderByDescending(x => x.CreatedAt).Take(30)) { <p><strong>@RuntimeName(command.RuntimeId) · @command.Kind · @command.State</strong> @command.Detail <code>@command.Id</code>@if (command.State == Delivery.Unknown) { <button class="subtle" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty</button> }</p> }</details>
+    <footer>Work continues when you close this page.</footer>
+  }
+</div>

@@ -1,0 +1,241 @@
+{
+  "version": "1.18.29",
+  "provider": "opencode",
+  "model": "big-pickle",
+  "sshDropDuringTool": true,
+  "backendRestart": true,
+  "workers": [
+    {
+      "target": "a",
+      "workspace": "/home/agent/workspaces/live-a-c52802729e",
+      "nativeSessionId": "ses_f876e2d0bffeBt2xZLEfvPjHpk",
+      "file": "NATIVE_0_c52802729e\n\nFOLLOWUP\n",
+      "messages": [
+        {
+          "id": "msg_078922379001cXPZDuRjEg5gHi",
+          "role": "assistant",
+          "parentID": "msg_078921288002d08ddd5ed3cc59",
+          "finish": "stop",
+          "error": null,
+          "text": [
+            "Both lines:\n1. `NATIVE_0_c52802729e`\n2. (blank line)\n3. `FOLLOWUP`"
+          ],
+          "tools": []
+        },
+        {
+          "id": "msg_0789218a8001osSXA3cxCUKd5r",
+          "role": "assistant",
+          "parentID": "msg_078921288002d08ddd5ed3cc59",
+          "finish": "tool-calls",
+          "error": null,
+          "text": [],
+          "tools": [
+            {
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "printf '\\nFOLLOWUP\\n' >> evidence.txt; cat evidence.txt"
+                },
+                "output": "NATIVE_0_c52802729e\n\nFOLLOWUP\n",
+                "title": "printf '\\nFOLLOWUP\\n' >> evidence.txt; cat evidence.txt",
+                "metadata": {
+                  "output": "NATIVE_0_c52802729e\n\nFOLLOWUP\n",
+                  "exit": 0,
+                  "truncated": false
+                },
+                "time": {
+                  "start": 1788729238287,
+                  "end": 1788729238294
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_078921288002d08ddd5ed3cc59",
+          "role": "user",
+          "parentID": null,
+          "finish": null,
+          "error": null,
+          "text": [
+            "In the same workspace append exactly FOLLOWUP to evidence.txt on a new line. Run cat evidence.txt and report both lines. Stop without committing."
+          ],
+          "tools": []
+        },
+        {
+          "id": "msg_078921288001l51GeQCuxI9Rz1",
+          "role": "assistant",
+          "parentID": "msg_07891d2f400190062039356ef9",
+          "finish": "stop",
+          "error": null,
+          "text": [
+            "Output: `NATIVE_0_c52802729e`"
+          ],
+          "tools": []
+        },
+        {
+          "id": "msg_07891dbb5001tPlq5IawiFmaLL",
+          "role": "assistant",
+          "parentID": "msg_07891d2f400190062039356ef9",
+          "finish": "tool-calls",
+          "error": null,
+          "text": [],
+          "tools": [
+            {
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "sleep 12; printf 'NATIVE_0_c52802729e\\n' > evidence.txt; cat evidence.txt"
+                },
+                "output": "NATIVE_0_c52802729e\n",
+                "title": "sleep 12; printf 'NATIVE_0_c52802729e\\n' > evidence.txt; cat evidence.txt",
+                "metadata": {
+                  "output": "NATIVE_0_c52802729e\n",
+                  "exit": 0,
+                  "truncated": false
+                },
+                "time": {
+                  "start": 1788729221950,
+                  "end": 1788729233999
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_07891d2f400190062039356ef9",
+          "role": "user",
+          "parentID": null,
+          "finish": null,
+          "error": null,
+          "text": [
+            "In this disposable workspace run exactly this bash command: sleep 12; printf 'NATIVE_0_c52802729e\\n' > evidence.txt; cat evidence.txt . Then report the output and stop. Do not commit, access other directories, or create other files."
+          ],
+          "tools": []
+        }
+      ]
+    },
+    {
+      "target": "a",
+      "workspace": "/home/agent/workspaces/live-b-c52802729e",
+      "nativeSessionId": "ses_f876e2a3bffe1WTSoVVfkBN476",
+      "file": "NATIVE_1_c52802729e\n",
+      "messages": [
+        {
+          "id": "msg_07891edfa001tYrcsZHQV8R3to",
+          "role": "assistant",
+          "parentID": "msg_07891d5c40018018cf35cf1897",
+          "finish": "stop",
+          "error": null,
+          "text": [
+            "Output: `NATIVE_1_c52802729e`"
+          ],
+          "tools": []
+        },
+        {
+          "id": "msg_07891dec5001LpSePrbEVO3k1Q",
+          "role": "assistant",
+          "parentID": "msg_07891d5c40018018cf35cf1897",
+          "finish": "tool-calls",
+          "error": null,
+          "text": [],
+          "tools": [
+            {
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "sleep 2; printf 'NATIVE_1_c52802729e\\n' > evidence.txt; cat evidence.txt"
+                },
+                "output": "NATIVE_1_c52802729e\n",
+                "title": "sleep 2; printf 'NATIVE_1_c52802729e\\n' > evidence.txt; cat evidence.txt",
+                "metadata": {
+                  "output": "NATIVE_1_c52802729e\n",
+                  "exit": 0,
+                  "truncated": false
+                },
+                "time": {
+                  "start": 1788729222625,
+                  "end": 1788729224644
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_07891d5c40018018cf35cf1897",
+          "role": "user",
+          "parentID": null,
+          "finish": null,
+          "error": null,
+          "text": [
+            "In this disposable workspace run exactly this bash command: sleep 2; printf 'NATIVE_1_c52802729e\\n' > evidence.txt; cat evidence.txt . Then report the output and stop. Do not commit, access other directories, or create other files."
+          ],
+          "tools": []
+        }
+      ]
+    },
+    {
+      "target": "b",
+      "workspace": "/home/agent/workspaces/live-c-c52802729e",
+      "nativeSessionId": "ses_f876e2751ffesIgXQQf6aTE7us",
+      "file": "NATIVE_2_c52802729e\n",
+      "messages": [
+        {
+          "id": "msg_07891ec03001uRKjKvAO2ZVRm3",
+          "role": "assistant",
+          "parentID": "msg_07891d8ae001690362c66ecfe3",
+          "finish": "stop",
+          "error": null,
+          "text": [
+            "Output: `NATIVE_2_c52802729e`"
+          ],
+          "tools": []
+        },
+        {
+          "id": "msg_07891db97001LsFA55CkcV6xlX",
+          "role": "assistant",
+          "parentID": "msg_07891d8ae001690362c66ecfe3",
+          "finish": "tool-calls",
+          "error": null,
+          "text": [],
+          "tools": [
+            {
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "sleep 2; printf 'NATIVE_2_c52802729e\\n' > evidence.txt; cat evidence.txt"
+                },
+                "output": "NATIVE_2_c52802729e\n",
+                "title": "sleep 2; printf 'NATIVE_2_c52802729e\\n' > evidence.txt; cat evidence.txt",
+                "metadata": {
+                  "output": "NATIVE_2_c52802729e\n",
+                  "exit": 0,
+                  "truncated": false
+                },
+                "time": {
+                  "start": 1788729222114,
+                  "end": 1788729224154
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "msg_07891d8ae001690362c66ecfe3",
+          "role": "user",
+          "parentID": null,
+          "finish": null,
+          "error": null,
+          "text": [
+            "In this disposable workspace run exactly this bash command: sleep 2; printf 'NATIVE_2_c52802729e\\n' > evidence.txt; cat evidence.txt . Then report the output and stop. Do not commit, access other directories, or create other files."
+          ],
+          "tools": []
+        }
+      ]
+    }
+  ]
+}

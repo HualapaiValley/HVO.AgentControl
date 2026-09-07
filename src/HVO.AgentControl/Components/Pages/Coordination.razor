@@ -1,0 +1,63 @@
+@page "/coordination"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+@using HVO.AgentControl.Core
+
+<PageTitle>AgentControl · Coordination</PageTitle>
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
+  <ControlHeader Title="Coordination" Description="Give your coordinator an instruction and let it route work and responses between agents." />
+  @if (error is not null) { <p role="alert" class="notice error">@error</p> }
+  @if (notice is not null) { <p role="status" class="notice">@notice</p> }
+  @if (snapshot is not null)
+  {
+    <section class="panel" aria-label="Coordinator settings"><h2>Coordinators</h2>
+      <p>Dedicated routing sessions do not participate in worker tasks.</p>
+      @foreach (var coordinator in snapshot.Workers.Where(x => x.Role == SessionRoles.Coordinator))
+      { <p><strong>@coordinator.Name</strong> · @coordinator.Activity · @coordinator.ProviderId/@coordinator.ModelId · <a href="@ConversationUrl(coordinator.Id)">Conversation</a> · <a href="@("/workers?edit=" + coordinator.Id)">Edit coordinator and model</a></p> }
+      <a href="/workers?new=true&amp;role=Coordinator">Create a coordinator session</a>
+    </section>
+    <section class="panel" aria-label="Start coordination">
+      <h2>New coordination</h2>
+      <p>Choose a coordinator to plan assignments and route responses. It delegates task execution to the agents below.</p>
+      <label>Coordinator<select aria-label="Coordinator" @bind="coordinatorId"><option value="">Choose coordinator</option>@foreach (var worker in snapshot.Workers.Where(x => !x.Archived && x.Role == SessionRoles.Coordinator)) { <option value="@worker.Id">@worker.Name · @worker.ProviderId/@worker.ModelId</option> }</select></label>
+      <fieldset><legend>Agents it can contact</legend>@foreach (var worker in snapshot.Workers.Where(x => !x.Archived && x.Role == SessionRoles.Worker))
+      { <label class="participant"><input type="checkbox" checked="@selected.Contains(worker.Id)" @onchange="e => Select(worker.Id, e.Value is true)" /> @worker.Name @(worker.Description.Length > 0 ? "· " + worker.Description : "")</label> }</fieldset>
+      <label>Instruction<textarea rows="5" maxlength="16000" @bind="instruction" placeholder="Ask Agent 1 what time it is, then tell the other agents what Agent 1 reported."></textarea></label>
+      <label class="check"><input type="checkbox" @bind="includeGuidance" /> Include coordination guidance in worker instructions</label>
+      @if (includeGuidance) { <label>Progress interval in minutes (0 for milestones only)<input type="number" min="0" max="1440" @bind="progressMinutes" /></label> }
+      <label>Maximum coordinator turns<input type="number" min="1" max="100" @bind="maxRounds" /></label>
+      <button disabled="@(busy || string.IsNullOrEmpty(coordinatorId) || selected.Count == 0 || string.IsNullOrWhiteSpace(instruction) || runs.Any(x => x.State is not ("Completed" or "Stopped")))" @onclick="Start">Start coordination</button>
+      <p class="meta">Worker tasks are ordinary prompts. Tool approvals remain in the conversation's pending requests. The coordinator wakes when results or questions arrive.</p>
+    </section>
+    @foreach (var run in runs)
+    {
+      <section class="panel" aria-label="Coordination run" @key="run.Id">
+        <div class="card-heading"><h2>@run.State</h2><span>Coordinator turn @run.Round / @run.MaxRounds</span></div>
+        <p>@run.Instruction</p><p role="status">@run.Detail</p>
+        <a href="@ConversationUrl(run.CoordinatorWorkerId)">Open coordinator conversation</a>
+        <div class="actions">
+          @if (run.State == "Paused") { <button @onclick='() => Control(run, "resume")'>Resume coordination</button> }
+          else if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "pause")'>Pause coordination</button> }
+          @if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "stop")'>Stop coordination</button> }
+        </div>
+        <p class="meta">Pause and stop prevent new routing decisions. Already dispatched instructions keep running; use the worker's cancellation control to stop its work.</p>
+        @if (run.State is not ("Completed" or "Stopped"))
+        {
+          <label>Follow-up to coordinator<textarea rows="3" value="@followups.GetValueOrDefault(run.Id, "")" @oninput="e => followups[run.Id] = e.Value?.ToString() ?? string.Empty"></textarea></label>
+          <button disabled="@(busy || string.IsNullOrWhiteSpace(followups.GetValueOrDefault(run.Id)))" @onclick="() => SendFollowup(run)">Send follow-up</button>
+        }
+        <details><summary>Last decision and evidence</summary><pre>@run.DecisionJson</pre><pre>@run.InputJson</pre></details>
+        <h3>Messages and responses</h3>
+        @foreach (var command in snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt))
+        {
+          <article class="command"><a href="@ConversationUrl(command.WorkerId!)">@snapshot.Workers.FirstOrDefault(x => x.Id == command.WorkerId)?.Name</a> · @command.State
+            <p>@(command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : "Answer to worker question")</p>
+            <p class="meta">@AssignmentGuidance.ProgressStatus(command)</p>
+            <pre>@(command.State == Delivery.Finished ? HVO.AgentControl.Infrastructure.ControlStore.ResponseText(command.ResultJson) : command.ProgressText)</pre><small>Request @command.Id</small>
+          </article>
+        }
+      </section>
+    }
+  }
+</div>

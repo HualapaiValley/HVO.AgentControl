@@ -1,0 +1,15 @@
+@page "/login"
+@attribute [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+
+<PageTitle>Sign in · AgentControl</PageTitle>
+<main class="sign-in">
+  <p class="eyebrow">HVO / AGENT CONTROL</p>
+  <h1>Your work, in view.</h1>
+  <p>Sign in to manage your persistent coding sessions.</p>
+  @if (Failed) { <p role="alert">The owner password was not accepted.</p> }
+  <form action="/auth/login" method="post" data-enhance="false">
+    <AntiforgeryToken />
+    <label>Owner password <input name="password" type="password" autocomplete="current-password" required maxlength="1024" /></label>
+    <button type="submit">Sign in</button>
+  </form>
+</main>

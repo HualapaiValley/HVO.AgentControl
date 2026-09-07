@@ -1,0 +1,17 @@
+@page "/terminal"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@implements IAsyncDisposable
+@inject HVO.AgentControl.Infrastructure.ControlStore Store
+@inject IJSRuntime JS
+
+<PageTitle>AgentControl · Admin terminal</PageTitle>
+<link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+<div class="shell">
+  <ControlHeader Title="Admin terminal" Description="Interact directly with the runtime OS using its saved SSH login." />
+  <label>Runtime<select @bind="runtimeId" disabled="@connected"><option value="">Choose a runtime</option>@foreach (var runtime in runtimes) { <option value="@runtime.Id">@runtime.Name · @runtime.Username@@@runtime.Host</option> }</select></label>
+  <div class="actions"><button disabled="@(connected || string.IsNullOrEmpty(runtimeId))" @onclick="Open">Open terminal</button><button disabled="@(!connected)" @onclick="Close">Close terminal</button></div>
+  <p>Each connection opens a separate shell in the SSH user's home directory. Closing it ends that shell; the agent's session continues. Reopening starts a new shell.</p>
+  <p role="status">@status</p>
+  <div class="terminal" @ref="host" aria-label="Remote terminal"></div>
+</div>

@@ -1,0 +1,6 @@
+@if (facts is not null)
+{
+  <p class="meta">@facts.Source · @facts.Scope · @DateTimeOffset.FromUnixTimeMilliseconds(facts.ObservedAt).ToString("u")</p>
+  <dl>@foreach (var fact in facts.Facts) { <dt>@Label(fact.Key)</dt><dd>@fact.Value</dd> }</dl>
+}
+else { <p>No machine observations yet.</p> }

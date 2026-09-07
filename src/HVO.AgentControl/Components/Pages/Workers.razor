@@ -1,0 +1,138 @@
+@page "/workers"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+@using HVO.AgentControl.Core
+
+<PageTitle>AgentControl · Workers</PageTitle>
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
+  <ControlHeader Title="Workers" Description="Manage your workers, models and workspaces. Open a conversation to give a worker a task." />
+  @if (!string.IsNullOrEmpty(error)) { <div class="notice error" role="alert">@error <button class="subtle" @onclick="() => error = null">Dismiss</button></div> }
+  @if (!string.IsNullOrEmpty(notice)) { <div class="notice" role="status">@notice</div> }
+  @if (snapshot is null) { <p>Loading saved state…</p> }
+  else
+  {
+    <div class="section-heading"><h2>Workers <span class="count">@snapshot.Workers.Count(x => x.Role == SessionRoles.Worker)</span></h2><button disabled="@(!snapshot.Runtimes.Any(x => x.Transport == "Connected"))" @onclick="NewWorker">New worker</button></div>
+    @if (creatingWorker)
+    {
+      <section class="panel" aria-label="New worker">
+        <h3>Set up a worker</h3><p class="muted">Choose its host, workspace and model. Each worker keeps its own conversation.</p>
+        <div class="form-grid">
+          <label>Runtime<select @bind="newRuntimeId"><option value="">Choose a runtime</option>@foreach (var runtime in snapshot.Runtimes.Where(x => x.Transport == "Connected")) { <option value="@runtime.Id">@runtime.Name</option> }</select></label>
+          <label>Session role<select @bind="newRole"><option>Worker</option><option>Coordinator</option></select></label>
+          <label>Worker name<input @bind="newWorkerName" /></label><label>Project<input @bind="newProject" /></label><label>Remote workspace directory<input @bind="newDirectory" /></label>
+          <label class="wide">Provider / model<select @bind="newModel"><option value="">Choose an available model</option>@foreach (var model in Models(newRuntimeId)) { <option value="@(model.ProviderId + "/" + model.ModelId)">@model.ProviderId / @model.Name</option> }</select></label>
+          <div><button class="subtle" disabled="@busy" @onclick="InspectWorkspaceModels">Inspect workspace models</button><p class="meta">Discover configuration specific to this existing workspace. For a new worktree, inspect its source repository.</p></div>
+        </div>
+        @if (WorkspaceOwner(newRuntimeId, newDirectory) is { } existing)
+        { <div class="notice" role="status"><strong>@existing.Name already uses this workspace.</strong><p>@(existing.Archived ? "This worker is archived. Restore it to continue." : "Open its existing conversation or change its model using Edit worker.")</p><div class="actions"><a class="button-link" href="@ConversationUrl(existing.Id)">Open existing worker</a><button class="subtle" @onclick="() => BeginEdit(existing)">Edit existing worker</button></div><p class="meta">To replace it, delete the worker registration first. Dismissing a setup attempt does not remove the worker.</p></div> }
+        @if (newRole == SessionRoles.Worker) { <label class="check"><input type="checkbox" @bind="discoverCapabilities" /> Request initial capability report (uses the selected model)</label> }
+        else { <p>Coordinators route instructions and never receive worker assignments.</p> }
+        <details><summary>Provision a separate Git worktree</summary><p>The source must be clean. AgentControl creates a new branch and directory without resetting existing work.</p><div class="form-grid"><label>Existing repository (blank selects existing workspace)<input @bind="newRepository" /></label><label>New branch<input @bind="newBranch" /></label><label>Base ref<input @bind="newBaseRef" /></label></div></details>
+        <p class="muted">One modifying worker per canonical workspace. Workspace roots guide application operations; they do not sandbox agent tools.</p>
+        <div class="actions"><button disabled="@(busy || WorkspaceOwner(newRuntimeId, newDirectory) is not null)" @onclick="CreateWorker">Create worker</button><button class="subtle" @onclick="() => creatingWorker = false">Cancel</button></div>
+      </section>
+    }
+    @if (editing is not null)
+    {
+      <section class="panel" aria-label="Edit worker">
+        <h3>Edit @editing.Role.ToLowerInvariant()</h3>
+        <div class="form-grid">
+          <label>Worker name<input @bind="editing.Name" maxlength="120" /></label>
+          <label>Project<input @bind="editing.Project" maxlength="120" /></label>
+          <label class="wide">Role / description<textarea @bind="editing.Description" maxlength="4000"></textarea></label>
+          <label>Default provider / model<select @bind="editModel" @bind:after="EditModelChanged">
+            @if (!EditModels.Any(x => x.ProviderId + "/" + x.ModelId == editModel)) { <option value="@editModel">@editModel (refresh to check availability)</option> }
+            @foreach (var model in EditModels) { <option value="@(model.ProviderId + "/" + model.ModelId)">@model.ProviderId / @model.Name</option> }
+          </select></label>
+          <label>Agent mode<select @bind="editing.Agent"><option value="">Runtime default</option>@foreach (var agent in EditChoice?.Agents ?? []) { <option>@agent</option> }</select></label>
+          <label>Reasoning<select @bind="editing.Variant"><option value="">Model default</option>@foreach (var variant in EditChoice?.Variants ?? []) { <option>@variant</option> }</select></label>
+        </div>
+        <p>Settings apply to future instructions. Active work and instructions already queued keep their settings.</p>
+        <p class="mono">@editing.Directory</p>
+        <div class="actions"><button disabled="@busy" @onclick="SaveEdit">Save worker</button><button class="subtle" disabled="@busy" @onclick="RefreshEditModels">Refresh workspace models</button><button class="subtle" @onclick="() => editing = null">Cancel edit</button></div>
+        @if (editing.Role == SessionRoles.Coordinator)
+        { <details><summary>Delete coordinator registration</summary><p>Requires idle state and no unfinished coordination. Remote files and native conversation are retained.</p><button class="danger" @onclick="() => DeleteWorker(editing)">Confirm delete coordinator</button></details> }
+        @if (editing.Role == SessionRoles.Worker)
+        {
+          <details><summary>Reserve as a dedicated coordinator</summary><p>This permanently removes this conversation from task workers. Use only a dedicated idle conversation; coordinator execution tools will be disabled.</p><button class="subtle" disabled="@busy" @onclick="ReserveCoordinator">Reserve coordinator role</button></details>
+        }
+      </section>
+    }
+    <p class="meta">Coordinator sessions are managed on <a href="/coordination">Coordination</a>.</p>
+    <label class="check"><input type="checkbox" @bind="showArchived" /> Show archived workers</label>
+    <div class="filters"><label>Runtime<select @bind="runtimeFilter"><option value="">All runtimes</option>@foreach (var runtime in snapshot.Runtimes) { <option value="@runtime.Id">@runtime.Name</option> }</select></label><label>Activity<select @bind="activityFilter"><option value="">All activity</option><option>Active</option><option>Waiting</option><option>Error</option><option value="Idle">Ready</option></select></label><label>Project<input @bind="projectFilter" placeholder="Filter projects" /></label></div>
+    @if (snapshot.Runtimes.Count == 0) { <p class="notice">Start by <a href="/runtimes">adding a runtime</a>, then create a worker in its workspace.</p> }
+    <section class="worker-inventory" aria-label="Worker inventory">
+      @foreach (var command in CreationCards.Where(x => !PastSetup(x)))
+      {
+        var setup = Json.Read<CreateWorkerInput>(command.Payload);
+        <article class="worker-card creation-card" @key="command.Id" aria-label="Worker setup">
+          <div class="card-heading"><h3>@setup.Name</h3><span class="badge" role="status">@CreationStatus(command)</span></div>
+          <p>@RuntimeName(command.RuntimeId) · @setup.Role · @setup.Project</p><p class="mono">@setup.Directory</p>
+          @if (WorkspaceOwner(command.RuntimeId, setup.Directory) is { } existingSetupWorker)
+          { <p><a class="button-link" href="@ConversationUrl(existingSetupWorker.Id)">Open existing worker · @existingSetupWorker.Name</a></p> }
+          <p>@(command.Detail.Length > 0 ? command.Detail : "Waiting for the runtime to create this conversation.")</p>
+          <p class="meta">Updated @Age(command.UpdatedAt). This setup record remains available when you leave this page.</p>
+          @if (command.State == Delivery.Queued) { <button class="subtle" @onclick='() => QueueAction(command.Id, "cancel")'>Cancel queued setup</button> }
+          @if (command.State is Delivery.Failed or Delivery.Cancelled)
+          { <div class="actions"><button class="subtle" @onclick="() => EditSetup(command)">Edit setup</button><button class="subtle" @onclick="() => DismissSetup(command.Id)">Dismiss setup</button></div> }
+          @if (command.State == Delivery.Unknown) { <p>Inspect native state before acknowledging uncertain creation.</p><button class="subtle" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty</button> }
+          <details><summary>Setup request</summary><code>@command.Id</code></details>
+        </article>
+      }
+      @foreach (var worker in FilteredWorkers())
+      {
+        <article class="worker-card" @key="worker.Id">
+          <div class="card-heading"><h3>@worker.Name</h3><span class="badge">@DisplayStatus.Worker(worker)</span></div>
+          <p>@RuntimeName(worker.RuntimeId) · @worker.Project</p><p class="mono">@worker.Directory</p>
+          <p class="meta">@worker.Branch · @worker.ProviderId / @worker.ModelId</p>
+          @if (!worker.Stale && worker.Activity is "Active" or "Retrying" && (worker.CurrentAction.EndsWith(": running", StringComparison.Ordinal) || worker.CurrentAction.EndsWith(": pending", StringComparison.Ordinal))) { <p>@worker.CurrentAction</p> }
+          @if (snapshot.Requests.Count(x => x.WorkerId == worker.Id) is > 0 and var requestCount) { <p class="attention-text">@requestCount request(s) need your response. <a href="@ConversationUrl(worker.Id)">Respond</a></p> }
+          <p>@worker.Description</p>
+          <div class="actions"><a class="button-link" href="@ConversationUrl(worker.Id)">Open conversation</a><button class="subtle" @onclick="() => BeginEdit(worker)">Edit worker</button></div>
+          <details><summary>Details &amp; management</summary>
+          <p class="meta">Last checked @Age(worker.LastObservedAt). Previous assignment: @DisplayStatus.Outcome(worker.Outcome).</p>
+          <details><summary>Capabilities · @(worker.CapabilityReportedAt is null ? "not reported" : Age(worker.CapabilityReportedAt))</summary>
+            <p class="meta">Machine facts are probes; the following narrative is agent-reported and may need verification before assignment.</p>
+            <CapabilityFacts Json="@worker.CapabilitiesJson" />
+            <pre class="capability-report">@(worker.CapabilityReport.Length == 0 ? "No agent capability report yet." : worker.CapabilityReport)</pre>
+            @if (worker.CapabilityCommandId is { } capabilityId) { <p>Latest inquiry: @snapshot.Commands.FirstOrDefault(x => x.Id == capabilityId)?.State</p> }
+            <button class="subtle" disabled="@(busy || worker.Archived)" @onclick="() => Discover(worker)">Refresh capability report</button>
+          </details>
+          <div class="actions"><button class="subtle" @onclick="() => deletingWorkerId = worker.Id">Delete worker</button>
+            @if (worker.Archived) { <button class="subtle" disabled="@busy" @onclick="() => SetArchived(worker, false)">Restore worker</button> }
+            else { <button class="subtle" disabled="@(busy || worker.Stale || worker.Activity != "Idle")" @onclick="() => SetArchived(worker, true)">Archive worker</button> }
+          </div>
+          @if (deletingWorkerId == worker.Id)
+          { <p>Delete @worker.Name from AgentControl? This releases its workspace claim and removes cached conversation data. Remote files, native conversation and command audit are retained.</p><div class="actions"><button class="danger" disabled="@busy" @onclick="() => DeleteWorker(worker)">Confirm delete worker</button><button class="subtle" @onclick="() => deletingWorkerId = null">Keep worker</button></div> }
+          </details>
+        </article>
+      }
+      @if (!FilteredWorkers().Any() && !CreationCards.Any()) { <p class="empty">@(snapshot.Workers.Count == 0 ? "Create a worker to start a persistent conversation." : "No workers match these filters.")</p> }
+    </section>
+    @if (CreationCards.Any(PastSetup))
+    {
+      <details class="panel"><summary>Previous setup attempts (@CreationCards.Count(PastSetup))</summary>
+        <p class="muted">These attempts did not create another worker. An existing worker already uses the workspace.</p>
+        @foreach (var command in CreationCards.Where(PastSetup))
+        {
+          var input = Json.Read<CreateWorkerInput>(command.Payload);
+          var owner = WorkspaceOwner(command.RuntimeId, input.Directory)!;
+          <article class="operation" aria-label="Previous worker setup"><h3>@input.Name · @CreationStatus(command)</h3><p>@command.Detail</p><div class="actions"><a class="button-link" href="@ConversationUrl(owner.Id)">Open existing worker · @owner.Name</a><button class="subtle" @onclick="() => DismissSetup(command.Id)">Dismiss setup</button><button class="subtle" @onclick="() => EditSetup(command)">Edit setup</button></div></article>
+        }
+      </details>
+    }
+    <details class="panel"><summary>Worker setup &amp; recent operations</summary>
+      @foreach (var command in snapshot.Commands.Where(x => x.Kind is "CreateWorker" or "InspectWorkspace").OrderByDescending(x => x.CreatedAt).Take(30))
+      {
+        <div class="operation"><p><strong>@RuntimeName(command.RuntimeId) · @command.Kind · @command.State</strong> @command.Detail</p><code>@command.Id</code>
+          @if (command.Kind == "CreateWorker" && command.State == Delivery.Queued) { <button class="subtle" @onclick='() => QueueAction(command.Id, "cancel")'>Cancel queued setup</button> }
+          @if (command.State == Delivery.Unknown) { <button class="subtle" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty</button> }
+          @if (command.Kind == "CreateWorker" && command.State == Delivery.Finished && command.ResultId is not null) { <a href="@ConversationUrl(command.ResultId)">Open conversation</a> }
+        </div>
+      }
+    </details>
+    <footer>Work continues when you close this page.</footer>
+  }
+</div>

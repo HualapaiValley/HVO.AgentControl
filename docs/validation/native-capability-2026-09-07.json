@@ -1,0 +1,20 @@
+{
+  "sessionIdentitiesPreserved": true,
+  "coordinatorRole": "Coordinator",
+  "capabilityCommandId": "12f702d8-4e35-4a9a-9ea6-4b868989b708",
+  "capabilityState": "Finished",
+  "capabilityReportedAt": 1788746212822,
+  "reportCharacters": 3557,
+  "runtimeHealth": [
+    {
+      "name": "Docker demo",
+      "health": "Healthy"
+    },
+    {
+      "name": "AgentControl coordinator",
+      "health": "Healthy"
+    }
+  ],
+  "evidenceType": "Live OpenCode capability inquiry and post-deployment checks",
+  "reportInterpretation": "Agent-reported narrative; individual capability claims are not independently verified."
+}

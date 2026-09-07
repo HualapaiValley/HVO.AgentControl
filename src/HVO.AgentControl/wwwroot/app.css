@@ -1,0 +1,36 @@
+:root { color-scheme: dark; --ink: #f1f5f9; --muted: #a1afc3; --paper: #05070d; --line: #94a3b82e; --accent: #2563eb; --accent-soft: #3b82f626; --surface: #0f172a; --surface-hover: #1e293b; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.55; }
+h1, h2, h3, p { margin: 0 0 .65rem; } h1 { font-size: clamp(1.7rem, 3vw, 2.2rem); line-height: 1.15; font-weight: 550; letter-spacing: -.045em; } h2 { font-size: 1.4rem; font-weight: 550; letter-spacing: -.025em; } h3 { font-size: 1rem; }
+button, input, select, textarea { font: inherit; } button { cursor: pointer; border: 1px solid transparent; border-radius: 6px; background: var(--accent); color: white; padding: .6rem .9rem; font-weight: 550; } button:hover { filter: brightness(.94); } button:disabled { opacity: .45; cursor: default; } button.subtle { background: var(--surface); color: var(--ink); border-color: var(--line); } button.danger { background: #351c23; border-color: #ef444455; color: #fecaca; }
+input, select, textarea { display: block; width: 100%; padding: .6rem .7rem; border: 1px solid #334155; border-radius: 5px; background: var(--surface); color: var(--ink); margin-top: .3rem; } textarea { resize: vertical; } label { display: block; font-size: .85rem; font-weight: 550; } label small { font-weight: 400; color: var(--muted); } :focus-visible { outline: 3px solid #60a5fa; outline-offset: 3px; }
+a { color: #93c5fd; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; line-height: 1.65; margin: .4rem 0; } code, .mono { font-family: ui-monospace, monospace; font-size: .8rem; overflow-wrap: anywhere; } details { margin-top: .8rem; } summary { cursor: pointer; color: var(--muted); font-size: .85rem; margin-bottom: .6rem; } small, .meta { font-size: .76rem; color: var(--muted); } .muted { color: var(--muted); } .eyebrow { font-size: .67rem; letter-spacing: .19em; font-weight: 700; color: var(--accent); margin-bottom: 1.15rem; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-top: .8rem; } .badge { display: inline-flex; align-self: start; font-size: .7rem; background: #1e293b; border: 1px solid #334155; color: #cbd5e1; padding: .2rem .55rem; border-radius: 99px; white-space: nowrap; } .badge.good { background: #12382c; color: #86efac; } .badge.attention { background: #3d2e15; color: #fde68a; }
+.notice { border: 1px solid #a1620755; border-radius: 6px; padding: .8rem 1rem; background: #292414; margin: 1rem 0; font-size: .85rem; } .notice.error { border-color: #ef444455; background: #351c23; color: #fecaca; } .empty { padding: 2rem; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; } .sign-in { max-width: 460px; margin: 15vh auto; padding: 2rem; } .sign-in form { margin-top: 2rem; } .sign-in button { width: 100%; margin-top: 1.2rem; }
+#blazor-error-ui { background: #292414; bottom: 0; display: none; left: 0; padding: 1rem; position: fixed; width: 100%; z-index: 1000; } #blazor-error-ui .dismiss { cursor: pointer; float: right; }
+
+/* Shared page and form conventions; page-specific views keep their scoped styles. */
+.shell { max-width: 1400px; margin: auto; padding: 0 2.5rem 2rem; }
+.section-heading, .card-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+.section-heading { margin: 2rem 0 1rem; }.count { font-size: .85rem; color: var(--muted); margin-left: .4rem; }
+.panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+.form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1rem; }.wide { grid-column: 1 / -1; }
+.check { display: flex; align-items: center; gap: .6rem; }.check input { width: auto; }
+.filters { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1.2rem 0; }.filters label { min-width: 160px; font-size: .75rem; }
+.button-link { display: inline-block; text-decoration: none; border: 1px solid transparent; border-radius: 6px; background: var(--accent); color: white; padding: .6rem .9rem; font-weight: 550; }
+.button-link:hover { filter: brightness(.94); }.button-link.subtle { background: var(--surface); color: var(--ink); border-color: var(--line); }
+footer { margin: 2rem 0 0; font-size: .7rem; color: var(--muted); }
+@media (max-width: 850px) { .shell { padding: 1.5rem; } }
+@media (max-width: 500px) { .shell { padding: 1rem; }.form-grid { grid-template-columns: 1fr; }.filters label { min-width: 130px; } }
+
+/* Surfaces and spacing follow the HVO SkyMonitor dark visual language. */
+body { background-image: radial-gradient(ellipse at top left, #1e3a5f30, transparent 55%); min-height: 100vh; }
+.panel { box-shadow: 0 12px 35px #02061730; }
+input, select, textarea { border-radius: .6rem; }
+button, .button-link { border-radius: .65rem; }
+button:hover, .button-link:hover { filter: brightness(1.15); }
+a:hover { color: #bfdbfe; }
+summary:hover { color: var(--ink); }
+.card-heading > div, .card-heading h3 { min-width: 0; overflow-wrap: anywhere; }
+.attention-text { color: #fde68a; }
+@media (max-width: 850px) { .shell { padding-top: 0; } }

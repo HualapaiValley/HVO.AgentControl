@@ -1,0 +1,11 @@
+<header class="masthead">
+  <a class="brand" href="/" aria-label="AgentControl home"><span class="brand-mark" aria-hidden="true">HVO</span><span>AgentControl</span></a>
+  <nav aria-label="Main navigation">
+    <NavLink href="/" Match="NavLinkMatch.All">Overview</NavLink>
+    <NavLink href="/workers">Workers</NavLink>
+    <NavLink href="/runtimes">Runtimes</NavLink>
+    <NavLink href="/coordination">Coordination</NavLink>
+  </nav>
+  <form action="/auth/logout" method="post" data-enhance="false"><AntiforgeryToken /><button class="subtle">Sign out</button></form>
+</header>
+<div class="page-heading"><h1>@Title</h1><p class="muted">@Description</p></div>

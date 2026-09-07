@@ -1,0 +1,5 @@
+.panel { margin: 1rem 0; padding: 1rem; border: 1px solid #42516b; border-radius: .6rem; }
+.participant { display: flex; gap: .5rem; align-items: center; }
+.participant input { width: auto; }
+fieldset { min-width: 0; margin: 1rem 0; border: 1px solid #42516b; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25rem; overflow: auto; }

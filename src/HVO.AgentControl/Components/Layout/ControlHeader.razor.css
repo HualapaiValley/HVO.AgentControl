@@ -1,0 +1,11 @@
+.masthead { display: flex; align-items: center; gap: 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--line); margin-bottom: 2rem; }
+.brand { display: flex; align-items: center; gap: .65rem; color: var(--ink); text-decoration: none; font-weight: 650; font-size: 1.05rem; white-space: nowrap; }
+.brand-mark { border: 1px solid #3b82f6; color: #93c5fd; background: var(--accent-soft); border-radius: .65rem; padding: .35rem .5rem; font-size: .75rem; letter-spacing: .05em; }
+nav { display: flex; flex: 1; flex-wrap: wrap; gap: .35rem; }
+nav ::deep a { color: var(--muted); text-decoration: none; padding: .5rem .85rem; border: 1px solid transparent; border-radius: .65rem; font-weight: 550; }
+nav ::deep a:hover { color: var(--ink); background: var(--surface-hover); }
+nav ::deep a.active { background: var(--accent-soft); color: #bfdbfe; border-color: #3b82f655; }
+form { margin: 0; } form button { white-space: nowrap; font-size: .8rem; }
+.page-heading { margin-bottom: 1.5rem; }
+@media (max-width: 850px) { .masthead { flex-wrap: wrap; gap: .8rem; } nav { order: 3; flex-basis: 100%; } form { margin-left: auto; } }
+@media (max-width: 500px) { nav { gap: .1rem; } nav ::deep a { padding: .5rem .6rem; font-size: .8rem; } }
