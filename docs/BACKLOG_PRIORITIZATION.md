@@ -17,7 +17,7 @@ Root's initial audit compared every open issue body with merged PRs, current PRs
 | #75 / #53 | P0 active / design parent | Chat UI/performance owner priority; Astra xhigh owns #75 | none |
 | #78 | P0 active | Root owns executable audit and this plan; durable periodic scheduler remains | none |
 | #34 | P1 correction/review | Usage parsing PR56; PR72 ledger needs backfill correction and fresh review | none for current PR |
-| #69 | P1 review, then foundation | Task models PR57; reasoning PR76; durable routing/risk policy remains | #5 for remaining policy |
+| #69 | P1 remaining scope blocked | Task models PR57 and reasoning PR76 merged; durable routing/risk policy remains | #5 |
 | #65 | P2 remaining scope blocked | Child visibility PR60 and vanished replies PR77 merged; primed tools and actual task directories remain | #42 |
 | #35 | P2 remaining scope needs triage | Snapshot calculations PR64, history PR73 and periodic Linux sampler PR79 merged; validate deployment, then scope macOS/v1 | none |
 | #5 | P1 ready, first foundation | Missing work-item/phase ownership despite existing command IDs; add atomic claim/restart contract | none |
@@ -46,7 +46,7 @@ This order promotes #5 because it directly unlocks several older/newer requireme
 Run from an authenticated checkout:
 
 ```bash
-python3 scripts/prioritize-backlog.py --active 34 35 65 69 75 78 > /tmp/backlog-report.json
+python3 scripts/prioritize-backlog.py --active 34 75 78 > /tmp/backlog-report.json
 python3 tests/test_backlog_priority.py
 ```
 

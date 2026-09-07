@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-07.2",
+  "version": "2026-09-07.3",
   "repository": "RoySalisbury/HVO.AgentControl",
   "items": [
     {
@@ -391,12 +391,12 @@
     {
       "issue": 69,
       "priority": 1,
-      "disposition": "review",
+      "disposition": "candidate",
       "dependsOn": [
         5
       ],
-      "reason": "Per-task model override shipped; reasoning PR76 in review; durable risk policy remains.",
-      "nextSlice": "Review PR76, then persist model routing decisions on work items",
+      "reason": "Task models PR57 and reasoning PR76 merged; durable model/risk routing policy remains.",
+      "nextSlice": "Persist model routing decisions and risk floors on work items",
       "auditedUpdatedAt": "2026-09-07T18:30:52Z",
       "reviewedPulls": [
         {
@@ -407,7 +407,7 @@
         {
           "headRefOid": "473b371230729afb70d040dfef17acb098ebdc90",
           "number": 76,
-          "state": "OPEN"
+          "state": "MERGED"
         }
       ]
     },
