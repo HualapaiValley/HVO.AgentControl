@@ -69,6 +69,7 @@ builder.Services.AddDbContextFactory<ControlDb>(options => options.UseSqlite($"D
 builder.Services.AddSingleton<ControlStore>();
 builder.Services.AddSingleton<RuntimeVerificationService>();
 builder.Services.AddSingleton<ProviderLoginService>();
+builder.Services.AddSingleton<ProviderKeyService>();
 builder.Services.AddSingleton<TerminalService>();
 builder.Services.AddSingleton<IRuntimeTransportFactory, SshRuntimeTransportFactory>();
 builder.Services.AddHostedService<RuntimeSupervisor>();

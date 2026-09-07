@@ -41,10 +41,25 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
         await expect(profile).toHaveCount(0);
       }
     }
+    await page.goto(base + '/providers');
+    await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+    await expect(page.getByRole('heading', { name: 'Model access', exact: true })).toBeVisible();
+    const keyPanel = page.getByRole('region', { name: 'OpenCode Go key' });
+    await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveAttribute('type', 'password');
+    await keyPanel.getByLabel('OpenCode Go API key').fill('browser-fixture-key-not-a-real-credential');
+    await keyPanel.getByRole('button', { name: 'Save encrypted key' }).click();
+    await expect(keyPanel.getByRole('status')).toContainText('Key saved');
+    await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveValue('');
+    await page.reload();
+    await expect(keyPanel.getByRole('status')).toContainText('Key saved');
+    await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveValue('');
+    const keyMetadata = await (await context.request.get(base + '/api/v1/providers/opencode-go/key')).text();
+    expect(keyMetadata).not.toContain('browser-fixture-key');
+    expect(keyMetadata).not.toContain('secretReference');
     await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
     await page.setViewportSize({ width: 390, height: 844 });
-    for (const route of ['/', '/workers', '/runtimes', '/coordination']) {
+    for (const route of ['/', '/workers', '/runtimes', '/coordination', '/providers']) {
       await page.goto(base + route);
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
