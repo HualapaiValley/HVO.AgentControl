@@ -25,11 +25,13 @@ public static class TelemetryParser
     /// </summary>
     public static RuntimeTelemetrySample Parse(IReadOnlyDictionary<string, string> facts, long observedAt, string identity)
     {
-        var cumulativeCpuUsec = ParseNonNegativeLong(facts, "accumCpuUsec", "cpuUsageUsec", "usageUsec", "procCpuUsec");
-        var memoryBytes = ParseNonNegativeLong(facts, "memoryCurrentBytes", "memoryCurrentV2", "memoryUsageV1");
-        var memoryLimit = ParseMemoryLimit(facts);
-        var quotaCores = ParseQuotaCores(facts);
         var platform = ParsePlatform(facts);
+        var cumulativeCpuUsec = ParseNonNegativeLong(facts, "accumCpuUsec", "cpuUsageUsec", "usageUsec", "procCpuUsec");
+        var memoryBytes = ParseNonNegativeLong(facts, "memoryCurrentBytes");
+        if (platform == PlatformLinux)
+            memoryBytes ??= ParseNonNegativeLong(facts, "memoryCurrentV2", "memoryUsageV1");
+        var memoryLimit = ParseMemoryLimit(facts, platform);
+        var quotaCores = ParseQuotaCores(facts, platform);
         var hostLogicalCores = ParseInt(facts, "logicalCores");
         return new RuntimeTelemetrySample(observedAt, identity, cumulativeCpuUsec, memoryBytes, memoryLimit, quotaCores, platform, hostLogicalCores);
     }
@@ -49,18 +51,22 @@ public static class TelemetryParser
         return Parse(facts, observedAt, identity);
     }
 
-    private static long? ParseMemoryLimit(IReadOnlyDictionary<string, string> facts)
+    private static long? ParseMemoryLimit(IReadOnlyDictionary<string, string> facts, string platform)
     {
-        var canonical = ParseNonNegativeLong(facts, "memoryLimitBytes", "memoryLimitV2");
+        var canonical = ParseNonNegativeLong(facts, "memoryLimitBytes");
         if (canonical is not null) return canonical;
+        if (platform != PlatformLinux) return null;
+        if (facts.ContainsKey("memoryLimitV2"))
+            return ParseNonNegativeLong(facts, "memoryLimitV2") is { } v2 && v2 < CgroupV1UnlimitedMemoryThreshold ? v2 : null;
         var v1 = ParseNonNegativeLong(facts, "memoryLimitV1");
         return v1 is { } limit && limit < CgroupV1UnlimitedMemoryThreshold ? limit : null;
     }
 
-    private static double? ParseQuotaCores(IReadOnlyDictionary<string, string> facts)
+    private static double? ParseQuotaCores(IReadOnlyDictionary<string, string> facts, string platform)
     {
         var canonical = ParseFiniteDouble(facts, "cpuQuotaCores");
         if (canonical is not null) return canonical > 0 ? canonical : null;
+        if (platform != PlatformLinux) return null;
 
         if (facts.TryGetValue("cpuQuotaV2", out var cpuMax))
         {

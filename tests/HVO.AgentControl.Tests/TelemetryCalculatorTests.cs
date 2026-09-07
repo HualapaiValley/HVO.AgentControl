@@ -251,6 +251,45 @@ public sealed class TelemetryCalculatorTests
     }
 
     [Fact]
+    public void ExplicitV2UnlimitedMemoryIsAuthoritativeOverMixedV1Facts()
+    {
+        var parsed = TelemetryParser.Parse(new Dictionary<string, string>
+        {
+            ["os"] = TelemetryParser.PlatformLinux,
+            ["memoryLimitV2"] = "max",
+            ["memoryLimitV1"] = "1073741824"
+        }, 1000, SessA);
+
+        Assert.Null(parsed.MemoryLimitBytes);
+    }
+
+    [Fact]
+    public void RawLinuxCgroupFactsAreIgnoredOutsideLinuxContract()
+    {
+        var facts = new Dictionary<string, string>
+        {
+            ["cpuQuotaV2"] = "200000 100000",
+            ["memoryCurrentV2"] = "512",
+            ["memoryLimitV2"] = "1024",
+            ["cpuQuotaMicrosV1"] = "100000",
+            ["cpuPeriodMicrosV1"] = "100000",
+            ["memoryLimitV1"] = "2048"
+        };
+
+        var unknown = TelemetryParser.Parse(facts, 1000, SessA);
+        var macos = TelemetryParser.Parse(new Dictionary<string, string>(facts) { ["os"] = "Darwin" }, 1000, SessA);
+
+        Assert.Equal(TelemetryParser.PlatformUnknown, unknown.Platform);
+        Assert.Null(unknown.QuotaCores);
+        Assert.Null(unknown.MemoryBytes);
+        Assert.Null(unknown.MemoryLimitBytes);
+        Assert.Equal(TelemetryParser.PlatformMacos, macos.Platform);
+        Assert.Null(macos.QuotaCores);
+        Assert.Null(macos.MemoryBytes);
+        Assert.Null(macos.MemoryLimitBytes);
+    }
+
+    [Fact]
     public void ParserIgnoresNonNumericAndUnknownKeys()
     {
         var parsed = TelemetryParser.Parse(new Dictionary<string, string>

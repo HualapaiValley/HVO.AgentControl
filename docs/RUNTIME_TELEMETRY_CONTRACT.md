@@ -87,6 +87,11 @@ unavailable state.
 families are accepted: canonical keys and the raw keys `CapabilityProbe` already emits. Aliases
 are checked in the order shown; the first parseable value wins.
 
+Raw `*V1`/`*V2` cgroup keys are honored only when `os` identifies Linux. Canonical keys such as
+`cpuQuotaCores`, `memoryCurrentBytes`, and `memoryLimitBytes` are explicit sampler inputs and
+may be used on another platform. If both cgroup versions are present, an explicit v2 value is
+authoritative: `memoryLimitV2=max` means no limit and does not fall back to a v1 limit.
+
 **Boundary rules applied by the parser:**
 - Negative CPU counters → `null` (cumulative CPU is monotonic by definition).
 - Negative memory bytes → `null` (memory usage cannot be negative).
