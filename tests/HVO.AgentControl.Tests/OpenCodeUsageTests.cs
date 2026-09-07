@@ -59,6 +59,28 @@ public sealed class OpenCodeUsageTests
         Assert.Null(result.Usage.Currency);
     }
 
+    [Theory]
+    [InlineData("provider", "nested-provider", "model", "model")]
+    [InlineData("provider", "provider", "model", "nested-model")]
+    public void RejectsConflictingTopLevelAndNestedModelIdentity(string provider, string nestedProvider,
+        string model, string nestedModel)
+    {
+        var result = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            providerID = provider,
+            modelID = model,
+            model = new { providerID = nestedProvider, id = nestedModel },
+            time = new { created = 100L }
+        }));
+
+        Assert.False(result.Accepted);
+        Assert.Single(result.Errors);
+        Assert.Contains("disagree", result.Errors[0]);
+    }
+
     [Fact]
     public void MalformedCountersAndTimesAreIgnoredWithoutFabrication()
     {

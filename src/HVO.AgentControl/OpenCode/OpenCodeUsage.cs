@@ -67,13 +67,21 @@ public static class OpenCodeUsageParser
         }
 
         var model = ObjectProperty(info, "model");
+        var providerId = StringProperty(info, "providerID");
+        var nestedProviderId = StringProperty(model, "providerID");
+        if (providerId is not null && nestedProviderId is not null && providerId != nestedProviderId)
+            return Rejected("Top-level and nested provider IDs disagree.");
+        var modelId = StringProperty(info, "modelID");
+        var nestedModelId = StringProperty(model, "id");
+        if (modelId is not null && nestedModelId is not null && modelId != nestedModelId)
+            return Rejected("Top-level and nested model IDs disagree.");
         var tokens = ObjectProperty(info, "tokens");
         var cache = ObjectProperty(tokens, "cache");
         return new(new OpenCodeUsage
         {
             Identity = identity,
-            ProviderId = StringProperty(info, "providerID") ?? StringProperty(model, "providerID"),
-            ModelId = StringProperty(info, "modelID") ?? StringProperty(model, "id"),
+            ProviderId = providerId ?? nestedProviderId,
+            ModelId = modelId ?? nestedModelId,
             CreatedAt = created,
             CompletedAt = completed,
             TotalTokens = ReadCounter(tokens, "total", "total tokens", errors),
