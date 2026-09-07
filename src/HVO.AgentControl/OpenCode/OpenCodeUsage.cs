@@ -4,6 +4,8 @@ namespace HVO.AgentControl.OpenCode;
 
 public sealed record UsageIdentity(string RuntimeId, string SessionId, string MessageId);
 
+public enum UsageSource { CommandResult, Transcript }
+
 public sealed record OpenCodeUsage
 {
     public required UsageIdentity Identity { get; init; }
@@ -20,6 +22,7 @@ public sealed record OpenCodeUsage
     public decimal? Cost { get; init; }
     public string? Currency { get; init; }
     public long ObservedAt { get; init; }
+    public UsageSource Source { get; init; } = UsageSource.Transcript;
 
     public bool IsFinal => CompletedAt.HasValue;
 }
@@ -31,7 +34,8 @@ public sealed record OpenCodeUsageParseResult(OpenCodeUsage? Usage, IReadOnlyLis
 
 public static class OpenCodeUsageParser
 {
-    public static OpenCodeUsageParseResult Parse(JsonElement message, UsageIdentity identity, long observedAt)
+    public static OpenCodeUsageParseResult Parse(JsonElement message, UsageIdentity identity, long observedAt,
+        UsageSource source = UsageSource.Transcript)
     {
         var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(identity.RuntimeId) || string.IsNullOrWhiteSpace(identity.SessionId) ||
@@ -91,7 +95,8 @@ public static class OpenCodeUsageParser
             CacheWriteTokens = ReadCounter(cache, "write", "cache write tokens", errors),
             Cost = ReadCost(info, errors),
             Currency = StringProperty(info, "currency"),
-            ObservedAt = observedAt
+            ObservedAt = observedAt,
+            Source = source
         }, errors);
     }
 
@@ -131,8 +136,8 @@ public static class OpenCodeUsageParser
 public static class OpenCodeUsageMerger
 {
     /// <summary>
-    /// Chooses one complete revision: final beats provisional, then the newer observed
-    /// revision wins, and equal-ranked conflicts use a stable fieldwise ordering.
+    /// Chooses one complete revision: final beats provisional, then native revision timestamps,
+    /// retained-source precedence, observation time, and stable fieldwise ordering.
     /// No fields are combined, so provider/model/currency and measurements stay coherent.
     /// </summary>
     public static OpenCodeUsage Merge(OpenCodeUsage left, OpenCodeUsage right)
@@ -154,6 +159,12 @@ public static class OpenCodeUsageMerger
     {
         var final = left.IsFinal.CompareTo(right.IsFinal);
         if (final != 0) return final;
+        var completed = Nullable.Compare(left.CompletedAt, right.CompletedAt);
+        if (completed != 0) return completed;
+        var created = Nullable.Compare(left.CreatedAt, right.CreatedAt);
+        if (created != 0) return created;
+        var source = left.Source.CompareTo(right.Source);
+        if (source != 0) return source;
         var observed = left.ObservedAt.CompareTo(right.ObservedAt);
         if (observed != 0) return observed;
 
@@ -161,10 +172,6 @@ public static class OpenCodeUsageMerger
         if (provider != 0) return provider;
         var model = string.CompareOrdinal(left.ModelId, right.ModelId);
         if (model != 0) return model;
-        var created = Nullable.Compare(left.CreatedAt, right.CreatedAt);
-        if (created != 0) return created;
-        var completed = Nullable.Compare(left.CompletedAt, right.CompletedAt);
-        if (completed != 0) return completed;
         var total = Nullable.Compare(left.TotalTokens, right.TotalTokens);
         if (total != 0) return total;
         var input = Nullable.Compare(left.InputTokens, right.InputTokens);

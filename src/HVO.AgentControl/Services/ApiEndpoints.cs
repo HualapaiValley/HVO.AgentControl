@@ -1,3 +1,4 @@
+using System.Text;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.AspNetCore.Antiforgery;
@@ -35,6 +36,11 @@ public static class ApiEndpoints
         group.MapGet("/operator-updates", (long? after, int? take, ControlStore store) => store.OperatorUpdates(after ?? 0, take ?? 50));
         group.MapPost("/operator-updates/{id}/ack", (string id, ControlStore store) => store.AcknowledgeOperatorUpdate(id));
         group.MapGet("/snapshot", (ControlStore store) => store.Snapshot());
+        group.MapGet("/usage", (string? workerId, string? providerId, string? modelId, long? from, long? to, ControlStore store) =>
+            store.Usage(new(workerId, providerId, modelId, from, to)));
+        group.MapGet("/usage/export", async (string? workerId, string? providerId, string? modelId, long? from, long? to, ControlStore store) =>
+            Results.File(Encoding.UTF8.GetBytes(await store.ExportUsageCsv(new(workerId, providerId, modelId, from, to))),
+                "text/csv; charset=utf-8", "model-usage.csv"));
         group.MapGet("/runtimes", (ControlStore store) => store.Read(db => db.Runtimes.AsNoTracking().ToListAsync()));
         group.MapGet("/runtimes/{id}/telemetry-history", (string id, int? take, ControlStore store) => store.TelemetryHistory(id, take ?? 10));
         group.MapPost("/runtimes", (RuntimeRecord input, ControlStore store) => store.SaveRuntime(input));
