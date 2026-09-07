@@ -68,7 +68,7 @@ public static class TelemetryParser
         if (canonical is not null) return canonical > 0 ? canonical : null;
         if (platform != PlatformLinux) return null;
 
-        if (facts.TryGetValue("cpuQuotaV2", out var cpuMax))
+        if (facts.TryGetValue("cpuQuotaV2", out var cpuMax) && cpuMax is not null)
         {
             var tokens = cpuMax.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (tokens.Length == 2 && tokens[0] != "max")
@@ -92,7 +92,7 @@ public static class TelemetryParser
 
     private static string ParsePlatform(IReadOnlyDictionary<string, string> facts)
     {
-        if (!facts.TryGetValue("os", out var os)) return PlatformUnknown;
+        if (!facts.TryGetValue("os", out var os) || os is null) return PlatformUnknown;
         if (os.Contains("darwin", StringComparison.OrdinalIgnoreCase)) return PlatformMacos;
         if (os.Contains("linux", StringComparison.OrdinalIgnoreCase)) return PlatformLinux;
         return PlatformUnknown;
@@ -102,7 +102,7 @@ public static class TelemetryParser
     {
         foreach (var key in keys)
         {
-            if (facts.TryGetValue(key, out var raw) &&
+            if (facts.TryGetValue(key, out var raw) && raw is not null &&
                 long.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) &&
                 value >= 0)
                 return value;
@@ -114,7 +114,7 @@ public static class TelemetryParser
     {
         foreach (var key in keys)
         {
-            if (facts.TryGetValue(key, out var raw) &&
+            if (facts.TryGetValue(key, out var raw) && raw is not null &&
                 int.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) &&
                 value > 0)
                 return value;
@@ -126,7 +126,7 @@ public static class TelemetryParser
     {
         foreach (var key in keys)
         {
-            if (facts.TryGetValue(key, out var raw) &&
+            if (facts.TryGetValue(key, out var raw) && raw is not null &&
                 double.TryParse(raw.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) &&
                 double.IsFinite(value))
                 return value;

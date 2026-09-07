@@ -2,6 +2,7 @@ using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Services;
+using HVO.AgentControl.Telemetry;
 using Microsoft.AspNetCore.Components;
 
 namespace HVO.AgentControl.Components.Pages;
@@ -14,6 +15,19 @@ public partial class Runtimes
     private RuntimeVerification? runtimeVerification;
     private string sshPassword = "", sshPrivateKey = "", sshPassphrase = "";
     private string? runtimeSetupId, runtimeConnectId;
+
+    private static RuntimeTelemetryProjection? Telemetry(RuntimeRecord runtime) =>
+        RuntimeTelemetryProjection.FromCapabilities(runtime.CapabilitiesJson, $"{runtime.Id}:{runtime.Generation}");
+
+    private static string Bytes(long? value)
+    {
+        if (value is null) return "unknown";
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var amount = (double)value.Value;
+        var unit = 0;
+        while (amount >= 1024 && unit < units.Length - 1) { amount /= 1024; unit++; }
+        return amount.ToString(amount >= 10 || unit == 0 ? "0" : "0.0", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
+    }
 
     protected override Task SnapshotChanged()
     {

@@ -7,5 +7,5 @@ nav ::deep a:hover { color: var(--ink); background: var(--surface-hover); }
 nav ::deep a.active { background: var(--accent-soft); color: #bfdbfe; border-color: #3b82f655; }
 form { margin: 0; } form button { white-space: nowrap; font-size: .8rem; }
 .page-heading { margin-bottom: 1.5rem; }
-@media (max-width: 850px) { .masthead { flex-wrap: wrap; gap: .8rem; } nav { order: 3; flex-basis: 100%; } form { margin-left: auto; } }
+@media (max-width: 850px) { .masthead { flex-wrap: wrap; gap: .8rem; padding-left: 2.75rem; } nav { order: 3; flex-basis: 100%; } form { margin-left: auto; } }
 @media (max-width: 500px) { nav { gap: .1rem; } nav ::deep a { padding: .5rem .6rem; font-size: .8rem; } }

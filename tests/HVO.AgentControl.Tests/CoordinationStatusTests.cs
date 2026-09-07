@@ -155,6 +155,12 @@ public sealed class CoordinationStatusTests
     private static string Invoke(Coordination page, string method, CoordinationRun run) =>
         (string)typeof(Coordination).GetMethod(method, InstancePrivate)!.Invoke(page, [run])!;
 
+    private static string? SchedulerReason(Coordination page, CoordinationRun run) =>
+        (string?)typeof(Coordination).GetMethod("SchedulerWaitReason", InstancePrivate)!.Invoke(page, [run]);
+
+    private static string? LastSummary(Coordination page, CoordinationRun run) =>
+        (string?)typeof(Coordination).GetMethod("LastCoordinatorSummary", InstancePrivate)!.Invoke(page, [run]);
+
     private static WorkerRecord Observe(WorkerRecord worker) { worker.Stale = false; worker.LastObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); return worker; }
 
     private static CoordinationRun RunWith(WorkerRecord worker) => new() { Id = "run", WorkerIdsJson = Json.Write(new[] { worker.Id }) };
@@ -358,4 +364,180 @@ public sealed class CoordinationStatusTests
         };
         Assert.Contains("receipt 1m ago", Invoke(Page(new ControlSnapshot(1, [], [worker], [command], [])), "RunLatestEvidence", run));
     }
+
+    [Theory]
+    [InlineData("Paused", "owner pause")]
+    [InlineData("Recovering", "recovery backoff")]
+    public void SchedulerReasonReportsOwnerAndRecoveryBlocks(string state, string expected)
+    {
+        var run = new CoordinationRun { Id = "run", State = state, WorkerIdsJson = Json.Write(Array.Empty<string>()), Detail = "Coordination paused. Already dispatched worker instructions remain independent." };
+        Assert.Contains(expected, SchedulerReason(Page(new ControlSnapshot(1, [], [], [], [])), run));
+    }
+
+    [Theory]
+    [InlineData("Configured coordinator turn limit reached after a failed decision.", "turn budget")]
+    [InlineData("Coordinator delivery needs attention: DeliveryUnknown.", "delivery outcome")]
+    [InlineData("The configured coordinator turn limit was reached during format recovery.", "output could not be used")]
+    [InlineData("A participant is unavailable or is no longer a task worker.", "participant is unavailable")]
+    public void SchedulerReasonDistinguishesSystemPauses(string detail, string expected)
+    {
+        var run = new CoordinationRun { Id = "run", State = "Paused", Detail = detail, WorkerIdsJson = Json.Write(Array.Empty<string>()) };
+        Assert.Contains(expected, SchedulerReason(Page(new ControlSnapshot(1, [], [], [], [])), run));
+    }
+
+    [Fact]
+    public void SchedulerReasonReportsTurnBudgetAndCoordinatorAvailability()
+    {
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = "coordinator", WorkerIdsJson = Json.Write(new[] { worker.Id }), Round = 1, MaxRounds = 1 };
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var page = Page(new ControlSnapshot(1, [], [coordinator, worker], [], []));
+        Assert.Contains("turn budget", SchedulerReason(page, run));
+
+        run.Round = 0;
+        coordinator.Stale = true;
+        Assert.Contains("stale", SchedulerReason(page, run));
+
+        coordinator.Stale = false; coordinator.Activity = "Active";
+        Assert.Contains("coordinator is busy", SchedulerReason(page, run));
+    }
+
+    [Theory]
+    [InlineData("stale", "awaits scheduler reconciliation")]
+    [InlineData("active", "awaits scheduler reconciliation")]
+    [InlineData("in-flight", "awaits scheduler reconciliation")]
+    public void FinishedDecisionIsReconciledBeforeParticipantAvailability(string availability, string expected)
+    {
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var decision = new CommandRecord { Id = "decision", WorkerId = coordinator.Id, State = Delivery.Finished };
+        var commands = new List<CommandRecord> { decision };
+        switch (availability)
+        {
+            case "stale": worker.Stale = true; break;
+            case "active": worker.Activity = "Active"; break;
+            case "in-flight": commands.Add(new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running }); break;
+        }
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = coordinator.Id, DecisionCommandId = decision.Id, WorkerIdsJson = Json.Write(new[] { worker.Id }) };
+
+        Assert.Contains(expected, SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], commands, [])), run));
+    }
+
+    [Fact]
+    public void SchedulerReasonDistinguishesUnresolvedWorkAndUnchangedEvidence()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = coordinator.Id, WorkerIdsJson = Json.Write(new[] { worker.Id }), LastDecisionAt = now };
+        var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running, CreatedAt = now, UpdatedAt = now };
+        var page = Page(new ControlSnapshot(1, [], [coordinator, worker], [command], []));
+        Assert.Contains("worker work is still unresolved", SchedulerReason(page, run));
+
+        command.State = Delivery.Finished;
+        run.LastObservation = CoordinationObservation.Fingerprint([command], []);
+        Assert.Contains("evidence is unchanged", SchedulerReason(page, run));
+    }
+
+    [Fact]
+    public void OwnerFollowupIsNotReportedBlockedByEarlierWork()
+    {
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Active", Role = SessionRoles.Worker });
+        var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running };
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            CoordinatorWorkerId = coordinator.Id,
+            Instruction = "Original\n\nOwner follow-up:\nUse the correction.",
+            WorkerIdsJson = Json.Write(new[] { worker.Id }),
+            InputJson = Json.Write(new CoordinatorContext("Original", [], [], []))
+        };
+
+        Assert.Null(SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], [command], [])), run));
+    }
+
+    [Fact]
+    public void SchedulerReasonDoesNotReplaceLastCoordinatorSummary()
+    {
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            State = "Paused",
+            WorkerIdsJson = Json.Write(Array.Empty<string>()),
+            Detail = "Coordination paused. Already dispatched worker instructions remain independent.",
+            DecisionJson = Json.Write(new CoordinatorDecision("Workers are done.", [], true))
+        };
+        var page = Page(new ControlSnapshot(1, [], [], [], []));
+
+        Assert.Equal("Workers are done.", LastSummary(page, run));
+        Assert.Contains("owner pause", SchedulerReason(page, run));
+    }
+
+    [Fact]
+    public void SchedulerReasonKeepsPendingRecoveryAndRepairDistinctFromUnchangedEvidence()
+    {
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            CoordinatorWorkerId = coordinator.Id,
+            WorkerIdsJson = Json.Write(new[] { worker.Id }),
+            LastObservation = CoordinationObservation.Fingerprint([], []),
+            InputJson = Json.Write(new CoordinatorContext("Task", [], [], [], Repair: new(1, "rejected")))
+        };
+        var page = Page(new ControlSnapshot(1, [], [coordinator, worker], [], []));
+        Assert.Contains("evidence is unchanged", SchedulerReason(page, run));
+
+        run.InputJson = Json.Write(new CoordinatorContext("Task", [], [], [], Recovery: new(1, 1234, "retry")));
+        Assert.Contains("evidence is unchanged", SchedulerReason(page, run));
+    }
+
+    [Fact]
+    public void MissingDecisionFromBoundedSnapshotIsNotReportedComplete()
+    {
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = coordinator.Id, DecisionCommandId = "trimmed", WorkerIdsJson = Json.Write(new[] { worker.Id }) };
+
+        var reason = SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], [], [])), run);
+
+        Assert.Contains("bounded snapshot", reason);
+        Assert.Contains("unavailable", reason);
+    }
+    [Theory]
+    [InlineData("progress")]
+    [InlineData("completion")]
+    [InlineData("question")]
+    [InlineData("repair")]
+    public void NewEvidenceCanWakeSchedulerWhileAnotherWorkerRuns(string signal)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Active", Role = SessionRoles.Worker });
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            CoordinatorWorkerId = coordinator.Id,
+            WorkerIdsJson = Json.Write(new[] { worker.Id }),
+            LastDecisionAt = now - 120_000
+        };
+        var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running };
+        var commands = new List<CommandRecord> { command };
+        var requests = new List<PendingRequest>();
+        if (signal == "progress") command.LastProgressAt = now;
+        if (signal == "completion") commands.Add(new CommandRecord
+        {
+            Id = "finished",
+            WorkerId = worker.Id,
+            Origin = "coordinator:run",
+            State = Delivery.Finished,
+            UpdatedAt = now
+        });
+        if (signal == "question") requests.Add(new PendingRequest { WorkerId = worker.Id, Kind = "question", State = "Pending" });
+        if (signal == "repair") run.InputJson = Json.Write(new CoordinatorContext(run.Instruction, [], [], [], Repair: new(1, "rejected")));
+        Assert.Null(SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], commands, requests)), run));
+    }
+
 }

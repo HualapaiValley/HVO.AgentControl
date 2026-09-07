@@ -60,3 +60,50 @@ jobs:
       - name: Remove disposable SSH fixtures
         if: always()
         run: docker rm -f hvo-agentcontrol-fixture-a hvo-agentcontrol-fixture-b || true
+
+  published-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/Browser/package-lock.json
+      - name: Install browser dependencies
+        working-directory: tests/Browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Publish application
+        run: dotnet publish src/HVO.AgentControl --configuration Release --output artifacts/published-ui
+      - name: Test published desktop and mobile UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ui-data artifacts/ui-secrets
+          python3 -c 'import secrets,pathlib; p=pathlib.Path("artifacts/ui-secrets/owner-password"); p.write_text(secrets.token_urlsafe(32)); p.chmod(0o600)'
+          export Control__DataDirectory="$PWD/artifacts/ui-data"
+          export Control__SecretsDirectory="$PWD/artifacts/ui-secrets"
+          export Control__AllowInsecureLocalHttp=true
+          export ASPNETCORE_URLS=http://127.0.0.1:5058
+          (cd artifacts/published-ui && exec dotnet HVO.AgentControl.dll) > artifacts/ui-host.log 2>&1 &
+          ui_pid=$!
+          trap 'kill "$ui_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..60}; do
+            if curl --silent --fail http://127.0.0.1:5058/health/ready > /dev/null; then break; fi
+            sleep 1
+          done
+          export HVO_BASE_URL=http://127.0.0.1:5058
+          export HVO_OWNER_PASSWORD_FILE="$PWD/artifacts/ui-secrets/owner-password"
+          node tests/Browser/package-smoke.cjs
+      - name: Upload UI diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-ui-diagnostics
+          path: artifacts/ui-host.log
