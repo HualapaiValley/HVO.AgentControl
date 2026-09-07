@@ -17,6 +17,8 @@ public static class ApiEndpoints
             return await next(context);
         });
         group.MapGet("/csrf", (HttpContext context, IAntiforgery antiforgery) => new { token = antiforgery.GetAndStoreTokens(context).RequestToken });
+        group.MapGet("/providers/logins", (ProviderLoginService logins) => logins.List());
+        group.MapPost("/runtimes/{id}/providers/chatgpt", (string id, RequestId input, ProviderLoginService logins) => logins.Start(id, input.Id));
         group.MapGet("/github/access", (HVO.AgentControl.GitHub.GitHubAccessService github) => github.List());
         group.MapPost("/runtimes/{id}/github/disable", (string id, DeleteRegistrationInput input,
             HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Disable(id, input.ExpectedRevision, token));

@@ -1,0 +1,37 @@
+@page "/providers"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+
+<PageTitle>AgentControl · Model access</PageTitle>
+<div class="shell">
+    <ControlHeader Title="Model access" Description="Connect execution runtimes to your model subscription." />
+    @if (error is not null) { <div class="notice error" role="alert">@error</div> }
+    <section class="panel">
+        <h2>ChatGPT subscription</h2>
+        <p>Choose a runtime, open the sign-in link and enter its device code. No port forwarding is needed. All workers running as the same OS user on that runtime share its OpenCode credentials.</p>
+        <p>Credentials stay on the runtime. Sign-in does not change worker models or interrupt tasks. After signing in, refresh workspace models in the worker editor and select a model for future instructions.</p>
+        <p>You can navigate away while approval is pending. If AgentHost restarts, pending sign-in tracking is lost; check the runtime before starting again.</p>
+    </section>
+    @foreach (var runtime in snapshot?.Runtimes ?? [])
+    {
+        var login = logins.FirstOrDefault(x => x.RuntimeId == runtime.Id);
+        var pending = login?.State is "Starting" or "Waiting";
+        <section class="panel" @key="runtime.Id">
+            <h2>@runtime.Name</h2>
+            <p class="meta">@runtime.Health · @runtime.Username@@@runtime.Host</p>
+            @if (login is not null)
+            {
+                <p role="status"><strong>@login.State</strong> · @login.Detail</p>
+                @if (login.State == "Waiting")
+                {
+                    <p><a href="@login.Url" target="_blank" rel="noopener noreferrer">Open ChatGPT device sign-in</a></p>
+                    <p>Device code: <code class="device-code">@login.Code</code></p>
+                    <p class="meta">Approve promptly; the device code can expire. Tracking continues for up to ten minutes.</p>
+                }
+            }
+            <button disabled="@(busy || pending || !runtime.DesiredConnected || runtime.Health != "Healthy")" @onclick="() => Start(runtime.Id)">@(pending ? "Sign-in pending…" : login?.State == "Connected" ? "Sign in again" : "Sign in with ChatGPT")</button>
+            @if (runtime.Health != "Healthy") { <p class="meta">Verify and connect this runtime first.</p> }
+        </section>
+    }
+</div>

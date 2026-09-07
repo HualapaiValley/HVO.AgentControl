@@ -110,3 +110,7 @@ For the current manually enrolled test, first finish its work and disconnect the
 ## Executed verification
 
 See [configuration and cache verification](validation/devcontainer-configurations-2026-09-07.md) for actual default-config `vscode` tools, the nested-Docker full test run, repeat-up identity checks and a fresh cached instance.
+
+## Provider access during provisioning
+
+Provider profiles should be optionally configured after runtime verification, with a visible waiting-for-sign-in state and the same setup available later. See [Runtime provider access](PROVIDER_ACCESS.md) for the ChatGPT website flow, additional provider targets, readiness checks and the planned credential-owner design. Credentials must not be copied into cached images or devcontainer.json.
