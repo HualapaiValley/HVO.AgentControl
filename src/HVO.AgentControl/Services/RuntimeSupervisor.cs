@@ -307,7 +307,11 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                     var request = await store.Read(async db => await db.Requests.FindAsync(reply.RequestId)) ?? throw new ControlException("Request missing.");
                     var current = await api.Snapshot(worker!, options.Value.HistoryLimit, token);
                     var pending = request.Kind == "permission" ? current.Permissions : current.Questions;
-                    if (!pending.Any(x => x.GetProperty("id").GetString() == request.NativeId)) throw new ControlException("Native request is no longer pending; reply was not sent.");
+                    if (!pending.Any(x => x.GetProperty("id").GetString() == request.NativeId))
+                    {
+                        await store.RecordUnavailableReply(command.Id);
+                        break;
+                    }
                     mutationStarted = true;
                     await api.Reply(worker!, request, reply, token);
                     await Complete(command.Id, Delivery.Finished, "Reply accepted for the identified native request.");

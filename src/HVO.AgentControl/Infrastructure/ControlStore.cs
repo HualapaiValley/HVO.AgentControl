@@ -283,7 +283,10 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         var worker = await db.Workers.FindAsync(request.WorkerId) ?? throw new ControlException("Worker not found.", 404);
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, worker.RuntimeId, worker.Id, "Reply", payload);
-        if (request.State != "Pending" || request.ReplyCommandId is not null) throw new ControlException("Request is resolved or already has a recorded reply.");
+        if (request.State == "NoLongerPending")
+            throw new ControlException("This request is no longer pending on the worker. No new reply was sent; its disappearance does not confirm approval.");
+        if (request.State != "Pending" || request.ReplyCommandId is not null)
+            throw new ControlException("This request already has a recorded or uncertain reply. Refresh its status before responding again.");
         if (request.Kind == "permission" && input.Permission is not ("once" or "always" or "reject")) throw new ControlException("Select a native permission decision.", 400);
         if (request.Kind == "question" && !input.Reject && (input.Answers is null || Json.Write(input.Answers).Length > 16000)) throw new ControlException("Question answers are required and must be bounded.", 400);
         if (request.Kind == "question" && !input.Reject) InteractiveRequests.ValidateAnswers(request.Json, input.Answers);
