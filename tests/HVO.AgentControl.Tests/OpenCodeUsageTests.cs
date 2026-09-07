@@ -209,6 +209,33 @@ public sealed class OpenCodeUsageTests
     }
 
     [Fact]
+    public void NullAndLiteralDashUseDistinctStableMergeOrdering()
+    {
+        var missing = Snapshot(provider: null, model: "model");
+        var literal = Snapshot(provider: "-", model: "model");
+
+        var forward = OpenCodeUsageMerger.Merge(missing, literal);
+        var reverse = OpenCodeUsageMerger.Merge(literal, missing);
+        Assert.Same(literal, forward);
+        Assert.Same(literal, reverse);
+        Assert.Same(literal, OpenCodeUsageMerger.Merge(literal, literal));
+    }
+
+    [Fact]
+    public void DelimiterContainingProviderAndModelUseStableMergeOrdering()
+    {
+        var splitProvider = Snapshot(provider: "a|b", model: "c");
+        var splitModel = Snapshot(provider: "a", model: "b|c");
+
+        var forward = OpenCodeUsageMerger.Merge(splitProvider, splitModel);
+        var reverse = OpenCodeUsageMerger.Merge(splitModel, splitProvider);
+        Assert.NotEqual(splitProvider, splitModel);
+        Assert.Same(forward, reverse);
+        Assert.Same(forward, OpenCodeUsageMerger.MergeAll([splitProvider, splitModel]));
+        Assert.Same(forward, OpenCodeUsageMerger.MergeAll([splitModel, splitProvider]));
+    }
+
+    [Fact]
     public void MergeRejectsDifferentIdentities()
     {
         var usage = Parse(Assistant(new { id = "msg_test", sessionID = "ses_test", role = "assistant", time = new { created = 1L } })).Usage!;
@@ -220,4 +247,15 @@ public sealed class OpenCodeUsageTests
         OpenCodeUsageParser.Parse(JsonSerializer.SerializeToElement(new { info, parts = Array.Empty<object>() }), Identity, observedAt);
 
     private static object Assistant(object info) => info;
+
+    private static OpenCodeUsage Snapshot(string? provider, string? model) => new()
+    {
+        Identity = Identity,
+        ProviderId = provider,
+        ModelId = model,
+        CreatedAt = 100,
+        CompletedAt = 300,
+        InputTokens = 10,
+        ObservedAt = 300
+    };
 }

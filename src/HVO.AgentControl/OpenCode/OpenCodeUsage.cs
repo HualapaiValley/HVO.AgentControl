@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Globalization;
 
 namespace HVO.AgentControl.OpenCode;
 
@@ -133,7 +132,7 @@ public static class OpenCodeUsageMerger
 {
     /// <summary>
     /// Chooses one complete revision: final beats provisional, then the newer observed
-    /// revision wins, and equal-ranked conflicts use a stable ordinal snapshot key.
+    /// revision wins, and equal-ranked conflicts use a stable fieldwise ordering.
     /// No fields are combined, so provider/model/currency and measurements stay coherent.
     /// </summary>
     public static OpenCodeUsage Merge(OpenCodeUsage left, OpenCodeUsage right)
@@ -156,20 +155,29 @@ public static class OpenCodeUsageMerger
         var final = left.IsFinal.CompareTo(right.IsFinal);
         if (final != 0) return final;
         var observed = left.ObservedAt.CompareTo(right.ObservedAt);
-        return observed != 0 ? observed : string.CompareOrdinal(SnapshotKey(left), SnapshotKey(right));
+        if (observed != 0) return observed;
+
+        var provider = string.CompareOrdinal(left.ProviderId, right.ProviderId);
+        if (provider != 0) return provider;
+        var model = string.CompareOrdinal(left.ModelId, right.ModelId);
+        if (model != 0) return model;
+        var created = Nullable.Compare(left.CreatedAt, right.CreatedAt);
+        if (created != 0) return created;
+        var completed = Nullable.Compare(left.CompletedAt, right.CompletedAt);
+        if (completed != 0) return completed;
+        var total = Nullable.Compare(left.TotalTokens, right.TotalTokens);
+        if (total != 0) return total;
+        var input = Nullable.Compare(left.InputTokens, right.InputTokens);
+        if (input != 0) return input;
+        var output = Nullable.Compare(left.OutputTokens, right.OutputTokens);
+        if (output != 0) return output;
+        var reasoning = Nullable.Compare(left.ReasoningTokens, right.ReasoningTokens);
+        if (reasoning != 0) return reasoning;
+        var cacheRead = Nullable.Compare(left.CacheReadTokens, right.CacheReadTokens);
+        if (cacheRead != 0) return cacheRead;
+        var cacheWrite = Nullable.Compare(left.CacheWriteTokens, right.CacheWriteTokens);
+        if (cacheWrite != 0) return cacheWrite;
+        var cost = Nullable.Compare(left.Cost, right.Cost);
+        return cost != 0 ? cost : string.CompareOrdinal(left.Currency, right.Currency);
     }
-
-    private static string SnapshotKey(OpenCodeUsage usage) => string.Join("|", new[]
-    {
-        Text(usage.ProviderId), Text(usage.ModelId), Text(usage.CreatedAt), Text(usage.CompletedAt),
-        Text(usage.TotalTokens), Text(usage.InputTokens), Text(usage.OutputTokens), Text(usage.ReasoningTokens),
-        Text(usage.CacheReadTokens), Text(usage.CacheWriteTokens), Text(usage.Cost), Text(usage.Currency)
-    });
-
-    private static string Text(object? value) => value switch
-    {
-        null => "-",
-        decimal number => number.ToString(CultureInfo.InvariantCulture),
-        _ => value.ToString() ?? "-"
-    };
 }
