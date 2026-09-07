@@ -281,19 +281,20 @@ public partial class Coordination
         if (participants.Length != participantIds.Length || participants.Any(x => x.Archived || x.Role != SessionRoles.Worker))
             return "a participant is unavailable; no new decision is sent.";
 
-        if (participants.Any(x => x.Stale))
+        var context = ReadContext(run);
+        var ownerFollowup = context is not null && context.Instruction != run.Instruction;
+        if (!ownerFollowup && participants.Any(x => x.Stale))
             return "a participant session is stale; no new decision is sent until it is observed.";
-        if (participants.Any(x => x.Activity != "Idle"))
+        if (!ownerFollowup && participants.Any(x => x.Activity != "Idle"))
             return "a participant is busy; no new decision is sent until it is idle.";
 
         var requests = snapshot.Requests.Where(x => participantIds.Contains(x.WorkerId) && x.State == "Pending" && x.ReplyCommandId is null).ToArray();
         var commands = snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt).ToArray();
         if (commands.Any(x => x.State == Delivery.Unknown))
             return "worker delivery is unresolved; no new decision is sent until its outcome is confirmed.";
-        if (commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State)))
+        if (!ownerFollowup && commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State)))
             return "assigned worker work is still unresolved; no new decision is sent.";
 
-        var context = ReadContext(run);
         if (context?.Repair is not null)
             return "a coordinator format correction is pending; no new decision is sent until the correction is requested.";
         if (context?.Recovery is not null)

@@ -440,6 +440,24 @@ public sealed class CoordinationStatusTests
     }
 
     [Fact]
+    public void OwnerFollowupIsNotReportedBlockedByEarlierWork()
+    {
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Active", Role = SessionRoles.Worker });
+        var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running };
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            CoordinatorWorkerId = coordinator.Id,
+            Instruction = "Original\n\nOwner follow-up:\nUse the correction.",
+            WorkerIdsJson = Json.Write(new[] { worker.Id }),
+            InputJson = Json.Write(new CoordinatorContext("Original", [], [], []))
+        };
+
+        Assert.Null(SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], [command], [])), run));
+    }
+
+    [Fact]
     public void SchedulerReasonDoesNotReplaceLastCoordinatorSummary()
     {
         var run = new CoordinationRun
