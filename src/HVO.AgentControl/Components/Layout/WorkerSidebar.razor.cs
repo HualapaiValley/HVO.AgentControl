@@ -96,6 +96,7 @@ public partial class WorkerSidebar
         {
             try { await module.DisposeAsync(); }
             catch (JSDisconnectedException) { }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         }
         lifetime.Dispose();
     }
