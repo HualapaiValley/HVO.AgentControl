@@ -42,6 +42,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       }
     }
     await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
     await page.setViewportSize({ width: 390, height: 844 });
     for (const route of ['/', '/workers', '/runtimes', '/coordination']) {
       await page.goto(base + route);

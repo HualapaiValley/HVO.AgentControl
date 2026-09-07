@@ -28,6 +28,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
    await expect(sidebar.getByText('No task workers match.')).toBeVisible();
    await sidebar.getByRole('searchbox',{name:'Find a worker'}).fill('');
    await sidebar.getByRole('button',{name:'Collapse worker sidebar'}).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
    await expect(sidebar).toHaveClass(/is-collapsed/);
    await page.goto(base+'/workers');
    await expect(page.getByRole('complementary',{name:'Worker navigation'})).toHaveClass(/is-collapsed/);
@@ -54,10 +55,12 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
   await expect(form.getByRole('button',{name:'Create worker',exact:true})).toBeDisabled();
   await page.screenshot({path:path.join(artifacts,'ui-workspace-conflict.png'),fullPage:true});
    await form.getByRole('link',{name:'Open existing worker',exact:true}).click();
+  await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
   await expect(page.getByRole('region',{name:'Worker conversation'})).toBeVisible();
   await expect(page.locator('.history-panel')).not.toHaveAttribute('open','');
    await page.screenshot({path:path.join(artifacts,'ui-conversation.png'),fullPage:true});
    await page.getByRole('button',{name:'Collapse worker sidebar'}).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
    for(const route of ['/', '/workers', '/runtimes', '/coordination']) {
     await page.setViewportSize({width:390,height:844}); await page.goto(base+route);
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
