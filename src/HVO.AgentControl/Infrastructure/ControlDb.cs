@@ -41,6 +41,9 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
         model.Entity<WorkItem>().HasIndex(x => x.IssueNumber);
         model.Entity<WorkItem>().HasIndex(x => x.Branch);
+        model.Entity<WorkItem>().HasIndex(x => new { x.Repository, x.Branch })
+            .IsUnique()
+            .HasFilter("State NOT IN ('Released', 'Abandoned')");
         model.Entity<WorkItem>().HasIndex(x => x.OwnerWorkerId);
         model.Entity<WorkItemPhase>().HasIndex(x => new { x.WorkItemId, x.Name }).IsUnique();
         model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);

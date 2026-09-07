@@ -100,6 +100,8 @@ public sealed partial class ControlStore
             var existingOwner = await db.Workers.FindAsync(workItem.OwnerWorkerId);
             throw new ControlException($"Work item is owned by '{(existingOwner?.Name ?? "unknown")}'. Only the owner may release it.");
         }
+        if (workItem.State == WorkItemState.Released || workItem.State == WorkItemState.Abandoned)
+            throw new ControlException($"Work item is {workItem.State.ToString().ToLowerInvariant()} and cannot be released.");
         if (input.PhaseName is not null)
         {
             var phase = await db.WorkItemPhases.FirstOrDefaultAsync(x => x.WorkItemId == input.WorkItemId && x.Name == input.PhaseName);
@@ -125,6 +127,8 @@ public sealed partial class ControlStore
             var existingOwner = await db.Workers.FindAsync(workItem.OwnerWorkerId);
             throw new ControlException($"Work item is owned by '{(existingOwner?.Name ?? "unknown")}'. Only the owner may transition it.");
         }
+        if (workItem.State == WorkItemState.Released || workItem.State == WorkItemState.Abandoned)
+            throw new ControlException($"Work item is {workItem.State.ToString().ToLowerInvariant()} and cannot be transitioned.");
         if (workItem.Revision != input.ExpectedRevision) throw new ControlException("Work item changed; refresh and retry.", 409);
         var validStates = new[] { WorkItemState.Active, WorkItemState.InReview, WorkItemState.InCI, WorkItemState.Completed, WorkItemState.Released, WorkItemState.Abandoned };
         if (!validStates.Contains(input.State))

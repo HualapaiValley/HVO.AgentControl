@@ -1,5 +1,7 @@
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -379,6 +381,72 @@ public sealed class WorkItemOwnershipTests
         var item = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-claim-abandoned", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
         await app.Store.TransitionWorkItem(new TransitionWorkItemInput(item.Id, item.Revision, worker.Id, WorkItemState.Abandoned, null));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.ClaimWorkItem(new WorkItemClaimInput(item.Id, worker.Id)));
+    }
+
+    [Fact]
+    public async Task DatabaseRejectsTwoLiveWorkItemsForSameRepositoryBranch()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var factory = app.Services.GetRequiredService<IDbContextFactory<ControlDb>>();
+        await using (var first = await factory.CreateDbContextAsync())
+        {
+            first.WorkItems.Add(new WorkItem
+            {
+                Id = "wi-index-1",
+                IssueNumber = "42",
+                Title = "First",
+                Branch = "feat/index",
+                Repository = "HVO.AgentControl",
+                OwnerWorkerId = worker.Id,
+                State = WorkItemState.Active,
+                CurrentPhase = "implementation"
+            });
+            await first.SaveChangesAsync();
+        }
+        await using var second = await factory.CreateDbContextAsync();
+        second.WorkItems.Add(new WorkItem
+        {
+            Id = "wi-index-2",
+            IssueNumber = "99",
+            Title = "Second",
+            Branch = "feat/index",
+            Repository = "HVO.AgentControl",
+            OwnerWorkerId = worker.Id,
+            State = WorkItemState.Active,
+            CurrentPhase = "implementation"
+        });
+        await Assert.ThrowsAsync<DbUpdateException>(() => second.SaveChangesAsync());
+    }
+
+    [Fact]
+    public async Task TerminalWorkItemCannotBeReleasedAgain()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var released = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-release-again", "42", "Released", "feat/release-again", "HVO.AgentControl", worker.Id));
+        await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(released.Id, worker.Id));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.ReleaseWorkItem(new WorkItemReleaseInput(released.Id, worker.Id)));
+
+        var abandoned = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-abandon-release", "43", "Abandoned", "feat/abandon-release", "HVO.AgentControl", worker.Id));
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(abandoned.Id, abandoned.Revision, worker.Id, WorkItemState.Abandoned, null));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.ReleaseWorkItem(new WorkItemReleaseInput(abandoned.Id, worker.Id)));
+    }
+
+    [Fact]
+    public async Task TerminalWorkItemCannotTransitionAgain()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var released = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-transition-again", "42", "Released", "feat/transition-again", "HVO.AgentControl", worker.Id));
+        await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(released.Id, worker.Id));
+        var current = await app.Store.GetWorkItem(released.Id);
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(released.Id, current!.Revision, worker.Id, WorkItemState.Active, null)));
+
+        var abandoned = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-transition-abandon", "43", "Abandoned", "feat/transition-abandon", "HVO.AgentControl", worker.Id));
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(abandoned.Id, abandoned.Revision, worker.Id, WorkItemState.Abandoned, null));
+        current = await app.Store.GetWorkItem(abandoned.Id);
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(abandoned.Id, current!.Revision, worker.Id, WorkItemState.Active, null)));
     }
 
     [Fact]
