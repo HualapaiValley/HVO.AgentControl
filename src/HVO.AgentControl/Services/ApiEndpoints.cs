@@ -28,6 +28,9 @@ public static class ApiEndpoints
         group.MapPost("/coordinations", (StartCoordinationInput input, ControlStore store) => store.StartCoordination(input));
         group.MapPost("/coordinations/{id}/control", (string id, CoordinationControlInput input, ControlStore store) => store.ControlCoordination(id, input));
         group.MapPost("/coordinations/{id}/prompts", (string id, CoordinationPromptInput input, ControlStore store) => store.PromptCoordination(id, input));
+        group.MapPost("/coordinations/{id}/operator-updates", (string id, ConfigureOperatorUpdatesInput input, ControlStore store) => store.ConfigureOperatorUpdates(id, input));
+        group.MapGet("/operator-updates", (long? after, int? take, ControlStore store) => store.OperatorUpdates(after ?? 0, take ?? 50));
+        group.MapPost("/operator-updates/{id}/ack", (string id, ControlStore store) => store.AcknowledgeOperatorUpdate(id));
         group.MapGet("/snapshot", (ControlStore store) => store.Snapshot());
         group.MapGet("/runtimes", (ControlStore store) => store.Read(db => db.Runtimes.AsNoTracking().ToListAsync()));
         group.MapPost("/runtimes", (RuntimeRecord input, ControlStore store) => store.SaveRuntime(input));

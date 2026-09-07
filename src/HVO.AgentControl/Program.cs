@@ -73,6 +73,7 @@ builder.Services.AddSingleton<TerminalService>();
 builder.Services.AddSingleton<IRuntimeTransportFactory, SshRuntimeTransportFactory>();
 builder.Services.AddHostedService<RuntimeSupervisor>();
 builder.Services.AddHostedService<CoordinatorService>();
+builder.Services.AddHostedService<OperatorUpdateService>();
 builder.Services.AddHostedService<ActivityPublisher>();
 builder.Services.AddSignalR(options => options.MaximumReceiveMessageSize = 512 * 1024);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents(options => options.MaxBufferedUnacknowledgedRenderBatches = 5)

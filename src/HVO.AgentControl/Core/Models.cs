@@ -265,3 +265,39 @@ public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reas
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
     CoordinationRecovery? Recovery = null);
+
+public sealed class OperatorUpdateSchedule
+{
+    [Key] public string Id { get; set; } = "";
+    public string CoordinationRunId { get; set; } = "";
+    public int IntervalMinutes { get; set; }
+    public bool Enabled { get; set; } = true;
+    public long NextDueAt { get; set; }
+    public long? LastDueAt { get; set; }
+    public long LastEmittedEventSequence { get; set; }
+    public long ActiveSetRevision { get; set; } = 1;
+    public long Revision { get; set; }
+    public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+}
+
+public sealed class OperatorStatusUpdate
+{
+    [Key] public long Sequence { get; set; }
+    public string Id { get; set; } = "";
+    public string ScheduleId { get; set; } = "";
+    public string CoordinationRunId { get; set; } = "";
+    public string Kind { get; set; } = "Scheduled";
+    public long DueAt { get; set; }
+    public long PublishedAt { get; set; }
+    public long SourceEventSequence { get; set; }
+    public long ActiveSetRevision { get; set; }
+    public long MissedIntervals { get; set; }
+    public string SummaryJson { get; set; } = "{}";
+    public long? AcknowledgedAt { get; set; }
+}
+
+public sealed record ConfigureOperatorUpdatesInput(string Id, int IntervalMinutes);
+public sealed record OperatorParticipantSummary(string WorkerId, string Name, string Phase, string? Assignment,
+    long? LastObservedAt, long? LastProgressAt, long? LastReceiptAt, string? Blocker, string NextEvent);
+public sealed record OperatorStatusSummary(string CoordinationRunId, string RunState, long GeneratedAt,
+    int Busy, int Available, int Queued, int Attention, OperatorParticipantSummary[] Participants);

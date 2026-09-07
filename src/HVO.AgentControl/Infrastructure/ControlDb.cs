@@ -17,6 +17,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
     public DbSet<RuntimeTelemetryHistoryRecord> TelemetryHistory => Set<RuntimeTelemetryHistoryRecord>();
+    public DbSet<OperatorUpdateSchedule> OperatorUpdateSchedules => Set<OperatorUpdateSchedule>();
+    public DbSet<OperatorStatusUpdate> OperatorStatusUpdates => Set<OperatorStatusUpdate>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -29,5 +31,10 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
         model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);
         model.Entity<RuntimeTelemetryHistoryRecord>().HasIndex(x => new { x.RuntimeId, x.ObservedAt, x.Sequence });
+        model.Entity<OperatorUpdateSchedule>().HasIndex(x => x.CoordinationRunId).IsUnique();
+        model.Entity<OperatorStatusUpdate>().Property(x => x.Id).IsRequired();
+        model.Entity<OperatorStatusUpdate>().HasIndex(x => x.Id).IsUnique();
+        model.Entity<OperatorStatusUpdate>().HasIndex(x => new { x.ScheduleId, x.Kind, x.DueAt }).IsUnique();
+        model.Entity<OperatorStatusUpdate>().HasIndex(x => new { x.CoordinationRunId, x.Sequence });
     }
 }

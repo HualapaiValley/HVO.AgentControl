@@ -1,0 +1,67 @@
+@using HVO.AgentControl.Core
+@implements IAsyncDisposable
+
+<aside class="worker-sidebar @(collapsed ? "is-collapsed" : "")" aria-label="Worker navigation">
+  <div class="sidebar-head">
+    <a class="sidebar-brand" href="/" title="AgentControl overview"><span>HVO</span><strong>AgentControl</strong></a>
+    <button class="sidebar-toggle" type="button" title="@(collapsed ? "Expand worker sidebar" : "Collapse worker sidebar")" aria-label="@(collapsed ? "Expand worker sidebar" : "Collapse worker sidebar")" aria-expanded="@(!collapsed)" @onclick="Toggle">@(collapsed ? ">" : "<")</button>
+  </div>
+  @if (!collapsed)
+  {
+    <label class="sidebar-search"><span>Find a worker</span><input type="search" placeholder="Name, runtime, project" @bind="search" @bind:event="oninput" /></label>
+    <nav class="worker-navigation" aria-label="Conversations">
+      @if (snapshot is null)
+      {
+        <p class="sidebar-empty">@(error ?? "Loading workers...")</p>
+      }
+      else
+      {
+        var groups = RuntimeGroups.ToList();
+        @if (groups.Count == 0)
+        {
+          <p class="sidebar-empty">No task workers match.</p>
+        }
+        @foreach (var group in groups)
+        {
+          <section class="runtime-group" aria-label="@group.RuntimeName">
+            <h2><span>@group.RuntimeName</span><small>@group.Workers.Count</small></h2>
+            @foreach (var worker in group.Workers)
+            {
+              <a class="worker-link @(worker.Id == selectedWorkerId ? "selected" : "")" href="@ConversationUrl(worker.Id)" title="@worker.Id">
+                <span class="status-dot @StatusTone(worker)" aria-hidden="true"></span>
+                <span><strong>@worker.Name</strong><small>@DisplayStatus.Worker(worker)@ProjectSuffix(worker)</small></span>
+              </a>
+            }
+          </section>
+        }
+        var coordinators = Coordinators.ToList();
+        @if (coordinators.Count > 0)
+        {
+          <section class="coordinator-group" aria-label="Coordinators">
+            <h2><span>Coordinators</span><small>@coordinators.Count</small></h2>
+            @foreach (var coordinator in coordinators)
+            {
+              <a class="worker-link coordinator-link @(coordinator.Id == selectedWorkerId ? "selected" : "")" href="@ConversationUrl(coordinator.Id)" title="@coordinator.Id">
+                <span class="status-dot @StatusTone(coordinator)" aria-hidden="true"></span>
+                <span><strong>@coordinator.Name</strong><small>@DisplayStatus.Worker(coordinator)</small></span>
+              </a>
+            }
+          </section>
+        }
+      }
+    </nav>
+    <nav class="admin-navigation" aria-label="Administration">
+      <NavLink href="/providers">Models</NavLink>
+      <NavLink href="/github">GitHub</NavLink>
+      <NavLink href="/runtimes">Runtimes</NavLink>
+    </nav>
+  }
+</aside>
+@if (collapsed)
+{
+  <button class="sidebar-mobile-toggle" type="button" aria-label="Expand worker sidebar" @onclick="Toggle">&gt;</button>
+}
+@if (!collapsed)
+{
+  <button class="sidebar-backdrop" type="button" aria-label="Close worker sidebar" @onclick="Toggle"></button>
+}

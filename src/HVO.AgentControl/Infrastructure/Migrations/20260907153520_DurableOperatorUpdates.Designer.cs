@@ -2,6 +2,7 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -9,9 +10,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260907153520_DurableOperatorUpdates")]
+    partial class DurableOperatorUpdates
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -740,54 +743,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("GitHubAccess");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Telemetry.RuntimeTelemetryHistoryRecord", b =>
-                {
-                    b.Property<long>("Sequence")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<double?>("CpuCoreUsage")
-                        .HasColumnType("REAL");
-
-                    b.Property<double?>("CpuQuotaPercent")
-                        .HasColumnType("REAL");
-
-                    b.Property<long?>("CpuWindowMs")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("MemoryBytes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("MemoryLimitBytes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<double?>("MemoryPercent")
-                        .HasColumnType("REAL");
-
-                    b.Property<string>("Note")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("ObservedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<double?>("QuotaCores")
-                        .HasColumnType("REAL");
-
-                    b.Property<string>("RuntimeId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Sequence");
-
-                    b.HasIndex("RuntimeId", "ObservedAt", "Sequence");
-
-                    b.ToTable("TelemetryHistory");
                 });
 #pragma warning restore 612, 618
         }

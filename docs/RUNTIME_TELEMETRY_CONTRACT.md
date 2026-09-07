@@ -2,8 +2,10 @@
 
 Implementation for issue #35 calculation foundation (namespace `HVO.AgentControl.Telemetry`).
 This document defines the input facts, parser behavior, calculator guard states, and the
-deterministic output produced from two consecutive samples. No polling transport, persistence,
-Program, or UI is included in this slice.
+deterministic output produced from two consecutive samples. Runtime cards now project the
+existing authenticated capability snapshot through this contract, showing available memory and
+quota facts while explicitly retaining `NeedsSecondSample`; polling and live utilization remain
+outside this slice.
 
 It supplements the broader [worker status and observability design](OBSERVABILITY_DESIGN.md)
 without replacing that document's status and usage requirements.
@@ -197,5 +199,6 @@ cgroup quota equals effective capacity.
 
 - Authenticated sampling transport and authorization.
 - Persistence/migration of samples or computed telemetry.
-- Surfaces (Program/UI) displaying runtime telemetry.
+- Live Program/UI utilization based on consecutive samples (runtime cards expose only the
+  existing point-in-time capability observation).
 - Per-worker breakdown.
