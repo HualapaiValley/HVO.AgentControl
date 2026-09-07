@@ -50,3 +50,7 @@ playwright-report/
 
 # Local .NET tool discovery cache
 dotnet/runfile-discovery/
+
+# Python tooling bytecode
+__pycache__/
+*.py[cod]
