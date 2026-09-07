@@ -15,6 +15,8 @@ for target in a b; do
   name="hvo-agentcontrol-fixture-$target"
   if ! docker inspect "$name" >/dev/null 2>&1; then docker run -d --name "$name" hvo-agentcontrol-ssh-fixture:local >/dev/null; fi
   docker start "$name" >/dev/null
+  docker cp tests/Fixtures/fixture-opencode.py "$name:/usr/local/bin/fixture-opencode" >/dev/null
+  docker exec "$name" chmod 755 /usr/local/bin/fixture-opencode
   docker cp .fixture/secrets/fixture-key.pub "$name:/home/agent/.ssh/authorized_keys" >/dev/null
   docker exec "$name" sh -c 'chown agent:agent /home/agent/.ssh/authorized_keys && chmod 600 /home/agent/.ssh/authorized_keys'
   docker exec -u agent "$name" sh -c 'for dir in a b; do git -C /home/agent/workspaces/$dir init -q; git -C /home/agent/workspaces/$dir -c user.name=Fixture -c user.email=fixture@invalid commit -q --allow-empty -m Initial; done'

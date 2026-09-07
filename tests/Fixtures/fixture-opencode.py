@@ -29,6 +29,9 @@ if os.path.exists(state_file):
 subscribers = []
 waiters = {}
 no_models = False
+hold_provider = False
+provider_waiting = threading.Event()
+provider_release = threading.Event()
 
 def save():
     with lock:
@@ -109,14 +112,29 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         return parsed.path, parse_qs(parsed.query).get('directory', [''])[0]
     def do_GET(self):
-        global no_models
+        global no_models, hold_provider
         if not self.auth():
             return
         path, directory = self.context()
         if path == '/global/event':
             return self.events()
+        if path == '/provider':
+            with lock:
+                should_hold = hold_provider
+                hold_provider = False
+            if should_hold:
+                provider_waiting.set()
+                provider_release.wait(60)
+                provider_waiting.clear()
         with lock:
-            if path == '/global/health':
+            if path == '/fixture/hold-provider':
+                provider_release.clear()
+                hold_provider = True
+                value = True
+            elif path == '/fixture/release-provider':
+                provider_release.set()
+                value = True
+            elif path == '/global/health':
                 value = {'healthy': True, 'version': '1.18.29'}
             elif path == '/doc':
                 routes = ['/global/event', '/session', '/session/{sessionID}/prompt_async', '/session/{sessionID}/message', '/session/status', '/provider', '/path', '/session/{sessionID}/abort', '/permission/{requestID}/reply', '/question/{requestID}/reply']
@@ -132,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
                 no_models = False
                 value = True
             elif path == '/fixture/stats':
-                value = {'submissions': state['submissions'], 'sessions': len(state['sessions'])}
+                value = {'submissions': state['submissions'], 'sessions': len(state['sessions']), 'providerWaiting': provider_waiting.is_set()}
             elif path == '/fixture/drop-sse':
                 for subscriber in subscribers:
                     subscriber.put(None)

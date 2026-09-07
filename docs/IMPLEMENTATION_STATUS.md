@@ -1,4 +1,14 @@
-# Initial release implementation status
+# AgentControl implementation status
+
+## Beta execution checkpoint — 2026-09-07
+
+Both native beta runs are complete: pricing review → separate fixer → exact-SHA re-review (PR #18), and shipping implementation → review → README correction → re-review (PR #22). The lab now has 13 passing tests. Real controller context overflow was fixed in PR #21; a final CI preflight-cancellation race (#26) is fixed in PR #25; web restart during active native work preserved caller identity and one delivery attempt. See [full validation and interventions](validation/beta-development-2026-09-07.md) and [assignment guidance](BETA_ASSIGNMENT_GUIDE.md). This is supervised beta evidence, not unattended readiness. Next priorities are #23/#24 (decision receipts/output), #19 (effective limits), #3/#7 (scheduled updates/evidence), then #10 (workflow visibility).
+
+The private [GitHub repository](https://github.com/RoySalisbury/HVO.AgentControl) is now established, with a [complete development plan](BETA_DEVELOPMENT_PLAN.md), [beta epic #1](https://github.com/RoySalisbury/HVO.AgentControl/issues/1), and independently scoped backlog issues. The reproducible fleet bootstrap and fresh-container SSH readiness fix are merged in [PR #17](https://github.com/RoySalisbury/HVO.AgentControl/pull/17); hosted CI passed.
+
+Three separate .NET 10.0.400 development containers are connected to the existing dedicated coordinator. All four native sessions use `opencode/big-pickle` for the initial exercises. Workers have repository-scoped Git deploy keys; GitHub comments/PR publication is currently performed by the authenticated supervising host. The coordinator remains outside the work participant list. See [fleet operations](BETA_FLEET.md). Existing owner demo/M4 workers remain separate.
+
+The historical initial-release notes below describe their original validation time. Their statements about an untracked baseline, no GitHub mutations, stopped test services, and hosted CI not being run no longer describe the current beta environment. Beta containers are intentionally left running.
 
 Research checkpoint: [SkyMonitor prototype adoption review](PROTOTYPE_COORDINATION_REVIEW.md) completed against training-guide comment 5565244201, related audits/experiments and repository main `76e48bdb4933a9d91b21a9623dfb822cb49dcb09`. The pinned local guard fixtures passed. Proposed next slices are durable operator updates/evidence cursors, explicit enrollment and harness adapters, lifecycle/resource claims, then optional PR review/finalization and controlled migration. This documentation review did not change running coordination or enroll prototype agents.
 

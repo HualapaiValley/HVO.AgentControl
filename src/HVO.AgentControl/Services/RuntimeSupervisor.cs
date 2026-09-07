@@ -312,6 +312,19 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                 default: throw new ControlException("Unsupported command.");
             }
         }
+        catch (OperationCanceledException) when (command.Kind == "Prompt" && !mutationStarted && token.IsCancellationRequested)
+        {
+            // Shutdown interrupted only read-only checks; no native submission needs reconciliation.
+            await store.Write(async db =>
+            {
+                var pending = (await db.Commands.FindAsync(command.Id))!;
+                pending.State = Delivery.Queued; pending.Attempts = Math.Max(0, pending.Attempts - 1);
+                pending.Detail = "Backend stopped during read-only preflight; instruction remains queued and was not submitted.";
+                pending.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "CommandPreflightInterrupted", runtime.Id, command.WorkerId, command.Id);
+                return true;
+            });
+        }
         catch (NativeRejectedException ex) when (ex.Status is >= 400 and < 500)
         { await Complete(command.Id, Delivery.Failed, SafeError(ex)); }
         catch (Exception ex)
