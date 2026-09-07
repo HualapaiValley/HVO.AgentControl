@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Globalization;
 
 namespace HVO.AgentControl.OpenCode;
 
@@ -122,25 +123,15 @@ public static class OpenCodeUsageParser
 
 public static class OpenCodeUsageMerger
 {
+    /// <summary>
+    /// Chooses one complete revision: final beats provisional, then the newer observed
+    /// revision wins, and equal-ranked conflicts use a stable ordinal snapshot key.
+    /// No fields are combined, so provider/model/currency and measurements stay coherent.
+    /// </summary>
     public static OpenCodeUsage Merge(OpenCodeUsage left, OpenCodeUsage right)
     {
         if (left.Identity != right.Identity) throw new ArgumentException("Usage identities must match.");
-        return left with
-        {
-            ProviderId = MaxText(left.ProviderId, right.ProviderId),
-            ModelId = MaxText(left.ModelId, right.ModelId),
-            CreatedAt = Min(left.CreatedAt, right.CreatedAt),
-            CompletedAt = Max(left.CompletedAt, right.CompletedAt),
-            TotalTokens = Max(left.TotalTokens, right.TotalTokens),
-            InputTokens = Max(left.InputTokens, right.InputTokens),
-            OutputTokens = Max(left.OutputTokens, right.OutputTokens),
-            ReasoningTokens = Max(left.ReasoningTokens, right.ReasoningTokens),
-            CacheReadTokens = Max(left.CacheReadTokens, right.CacheReadTokens),
-            CacheWriteTokens = Max(left.CacheWriteTokens, right.CacheWriteTokens),
-            Cost = Max(left.Cost, right.Cost),
-            Currency = MaxText(left.Currency, right.Currency),
-            ObservedAt = Math.Max(left.ObservedAt, right.ObservedAt)
-        };
+        return CompareAuthority(left, right) >= 0 ? left : right;
     }
 
     public static OpenCodeUsage MergeAll(IEnumerable<OpenCodeUsage> snapshots)
@@ -152,8 +143,25 @@ public static class OpenCodeUsageMerger
         return result;
     }
 
-    private static long? Min(long? left, long? right) => left.HasValue && right.HasValue ? Math.Min(left.Value, right.Value) : left ?? right;
-    private static long? Max(long? left, long? right) => left.HasValue && right.HasValue ? Math.Max(left.Value, right.Value) : left ?? right;
-    private static decimal? Max(decimal? left, decimal? right) => left.HasValue && right.HasValue ? Math.Max(left.Value, right.Value) : left ?? right;
-    private static string? MaxText(string? left, string? right) => left is null ? right : right is null ? left : string.CompareOrdinal(left, right) >= 0 ? left : right;
+    private static int CompareAuthority(OpenCodeUsage left, OpenCodeUsage right)
+    {
+        var final = left.IsFinal.CompareTo(right.IsFinal);
+        if (final != 0) return final;
+        var observed = left.ObservedAt.CompareTo(right.ObservedAt);
+        return observed != 0 ? observed : string.CompareOrdinal(SnapshotKey(left), SnapshotKey(right));
+    }
+
+    private static string SnapshotKey(OpenCodeUsage usage) => string.Join("|", new[]
+    {
+        Text(usage.ProviderId), Text(usage.ModelId), Text(usage.CreatedAt), Text(usage.CompletedAt),
+        Text(usage.TotalTokens), Text(usage.InputTokens), Text(usage.OutputTokens), Text(usage.ReasoningTokens),
+        Text(usage.CacheReadTokens), Text(usage.CacheWriteTokens), Text(usage.Cost), Text(usage.Currency)
+    });
+
+    private static string Text(object? value) => value switch
+    {
+        null => "-",
+        decimal number => number.ToString(CultureInfo.InvariantCulture),
+        _ => value.ToString() ?? "-"
+    };
 }

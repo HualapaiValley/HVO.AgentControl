@@ -87,7 +87,7 @@ public sealed class OpenCodeUsageTests
     }
 
     [Fact]
-    public void MergeIsIdempotentOrderIndependentAndFinalCannotRegress()
+    public void FinalSnapshotWinsEvenWhenItsCountersAreLower()
     {
         var partial = Parse(Assistant(new
         {
@@ -112,16 +112,78 @@ public sealed class OpenCodeUsageTests
             tokens = new { total = 9L, input = 4L, output = 3L, reasoning = 2L, cache = new { read = 7L, write = 1L } }
         }), 300).Usage!;
 
-        var forward = OpenCodeUsageMerger.Merge(partial, final);
-        var reverse = OpenCodeUsageMerger.Merge(final, partial);
-        var repeated = OpenCodeUsageMerger.Merge(forward, partial);
+        var merged = OpenCodeUsageMerger.Merge(partial with { InputTokens = 100 }, final with { InputTokens = 80 });
+        Assert.Equal(final with { InputTokens = 80 }, merged);
+        Assert.True(merged.IsFinal);
+        Assert.Equal(80, merged.InputTokens);
+        Assert.Equal("provider-final", merged.ProviderId);
+        Assert.Equal("model-final", merged.ModelId);
+        Assert.Equal(1.25m, merged.Cost);
+    }
+
+    [Fact]
+    public void LateStaleProvisionalSnapshotCannotDemoteFinalSnapshot()
+    {
+        var final = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            modelID = "final",
+            providerID = "provider",
+            time = new { created = 100L, completed = 300L },
+            tokens = new { input = 80L }
+        }), 300).Usage!;
+        var stale = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            modelID = "partial",
+            providerID = "provider",
+            time = new { created = 100L },
+            tokens = new { input = 100L }
+        }), 400).Usage!;
+
+        Assert.Equal(final, OpenCodeUsageMerger.Merge(final, stale));
+        Assert.Equal(final, OpenCodeUsageMerger.Merge(stale, final));
+    }
+
+    [Fact]
+    public void EqualRankConflictsChooseOneWholeSnapshotInEitherOrder()
+    {
+        var usd = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            modelID = "model-a",
+            providerID = "provider-a",
+            time = new { created = 100L, completed = 300L },
+            cost = 1m,
+            currency = "USD",
+            tokens = new { input = 10L }
+        }), 300).Usage!;
+        var eur = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            modelID = "model-b",
+            providerID = "provider-b",
+            time = new { created = 100L, completed = 300L },
+            cost = 2m,
+            currency = "EUR",
+            tokens = new { input = 20L }
+        }), 300).Usage!;
+
+        var forward = OpenCodeUsageMerger.Merge(usd, eur);
+        var reverse = OpenCodeUsageMerger.Merge(eur, usd);
         Assert.Equal(forward, reverse);
-        Assert.Equal(forward, repeated);
-        Assert.True(forward.IsFinal);
-        Assert.Equal(300, forward.CompletedAt);
-        Assert.Equal(4, forward.InputTokens);
-        Assert.Equal(1.25m, forward.Cost);
-        Assert.Equal(300, forward.ObservedAt);
+        Assert.True(forward == usd || forward == eur);
+        Assert.Equal(forward.ProviderId == "provider-a" ? "model-a" : "model-b", forward.ModelId);
+        Assert.Equal(forward.ProviderId == "provider-a" ? "USD" : "EUR", forward.Currency);
+        Assert.Equal(forward.ProviderId == "provider-a" ? 10 : 20, forward.InputTokens);
     }
 
     [Fact]
