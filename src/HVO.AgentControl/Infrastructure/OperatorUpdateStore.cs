@@ -109,6 +109,67 @@ public sealed partial class ControlStore
         return update;
     });
 
+    public async Task<int> PublishOperatorMilestone(string runId, string milestoneKind, long? observedAt = null, ControlDb? db = null)
+    {
+        var now = observedAt ?? Now;
+        if (db is not null) return await PublishMilestoneInternal(db, runId, milestoneKind, now);
+        return await Write(async db => await PublishMilestoneInternal(db, runId, milestoneKind, now));
+    }
+
+    internal async Task<int> PublishMilestoneInternal(ControlDb db, string runId, string milestoneKind, long now)
+    {
+        var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.CoordinationRunId == runId && x.Enabled);
+        if (schedule is null) return 0;
+
+        var sourceSequence = await db.Events.OrderByDescending(x => x.Sequence).Select(x => x.Sequence).FirstOrDefaultAsync();
+        var milestoneId = schedule.Id + ":milestone:" + sourceSequence;
+
+        if (await db.OperatorStatusUpdates.AnyAsync(x => x.Id == milestoneId)) return 0;
+
+        var run = await db.CoordinationRuns.FindAsync(runId);
+        if (run is null) return 0;
+
+        var summary = await BuildOperatorSummary(db, run, now);
+        db.OperatorStatusUpdates.Add(new OperatorStatusUpdate
+        {
+            Id = milestoneId,
+            ScheduleId = schedule.Id,
+            CoordinationRunId = runId,
+            Kind = milestoneKind,
+            DueAt = now,
+            PublishedAt = now,
+            SourceEventSequence = sourceSequence,
+            ActiveSetRevision = schedule.ActiveSetRevision,
+            MissedIntervals = 0,
+            SummaryJson = Json.Write(summary)
+        });
+        Event(db, "OperatorStatusUpdatePublished", payload: new { scheduleId = schedule.Id, runId, kind = milestoneKind, milestoneId });
+        return 1;
+    }
+
+    public async Task<int> PruneAcknowledgedOperatorUpdates(int maxAcknowledgedPerSchedule = 1000, long? observedAt = null)
+    {
+        var now = observedAt ?? Now;
+        return await Write(async db =>
+        {
+            var schedules = await db.OperatorUpdateSchedules.AsNoTracking().Select(x => x.Id).ToListAsync();
+            var deleted = 0;
+            foreach (var scheduleId in schedules)
+            {
+                var acknowledged = await db.OperatorStatusUpdates
+                    .Where(x => x.ScheduleId == scheduleId && x.AcknowledgedAt != null)
+                    .OrderByDescending(x => x.AcknowledgedAt)
+                    .Skip(maxAcknowledgedPerSchedule)
+                    .Select(x => x.Sequence)
+                    .ToListAsync();
+                if (acknowledged.Count > 0)
+                    deleted += await db.OperatorStatusUpdates.Where(x => acknowledged.Contains(x.Sequence)).ExecuteDeleteAsync();
+            }
+            return deleted;
+        });
+    }
+
     private static async Task PublishOperatorUpdate(ControlDb db, OperatorUpdateSchedule schedule, CoordinationRun run,
         string kind, long dueAt, long publishedAt, long missedIntervals, string id)
     {

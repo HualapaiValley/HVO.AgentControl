@@ -271,4 +271,84 @@ public sealed class OperatorUpdateTests
         await store.ConfigureOperatorUpdates(runId, new(Guid.NewGuid().ToString(), 1), 7_000_000);
         return await store.OperatorUpdates();
     }
+
+    [Fact]
+    public async Task MilestonePublishedWhenCoordinationStopped()
+    {
+        await using var app = new TestApp();
+        var (run, _) = await Seed(app.Store);
+        await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), 9_000_000);
+        var initial = await app.Store.OperatorUpdates();
+        Assert.Single(initial);
+
+        await app.Store.ControlCoordination(run.Id, new(run.Revision, "stop"));
+        var updates = await app.Store.OperatorUpdates();
+        var milestone = updates.LastOrDefault();
+        Assert.NotNull(milestone);
+        Assert.Equal("Stopped", milestone.Kind);
+        Assert.Equal(run.Id, milestone.CoordinationRunId);
+    }
+
+    [Fact]
+    public async Task MilestoneIsIdempotentAndRequiresSchedule()
+    {
+        await using var app = new TestApp();
+        var (run, _) = await Seed(app.Store);
+        const long start = 10_000_000;
+        var scheduleId = (await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), start)).Id;
+
+        var firstResult = await app.Store.PublishOperatorMilestone(run.Id, "UniqueKind", start + 1);
+        Assert.Equal(1, firstResult);
+
+        var existing = await app.Store.Read(db => db.OperatorStatusUpdates.AsNoTracking().AnyAsync(x => x.ScheduleId == scheduleId && x.Kind == "UniqueKind"));
+        Assert.True(existing);
+
+        await app.Store.Write(async db =>
+        {
+            var schedule = await db.OperatorUpdateSchedules.FindAsync(scheduleId);
+            if (schedule is not null) db.OperatorUpdateSchedules.Remove(schedule);
+            return Task.FromResult(true);
+        });
+        Assert.Equal(0, await app.Store.PublishOperatorMilestone(run.Id, "AfterScheduleRemoval", start + 2));
+    }
+
+    [Fact]
+    public async Task PruneAcknowledgedDeletesOldRowsButKeepsRecentAndUnacknowledged()
+    {
+        await using var app = new TestApp();
+        var (run, _) = await Seed(app.Store);
+        var scheduleId = (await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 1), 11_000_000)).Id;
+
+        await app.Store.Write(async db =>
+        {
+            for (var i = 0; i < 10; i++)
+            {
+                db.OperatorStatusUpdates.Add(new OperatorStatusUpdate
+                {
+                    Id = scheduleId + ":prune:" + i,
+                    ScheduleId = scheduleId,
+                    CoordinationRunId = run.Id,
+                    Kind = "Scheduled",
+                    DueAt = 11_000_000L + i,
+                    PublishedAt = 11_000_000L + i,
+                    SourceEventSequence = 11_000_000L + i,
+                    ActiveSetRevision = 1,
+                    SummaryJson = "{}",
+                    AcknowledgedAt = i < 3 ? 12_000_000L : 11_000_000L
+                });
+            }
+            return Task.FromResult(true);
+        });
+
+        var before = await app.Store.Read(db => db.OperatorStatusUpdates.CountAsync(x => x.ScheduleId == scheduleId));
+        Assert.Equal(11, before);
+
+        var pruned = await app.Store.PruneAcknowledgedOperatorUpdates(maxAcknowledgedPerSchedule: 3);
+        Assert.Equal(7, pruned);
+
+        var remaining = await app.Store.Read(db => db.OperatorStatusUpdates.Where(x => x.ScheduleId == scheduleId).ToListAsync());
+        Assert.Equal(4, remaining.Count);
+        Assert.Equal(3, remaining.Count(u => u.AcknowledgedAt == 12_000_000L));
+        Assert.Single(remaining, u => u.AcknowledgedAt == null);
+    }
 }
