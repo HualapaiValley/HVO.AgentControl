@@ -82,6 +82,19 @@
           <div class="card-heading"><h3>@runtime.Name</h3><span class="badge @(runtime.Transport == "Connected" ? "good" : "")">@runtime.Transport</span></div>
           <p class="mono">@runtime.Username@@@runtime.Host:@runtime.Port</p>
           <p>OpenCode @runtime.Version · @snapshot.Workers.Count(x => x.RuntimeId == runtime.Id) registered agent(s)</p>
+          @if (Telemetry(runtime) is { } telemetry)
+          {
+            <div class="telemetry" aria-label="Runtime resource observation">
+              <strong>Resource snapshot</strong>
+              <span>Memory @Bytes(telemetry.Sample.MemoryBytes) / @Bytes(telemetry.Sample.MemoryLimitBytes)</span>
+              <span>CPU quota @(telemetry.Sample.QuotaCores is { } quota ? quota.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " cores" : "unknown")</span>
+              <small>Observed @Age(telemetry.Sample.ObservedAt). @telemetry.Result.Note</small>
+            </div>
+          }
+          else
+          {
+            <p class="telemetry unavailable">Resource snapshot unavailable until an authenticated capability probe succeeds.</p>
+          }
           @if (runtime.Health != "Healthy") { <p class="notice">@runtime.Diagnostic</p> }
           <div class="actions">
             <a class="button-link subtle" href="@("/terminal?runtime=" + runtime.Id)" target="_blank" rel="noopener">Open admin terminal</a>
