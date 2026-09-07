@@ -126,6 +126,23 @@ public sealed class EffectiveResourceTests
     }
 
     [Fact]
+    public void MacProbeShapeWithUnknownScopeAndEmptyCgroupKeysFallsBackToHost()
+    {
+        var probe = Parse(
+            ("os", "Darwin"), ("logicalCores", "10"), ("memoryBytes", "17179869184"),
+            ("executionScope", "unknown"),
+            ("cpuQuotaV2", ""), ("cpuSetV2", ""), ("cpuSetV1", ""),
+            ("memoryLimitV2", ""), ("memoryCurrentV2", ""),
+            ("cpuQuotaMicrosV1", ""), ("cpuPeriodMicrosV1", ""), ("memoryLimitV1", ""));
+        Assert.Equal("10", probe.Facts["effectiveCpuCores"]);
+        Assert.Equal("17179869184", probe.Facts["effectiveMemoryBytes"]);
+        Assert.Equal("10", probe.Facts["logicalCores"]);
+        Assert.Equal("17179869184", probe.Facts["memoryBytes"]);
+        foreach (var key in new[] { "cpuQuotaV2", "cpuSetV2", "cpuSetV1", "memoryLimitV2", "memoryCurrentV2", "cpuQuotaMicrosV1", "cpuPeriodMicrosV1", "memoryLimitV1" })
+            Assert.Equal("unknown", probe.Facts[key]);
+    }
+
+    [Fact]
     public void OverflowAndUnknownInputsYieldUnknownNotFabricatedValues()
     {
         Assert.Equal("unknown", CapabilityProbe.EffectiveMemoryBytes(Facts(("memoryKiB", "9223372036854775807"))));

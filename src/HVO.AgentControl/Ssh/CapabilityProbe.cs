@@ -63,9 +63,12 @@ public static class CapabilityProbe
 
     private static bool IsContainerLike(Dictionary<string, string> facts) =>
         string.Equals(facts.GetValueOrDefault("executionScope"), "container", StringComparison.Ordinal)
-        || facts.ContainsKey("cpuQuotaV2") || facts.ContainsKey("cpuSetV2") || facts.ContainsKey("cpuSetV1")
-        || facts.ContainsKey("cpuQuotaMicrosV1") || facts.ContainsKey("cpuPeriodMicrosV1")
-        || facts.ContainsKey("memoryLimitV2") || facts.ContainsKey("memoryLimitV1");
+        || HasReadableConstraint(facts, "cpuQuotaV2") || HasReadableConstraint(facts, "cpuSetV2") || HasReadableConstraint(facts, "cpuSetV1")
+        || HasReadableConstraint(facts, "cpuQuotaMicrosV1") || HasReadableConstraint(facts, "cpuPeriodMicrosV1")
+        || HasReadableConstraint(facts, "memoryLimitV2") || HasReadableConstraint(facts, "memoryLimitV1");
+
+    private static bool HasReadableConstraint(Dictionary<string, string> facts, string key) =>
+        TryNonUnknown(facts, key, out _);
 
     private static bool TryNonUnknown(Dictionary<string, string> facts, string key,
         [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? value)
