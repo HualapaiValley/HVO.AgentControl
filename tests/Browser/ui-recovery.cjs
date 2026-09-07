@@ -31,13 +31,14 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
    await expect(sidebar).toHaveClass(/is-collapsed/);
    await page.goto(base+'/workers');
    await expect(page.getByRole('complementary',{name:'Worker navigation'})).toHaveClass(/is-collapsed/);
-   await page.getByRole('button',{name:'Expand worker sidebar'}).click();
-   await expect(page.getByRole('complementary',{name:'Worker navigation'})).not.toHaveClass(/is-collapsed/);
-   await expect(page.getByRole('region',{name:'Worker conversation'})).toHaveCount(0);
-  await expect(page.getByRole('region',{name:'Available workers'})).toBeVisible();
-  await page.screenshot({path:path.join(artifacts,'ui-overview.png'),fullPage:true});
-  await page.goto(base+'/workers'); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
-  const card=page.locator('.worker-inventory article').filter({has:page.getByRole('heading',{name:worker.name,exact:true})});
+    await page.getByRole('button',{name:'Expand worker sidebar'}).click();
+    await expect(page.getByRole('complementary',{name:'Worker navigation'})).not.toHaveClass(/is-collapsed/);
+    await page.goto(base+'/'); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+    await expect(page.getByRole('region',{name:'Worker conversation'})).toHaveCount(0);
+    await expect(page.getByRole('region',{name:'Available workers'})).toBeVisible();
+    await page.screenshot({path:path.join(artifacts,'ui-overview.png'),fullPage:true});
+    await page.goto(base+'/workers'); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+    const card=page.locator('.worker-inventory article').filter({has:page.getByRole('heading',{name:worker.name,exact:true})});
   expect(await card.innerText()).not.toContain('NeedsReview');
   expect(await card.innerText()).not.toContain('bash: completed');
   expect(await card.innerText()).not.toContain('bash: error');
@@ -61,9 +62,9 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.setViewportSize({width:390,height:844}); await page.goto(base+route);
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
     expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
-   }
-   await page.getByRole('button',{name:'Expand worker sidebar'}).click();
-   await expect(page.getByRole('complementary',{name:'Worker navigation'})).toBeVisible();
+    }
+    await page.getByRole('button',{name:'Expand worker sidebar'}).click();
+    await expect(page.getByRole('complementary',{name:'Worker navigation'})).not.toHaveClass(/is-collapsed/);
    await page.getByRole('button',{name:'Close worker sidebar'}).click();
   await page.goto(base+'/?worker='+worker.id); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
   expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
