@@ -760,6 +760,35 @@ public sealed class CoordinationTests
         Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator-decision:" + run.Id);
     }
 
+    [Fact]
+    public async Task OwnerPermissionDoesNotBlockIdlePeerOrAppearAsActionableQuestion()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, b) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Parallel backlog", [a.Id, b.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Wait for approval", []));
+        await app.Store.CoordinationTick();
+        await app.Store.Write(async db =>
+        {
+            (await db.Workers.FindAsync(a.Id))!.Activity = "WaitingPermission";
+            db.Requests.Add(new PendingRequest { Id = "owner-approval", NativeId = "per_owner", WorkerId = a.Id, Kind = "permission", State = "Pending" });
+            return true;
+        });
+        await app.Store.CoordinationTick();
+        var observed = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.Empty(observed.Questions);
+        Assert.Equal("WaitingPermission", observed.Workers.Single(x => x.Id == a.Id).Activity);
+        await FinishDecision(app.Store, run.Id, new("Await owner; other work may be ready", []));
+        await app.Store.CoordinationTick();
+        await IdleDeadlineDue(app.Store, run.Id);
+        await app.Store.CoordinationTick();
+        var refreshed = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.NotNull(refreshed.ReassessmentReason);
+        Assert.Empty(refreshed.Questions);
+        Assert.Equal("Pending", await app.Store.Read(async db => (await db.Requests.FindAsync("owner-approval"))!.State));
+    }
+
     private static Task<bool> IdleDeadlineDue(ControlStore store, string id) => store.Write(async db =>
     {
         (await db.CoordinationRuns.FindAsync(id))!.LastDecisionAt = ControlStore.Now - 6 * 60000;

@@ -228,8 +228,8 @@ public sealed partial class ControlStore
         var occupied = commands.Where(x => Delivery.InFlight(x.State) || x.State == Delivery.Queued).Select(x => x.WorkerId).ToHashSet();
         var idleDue = run.State == "Waiting" && run.LastDecisionAt > 0 &&
             Now - run.LastDecisionAt >= options.Value.CoordinationIdleReassessmentMinutes * 60000L &&
-            participants.Any(x => !x.Stale && x.Activity == "Idle" && !occupied.Contains(x.Id)) &&
-            requests.Length == 0;
+            participants.Any(x => !x.Stale && x.Activity == "Idle" && !occupied.Contains(x.Id) &&
+                !requests.Any(request => request.WorkerId == x.Id));
         // Do not treat a stream of progress tokens or model-written prose as completion.
         var progressDue = commands.Any(x => x.LastProgressAt > run.LastDecisionAt) &&
             Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
@@ -262,7 +262,7 @@ public sealed partial class ControlStore
         var retainedCommands = commands.Where(x => Delivery.InFlight(x.State) || x.State == Delivery.Queued)
             .Concat(commands.TakeLast(16)).DistinctBy(x => x.Id).OrderBy(x => x.CreatedAt).ToArray();
         var results = retainedCommands.Select(CoordinatorEvidence).ToArray();
-        var contextInput = new CoordinatorContext(run.Instruction, contextWorkers, results, requests,
+        var contextInput = new CoordinatorContext(run.Instruction, contextWorkers, results, requests.Where(x => x.Kind == "question").ToArray(),
             await LastAppliedDecision(db, run.Id), retainedCommands.Select(x => new DispatchEvidence(x.Id, x.WorkerId!, x.Kind, x.State, x.CreatedAt)).ToArray(), repair,
             pendingRecovery, idleDue ? "Idle capacity reassessment: check current backlog and merge/review receipts. Advance ready independent work; explain concrete blockers when nothing is eligible. Do not repeat reviews at unchanged revisions without new evidence." : null);
         contextInput = FitCoordinatorEvidence(contextInput, options.Value.MaxPromptCharacters - CoordinationInstructions.Length - 100);
@@ -450,6 +450,8 @@ public sealed partial class ControlStore
         an omitted response is never a clean review, task completion, or permission to redispatch.
         Capability reports and prior prompts may also contain explicit omission markers when context is compacted.
         All outstanding command records remain visible even when they predate the recent completed-result window.
+        Only entries in questions are actionable task questions. Workers waiting for tool permission need the owner;
+        do not invent an answer_question action for an owner approval or wait to assign unrelated ready workers.
         When reassessmentReason is present, check current external backlog evidence through an available worker if needed.
         A pending merge or one blocked task does not block unrelated ready work. Park tasks, not permanently specialized workers.
         Reuse independent review receipts at the same exact head; request another review only for changed code/base or specific new evidence.
