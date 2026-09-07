@@ -669,6 +669,103 @@ public sealed class CoordinationTests
         Assert.Equal(Delivery.Running, snapshot.Commands.Single(x => x.Id == original.Id).State);
     }
 
+    [Fact]
+    public async Task IdleReassessmentRevisitsUnchangedBacklogOncePerDeadlineWithoutInventingAssignments()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Work the backlog", [a.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Waiting for a merge", []));
+        await app.Store.CoordinationTick();
+        Assert.False(await app.Store.CoordinationTick());
+        await IdleDeadlineDue(app.Store, run.Id);
+        await app.Store.CoordinationTick();
+        var reassessed = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Deciding", reassessed.State);
+        Assert.Contains("Idle capacity", Json.Read<CoordinatorContext>(reassessed.InputJson).ReassessmentReason);
+        Assert.False(await app.Store.CoordinationTick());
+        await FinishDecision(app.Store, run.Id, new("No eligible work; dependency still open", []));
+        await app.Store.CoordinationTick();
+        Assert.False(await app.Store.CoordinationTick());
+        var snapshot = await app.Store.Snapshot();
+        Assert.DoesNotContain(snapshot.Commands, x => x.Origin == "coordinator:" + run.Id);
+        Assert.Equal(2, snapshot.Commands.Count(x => x.Origin == "coordinator-decision:" + run.Id));
+        Assert.Equal(1, await app.Store.Read(db => db.Events.CountAsync(x => x.Type == "CoordinatorIdleReassessmentRequested")));
+    }
+
+    [Fact]
+    public async Task IdleReassessmentKeepsLongRunningWorkAndUsesOnlyFreeCapacity()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, b) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Parallel backlog", [a.Id, b.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Start A", [new("send_prompt", a.Id, "Long task")]));
+        await app.Store.CoordinationTick();
+        var original = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
+        await app.Store.Write(async db =>
+        {
+            (await db.Commands.FindAsync(original.Id))!.State = Delivery.Running;
+            (await db.Workers.FindAsync(a.Id))!.Activity = "Active";
+            return true;
+        });
+        Assert.False(await app.Store.CoordinationTick());
+        await IdleDeadlineDue(app.Store, run.Id);
+        await app.Store.CoordinationTick();
+        var context = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.NotNull(context.ReassessmentReason);
+        Assert.Equal(Delivery.Running, context.Results.Single(x => x.Id == original.Id).State);
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+    }
+
+    [Fact]
+    public async Task IdleReassessmentDeadlineSurvivesRestartAndRequiresObservedFreeCapacity()
+    {
+        string data, secrets, runId;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var (coordinator, a, _) = await Seed(app.Store);
+            runId = (await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Backlog", [a.Id]))).Id;
+            await app.Store.CoordinationTick();
+            await FinishDecision(app.Store, runId, new("Waiting", []));
+            await app.Store.CoordinationTick();
+            await IdleDeadlineDue(app.Store, runId);
+        }
+        await using var restarted = new TestApp(data, secrets);
+        Assert.False(await restarted.Store.CoordinationTick());
+        await ObserveIdle(restarted.Store);
+        await restarted.Store.CoordinationTick();
+        Assert.NotNull(Json.Read<CoordinatorContext>((await restarted.Store.Coordinations()).Single().InputJson).ReassessmentReason);
+        Assert.False(await restarted.Store.CoordinationTick());
+    }
+
+    [Fact]
+    public async Task IdleDeadlineDoesNotBypassAllBusyOrConfiguredRoundLimit()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Backlog", [a.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Wait", []));
+        await app.Store.CoordinationTick();
+        await IdleDeadlineDue(app.Store, run.Id);
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(a.Id))!.Activity = "Active"; return true; });
+        Assert.False(await app.Store.CoordinationTick());
+        await ObserveIdle(app.Store);
+        await app.Store.Write(async db => { var saved = (await db.CoordinationRuns.FindAsync(run.Id))!; saved.Round = saved.MaxRounds; return true; });
+        await app.Store.CoordinationTick();
+        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator-decision:" + run.Id);
+    }
+
+    private static Task<bool> IdleDeadlineDue(ControlStore store, string id) => store.Write(async db =>
+    {
+        (await db.CoordinationRuns.FindAsync(id))!.LastDecisionAt = ControlStore.Now - 6 * 60000;
+        return true;
+    });
+
     private static async Task<(WorkerRecord, WorkerRecord, WorkerRecord)> Seed(ControlStore store)
     {
         var coordinator = await PersistenceTests.SeedWorker(store);
