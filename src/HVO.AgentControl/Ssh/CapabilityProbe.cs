@@ -1,3 +1,4 @@
+using System.Globalization;
 using HVO.AgentControl.Core;
 
 namespace HVO.AgentControl.Ssh;
@@ -16,8 +17,137 @@ public static class CapabilityProbe
             var value = line[(split + 1)..].Trim();
             facts[line[..split]] = value.Length == 0 ? "unknown" : value[..Math.Min(value.Length, 500)];
         }
+        facts["effectiveCpuCores"] = EffectiveCpuCores(facts);
+        facts["effectiveMemoryBytes"] = EffectiveMemoryBytes(facts);
         return new(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), "probe", directory, facts);
     }
+
+    /// <summary>Effective CPU quota/cpuset/host minimum normalized from raw probe facts; fractional quotas allowed. "unknown" when nothing is verifiable.</summary>
+    public static string EffectiveCpuCores(Dictionary<string, string> facts)
+    {
+        var host = TryNonUnknown(facts, "logicalCores", out var rawLogical)
+            ? ParsePositiveDecimal(rawLogical)
+            : null;
+        if (!IsContainerLike(facts))
+            return host is { } hostOnly ? Format(hostOnly) : "unknown";
+
+        var candidates = new List<decimal>();
+        if (host is { } hostCores) candidates.Add(hostCores);
+        if (CpuQuotaCores(facts) is { } quotaCores) candidates.Add(quotaCores);
+        if (CpuSetCount(facts) is { } setCores) candidates.Add(setCores);
+        return candidates.Count == 0 ? "unknown" : Format(candidates.Min());
+    }
+
+    /// <summary>Effective memory in bytes normalized from host-visible memory and the cgroup limit; "unknown" when nothing is verifiable.</summary>
+    public static string EffectiveMemoryBytes(Dictionary<string, string> facts)
+    {
+        var host = HostMemoryBytes(facts);
+        if (!IsContainerLike(facts))
+            return host is { } hostOnly ? Format(hostOnly) : "unknown";
+
+        var candidates = new List<long>();
+        if (host is { } hostBytes) candidates.Add(hostBytes);
+        if (CgroupMemoryLimitBytes(facts) is { } limitBytes) candidates.Add(limitBytes);
+        return candidates.Count == 0 ? "unknown" : Format(candidates.Min());
+    }
+
+    private static bool IsContainerLike(Dictionary<string, string> facts) =>
+        string.Equals(facts.GetValueOrDefault("executionScope"), "container", StringComparison.Ordinal)
+        || facts.ContainsKey("cpuQuotaV2") || facts.ContainsKey("cpuSetV2")
+        || facts.ContainsKey("cpuQuotaMicrosV1") || facts.ContainsKey("cpuPeriodMicrosV1")
+        || facts.ContainsKey("memoryLimitV2") || facts.ContainsKey("memoryLimitV1");
+
+    private static bool TryNonUnknown(Dictionary<string, string> facts, string key,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? value)
+    {
+        if (facts.TryGetValue(key, out value) && value.Length != 0 && value != "unknown") return true;
+        value = null;
+        return false;
+    }
+
+    private static decimal? CpuQuotaCores(Dictionary<string, string> facts)
+    {
+        if (TryNonUnknown(facts, "cpuQuotaV2", out var max))
+        {
+            var parts = max.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2 && ParsePositiveLong(parts[1]) is { } period)
+            {
+                if (parts[0] is "max" or "-1") return null;
+                return ParsePositiveDecimal(parts[0]) is { } quota ? quota / period : null;
+            }
+            return null;
+        }
+
+        if (TryNonUnknown(facts, "cpuQuotaMicrosV1", out var quotaMicros)
+            && TryNonUnknown(facts, "cpuPeriodMicrosV1", out var periodMicros)
+            && ParsePositiveLong(periodMicros) is { } v1Period
+            && ParsePositiveDecimal(quotaMicros) is { } v1Quota)
+            return v1Quota / v1Period;
+        return null;
+    }
+
+    private static long? CpuSetCount(Dictionary<string, string> facts)
+    {
+        if (!TryNonUnknown(facts, "cpuSetV2", out var set)) return null;
+        long total = 0;
+        foreach (var token in set.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var dash = token.IndexOf('-');
+            if (dash < 0)
+            {
+                if (ParseNonNegativeLong(token) is null) return null;
+                total += 1;
+            }
+            else
+            {
+                var low = ParseNonNegativeLong(token[..dash]);
+                var high = ParseNonNegativeLong(token[(dash + 1)..]);
+                if (low is not { } lo || high is not { } hi || hi < lo) return null;
+                total += hi - lo + 1;
+            }
+        }
+        return total > 0 ? total : null;
+    }
+
+    private static long? HostMemoryBytes(Dictionary<string, string> facts)
+    {
+        if (TryNonUnknown(facts, "memoryKiB", out var kiB)
+            && long.TryParse(kiB, NumberStyles.None, CultureInfo.InvariantCulture, out var ki)
+            && ki > 0 && ki <= long.MaxValue / 1024)
+            return ki * 1024;
+        if (TryNonUnknown(facts, "memoryBytes", out var bytes)
+            && long.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var b) && b > 0)
+            return b;
+        return null;
+    }
+
+    private static long? CgroupMemoryLimitBytes(Dictionary<string, string> facts)
+    {
+        if (TryNonUnknown(facts, "memoryLimitV2", out var max))
+        {
+            if (max is "max" or "-1") return null;
+            return ParsePositiveLong(max);
+        }
+        if (TryNonUnknown(facts, "memoryLimitV1", out var bytes))
+        {
+            if (!long.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var limit)) return null;
+            return limit <= 0 || limit >= (1L << 62) ? null : limit;
+        }
+        return null;
+    }
+
+    private static decimal? ParsePositiveDecimal(string text) =>
+        decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out var value) && value > 0 ? value : null;
+
+    private static long? ParsePositiveLong(string text) =>
+        long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value > 0 ? value : null;
+
+    private static long? ParseNonNegativeLong(string text) =>
+        long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value >= 0 ? value : null;
+
+    private static string Format(decimal value) => value.ToString("0.######", CultureInfo.InvariantCulture);
+
+    private static string Format(long value) => value.ToString(CultureInfo.InvariantCulture);
 
     // No installations, credentials, external network requests or unbounded hardware enumeration.
     public static string Script(string directory) => "cd " + BootstrapScript.Quote(directory) + " || exit 1\n" + """
