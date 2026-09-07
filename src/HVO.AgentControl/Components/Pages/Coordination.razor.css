@@ -14,4 +14,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25rem; overflo
 .chip-stale { background: #6b2a2a; color: #ffd9d9; }
 .chip-uncertain { background: #5a2f7a; color: #f0dbff; }
 .chip-idle { background: #3d4658; color: #d9e2f2; }
+.chip-failed, .chip-outcome { background: #7a2424; color: #ffd6d6; }
+.chip-cancelled { background: #4a2f2f; color: #ffdcdc; }
+.collapsed > summary { cursor: pointer; margin-bottom: .4rem; }
+.collapsed[open] > summary { margin-bottom: 1rem; }
 @media (max-width: 40rem) { .participant-line { grid-template-columns: 1fr; } }
