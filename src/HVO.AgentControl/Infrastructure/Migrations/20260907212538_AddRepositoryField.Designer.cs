@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260907211025_AddRepositoryField")]
+    [Migration("20260907212538_AddRepositoryField")]
     partial class AddRepositoryField
     {
         /// <inheritdoc />
