@@ -1,0 +1,15 @@
+# Dev Container worker validation — 2026-09-07
+
+Executed on hvo-dev-03 using Dev Container CLI 0.89.0 and `.devcontainer/worker/devcontainer.json`. This verifies an operator-driven provisioning path; it is not evidence of automatic coordinator/UI provisioning or multi-host scheduling.
+
+- Built and started a new container from the shared Dockerfile's `tools` stage, using an independent local clone of main `4a085ddb0bdc5e6fa887863a8c46f49bf4beb342` as the bind-mounted workspace. Existing beta containers were not recreated.
+- Container ID: `e651834020e4241b36be391d01ce87c7239e73870f149d20a516bef450b0d0a4`; ownership label `hvo.agentcontrol.test=devcontainer-worker`. Repeated `up` returned exactly the same ID. No stop/rebuild recovery claim is made by this reuse check.
+- Docker inspection confirmed 2 CPUs, 4,294,967,296 bytes of memory and 512 PIDs; only workspace, home and SSH configuration mounts. No host Docker socket.
+- Creation lifecycle restored the solution. CLI `exec` verified SDK 10.0.400, Python 3.12.3, Node 18.19.1, GitHub CLI 2.45.0 and passwordless container-local sudo. The image uses distribution packages; these version observations are not a claim that every tool is the latest release.
+- Inside the container: Release build with warnings as errors and format verification passed; tests passed 65, skipped 7, failed 0. Skipped cases require external SSH fixtures and were not exercised inside this container.
+- The ordinary SSH image's final stage also built successfully after the shared-tool changes. Shellcheck passed for the existing development entrypoint and post-create script. Repository-required restore, Release build and format verification passed on the host.
+- Installed a dedicated public SSH login key, pinned the host key using Docker-side inspection, and verified/enrolled through AgentControl's API. Runtime `0fd3164099e34a8cbe454719630c9d6a` became Connected/Healthy after verified OpenCode 1.18.29 bootstrap.
+- Created `Devcontainer Test Worker`, ID `8d2ceccd4a2f4761b028a8ae089cea94`, using `opencode/big-pickle` and `/home/agent/workspaces/project`. Initial capability discovery completed and the worker returned Idle, not stale. Native session data lives in the retained home volume. Its model report quoted host-visible CPU/RAM instead of the enforced container limits; use the Docker observations above for scheduling. A model inventory claim is not independent verification of effective capacity.
+- Set the test clone's origin to HVO.AgentControl's GitHub remote. No host GitHub API credential or deploy key was copied into the new worker; GitHub write tasks require scoped access before assignment. Optional cloud CLIs were correctly reported missing during enrollment.
+
+Local build/CLI logs and registration IDs are retained under ignored `.fixture/devcontainer-test/`. The container is left running and registered for further testing. Provisioning across another Docker host, automatic retirement, package persistence after rebuild, and direct worker issue/PR publication remain unverified and tracked in #42–#44.
