@@ -9,14 +9,16 @@ namespace HVO.AgentControl.Tests;
 public sealed class CoordinationStatusTests
 {
     [Theory]
-    [InlineData("permission", Delivery.Running, "Running", false, false, "Waiting on permission", false)]
-    [InlineData("question", Delivery.Running, "Running", false, false, "Waiting on a question", false)]
-    [InlineData(null, Delivery.Unknown, "Unknown", true, false, "Uncertain", false)]
-    [InlineData(null, Delivery.Queued, "None", true, false, "Queued", false)]
-    [InlineData(null, Delivery.Finished, "NeedsReview", false, true, "Idle", true)]
-    [InlineData(null, Delivery.Finished, "Cancelled", false, false, "Cancelled", false)]
+    [InlineData("permission", Delivery.Running, "Running", false, false, "Waiting on permission", false, false)]
+    [InlineData("question", Delivery.Running, "Running", false, false, "Waiting on a question", false, false)]
+    [InlineData(null, Delivery.Unknown, "Unknown", true, false, "Uncertain", false, false)]
+    [InlineData(null, Delivery.Queued, "None", true, false, "Queued", false, false)]
+    [InlineData(null, Delivery.Finished, "NeedsReview", false, true, "Idle", true, false)]
+    [InlineData(null, Delivery.Finished, "Cancelled", false, false, "Cancelled", false, false)]
+    [InlineData("both", Delivery.Running, "Running", false, false, "Waiting on permission and a question", false, false)]
+    [InlineData(null, Delivery.Unknown, "Running", true, false, "Uncertain", false, true)]
     public void CurrentBlockersAndOutcomesDetermineAvailability(string? request, string delivery,
-        string outcome, bool ownerOperation, bool oldFailure, string expectedLabel, bool available)
+        string outcome, bool ownerOperation, bool oldFailure, string expectedLabel, bool available, bool anotherRunning)
     {
         var worker = new WorkerRecord
         {
@@ -50,8 +52,18 @@ public sealed class CoordinationStatusTests
             CreatedAt = 2,
             UpdatedAt = 2
         });
-        List<PendingRequest> requests = request is null ? [] :
-            [new() { WorkerId = worker.Id, Kind = request, State = "Pending" }];
+        if (anotherRunning) commands.Add(new()
+        {
+            Id = "another",
+            WorkerId = worker.Id,
+            State = Delivery.Running,
+            Kind = "Prompt",
+            Origin = "owner",
+            CreatedAt = 3,
+            UpdatedAt = 3
+        });
+        string[] requestKinds = request is null ? [] : request == "both" ? ["question", "permission"] : [request];
+        var requests = requestKinds.Select(kind => new PendingRequest { WorkerId = worker.Id, Kind = kind, State = "Pending" }).ToList();
         var page = new Coordination();
         var flags = BindingFlags.Instance | BindingFlags.NonPublic;
         typeof(ControlPage).GetField("snapshot", flags)!.SetValue(page,
