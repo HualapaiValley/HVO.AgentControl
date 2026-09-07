@@ -16,6 +16,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<TranscriptMessage> Messages => Set<TranscriptMessage>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
+    public DbSet<WorkItem> WorkItems => Set<WorkItem>();
+    public DbSet<WorkItemPhase> WorkItemPhases => Set<WorkItemPhase>();
     public DbSet<RuntimeTelemetryHistoryRecord> TelemetryHistory => Set<RuntimeTelemetryHistoryRecord>();
     public DbSet<OperatorUpdateSchedule> OperatorUpdateSchedules => Set<OperatorUpdateSchedule>();
     public DbSet<OperatorStatusUpdate> OperatorStatusUpdates => Set<OperatorStatusUpdate>();
@@ -31,6 +33,10 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<PendingRequest>().HasIndex(x => new { x.WorkerId, x.Kind, x.NativeId }).IsUnique();
         model.Entity<CommandRecord>().HasIndex(x => new { x.State, x.QueueOrder });
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
+        model.Entity<WorkItem>().HasIndex(x => x.IssueNumber);
+        model.Entity<WorkItem>().HasIndex(x => x.Branch);
+        model.Entity<WorkItem>().HasIndex(x => x.OwnerWorkerId);
+        model.Entity<WorkItemPhase>().HasIndex(x => new { x.WorkItemId, x.Name }).IsUnique();
         model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);
         model.Entity<RuntimeTelemetryHistoryRecord>().HasIndex(x => new { x.RuntimeId, x.ObservedAt, x.Sequence });
         model.Entity<OperatorUpdateSchedule>().HasIndex(x => x.CoordinationRunId).IsUnique();
