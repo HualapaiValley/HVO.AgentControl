@@ -56,16 +56,57 @@ public sealed partial class ControlStore
         return run;
     });
 
+    public Task<CoordinationRun> RenewCoordination(string id, CoordinationRenewalInput input) => Write(async db =>
+    {
+        ValidateRequestId(input.Id);
+        var run = await db.CoordinationRuns.FindAsync(id) ?? throw new ControlException("Coordination not found.", 404);
+        var coordinator = await db.Workers.FindAsync(run.CoordinatorWorkerId) ?? throw new ControlException("Coordinator not found.", 404);
+        var payload = Json.Write(new { runId = id, input });
+        if (await db.Commands.FindAsync(input.Id) is { } prior)
+        { _ = Same(prior, coordinator.RuntimeId, coordinator.Id, "CoordinationRenewal", payload); return run; }
+        if (run.Revision != input.ExpectedRevision) throw new ControlException("Coordination changed; refresh before renewing.", 409);
+        if (run.State != "Paused") throw new ControlException("Pause coordination before reviewing and renewing its checkpoint.", 409);
+        if (input.AdditionalRounds is < 1 or > 100 || run.MaxRounds > int.MaxValue - input.AdditionalRounds ||
+            (long)run.MaxRounds - run.Round + input.AdditionalRounds > 100)
+            throw new ControlException("Grant 1–100 additional turns, with at most 100 remaining turns after renewal.", 400);
+        if (string.IsNullOrWhiteSpace(input.Instruction) || input.Instruction.Length > 16000)
+            throw new ControlException("Enter a replacement instruction of 1–16000 characters.", 400);
+        if (input.TurnWindowMinutes is < 1 or > 1440)
+            throw new ControlException("Choose a supervision budget window of 1–1440 minutes.", 400);
+        // Do not discard or replay a decision whose delivery is still unresolved.
+        if (run.DecisionCommandId is { } decisionId &&
+            (await db.Commands.FindAsync(decisionId) is not { } decision ||
+             decision.State is not (Delivery.Finished or Delivery.Failed)))
+            throw new ControlException("Resolve the pending coordinator decision before renewing. Its delivery is unchanged.", 409);
+        var previousInstruction = run.Instruction;
+        var previousLimit = run.MaxRounds;
+        run.Instruction = input.Instruction;
+        run.MaxRounds += input.AdditionalRounds;
+        run.ContinuousSupervision = input.ContinuousSupervision;
+        run.TurnsPerWindow = run.MaxRounds - run.Round;
+        run.TurnWindowMinutes = input.TurnWindowMinutes;
+        run.BudgetWindowEndsAt = Now + run.TurnWindowMinutes * 60000L;
+        run.LastObservation = "";
+        run.State = run.DecisionCommandId is null ? "Ready" : "Deciding";
+        run.Revision++;
+        run.Detail = $"Coordination renewed with {run.MaxRounds - run.Round} remaining turns. Existing assignments and receipts are retained.";
+        var command = await Record(db, input.Id, coordinator.RuntimeId, coordinator.Id, "CoordinationRenewal", payload);
+        command.State = Delivery.Finished; command.Detail = run.Detail;
+        Event(db, "CoordinationRenewed", commandId: command.Id,
+            payload: new { run.Id, run.Round, previousLimit, run.MaxRounds, previousInstruction, run.Instruction, run.ContinuousSupervision, run.TurnsPerWindow, run.TurnWindowMinutes }, provenance: "user");
+        return run;
+    });
+
     public Task<CoordinationRun> StartCoordination(StartCoordinationInput input) => Write(async db =>
     {
         ValidateRequestId(input.Id);
         AssignmentGuidance.Validate(input.IncludeGuidance, input.ProgressMinutes);
         if (input.WorkerIds is null || input.WorkerIds.Length is < 1 or > 16 || input.WorkerIds.Distinct().Count() != input.WorkerIds.Length || input.WorkerIds.Contains(input.CoordinatorWorkerId) ||
-            string.IsNullOrWhiteSpace(input.Instruction) || input.Instruction.Length > 16000 || input.MaxRounds is < 1 or > 100)
+            string.IsNullOrWhiteSpace(input.Instruction) || input.Instruction.Length > 16000 || input.MaxRounds is < 1 or > 100 || input.TurnWindowMinutes is < 1 or > 1440)
             throw new ControlException("Choose a separate coordinator, 1–16 workers, an instruction, and 1–100 decision rounds.", 400);
         if (await db.CoordinationRuns.FindAsync(input.Id) is { } prior)
         {
-            if (prior.CoordinatorWorkerId != input.CoordinatorWorkerId || prior.Instruction != input.Instruction || prior.WorkerIdsJson != Json.Write(input.WorkerIds) || prior.MaxRounds != input.MaxRounds || prior.IncludeGuidance != input.IncludeGuidance || prior.ProgressMinutes != input.ProgressMinutes)
+            if (prior.CoordinatorWorkerId != input.CoordinatorWorkerId || prior.Instruction != input.Instruction || prior.WorkerIdsJson != Json.Write(input.WorkerIds) || prior.TurnsPerWindow != input.MaxRounds || prior.IncludeGuidance != input.IncludeGuidance || prior.ProgressMinutes != input.ProgressMinutes || prior.ContinuousSupervision != input.ContinuousSupervision || prior.TurnWindowMinutes != input.TurnWindowMinutes)
                 throw new ControlException("Request ID already belongs to different coordination instructions.");
             return prior;
         }
@@ -84,6 +125,10 @@ public sealed partial class ControlStore
             Instruction = input.Instruction,
             WorkerIdsJson = Json.Write(input.WorkerIds),
             MaxRounds = input.MaxRounds,
+            ContinuousSupervision = input.ContinuousSupervision,
+            TurnsPerWindow = input.MaxRounds,
+            TurnWindowMinutes = input.TurnWindowMinutes,
+            BudgetWindowEndsAt = Now + input.TurnWindowMinutes * 60000L,
             IncludeGuidance = input.IncludeGuidance,
             ProgressMinutes = input.ProgressMinutes
         };
@@ -101,11 +146,13 @@ public sealed partial class ControlStore
             case "pause": run.State = "Paused"; break;
             case "stop": run.State = "Stopped"; break;
             case "resume" when run.State == "Paused":
+                if (run.Round >= run.MaxRounds && !run.ContinuousSupervision)
+                    throw new ControlException("The coordinator turn budget is exhausted. Renew this coordination to grant additional turns and retain its assignments.", 409);
                 if (run.InputJson != "{}") run.InputJson = Json.Write(ReadRecoveryContext(run) with { Repair = null, Recovery = null });
                 if (run.DecisionCommandId is { } decisionId && await db.Commands.FindAsync(decisionId) is { } decision &&
                     decision.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled)
                 { run.DecisionCommandId = null; run.LastObservation = ""; }
-                run.State = run.DecisionCommandId is null ? "Ready" : "Deciding";
+                run.State = run.Round >= run.MaxRounds ? "WaitingBudget" : run.DecisionCommandId is null ? "Ready" : "Deciding";
                 if (run.DecisionCommandId is null) run.LastObservation = "";
                 break;
             default: throw new ControlException("Choose pause, resume, or stop.", 400);
@@ -136,7 +183,7 @@ public sealed partial class ControlStore
             if (command is null) { PauseCoordination(run, "The decision command is missing."); return true; }
             if (command.State == Delivery.Failed)
             {
-                if (run.Round >= run.MaxRounds) { PauseCoordination(run, "Configured coordinator turn limit reached after a failed decision."); return true; }
+                if (run.Round >= run.MaxRounds) { AwaitCoordinationBudget(db, run, "Configured coordinator turn limit reached after a failed decision."); return true; }
                 Event(db, "CoordinatorDecisionRejected", commandId: decisionId, payload: new { run.Id, reason = "FailedCoordinatorTurn" });
                 run.DecisionCommandId = null; run.LastObservation = "";
                 ScheduleCoordinationRecovery(db, run, "The coordinator turn failed. No routing actions were applied.");
@@ -160,7 +207,7 @@ public sealed partial class ControlStore
                 Event(db, "CoordinatorDecisionRejected", commandId: decisionId, payload: new { run.Id, decisionCommandId = decisionId, repairAttempt = attempted, reason = "InvalidDecisionFormat" }, provenance: "service");
                 if (run.Round >= run.MaxRounds)
                 {
-                    PauseCoordination(run, "The configured coordinator turn limit was reached during format recovery. No actions were sent; increase the task budget in a new run.");
+                    AwaitCoordinationBudget(db, run, "Coordinator turn budget exhausted during format recovery. No actions were sent.");
                     return true;
                 }
                 // Persist the budget before requesting a fresh observation. Never resend the rejected
@@ -181,7 +228,7 @@ public sealed partial class ControlStore
             {
                 Event(db, "CoordinatorDecisionRejected", commandId: decisionId, payload: new { run.Id, reason = "InvalidActionBatch", detail = ex.Message });
                 run.DecisionCommandId = null; run.LastObservation = "";
-                if (run.Round >= run.MaxRounds) PauseCoordination(run, "Configured coordinator turn limit reached after a rejected decision. No actions were sent.");
+                if (run.Round >= run.MaxRounds) AwaitCoordinationBudget(db, run, "Configured coordinator turn limit reached after a rejected decision. No actions were sent.");
                 else ScheduleCoordinationRecovery(db, run, "Decision rejected without dispatch: " + ex.Message);
                 return true;
             }
@@ -202,12 +249,13 @@ public sealed partial class ControlStore
                 receiptActions.Add(new DecisionActionReceipt(action.Type, action.WorkerId, dispatch.Id, action.Type == "answer_question" ? action.RequestId : null));
             }
             var receipt = new DecisionReceipt(BoundEvidence(decision.Summary, 600), run.Round, decisionId, Now, receiptActions.ToArray());
-            run.DecisionCommandId = null; run.State = decision.Complete ? "Completed" : "Waiting";
+            // In supervision mode the model can finish a planning pass, not stop the C# supervisor.
+            run.DecisionCommandId = null; run.State = decision.Complete && !run.ContinuousSupervision ? "Completed" : "Waiting";
             run.Detail = decision.Summary; run.Revision++;
             Event(db, "CoordinatorDecisionApplied", payload: new { run.Id, run.Round, decision, receipt }, provenance: "coordinator");
             return true;
         }
-        if (run.Round >= run.MaxRounds) { PauseCoordination(run, "Decision round limit reached. Review results before starting another coordination."); return true; }
+        if (run.Round >= run.MaxRounds) { AwaitCoordinationBudget(db, run, "Coordinator turn budget exhausted. Review and renew this coordination to continue with its existing assignments and receipts."); return true; }
         var coordinator = await db.Workers.FindAsync(run.CoordinatorWorkerId);
         if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator) { PauseCoordination(run, "Restore the coordinator worker or stop this coordination."); return true; }
         if (coordinator.Stale || coordinator.Activity != "Idle" || await db.Commands.AnyAsync(x => x.WorkerId == coordinator.Id &&
@@ -217,7 +265,11 @@ public sealed partial class ControlStore
         if (participants.Length != participantIds.Length || participants.Any(x => x.Archived || x.Role != SessionRoles.Worker))
         { PauseCoordination(run, "A participant is unavailable or is no longer a task worker."); return true; }
         var requests = await db.Requests.Where(x => participantIds.Contains(x.WorkerId) && x.State == "Pending" && x.ReplyCommandId == null).ToArrayAsync();
-        var commands = await db.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt).ToArrayAsync();
+        // Owner work on these participants also occupies capacity and produces relevant receipts.
+        // Keep provenance unchanged; earlier tasks and other participants are outside this checkpoint.
+        var commands = await db.Commands.Where(x => x.Origin == "coordinator:" + run.Id ||
+            x.Origin == "owner" && x.Kind == "Prompt" && participantIds.Contains(x.WorkerId!) && x.CreatedAt >= run.CreatedAt)
+            .OrderBy(x => x.CreatedAt).ToArrayAsync();
         var repair = run.InputJson == "{}" ? null : Json.Read<CoordinatorContext>(run.InputJson).Repair;
         var pendingRecovery = run.InputJson == "{}" ? null : ReadRecoveryContext(run).Recovery;
         var ownerFollowup = run.InputJson != "{}" && ReadRecoveryContext(run).Instruction != run.Instruction;
@@ -235,7 +287,7 @@ public sealed partial class ControlStore
             Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
         var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
             x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
-        if (!idleDue && !ownerFollowup && repair is null && pendingRecovery is null && unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision) return false;
+        if (run.State == "Waiting" && !idleDue && !ownerFollowup && repair is null && pendingRecovery is null && unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision) return false;
         var observation = CoordinationObservation.Fingerprint(commands, requests);
         if (observation == run.LastObservation && !idleDue) return false;
         var contextWorkers = participants.Select(x => new WorkerRecord
@@ -339,7 +391,7 @@ public sealed partial class ControlStore
         var response = texts.LastOrDefault() ?? "";
         var prompt = command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : command.Payload;
         return new(command.Id, command.WorkerId!, command.State, command.Detail, command.State == Delivery.Finished ? "" : BoundEvidence(command.ProgressText, 2000),
-            command.LastProgressAt, prompt, BoundEvidence(response, 6000), response.Length > 6000, texts.Length > 1);
+            command.LastProgressAt, prompt, BoundEvidence(response, 6000), response.Length > 6000, texts.Length > 1, command.Origin);
     }
 
     private static string BoundEvidence(string text, int limit)

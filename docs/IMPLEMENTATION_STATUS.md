@@ -2,6 +2,8 @@
 
 ## Current priority checkpoint — 2026-09-07
 
+C# [continuous supervision](COORDINATION_SUPERVISION.md) implements the owner-requested heartbeat in #96: automatic bounded model-turn windows, restart persistence, idle reassessment, direct owner-assignment evidence, and explicit pause/stop precedence. OpenCode is a decision helper; its completion must not end supervision. Legacy paused runs can enable this mode on their existing checkpoint. See the linked document for exact behavior and remaining backlog/merge gate scope. Repository implementation and live deployment must still be verified separately.
+
 The dependency-aware [backlog triage plan](BACKLOG_PRIORITIZATION.md) and `backlog-plan.json` are the current assignment source. Older “next” lists below are historical. Finish active #75 UI/performance and PR review/correction work, then prioritize #5 ownership, #4 enrollment and #7 bounded evidence; #6/#8 unlock #42/#44 and subsequent provisioning/merge automation. #78 tracks periodic triage and evidence-based duplicate/obsolete issue review.
 
 PR73 runtime history and PR74 bounded GitHub CI-read permissions are merged. PR72 usage ledger remains in correction/review; PR76 reasoning, PR77 vanished replies and PR79 periodic sampling are merged. PR81 corrects generated migration history before deployment. These statements describe repository state, not an assertion that the running host has already deployed them.
