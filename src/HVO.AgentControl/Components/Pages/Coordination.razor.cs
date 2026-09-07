@@ -98,6 +98,16 @@ public partial class Coordination
             receipt = "last receipt " + Age(ageAt);
             next = "Next: confirm the delivery outcome before assigning more work.";
         }
+        else if (worker.Activity == "Retrying")
+        {
+            state = "retrying"; stateLabel = "Provider retry";
+            line = "The native provider reports a retry; the instruction remains outstanding. This is not new work progress.";
+            ageAt = worker.LastObservedAt;
+            assignment = runRunning is null ? "The session is retrying other work." : "The current coordination instruction is waiting for the provider.";
+            var evidence = runRunning ?? globalRunning;
+            receipt = evidence?.LastProgressAt is { } progressAt ? "latest progress " + Age(progressAt) : "last observed " + Age(worker.LastObservedAt);
+            next = "Next: provider recovery or owner intervention; do not resend the running instruction.";
+        }
         else if (runRunning is { } running)
         {
             state = "active"; stateLabel = "Active"; var progress = Clipped(running.ProgressText, 100); line = StateWord(running.State) + (progress.Length == 0 ? " with no progress text yet." : ": \"" + progress + "\"") + QueuedSuffix(queuedBacklog); ageAt = running.LastProgressAt ?? running.UpdatedAt;
@@ -189,7 +199,7 @@ public partial class Coordination
         var statuses = ParticipantStatuses(run).ToList();
         var parts = new List<string>
         {
-            "Busy " + statuses.Count(x => x.State is "active" or "waiting" or "uncertain"),
+            "Busy " + statuses.Count(x => x.State is "active" or "retrying" or "waiting" or "uncertain"),
             "Available " + statuses.Count(x => x.State == "idle"),
             "Queued " + statuses.Count(x => x.State == "queued" || x.QueuedBacklog > 0)
         };

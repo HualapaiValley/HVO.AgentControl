@@ -124,6 +124,20 @@ public sealed class CoordinationStatusTests
         Assert.Contains("no further routing", Property(Assert.Single(Statuses(page, run)), "Next"));
     }
 
+    [Fact]
+    public void ProviderRetryIsNotPresentedAsNewWorkProgressOrAvailability()
+    {
+        var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Retrying" });
+        var run = RunWith(worker);
+        var command = new CommandRecord { WorkerId = worker.Id, Kind = "Prompt", Origin = "coordinator:run", State = Delivery.Running };
+        var page = Page(new ControlSnapshot(1, [], [worker], [command], []));
+        var status = Assert.Single(Statuses(page, run));
+        Assert.Equal("Provider retry", Property(status, "StateLabel"));
+        Assert.Contains("not new work progress", Property(status, "StatusLine"));
+        Assert.Contains("do not resend", Property(status, "Next"));
+        Assert.Contains("Available 0", Invoke(page, "Aggregate", run));
+    }
+
     private static readonly BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
 
     private static Coordination Page(ControlSnapshot snapshot)
