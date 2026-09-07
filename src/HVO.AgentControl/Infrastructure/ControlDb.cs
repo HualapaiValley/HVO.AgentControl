@@ -22,6 +22,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        model.Entity<HVO.AgentControl.Services.ProviderCredential>();
+        model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.ManagedServerId, x.NativeSessionId }).IsUnique();
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.Directory }).IsUnique();

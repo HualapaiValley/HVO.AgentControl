@@ -757,6 +757,54 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.ToTable("GitHubAccess");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Services.ProviderCredential", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SecretReference")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ProviderCredential");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Services.ProviderKeyDelivery", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("KeyRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProviderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ProviderKeyDelivery");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Telemetry.RuntimeTelemetryHistoryRecord", b =>
                 {
                     b.Property<long>("Sequence")

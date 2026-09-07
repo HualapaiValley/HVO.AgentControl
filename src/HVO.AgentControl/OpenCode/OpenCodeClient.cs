@@ -87,6 +87,8 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     }
 
     public Task<JsonElement> Sessions(string directory, CancellationToken token) => Get(Scope("/session", directory), token);
+    public Task<JsonElement> SetProviderKey(string providerId, string key, CancellationToken token) =>
+        Send(HttpMethod.Put, $"/auth/{Id(providerId)}", new { type = "api", key }, token);
     public Task<JsonElement> ProviderAuthMethods(string directory, CancellationToken token) => Get(Scope("/provider/auth", directory), token);
     public Task<JsonElement> AuthorizeChatGpt(string directory, int method, CancellationToken token) =>
         Send(HttpMethod.Post, Scope("/provider/openai/oauth/authorize", directory), new { method }, token);

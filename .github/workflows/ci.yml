@@ -36,6 +36,9 @@ jobs:
       - name: Check formatting
         run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
 
+      - name: Backlog priority regression checks
+        run: python3 tests/test_backlog_priority.py
+
       - name: Soak runner regression checks
         run: python3 tests/test_soak_runner.py scripts/run-coordination-soak.sh
 
@@ -100,7 +103,7 @@ jobs:
           done
           export HVO_BASE_URL=http://127.0.0.1:5058
           export HVO_OWNER_PASSWORD_FILE="$PWD/artifacts/ui-secrets/owner-password"
-          node tests/Browser/package-smoke.cjs
+          HVO_PROVIDER_KEY_FIXTURE=1 node tests/Browser/package-smoke.cjs
       - name: Upload UI diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4

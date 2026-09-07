@@ -10,8 +10,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260907163426_RuntimeTelemetryHistory")]
-    partial class RuntimeTelemetryHistory
+    [Migration("20260907190807_ProviderKeyVault")]
+    partial class ProviderKeyVault
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -709,8 +709,20 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ActionsPermission")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("AppId")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("ChecksPermission")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CommitStatusesPermission")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Detail")
                         .IsRequired()
@@ -720,6 +732,9 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("InstallationId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("PermissionsVerifiedAt")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("PrivateKeyReference")
@@ -743,6 +758,54 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("GitHubAccess");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Services.ProviderCredential", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SecretReference")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ProviderCredential");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Services.ProviderKeyDelivery", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("KeyRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProviderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ProviderKeyDelivery");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Telemetry.RuntimeTelemetryHistoryRecord", b =>
