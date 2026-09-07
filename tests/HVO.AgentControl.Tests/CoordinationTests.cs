@@ -215,6 +215,83 @@ public sealed class CoordinationTests
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
     }
 
+    [Fact]
+    public void LegacyContextWithoutReceiptFieldsDeserializes()
+    {
+        var legacy = Json.Write(new
+        {
+            instruction = "Legacy instruction.",
+            workers = new[] { new WorkerRecord { Name = "A" } },
+            results = Array.Empty<CoordinatorResult>(),
+            questions = Array.Empty<PendingRequest>()
+        });
+        var context = Json.Read<CoordinatorContext>(legacy);
+        Assert.Equal("Legacy instruction.", context.Instruction);
+        var worker = Assert.Single(context.Workers);
+        Assert.Equal("A", worker.Name);
+        Assert.Empty(context.Results);
+        Assert.Empty(context.Questions);
+        Assert.Null(context.LastAppliedDecision);
+        Assert.Null(context.Dispatch);
+    }
+
+    [Fact]
+    public async Task OwnerFollowupSupersedingProposalPreparesNoPhantomDispatchAndNoReceipt()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Ask the time.", [a.Id]));
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        await app.Store.PromptCoordination(run.Id, new(Guid.NewGuid().ToString(), run.Revision, "Now ask memory usage."));
+        await FinishDecision(app.Store, run.Id, new("Old proposal", [new("send_prompt", a.Id, "Report the time.")]));
+        await app.Store.CoordinationTick();
+        Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+        run = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Ready", run.State);
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        Assert.Contains("memory usage", run.Instruction);
+        var context = Json.Read<CoordinatorContext>(run.InputJson);
+        Assert.Null(context.LastAppliedDecision);
+        Assert.Empty(context.Dispatch!);
+    }
+
+    [Fact]
+    public async Task AppliedFanOutReceiptListsEveryDispatchedCommand()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, b) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Ask both workers.", [a.Id, b.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Fan out", [new("send_prompt", a.Id, "A task."), new("send_prompt", b.Id, "B task.")]));
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Waiting", run.State);
+        Assert.Equal(1, run.Round);
+        var dispatched = (await app.Store.Snapshot()).Commands.Where(x => x.Origin == "coordinator:" + run.Id).ToArray();
+        Assert.Equal(2, dispatched.Length);
+        await Finish(app.Store, dispatched[0].Id, "A finished.");
+        await Finish(app.Store, dispatched[1].Id, "B finished.");
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        Assert.Equal(2, run.Round);
+        var context = Json.Read<CoordinatorContext>(run.InputJson);
+        var receipt = Assert.IsType<DecisionReceipt>(context.LastAppliedDecision);
+        Assert.Equal("Fan out", receipt.Summary);
+        Assert.Equal(1, receipt.Round);
+        Assert.Equal(2, receipt.Dispatched.Length);
+        Assert.Contains(receipt.Dispatched, d => d.WorkerId == a.Id);
+        Assert.Contains(receipt.Dispatched, d => d.WorkerId == b.Id);
+        var receiptIds = receipt.Dispatched.Select(d => d.CommandId).ToArray();
+        Assert.Contains(dispatched[0].Id, receiptIds);
+        Assert.Contains(dispatched[1].Id, receiptIds);
+        var ledger = Assert.IsType<DispatchEvidence[]>(context.Dispatch);
+        Assert.Equal(2, ledger.Length);
+        Assert.Contains(ledger, d => d.CommandId == dispatched[0].Id && d.State == Delivery.Finished);
+        Assert.Contains(ledger, d => d.CommandId == dispatched[1].Id && d.State == Delivery.Finished);
+    }
+
     private static async Task<(WorkerRecord, WorkerRecord, WorkerRecord)> Seed(ControlStore store)
     {
         var coordinator = await PersistenceTests.SeedWorker(store);
