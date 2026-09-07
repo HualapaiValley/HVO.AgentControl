@@ -33,7 +33,8 @@ public sealed class BacklogAuditTests
 
         Assert.NotEqual(0, process.ExitCode);
         var stderr = process.StandardError.ReadToEnd();
-        Assert.Contains("KeyError", stderr);
+        Assert.Contains("Plan", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("required", stderr, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
