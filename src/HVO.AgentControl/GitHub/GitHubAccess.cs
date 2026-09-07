@@ -17,4 +17,4 @@ public sealed class GitHubAccess
 }
 
 public sealed record ConfigureGitHubAccess(long AppId, long InstallationId, string PrivateKey,
-    string[] Repositories, long ExpectedRevision);
+    string[] Repositories, long ExpectedRevision, string? SourceRuntimeId = null, long? SourceRevision = null);

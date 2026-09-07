@@ -17,11 +17,13 @@
         <fieldset disabled="@busy">
             <div class="form-grid">
                 <label>Execution runtime<select @bind="runtimeId" @bind:after="SelectRuntime"><option value="">Select a runtime</option>@foreach (var runtime in snapshot?.Runtimes ?? []) { <option value="@runtime.Id">@runtime.Name</option> }</select></label>
-                <label>App ID<input type="number" min="1" @bind="appId" /></label>
-                <label>Installation ID<input type="number" min="1" @bind="installationId" /></label>
+                <label>App registration<select @bind="sourceRuntimeId" @bind:after="SelectSource"><option value="">Enter details or keep this runtime's registration</option>@foreach (var source in grants.Where(x => x.Id != runtimeId && x.State != "Disabled")) { <option value="@source.Id">Use registration from @RuntimeName(source.Id)</option> }</select></label>
+                <label>App ID<input disabled="@(sourceRuntimeId.Length > 0)" type="number" min="1" @bind="appId" /></label>
+                <label>Installation ID<input disabled="@(sourceRuntimeId.Length > 0)" type="number" min="1" @bind="installationId" /></label>
                 <label>Repositories (one owner/repository per line)<textarea rows="4" @bind="repositories"></textarea></label>
-                <label>PEM private key (leave empty to keep the stored key)<textarea rows="4" autocomplete="off" spellcheck="false" @bind="privateKey"></textarea></label>
+                <label>PEM private key (leave empty to keep the stored key)<textarea disabled="@(sourceRuntimeId.Length > 0)" rows="4" autocomplete="off" spellcheck="false" @bind="privateKey"></textarea></label>
             </div>
+            @if (sourceRuntimeId.Length > 0) { <p>The target receives its own expiring token. The App key stays encrypted in AgentControl. Repository access can be narrowed, but cannot exceed the source registration. Renewal is managed independently for each runtime.</p> }
             <button @onclick="Save" disabled="@(string.IsNullOrEmpty(runtimeId))">Verify and configure access</button>
         </fieldset>
     </section>

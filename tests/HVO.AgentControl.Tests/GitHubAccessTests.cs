@@ -125,6 +125,41 @@ public sealed class GitHubAccessTests
     public void InvalidRepositoryInputIsRejected(string repository) => Assert.Throws<ControlException>(() => GitHubAppClient.ValidateRepositories([repository]));
 
     [Fact]
+    public async Task ReusingRegistrationNarrowsScopeAndKeepsIndependentEncryptedCredentials()
+    {
+        await using var app = new TestApp();
+        var sourceRuntime = await app.Store.SaveRuntime(PersistenceTests.Profile());
+        var targetProfile = PersistenceTests.Profile(); targetProfile.Host = "127.0.0.2";
+        var target = await app.Store.SaveRuntime(targetProfile);
+        using var rsa = RSA.Create(2048);
+        using var handler = new Handler(request => Task.FromResult(Response(request.Method == HttpMethod.Get
+            ? new { account = new { login = "Owner" }, app_slug = "agentcontrol-test" } : Grant())));
+        using var http = new HttpClient(handler);
+        var secrets = app.Services.GetRequiredService<Secrets>();
+        var service = new GitHubAccessService(app.Store, secrets, new GitHubAppClient(http, new Clock()));
+        var source = await service.Configure(sourceRuntime.Id, new(1, 2, rsa.ExportRSAPrivateKeyPem(), ["Owner/Repo"], 0), CancellationToken.None);
+        var input = new ConfigureGitHubAccess(1, 2, "", ["Owner/Repo"], 0, source.Id, source.Revision);
+        await Assert.ThrowsAsync<ControlException>(() => service.Configure(target.Id, input with { SourceRevision = 0 }, CancellationToken.None));
+        await Assert.ThrowsAsync<ControlException>(() => service.Configure(target.Id, input with { Repositories = ["Owner/Other"] }, CancellationToken.None));
+        await Assert.ThrowsAsync<ControlException>(() => service.Configure(target.Id, input with { AppId = 9 }, CancellationToken.None));
+        await Assert.ThrowsAsync<ControlException>(() => service.Configure(target.Id, input with { PrivateKey = "do-not-mix" }, CancellationToken.None));
+        var copied = await service.Configure(target.Id, input, CancellationToken.None);
+        Assert.Equal(source.AppId, copied.AppId); Assert.Equal(source.InstallationId, copied.InstallationId);
+        Assert.NotEqual(source.PrivateKeyReference, copied.PrivateKeyReference);
+        Assert.Equal(secrets.Read(source.PrivateKeyReference), secrets.Read(copied.PrivateKeyReference));
+        Assert.Null(copied.ExpiresAt); Assert.Equal("Pending", copied.State);
+        await service.Disable(source.Id, source.Revision, CancellationToken.None);
+        Assert.Equal("Pending", (await service.List()).Single(x => x.Id == target.Id).State);
+        await Assert.ThrowsAsync<ControlException>(() => service.Configure(target.Id, input with { ExpectedRevision = copied.Revision }, CancellationToken.None));
+        using var owner = await app.SignIn();
+        var response = await owner.GetStringAsync("/api/v1/github/access");
+        Assert.DoesNotContain("privateKey", response, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("installation-test-secret", response);
+        var events = await app.Store.Read(db => Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToListAsync(db.Events));
+        Assert.All(events, e => { Assert.DoesNotContain("PRIVATE KEY", e.Payload); Assert.DoesNotContain("installation-test-secret", e.Payload); });
+    }
+
+    [Fact]
     public async Task ConfigurationPersistsEncryptedKeyButNeverReturnsOrJournalsCredentials()
     {
         await using var app = new TestApp();
