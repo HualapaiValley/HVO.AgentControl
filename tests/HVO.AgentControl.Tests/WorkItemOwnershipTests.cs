@@ -382,6 +382,31 @@ public sealed class WorkItemOwnershipTests
     }
 
     [Fact]
+    public async Task ConcurrentSameRepositoryBranchClaimsAdmitOnlyOneLiveOwner()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+
+        async Task<bool> Create(string id, string issue)
+        {
+            try
+            {
+                await app.Store.CreateWorkItem(new CreateWorkItemInput(id, issue, "Concurrent claim", "feat/shared", "HVO.AgentControl", worker.Id));
+                return true;
+            }
+            catch (ControlException)
+            {
+                return false;
+            }
+        }
+
+        var admitted = await Task.WhenAll(Create("wi-concurrent-1", "42"), Create("wi-concurrent-2", "99"));
+
+        Assert.Equal(1, admitted.Count(x => x));
+        Assert.Single(await app.Store.GetActiveWorkItems(), x => x.Repository == "HVO.AgentControl" && x.Branch == "feat/shared");
+    }
+
+    [Fact]
     public async Task CreateWorkItemWithSameRepoDifferentBranchSucceeds()
     {
         await using var app = new TestApp();
