@@ -41,6 +41,40 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
         await expect(profile).toHaveCount(0);
       }
     }
+    if (process.env.HVO_COORDINATION_SUPERVISION_FIXTURE === '1') {
+      await page.goto(base + '/coordination');
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      const run = page.getByRole('region', { name: 'Coordination run', exact: true });
+      await expect(run.getByRole('button', { name: 'Resume coordination', exact: true })).toBeDisabled();
+      const renewal = run.getByRole('region', { name: 'Renew coordination', exact: true });
+      await expect(renewal.getByLabel('Additional coordinator turns', { exact: true })).toHaveCount(0);
+      await renewal.getByLabel('Replacement coordinator instruction', { exact: true }).fill('Continue existing browser task under service supervision.');
+      await expect(renewal.getByLabel('Keep supervising until I pause or stop')).toBeChecked();
+      await renewal.getByRole('button', { name: 'Apply checkpoint and continue' }).click();
+      await expect(run.getByRole('heading', { name: 'Ready', exact: true })).toBeVisible();
+      await expect(run).toContainText('Continuous supervision');
+      await expect(run).toContainText('no fixed turn cutoff');
+      await expect.poll(async () => (await (await context.request.get(base + '/api/v1/coordinations')).json())[0].lastSupervisorAt).toBeGreaterThan(0);
+      await page.reload();
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      await expect(run).toContainText('no fixed turn cutoff');
+      await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
+      await page.setViewportSize({ width: 390, height: 844 });
+      await run.getByRole('button', { name: 'Pause coordination', exact: true }).click();
+      await expect(renewal.getByLabel('Replacement coordinator instruction')).toHaveValue('Continue existing browser task under service supervision.');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      await run.getByRole('button', { name: 'Resume coordination', exact: true }).click();
+      await expect(run.getByRole('heading', { name: 'Ready', exact: true })).toBeVisible();
+      await run.getByRole('button', { name: 'Stop coordination', exact: true }).click();
+      await expect(run.getByRole('heading', { name: 'Stopped', exact: true })).toBeVisible();
+      const saved = (await (await context.request.get(base + '/api/v1/coordinations')).json())[0];
+      expect(saved.id).toBe('supervision-browser-run');
+      expect(saved.round).toBe(1);
+      expect(saved.maxRounds).toBe(1);
+      expect(saved.continuousSupervision).toBe(true);
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
+    }
     await page.goto(base + '/providers');
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
     await expect(page.getByRole('heading', { name: 'Model access', exact: true })).toBeVisible();
@@ -67,6 +101,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       await expect(keyPanel.getByRole('status')).toContainText('Key saved');
       await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveValue('');
       await page.reload();
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(keyPanel.getByRole('status')).toContainText('Key saved');
       await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveValue('');
       const keyMetadata = await (await context.request.get(base + '/api/v1/providers/opencode-go/key')).text();
