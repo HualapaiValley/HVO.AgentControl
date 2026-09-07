@@ -65,3 +65,11 @@ For each audit, record newly ready/blocked items, oldest ready item, active clai
 ## Duplicate and closure rules
 
 A model may propose a canonical issue with evidence; semantic similarity is not enough. Distinguish parent/child, implemented foundation/remaining scope, and obsolete wording/new requirement. Link merged PRs, tests and deployment observations. Close only when all acceptance is met, or move explicit remaining scope to a linked canonical issue and record why. Preserve discussion; do not bulk-close old issues. Reopened prerequisites invalidate a ready plan at the next audit and must be checked before dispatch.
+
+## Idle capacity reassessment (#78, service trigger)
+
+An active Waiting run now requests a fresh coordinator assessment when its last decision is at least five minutes old and a non-stale participant is idle without an outstanding assignment. This also applies while another worker has a long-running task. `Control:CoordinationIdleReassessmentMinutes` accepts 1–60 minutes. The existing persisted `LastDecisionAt` provides the deadline across restart; reconnect observations are still required. Each request records a `CoordinatorIdleReassessmentRequested` event and an explicit context reason.
+
+This closes the unchanged-command-fingerprint stall. It does not fetch GitHub directly or implement the full periodic priority audit: the coordinator must delegate fresh evidence gathering where needed. Active/uncertain work, owner pauses, provider gates and the configured decision-round budget remain authoritative. Owner permissions stay in the operator UI and worker status; only task questions enter the actionable questions array. A pending owner approval excludes its worker from idle eligibility, without blocking another available worker. An expired round budget still pauses; this trigger does not silently extend model usage.
+
+The coordinator is instructed to reuse review evidence at an unchanged revision, explain concrete blockers, and consider independent ready work while a PR waits for merge. Semantic duplicate-review prevention remains guidance until durable task/review identities are enforced. The service never creates arbitrary tasks merely to fill capacity.

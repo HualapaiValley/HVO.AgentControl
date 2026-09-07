@@ -1,11 +1,45 @@
 using HVO.AgentControl.Components.Layout;
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Infrastructure;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
 
 public sealed class WorkerSidebarTests
 {
+    [Fact]
+    public async Task NavigationRemainsBoundedWithLargeRetainedEvidenceAndPreservesWorkerIdentity()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var evidence = new string('x', 2_000_000);
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Workers.FindAsync(worker.Id))!;
+            saved.Name = "Navigation worker"; saved.Project = "Project A"; saved.Description = "Searchable description";
+            saved.Activity = "WaitingPermission"; saved.Stale = false; saved.ModelsJson = evidence;
+            saved.CapabilitiesJson = evidence; saved.CapabilityReport = evidence;
+            var runtime = (await db.Runtimes.FindAsync(worker.RuntimeId))!;
+            runtime.ModelsJson = evidence;
+            db.Commands.Add(new CommandRecord { Id = "large-evidence", RuntimeId = worker.RuntimeId, WorkerId = worker.Id, Kind = "Prompt", Payload = evidence, ResultJson = evidence });
+            return true;
+        });
+        var navigation = await app.Store.NavigationSnapshot();
+        var result = Assert.Single(navigation.Workers);
+        Assert.Equal(worker.Id, result.Id); Assert.Equal(worker.RuntimeId, result.RuntimeId);
+        Assert.Equal("Project A", result.Project); Assert.Equal("Searchable description", result.Description);
+        Assert.Equal("Approval needed", DisplayStatus.Worker(result));
+        Assert.Single(WorkerSidebarView.TaskWorkerGroups(navigation, "Searchable", null));
+        Assert.Empty(navigation.Commands); Assert.Empty(navigation.Requests);
+        Assert.True(Json.Write(navigation).Length < 10000);
+        await app.Store.Read(async db =>
+        {
+            Assert.Equal(evidence, (await db.Commands.FindAsync("large-evidence"))!.ResultJson);
+            Assert.Equal(evidence, (await db.Workers.FindAsync(worker.Id))!.ModelsJson);
+            return true;
+        });
+    }
+
     private static ControlSnapshot Snapshot() => new(1,
         [new() { Id = "runtime-b", Name = "Mac Studio" }, new() { Id = "runtime-a", Name = "Build host" }],
         [

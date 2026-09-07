@@ -60,7 +60,7 @@ public partial class WorkerSidebar
 
     private async Task Refresh()
     {
-        try { snapshot = await Store.Snapshot(); error = null; }
+        try { snapshot = await Store.NavigationSnapshot(); error = null; }
         catch (Exception ex) { error = RuntimeSupervisor.SafeError(ex); }
     }
 

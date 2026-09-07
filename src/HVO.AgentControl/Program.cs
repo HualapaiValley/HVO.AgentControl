@@ -22,6 +22,7 @@ Directory.CreateDirectory(settings.DataDirectory);
 if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(settings.DataDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 if (settings.GlobalCapacity is < 1 or > 128 || settings.QueueLimit is < 1 or > 256 || settings.EventRetention is < 100 or > 1000000 ||
     settings.HistoryLimit is < 10 or > 1000 || settings.PollMilliseconds is < 100 or > 2000 || settings.MaxPromptCharacters is < 1 or > 64000 ||
+    settings.CoordinationIdleReassessmentMinutes is < 1 or > 60 ||
     settings.MaxRuntimes is < 1 or > 128 || settings.MaxWorkers is < 1 or > 1024 || settings.MaxCommandRecords is < 10 or > 1000000)
     throw new InvalidOperationException("Control limits are outside supported bounds; inspect Control configuration.");
 builder.Services.Configure<ControlOptions>(options =>

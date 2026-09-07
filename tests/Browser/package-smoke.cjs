@@ -44,6 +44,20 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.goto(base + '/providers');
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
     await expect(page.getByRole('heading', { name: 'Model access', exact: true })).toBeVisible();
+    const pools = page.getByRole('region', { name: 'Shared model access' });
+    await expect(pools).toBeVisible();
+    await expect(pools).toContainText('Remaining subscription allowance is unknown');
+    if (process.env.HVO_PROVIDER_POOL_FIXTURE === '1') {
+      await expect(pools).toContainText('fixture-provider · Exhausted');
+      const resume = pools.getByRole('button', { name: 'Resume fixture-provider dispatch', exact: true });
+      await expect(resume).toBeDisabled();
+      await pools.getByRole('checkbox').check();
+      await resume.click();
+      await expect(pools).toContainText('fixture-provider · Available');
+      await page.reload();
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      await expect(pools).toContainText('fixture-provider · Available');
+    }
     const keyPanel = page.getByRole('region', { name: 'OpenCode Go key' });
     await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveAttribute('type', 'password');
     // This mutation is only allowed against a disposable, explicitly opted-in fixture.
@@ -59,6 +73,10 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       expect(keyMetadata).not.toContain('browser-fixture-key');
       expect(keyMetadata).not.toContain('secretReference');
     }
+    const workerSearch = page.getByRole('searchbox', { name: 'Find a worker' });
+    await workerSearch.fill('fixture-no-matching-worker-identity');
+    await expect(page.getByRole('navigation', { name: 'Conversations' })).toContainText('No task workers match.');
+    await workerSearch.fill('');
     await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
     await page.setViewportSize({ width: 390, height: 844 });

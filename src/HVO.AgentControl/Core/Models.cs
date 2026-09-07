@@ -22,6 +22,7 @@ public sealed class ControlOptions
     public int EventRetention { get; set; } = 10000;
     public int HistoryLimit { get; set; } = 200;
     public int PollMilliseconds { get; set; } = 750;
+    public int CoordinationIdleReassessmentMinutes { get; set; } = 5;
     public int MaxPromptCharacters { get; set; } = 64000;
     public int MaxCommandRecords { get; set; } = 10000;
     public int MaxRuntimes { get; set; } = 32;
@@ -128,6 +129,7 @@ public sealed class CommandRecord
     public string Payload { get; set; } = "{}";
     public string State { get; set; } = Delivery.Queued;
     public string ExecutionPayload { get; set; } = "";
+    public string ProviderPoolId { get; set; } = "";
     public string ProgressText { get; set; } = "";
     public long? LastProgressAt { get; set; }
     public long? AcceptedAt { get; set; }
@@ -264,7 +266,7 @@ public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
-    CoordinationRecovery? Recovery = null);
+    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null);
 
 public sealed class OperatorUpdateSchedule
 {
