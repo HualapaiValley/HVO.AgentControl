@@ -43,6 +43,6 @@ devcontainer exec --workspace-folder /absolute/path/to/clone \
   bash -lc 'id -un; dotnet --version; git --version; gh --version; zsh --version'
 ```
 
-For the nested-Docker alternative add `--config .devcontainer/worker-docker/devcontainer.json` to both commands. Use the test command in [provisioning](../DEVCONTAINER_PROVISIONING.md#explicit-docker-integration-test-alternative).
+For the nested-Docker alternative add `--config /absolute/path/to/clone/.devcontainer/worker-docker/devcontainer.json` to both commands. The executed alternative used the central template path resolved from the supervising repo, with the independent clone as workspace; its config bytes matched the copy in that clone. The generated Feature lockfile pins the actual Docker-in-Docker 4.1.0 OCI digest and is checked in beside the template. Use the test command in [provisioning](../DEVCONTAINER_PROVISIONING.md#explicit-docker-integration-test-alternative).
 
 Automatic host selection, durable UI provisioning/recovery, verified SSH/OpenCode enrollment and retirement are still #43. The owner-selected broad Codespaces-style fallback and image refresh policy remain next-stage work; this verification does not claim those are implemented.

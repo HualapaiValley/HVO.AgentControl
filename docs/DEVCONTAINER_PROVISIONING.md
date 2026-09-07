@@ -6,7 +6,7 @@ Tracking: [project/task sessions #42](https://github.com/RoySalisbury/HVO.AgentC
 
 ## Environment contract
 
-Use `devcontainer.json` and the official Dev Container CLI for builds, Features, lifecycle commands, startup and execution. Do not create a competing environment-definition format. Honor the repository's `.devcontainer/devcontainer.json` (or explicitly selected repository configuration), including its Features, lifecycle commands, container/remote user and workspace. Do not silently substitute a worker template because it is smaller. When no repository configuration exists, the planned default is a broad Codespaces-style tool image; the lightweight execution template is an explicit alternative. Record the selected configuration path, source revision, configuration digest, CLI version and resulting image/container identities.
+Use `devcontainer.json` and the official Dev Container CLI for builds, Features, lifecycle commands, startup and execution. Do not create a competing environment-definition format. Honor the repository's `.devcontainer/devcontainer.json` (or explicitly selected repository configuration), including its Features, lifecycle commands, container/remote user and workspace. Do not silently substitute a worker template because it is smaller. When no repository configuration exists, the planned default is a broad Codespaces-style tool image; the lightweight execution template is an explicit alternative. Record the resolved configuration path, source revision, configuration digest, CLI version and resulting image/container identities. Resolve configuration paths explicitly: CLI `--config` paths are relative to the launch directory, not implicitly to `--workspace-folder`. When selecting a central template, record its revision separately from the project checkout revision.
 
 AgentControl owns the durable provisioning request, host selection, capacity reservations, credentials, registration, task sessions and retirement. A successful `devcontainer up` does not prove OpenCode is connected or the task environment is ready. Expose requested/building/starting/connecting/verifying/ready/blocked/failed states and bounded build logs, including after a web restart. On uncertain completion, reconcile by request-specific labels before creating anything again.
 
@@ -64,10 +64,10 @@ Build and test in an independent checkout on the selected host:
 
 ```bash
 devcontainer up --workspace-folder /absolute/path/to/checkout \
-  --config .devcontainer/worker-docker/devcontainer.json \
+  --config /absolute/path/to/checkout/.devcontainer/worker-docker/devcontainer.json \
   --id-label hvo.agentcontrol.provisioning=UNIQUE_REQUEST_ID
 devcontainer exec --workspace-folder /absolute/path/to/checkout \
-  --config .devcontainer/worker-docker/devcontainer.json \
+  --config /absolute/path/to/checkout/.devcontainer/worker-docker/devcontainer.json \
   --id-label hvo.agentcontrol.provisioning=UNIQUE_REQUEST_ID \
   bash -lc './tests/Fixtures/start.sh && HVO_SSH_FIXTURES=1 HVO_GITHUB_CLI_TESTS=1 dotnet test HVO.AgentControl.slnx --configuration Release'
 ```
