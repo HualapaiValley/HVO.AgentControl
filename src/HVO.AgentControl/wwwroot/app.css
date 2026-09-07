@@ -34,3 +34,7 @@ summary:hover { color: var(--ink); }
 .card-heading > div, .card-heading h3 { min-width: 0; overflow-wrap: anywhere; }
 .attention-text { color: #fde68a; }
 @media (max-width: 850px) { .shell { padding-top: 0; } }
+@media (min-width: 851px) {
+  body:has(.worker-sidebar) .shell { margin-left: 18rem; }
+  body:has(.worker-sidebar.is-collapsed) .shell { margin-left: 4.75rem; }
+}
