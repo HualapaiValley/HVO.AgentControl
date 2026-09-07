@@ -1,0 +1,41 @@
+{
+  "name": "AgentControl .NET worker with Docker integration tests",
+  "build": {
+    "dockerfile": "../../docker/development/Dockerfile",
+    "context": "../..",
+    "target": "tools"
+  },
+  "containerUser": "agent",
+  "remoteUser": "agent",
+  "updateRemoteUserUID": false,
+  "overrideCommand": true,
+  "shutdownAction": "none",
+  "workspaceFolder": "/home/agent/workspaces/project",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/home/agent/workspaces/project,type=bind",
+  "mounts": [
+    "source=hvo-worker-${devcontainerId}-home,target=/home/agent,type=volume",
+    "source=hvo-worker-${devcontainerId}-ssh,target=/etc/ssh,type=volume"
+  ],
+  "runArgs": [
+    "--cpus=2",
+    "--memory=6g",
+    "--pids-limit=1024",
+    "--network=bridge"
+  ],
+  "postCreateCommand": "dotnet restore HVO.AgentControl.slnx && docker info >/dev/null",
+  "postStartCommand": "sudo mkdir -p /run/sshd && sudo ssh-keygen -A && sudo /usr/sbin/sshd -t && (sudo pgrep -x sshd >/dev/null || sudo /usr/sbin/sshd)",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csdevkit",
+        "github.vscode-github-actions"
+      ],
+      "settings": {
+        "dotnet.defaultSolution": "HVO.AgentControl.slnx"
+      }
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {}
+  }
+}
