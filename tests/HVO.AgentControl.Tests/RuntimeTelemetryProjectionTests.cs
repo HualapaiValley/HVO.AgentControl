@@ -97,4 +97,16 @@ public sealed class RuntimeTelemetryProjectionTests
         Assert.Contains(expected, projection.Freshness(now, connected));
     }
 
+    [Theory]
+    [InlineData("Connected", "Reconciling", "Recent")]
+    [InlineData("Disconnected", "Healthy", "disconnected")]
+    public void FreshnessUsesObservedTransportRatherThanHealthLabel(string transport, string health, string expected)
+    {
+        var snapshot = new CapabilitySnapshot(1, "probe", "/work", new Dictionary<string, string> { ["os"] = "Linux" });
+        var projection = RuntimeTelemetryProjection.FromCapabilities(Json.Write(snapshot), "runtime:1");
+        Assert.NotNull(projection);
+        var runtime = new RuntimeRecord { DesiredConnected = true, Transport = transport, Health = health };
+        Assert.Contains(expected, projection.Freshness(1000, runtime));
+    }
+
 }

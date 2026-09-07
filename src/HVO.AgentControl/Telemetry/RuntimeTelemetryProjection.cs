@@ -6,6 +6,9 @@ namespace HVO.AgentControl.Telemetry;
 
 public sealed record RuntimeTelemetryProjection(RuntimeTelemetrySample Sample, RuntimeTelemetry Result)
 {
+    public string Freshness(long now, RuntimeRecord runtime) =>
+        Freshness(now, runtime.DesiredConnected && runtime.Transport == "Connected");
+
     public string Freshness(long now, bool connected) =>
         !connected ? "Historical snapshot — runtime disconnected" :
         Sample.ObservedAt > now ? "Snapshot timestamp is in the future; freshness unknown" :
