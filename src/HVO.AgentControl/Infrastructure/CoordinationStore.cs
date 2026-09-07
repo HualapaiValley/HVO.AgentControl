@@ -264,7 +264,7 @@ public sealed partial class ControlStore
             var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
                 .FirstOrDefaultAsync(x => x.CoordinationRunId == run.Id && x.Enabled);
             if (schedule is not null)
-                await PublishMilestoneInternal(db, schedule, run, decision.Complete ? "Completed" : "DecisionApplied", Now, transitionEvent);
+                await PublishMilestoneInternal(db, schedule, run, run.State == "Completed" ? "Completed" : "DecisionApplied", Now, transitionEvent);
             return true;
         }
         if (!run.ContinuousSupervision && run.Round >= run.MaxRounds) { PauseCoordination(run, "Coordinator turn budget exhausted. Review and renew this coordination to continue with its existing assignments and receipts."); return true; }

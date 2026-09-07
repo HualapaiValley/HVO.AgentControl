@@ -427,6 +427,23 @@ public sealed class OperatorUpdateTests
     }
 
     [Fact]
+    public async Task ContinuousSupervisionPublishesDecisionAppliedForCompletedDecision()
+    {
+        await using var app = new TestApp();
+        var (coordinator, participant) = await SeedCoordinatorParticipant(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Review blockers.", [participant.Id], ContinuousSupervision: true));
+        await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), 9_000_000);
+
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, complete: true);
+        await app.Store.CoordinationTick();
+
+        Assert.Equal("Waiting", (await app.Store.Coordinations()).Single().State);
+        var milestone = Assert.Single(await app.Store.OperatorUpdates(), x => x.Kind == "DecisionApplied");
+        Assert.Equal(run.Id, milestone.CoordinationRunId);
+    }
+
+    [Fact]
     public async Task FailedMilestonePublicationRollsBackTransitionEvidence()
     {
         await using var app = new TestApp();
@@ -473,7 +490,7 @@ public sealed class OperatorUpdateTests
         Assert.Equal(transitionEventSeq, milestones[0].SourceEventSequence);
     }
 
-    private static async Task FinishDecision(ControlStore store, string runId)
+    private static async Task FinishDecision(ControlStore store, string runId, bool complete = false)
     {
         var run = (await store.Coordinations()).Single(x => x.Id == runId);
         var commandId = run.DecisionCommandId ?? throw new InvalidOperationException("No decision command id");
@@ -481,7 +498,7 @@ public sealed class OperatorUpdateTests
         {
             var command = (await db.Commands.FindAsync(commandId))!;
             command.State = Delivery.Finished;
-            var decision = new CoordinatorDecision("Assign", Array.Empty<CoordinatorAction>());
+            var decision = new CoordinatorDecision("Assign", Array.Empty<CoordinatorAction>(), complete);
             var text = Json.Write(decision);
             command.ResultJson = Json.Write(new { messages = new[] { new { parts = new[] { new { type = "text", text } } } } });
             return true;
