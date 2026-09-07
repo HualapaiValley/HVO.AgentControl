@@ -387,6 +387,32 @@ public sealed class TelemetryCalculatorTests
     }
 
     [Fact]
+    public void QuotaBecomingAvailableDoesNotNormalizeTheWholeInterval()
+    {
+        var first = Sample(1000, cpu: 0, mem: 1, limit: 2, quota: null);
+        var second = Sample(2000, cpu: 1_000_000, mem: 1, limit: 2, quota: 2);
+        var result = TelemetryCalculator.Compute(first, second);
+
+        Assert.Equal(TelemetryState.QuotaUnavailable, result.State);
+        Assert.Null(result.CpuQuotaPercent);
+        Assert.Equal(1.0, result.CpuCoreUsage);
+        Assert.Contains("changed between samples", result.Note);
+    }
+
+    [Fact]
+    public void QuotaBecomingUnavailableDoesNotNormalizeTheWholeInterval()
+    {
+        var first = Sample(1000, cpu: 0, mem: 1, limit: 2, quota: 2);
+        var second = Sample(2000, cpu: 1_000_000, mem: 1, limit: 2, quota: null);
+        var result = TelemetryCalculator.Compute(first, second);
+
+        Assert.Equal(TelemetryState.QuotaUnavailable, result.State);
+        Assert.Null(result.CpuQuotaPercent);
+        Assert.Equal(1.0, result.CpuCoreUsage);
+        Assert.Contains("changed between samples", result.Note);
+    }
+
+    [Fact]
     public void ExtremeValidSamplesRemainFiniteWithoutOverflow()
     {
         var first = Sample(0, cpu: 0, mem: long.MaxValue, limit: long.MaxValue, quota: 1);

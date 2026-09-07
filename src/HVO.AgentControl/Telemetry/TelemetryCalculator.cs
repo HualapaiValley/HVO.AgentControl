@@ -55,8 +55,9 @@ public static class TelemetryCalculator
         if (!double.IsFinite(coreUsage))
             return Outcome(TelemetryState.NonFiniteResult, current, windowMs, "CPU core usage was non-finite; utilization is not computed.");
 
-        var quota = current.QuotaCores is { } q && q > 0 ? q : (double?)null;
-        var quotaChanged = previous.QuotaCores is { } previousQuota && quota is { } currentQuota && previousQuota != currentQuota;
+        var previousQuota = previous.QuotaCores is { } previousValue && previousValue > 0 ? previousValue : (double?)null;
+        var quota = current.QuotaCores is { } currentValue && currentValue > 0 ? currentValue : (double?)null;
+        var quotaChanged = previousQuota != quota;
         var quotaPercent = quota is { } qc && !quotaChanged ? coreUsage / qc * 100 : (double?)null;
         if (quotaPercent is { } measuredQuotaPercent && !double.IsFinite(measuredQuotaPercent))
             return Outcome(TelemetryState.NonFiniteResult, current, windowMs, "CPU quota-normalized percent was non-finite; utilization is not computed.");

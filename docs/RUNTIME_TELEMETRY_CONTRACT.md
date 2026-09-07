@@ -57,6 +57,10 @@ error state** — it is the honest measured ratio against the current quota/limi
 explains possible causes: quota/limit change during the window, cpuset/ancestor effective
 capacity differing from the direct cgroup quota, or kernel memory overcommit.
 
+CPU quota normalization is produced only when both samples contain the same positive quota.
+Any transition between unavailable and available quota, or between two different quotas,
+suppresses `CpuQuotaPercent` for that interval while retaining absolute core usage.
+
 ### Guard order (deterministic)
 
 1. `previous` missing → `NeedsSecondSample`
