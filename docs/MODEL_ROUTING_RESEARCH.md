@@ -87,6 +87,14 @@ Maintain an **offer registry** separate from model capability profiles. Each off
 
 Check official catalogs and offers daily and on catalog/provider errors; allow an operator to register a deal for evaluation. New deals enter a bounded canary before routing admission. Revalidate unknown-expiry trials and withdraw expired offers from new assignments; never silently convert an expired free route into paid usage. Fallback must stay within the owner's authorized billing policy. Do not interrupt a healthy task or replay a completed tool action merely because a cheaper offer appeared. These registry and routing behaviors are proposed work for #69/#82, not implemented controls.
 
+### Later: discovery across providers and local inference
+
+Extend offer discovery beyond Go/Zen to a maintained set of official provider catalogs, free tiers and time-limited promotions. Support direct provider APIs and local model serving through an adapter such as Ollama. Do not promise exhaustive discovery of every free offer: record coverage and last successful checks, and accept operator-submitted offers for verification.
+
+Distinguish genuinely no-charge hosted requests, promotional credits with an expiry or cap, subscription-included usage, and locally hosted inference. Local inference consumes hardware capacity and operating resources even without a per-token provider charge. Before qualifying a local route, record the exact model and quantization, effective context, tool support, available RAM/VRAM, measured throughput and concurrency. Runtime capability discovery should identify where that route can run; do not assume every worker has a suitable GPU.
+
+Discovery should produce candidates, not automatically register accounts, provision hardware or redirect production work. Reuse the same readiness checks, task evaluations, data eligibility and offer lifecycle for every route. Start with a small provider set and expand based on measured accepted-task value. This is a later extension of #69/#82; current usage accounting, limit recovery and routing reliability remain the immediate priorities.
+
 ## Observed integration facts and discrepancies
 
 Read-only snapshot of our installed OpenCode 1.18.29 catalog and prior rollout evidence:
