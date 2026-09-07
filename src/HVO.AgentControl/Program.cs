@@ -31,6 +31,11 @@ builder.Services.Configure<ControlOptions>(options =>
 });
 builder.Services.AddSingleton(_ => new ReplicaLock(settings.DataDirectory));
 builder.Services.AddSingleton<Secrets>();
+builder.Services.AddSingleton(_ => new HVO.AgentControl.GitHub.GitHubAppClient(
+    new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) }, TimeProvider.System));
+builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubAccessService>();
+builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubCredentialDelivery>();
+builder.Services.AddHostedService<HVO.AgentControl.GitHub.GitHubCredentialSupervisor>();
 builder.Services.AddDataProtection().PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.DataDirectory, "keys"))).SetApplicationName("HVO.AgentControl");
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
 {
