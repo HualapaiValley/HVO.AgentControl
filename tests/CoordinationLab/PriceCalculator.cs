@@ -10,4 +10,10 @@ public static class PriceCalculator
         if (quantity >= 10) subtotal *= 0.90m;
         return Math.Round(subtotal, 2, MidpointRounding.AwayFromZero);
     }
+
+    public static decimal ShippingCost(decimal discountedSubtotal)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(discountedSubtotal);
+        return discountedSubtotal >= 50.00m ? 0.00m : 4.95m;
+    }
 }
