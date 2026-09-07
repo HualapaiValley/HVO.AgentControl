@@ -73,6 +73,57 @@ public sealed class CoordinationContextBudgetTests
     }
 
     [Fact]
+    public async Task EscapedHistoricalBodiesYieldOmissionReceiptsWithoutLosingActiveWorkOrNewestVerdict()
+    {
+        await using var app = new TestApp();
+        var coordinator = await PersistenceTests.SeedWorker(app.Store);
+        var worker = new WorkerRecord { RuntimeId = coordinator.RuntimeId, NativeSessionId = "ses_escaped", Name = "Worker", Activity = "Active", Stale = false };
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Workers.FindAsync(coordinator.Id))!;
+            saved.Role = SessionRoles.Coordinator; saved.Activity = "Idle"; saved.Stale = false;
+            db.Workers.Add(worker); return true;
+        });
+        var instruction = "Do not repeat side effects. " + new string('i', 14000);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, instruction, [worker.Id]));
+        var ids = Enumerable.Range(0, 18).Select(_ => Guid.NewGuid().ToString()).ToArray();
+        var evidence = Json.Write(new { messages = new[] { new { parts = new[] { new { type = "text", text = "CHANGES_REQUESTED " + new string('<', 5500) + " exact-head" } } } } });
+        await app.Store.Write(db =>
+        {
+            for (var i = 0; i < ids.Length; i++)
+                db.Commands.Add(new CommandRecord
+                {
+                    Id = ids[i],
+                    RuntimeId = worker.RuntimeId,
+                    WorkerId = worker.Id,
+                    Kind = "Prompt",
+                    Origin = "coordinator:" + run.Id,
+                    State = i == 0 ? Delivery.Running : Delivery.Finished,
+                    Payload = Json.Write(new PromptInput(ids[i], new string('"', 5000), 0)),
+                    CreatedAt = ControlStore.Now - 1000 + i,
+                    ResultJson = evidence,
+                    ProgressText = "Awaiting reconciliation"
+                });
+            return Task.FromResult(true);
+        });
+        await app.Store.CoordinationTick();
+        var latest = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Deciding", latest.State);
+        var context = Json.Read<CoordinatorContext>(latest.InputJson);
+        Assert.Equal(instruction, context.Instruction);
+        Assert.Equal(17, context.Results.Length);
+        Assert.Equal(Delivery.Running, context.Results.Single(x => x.Id == ids[0]).State);
+        Assert.DoesNotContain("Historical evidence omitted", context.Results.Single(x => x.Id == ids[0]).Response);
+        Assert.Contains("CHANGES_REQUESTED", context.Results.Single(x => x.Id == ids[^1]).Response);
+        Assert.Contains(context.Results, x => x.Response.Contains("Historical evidence omitted") && x.ResponseTruncated && x.EarlierTextOmitted);
+        Assert.Equal(17, context.Dispatch!.Length);
+        var snapshot = await app.Store.Snapshot();
+        Assert.All(snapshot.Commands.Where(x => ids.Contains(x.Id)), x => Assert.Equal(evidence, x.ResultJson));
+        Assert.DoesNotContain(snapshot.Commands, x => x.Kind == "Prompt" && x.Origin == "coordinator:" + run.Id && !ids.Contains(x.Id));
+        Assert.True(Json.Read<PromptInput>(snapshot.Commands.Single(x => x.Id == latest.DecisionCommandId).Payload).Text.Length <= 64000);
+    }
+
+    [Fact]
     public async Task OversizedRoutingInventoryStillPausesWithoutDroppingFactsOrDispatching()
     {
         await using var app = new TestApp();
