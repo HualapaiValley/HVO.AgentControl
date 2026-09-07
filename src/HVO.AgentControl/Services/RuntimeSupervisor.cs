@@ -228,6 +228,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                 var runtime = (await db.Runtimes.FindAsync(runtimeId))!;
                 var runtimeWorkers = await db.Workers.Where(x => x.RuntimeId == runtimeId).Select(x => x.Id).ToListAsync();
                 if (worker.Role == SessionRoles.Worker && (occupied.Count >= options.Value.GlobalCapacity || runtimeWorkers.Count(occupied.Contains) >= runtime.Capacity)) continue;
+                if (!await ControlStore.ProviderDispatchAllowed(db, worker, command)) continue;
+                command.ProviderPoolId = ControlStore.PoolId(worker, command);
             }
             if (command.Kind is "Abort" or "Reply" && (await db.Workers.FindAsync(command.WorkerId))?.Stale != false) continue;
             command.State = Delivery.Dispatching; command.Attempts++; command.UpdatedAt = ControlStore.Now;
@@ -300,6 +302,14 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                         await Complete(command.Id, Delivery.Queued, "Native state changed before submission; waiting for idle.");
                         break;
                     }
+                    var admitted = await store.Write(async db =>
+                    {
+                        var pending = (await db.Commands.FindAsync(command.Id))!;
+                        if (await ControlStore.ProviderDispatchAllowed(db, worker, pending)) return true;
+                        pending.State = Delivery.Queued;
+                        return false;
+                    });
+                    if (!admitted) break;
                     command.NativeMessageId = OpenCodeClient.NewMessageId(beforePrompt);
                     await store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.NativeMessageId = command.NativeMessageId; return true; });
                     mutationStarted = true;
@@ -491,6 +501,12 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             var assistants = NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId);
             var ended = assistants.Any(x => x.GetProperty("info").GetProperty("time").TryGetProperty("completed", out _));
             var failed = assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
+            foreach (var assistant in assistants)
+            {
+                var info = assistant.GetProperty("info");
+                if (info.TryGetProperty("error", out var nativeError) && ProviderFailure.Parse(nativeError, ControlStore.Now) is { } failure)
+                    await ControlStore.ObserveProviderFailure(db, worker, command, info.GetProperty("id").GetString()!, failure);
+            }
             command.AcceptedAt ??= ControlStore.Now;
             var progress = ControlStore.ResponseText(Json.Write(new { messages = assistants }));
             progress = progress.Length <= 6000 ? progress : "[Earlier output omitted]\n" + progress[^5975..];
@@ -499,6 +515,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             if (activity == "Idle" && ended && !failed && progress.Length > 0 && command.Origin == "capability-report")
             { worker.CapabilityReport = progress; worker.CapabilityReportedAt = ControlStore.Now; }
             if (activity == "Idle" && ended) command.ResultJson = Json.Write(new { messages = assistants });
+            if (activity == "Idle" && ended) await ControlStore.ObserveProviderCompletion(db, command, !failed && progress.Length > 0);
             var state = activity == "Idle" && ended ? Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
@@ -551,6 +568,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
     {
         var command = (await db.Commands.FindAsync(id))!;
         command.State = state; command.Detail = detail; command.UpdatedAt = ControlStore.Now;
+        if (command.Kind == "Prompt" && state is Delivery.Failed or Delivery.Unknown)
+            await ControlStore.ObserveProviderCompletion(db, command, false);
         if (state == Delivery.Failed && command.Kind == "CreateWorker")
             await db.WorkspaceClaims.Where(x => x.CommandId == id && x.WorkerId == null).ExecuteDeleteAsync();
         ControlStore.Event(db, "CommandStateChanged", command.RuntimeId, command.WorkerId, id, new { state, detail });

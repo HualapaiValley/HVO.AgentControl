@@ -129,6 +129,7 @@ public sealed class CommandRecord
     public string Payload { get; set; } = "{}";
     public string State { get; set; } = Delivery.Queued;
     public string ExecutionPayload { get; set; } = "";
+    public string ProviderPoolId { get; set; } = "";
     public string ProgressText { get; set; } = "";
     public long? LastProgressAt { get; set; }
     public long? AcceptedAt { get; set; }

@@ -23,6 +23,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        model.Entity<ProviderPool>();
+        model.Entity<ProviderFailureReceipt>();
         model.Entity<HVO.AgentControl.Services.ProviderCredential>();
         model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
