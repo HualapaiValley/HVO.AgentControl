@@ -114,7 +114,12 @@ public sealed partial class ControlStore
         run.Detail = "Coordination " + run.State.ToLowerInvariant() + ". Already dispatched worker instructions remain independent.";
         Event(db, "CoordinationChanged", payload: new { run.Id, run.State }, provenance: "user");
         if (run.State != "Ready" && run.State != "Deciding" && run.State != "Waiting")
-            _ = PublishMilestoneInternal(db, run.Id, run.State, Now);
+        {
+            var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.CoordinationRunId == run.Id && x.Enabled);
+            if (schedule is not null)
+                await PublishMilestoneInternal(db, schedule, run, run.State, Now);
+        }
         return run;
     });
 
@@ -207,7 +212,10 @@ public sealed partial class ControlStore
             run.DecisionCommandId = null; run.State = decision.Complete ? "Completed" : "Waiting";
             run.Detail = decision.Summary; run.Revision++;
             Event(db, "CoordinatorDecisionApplied", payload: new { run.Id, run.Round, decision, receipt }, provenance: "coordinator");
-            _ = PublishMilestoneInternal(db, run.Id, decision.Complete ? "Completed" : "DecisionApplied", Now);
+            var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.CoordinationRunId == run.Id && x.Enabled);
+            if (schedule is not null)
+                await PublishMilestoneInternal(db, schedule, run, decision.Complete ? "Completed" : "DecisionApplied", Now);
             return true;
         }
         if (run.Round >= run.MaxRounds) { PauseCoordination(run, "Decision round limit reached. Review results before starting another coordination."); return true; }

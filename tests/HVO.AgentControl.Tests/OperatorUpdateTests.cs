@@ -351,4 +351,96 @@ public sealed class OperatorUpdateTests
         Assert.Equal(3, remaining.Count(u => u.AcknowledgedAt == 12_000_000L));
         Assert.Single(remaining, u => u.AcknowledgedAt == null);
     }
+
+    private static async Task<(WorkerRecord Coordinator, WorkerRecord Participant)> SeedCoordinatorParticipant(ControlStore store)
+    {
+        var coordinator = new WorkerRecord
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            RuntimeId = Guid.NewGuid().ToString("N"),
+            ManagedServerId = "server",
+            NativeSessionId = Guid.NewGuid().ToString("N"),
+            Name = "Coordinator",
+            Activity = "Idle",
+            Stale = false,
+            Role = SessionRoles.Coordinator,
+            Directory = "/home/agent/workspaces/a",
+            LastObservedAt = 950_000
+        };
+        var participant = new WorkerRecord
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            RuntimeId = coordinator.RuntimeId,
+            ManagedServerId = "server",
+            NativeSessionId = Guid.NewGuid().ToString("N"),
+            Name = "Participant",
+            Activity = "Idle",
+            Stale = false,
+            Directory = "/home/agent/workspaces/b",
+            LastObservedAt = 950_000
+        };
+        await store.Write(async db =>
+        {
+            db.Workers.Add(coordinator);
+            db.Workers.Add(participant);
+            return true;
+        });
+        return (coordinator, participant);
+    }
+
+    [Fact]
+    public async Task MilestonePublishedOnceWhenDecisionAppliedViaCoordinationTick()
+    {
+        await using var app = new TestApp();
+        var (coordinator, participant) = await SeedCoordinatorParticipant(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Review blockers.", [participant.Id]));
+        await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), 9_000_000);
+        var initial = await app.Store.OperatorUpdates();
+        Assert.Single(initial);
+
+        await app.Store.CoordinationTick();
+        var decisionCommandId = (await app.Store.Coordinations()).Single().DecisionCommandId;
+        Assert.NotNull(decisionCommandId);
+
+        await FinishDecision(app.Store, run.Id);
+        var beforeApply = await app.Store.OperatorUpdates();
+
+        await app.Store.CoordinationTick();
+        var afterApply = await app.Store.OperatorUpdates();
+        var milestones = afterApply.Where(u => u.Kind is "DecisionApplied" or "Completed").ToList();
+        Assert.Single(milestones);
+        Assert.Equal(run.Id, milestones[0].CoordinationRunId);
+    }
+
+    [Fact]
+    public async Task MilestonePublishedOnceWhenCoordinationStoppedByOwner()
+    {
+        await using var app = new TestApp();
+        var (coordinator, participant) = await SeedCoordinatorParticipant(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Review blockers.", [participant.Id]));
+        await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), 9_000_000);
+        var initial = await app.Store.OperatorUpdates();
+        Assert.Single(initial);
+
+        await app.Store.ControlCoordination(run.Id, new(run.Revision, "stop"));
+        var updates = await app.Store.OperatorUpdates();
+        var milestones = updates.Where(u => u.Kind == "Stopped").ToList();
+        Assert.Single(milestones);
+        Assert.Equal(run.Id, milestones[0].CoordinationRunId);
+    }
+
+    private static async Task FinishDecision(ControlStore store, string runId)
+    {
+        var run = (await store.Coordinations()).Single(x => x.Id == runId);
+        var commandId = run.DecisionCommandId ?? throw new InvalidOperationException("No decision command id");
+        await store.Write(async db =>
+        {
+            var command = (await db.Commands.FindAsync(commandId))!;
+            command.State = Delivery.Finished;
+            var decision = new CoordinatorDecision("Assign", Array.Empty<CoordinatorAction>());
+            var text = Json.Write(decision);
+            command.ResultJson = Json.Write(new { messages = new[] { new { parts = new[] { new { type = "text", text } } } } });
+            return true;
+        });
+    }
 }

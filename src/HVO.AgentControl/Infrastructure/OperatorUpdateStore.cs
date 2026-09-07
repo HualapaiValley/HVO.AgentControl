@@ -109,42 +109,39 @@ public sealed partial class ControlStore
         return update;
     });
 
-    public async Task<int> PublishOperatorMilestone(string runId, string milestoneKind, long? observedAt = null, ControlDb? db = null)
-    {
-        var now = observedAt ?? Now;
-        if (db is not null) return await PublishMilestoneInternal(db, runId, milestoneKind, now);
-        return await Write(async db => await PublishMilestoneInternal(db, runId, milestoneKind, now));
-    }
+    public Task<int> PublishOperatorMilestone(string runId, string milestoneKind, long? observedAt = null) =>
+        Write(async db =>
+        {
+            var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.CoordinationRunId == runId && x.Enabled);
+            if (schedule is null) return 0;
+            var run = await db.CoordinationRuns.FindAsync(runId);
+            if (run is null) return 0;
+            return await PublishMilestoneInternal(db, schedule, run, milestoneKind, observedAt ?? Now);
+        });
 
-    internal async Task<int> PublishMilestoneInternal(ControlDb db, string runId, string milestoneKind, long now)
+    internal async Task<int> PublishMilestoneInternal(ControlDb db, OperatorUpdateSchedule schedule, CoordinationRun run, string milestoneKind, long now)
     {
-        var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.CoordinationRunId == runId && x.Enabled);
-        if (schedule is null) return 0;
-
-        var sourceSequence = await db.Events.OrderByDescending(x => x.Sequence).Select(x => x.Sequence).FirstOrDefaultAsync();
-        var milestoneId = schedule.Id + ":milestone:" + sourceSequence;
+        var transitionKey = run.Id + ":" + milestoneKind + ":" + now;
+        var milestoneId = schedule.Id + ":milestone:" + transitionKey;
 
         if (await db.OperatorStatusUpdates.AnyAsync(x => x.Id == milestoneId)) return 0;
-
-        var run = await db.CoordinationRuns.FindAsync(runId);
-        if (run is null) return 0;
 
         var summary = await BuildOperatorSummary(db, run, now);
         db.OperatorStatusUpdates.Add(new OperatorStatusUpdate
         {
             Id = milestoneId,
             ScheduleId = schedule.Id,
-            CoordinationRunId = runId,
+            CoordinationRunId = run.Id,
             Kind = milestoneKind,
             DueAt = now,
             PublishedAt = now,
-            SourceEventSequence = sourceSequence,
+            SourceEventSequence = 0,
             ActiveSetRevision = schedule.ActiveSetRevision,
             MissedIntervals = 0,
             SummaryJson = Json.Write(summary)
         });
-        Event(db, "OperatorStatusUpdatePublished", payload: new { scheduleId = schedule.Id, runId, kind = milestoneKind, milestoneId });
+        Event(db, "OperatorStatusUpdatePublished", payload: new { scheduleId = schedule.Id, runId = run.Id, kind = milestoneKind, milestoneId });
         return 1;
     }
 
