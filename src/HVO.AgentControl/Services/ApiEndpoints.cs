@@ -21,6 +21,8 @@ public static class ApiEndpoints
         group.MapGet("/providers/opencode-go/key", (ProviderKeyService keys) => keys.Status());
         group.MapPost("/providers/opencode-go/key", (SaveProviderKey input, ProviderKeyService keys) => keys.Save(input));
         group.MapPost("/runtimes/{id}/providers/opencode-go", (string id, ApplyProviderKey input, ProviderKeyService keys, CancellationToken token) => keys.Apply(id, input, token));
+        group.MapGet("/providers/pools", (ControlStore store) => store.ProviderPools());
+        group.MapPost("/providers/pools/{id}/resume", (string id, ResumeProviderPool input, ControlStore store) => store.ResumePool(id, input));
         group.MapGet("/providers/logins", (ProviderLoginService logins) => logins.List());
         group.MapPost("/runtimes/{id}/providers/chatgpt", (string id, RequestId input, ProviderLoginService logins) => logins.Start(id, input.Id));
         group.MapGet("/github/access", (HVO.AgentControl.GitHub.GitHubAccessService github) => github.List());

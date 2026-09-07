@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260907201617_ProviderPoolCircuit")]
+    partial class ProviderPoolCircuit
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -625,99 +628,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique();
 
                     b.ToTable("Messages");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.WorkItem", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Branch")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("CurrentPhase")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("IssueNumber")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("OwnerWorkerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Repository")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("Revision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("UpdatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Branch");
-
-                    b.HasIndex("IssueNumber");
-
-                    b.HasIndex("OwnerWorkerId");
-
-                    b.ToTable("WorkItems");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.WorkItemPhase", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("CompletedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Evidence")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("OwnerWorkerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("StartedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("WorkItemId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("WorkItemId", "Name")
-                        .IsUnique();
-
-                    b.ToTable("WorkItemPhases");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkerRecord", b =>
