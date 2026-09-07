@@ -28,22 +28,26 @@ run many times under one sustained pass. It is never invoked by CI.
 - Runs only `FullyQualifiedName~CoordinationStressTests` on
   `HVO.AgentControl.Tests`, building once first.
 - `SOAK_BATCHES` batches, each accumulating at least `SOAK_BATCH_SECONDS` of
-  actual `dotnet test` execution before the batch moves on.
-- Stops on the first failing iteration and its batch.
+  actual wall-clock test execution before the batch moves on. An iteration
+  already started when the batch target is reached is allowed to complete, as
+  long as it fits inside the remaining overall deadline.
+- Stops on the first failing outcome and its batch.
 - Hard upper guard `SOAK_MAX_TOTAL_SECONDS` aborts the whole run regardless
   of batch progress.
 - Each invocation writes to a UNIQUE timestamped evidence directory
   `artifacts/coordination-soak-<UTC timestamp>-<pid>`; separate invocations
   never truncate or reuse directories or files, and all artifacts including
   failure logs are preserved. `SOAK_ARTIFACT_ROOT` overrides the base path.
-- The build step has its own hard `SOAK_BUILD_SECONDS` timeout, every test
-  iteration is bounded by the remaining batch duration through `timeout`
-  (which returns 124 on timeout), and the whole run has the overall guard.
-- Per-iteration outcome is recorded explicitly as one of `success`,
-  `failure`, `zero-tests`, or `timeout`. A counted passing iteration requires
-  a NONZERO expected test count and a clean pass. Zero-test iterations (for
-  example a marginal iteration capped against the remaining batch time) are
-  recorded as `zero-tests` and are never counted green.
+- The build step has its own hard `SOAK_BUILD_SECONDS` timeout bounded by
+  `min(build timeout, overall remaining)`, every test iteration is bounded by
+  the remaining OVERALL duration through `timeout` (which returns 124 on
+  timeout), and the whole run has the overall guard.
+- The runner fails closed: an iteration is a clean pass only when dotnet
+  exits `0`, a test summary is present, `Total` is nonzero, `Passed` is
+  nonzero, and `Failed` is zero. Per-iteration outcome is recorded explicitly
+  as one of `success`, `failure`, `zero-tests`, `skipped-only`,
+  `missing-evidence`, or `timeout`; every non-success outcome terminates the
+  run with a nonzero exit.
 - Every evidence line is ONE whole, valid JSON object. The produced
   `evidence.jsonl` is validated line-by-line at the end (via `python3`
   `json.loads`, or `jq -e .` when python3 is unavailable), and the valid /
@@ -53,8 +57,7 @@ run many times under one sustained pass. It is never invoked by CI.
   through a hiding pipeline.
 
 Defaults: 4 batches x 120 s, hard guard 900 s, build timeout 300 s,
-iteration minimum 10 s, `Release` configuration, artifacts under
-`artifacts/coordination-soak-<run tag>`.
+`Release` configuration, artifacts under `artifacts/coordination-soak-<run tag>`.
 
 ## Usage
 
