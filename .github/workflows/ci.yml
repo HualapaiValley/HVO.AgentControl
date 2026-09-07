@@ -36,6 +36,9 @@ jobs:
       - name: Check formatting
         run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
 
+      - name: Soak runner regression checks
+        run: python3 tests/test_soak_runner.py scripts/run-coordination-soak.sh
+
       - name: Unit and persistence tests
         run: dotnet test HVO.AgentControl.slnx --no-build --configuration Release
 
