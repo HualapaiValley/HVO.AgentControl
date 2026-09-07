@@ -3,3 +3,15 @@
 .participant input { width: auto; }
 fieldset { min-width: 0; margin: 1rem 0; border: 1px solid #42516b; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25rem; overflow: auto; }
+.participants { list-style: none; margin: .25rem 0 1rem; padding: 0; display: grid; gap: .5rem; }
+.participant-line { display: grid; gap: .3rem .75rem; grid-template-columns: auto auto 1fr auto; align-items: baseline; border: 1px solid #33415c; border-radius: .4rem; padding: .5rem .6rem; }
+.participant-line .meta { font-size: .85rem; }
+.participant-line p { grid-column: 1 / -1; margin: 0; }
+.chip { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
+.chip-active { background: #1e5d34; color: #d6ffe6; }
+.chip-waiting { background: #6b5114; color: #ffeeb8; }
+.chip-queued { background: #24506b; color: #d2ecff; }
+.chip-stale { background: #6b2a2a; color: #ffd9d9; }
+.chip-uncertain { background: #5a2f7a; color: #f0dbff; }
+.chip-idle { background: #3d4658; color: #d9e2f2; }
+@media (max-width: 40rem) { .participant-line { grid-template-columns: 1fr; } }

@@ -42,6 +42,20 @@
           @if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "stop")'>Stop coordination</button> }
         </div>
         <p class="meta">Pause and stop prevent new routing decisions. Already dispatched instructions keep running; use the worker's cancellation control to stop its work.</p>
+        <h3>Participants</h3>
+        <p class="meta">@Aggregate(run)</p>
+        <ul class="participants">
+          @foreach (var participant in ParticipantStatuses(run))
+          {
+            <li class="participant-line">
+              <span class="chip chip-@participant.State">@participant.StateLabel</span>
+              <strong>@participant.Name</strong>
+              <span class="meta">@(participant.Runtime.Length == 0 ? "runtime: unregistered" : "runtime: " + participant.Runtime)</span>
+              <span class="meta">@participant.ProgressAge</span>
+              <p>@participant.StatusLine</p>
+            </li>
+          }
+        </ul>
         @if (run.State is not ("Completed" or "Stopped"))
         {
           <label>Follow-up to coordinator<textarea rows="3" value="@followups.GetValueOrDefault(run.Id, "")" @oninput="e => followups[run.Id] = e.Value?.ToString() ?? string.Empty"></textarea></label>
@@ -51,10 +65,13 @@
         <h3>Messages and responses</h3>
         @foreach (var command in snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt))
         {
-          <article class="command"><a href="@ConversationUrl(command.WorkerId!)">@snapshot.Workers.FirstOrDefault(x => x.Id == command.WorkerId)?.Name</a> · @command.State
-            <p>@(command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : "Answer to worker question")</p>
-            <p class="meta">@AssignmentGuidance.ProgressStatus(command)</p>
-            <pre>@(command.State == Delivery.Finished ? HVO.AgentControl.Infrastructure.ControlStore.ResponseText(command.ResultJson) : command.ProgressText)</pre><small>Request @command.Id</small>
+          <article class="command">
+            <details>
+              <summary><a href="@ConversationUrl(command.WorkerId!)">@snapshot.Workers.FirstOrDefault(x => x.Id == command.WorkerId)?.Name</a> · @command.State · @AssignmentGuidance.ProgressStatus(command)</summary>
+              <p>@(command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : "Answer to worker question")</p>
+              <pre>@(command.State == Delivery.Finished ? HVO.AgentControl.Infrastructure.ControlStore.ResponseText(command.ResultJson) : command.ProgressText)</pre>
+              <small>Request @command.Id</small>
+            </details>
           </article>
         }
       </section>
