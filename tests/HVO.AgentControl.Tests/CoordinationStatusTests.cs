@@ -76,6 +76,54 @@ public sealed class CoordinationStatusTests
         if (oldFailure) Assert.Null(status.GetType().GetProperty("Outcome")!.GetValue(status));
     }
 
+    [Theory]
+    [InlineData(Delivery.Running)]
+    [InlineData(Delivery.Queued)]
+    public void OtherWorkDoesNotInventCoordinationQueue(string state)
+    {
+        var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord { WorkerId = worker.Id, Kind = "Abort", Origin = "owner", State = state };
+        var page = Page(new ControlSnapshot(1, [], [worker], [command], []));
+        var status = Assert.Single(Statuses(page, run));
+        Assert.Contains(state == Delivery.Running ? "no instruction from this run is queued" : "0 belong to this run", Property(status, "Assignment"));
+    }
+
+    [Theory]
+    [InlineData("permission", "owner must review")]
+    [InlineData("question", "coordinator or owner")]
+    public void WaitingPreservesActualProgressAndRawAssignment(string kind, string expected)
+    {
+        var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Running,
+            LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            Payload = Json.Write(new PromptInput("request", "Review PR 123", 1)),
+            ExecutionPayload = Json.Write(new PromptInput("request", "GUIDANCE BOILERPLATE Review PR 123", 1))
+        };
+        var page = Page(new ControlSnapshot(1, [], [worker], [command], [new PendingRequest { WorkerId = worker.Id, Kind = kind, State = "Pending" }]));
+        var status = Assert.Single(Statuses(page, run));
+        Assert.Equal("Review PR 123", Property(status, "Assignment"));
+        Assert.Contains("latest progress", Property(status, "Receipt"));
+        Assert.Contains(expected, Property(status, "Next"));
+    }
+
+    [Theory]
+    [InlineData("Completed")]
+    [InlineData("Stopped")]
+    public void TerminalRunDoesNotPromiseAnotherDispatch(string state)
+    {
+        var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Idle" });
+        var run = RunWith(worker); run.State = state;
+        var page = Page(new ControlSnapshot(1, [], [worker], [], []));
+        Assert.Contains("no further routing", Property(Assert.Single(Statuses(page, run)), "Next"));
+    }
+
     private static readonly BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
 
     private static Coordination Page(ControlSnapshot snapshot)
@@ -147,7 +195,7 @@ public sealed class CoordinationStatusTests
     }
 
     [Fact]
-    public void WaitingOnQuestionStatesBlockedOnOwnerReply()
+    public void WaitingOnQuestionAllowsCoordinatorOrOwnerReply()
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
@@ -167,7 +215,7 @@ public sealed class CoordinationStatusTests
         var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [question])), run));
         Assert.Equal("Waiting on a question", Property(status, "StateLabel"));
         Assert.Contains("waits on a task answer", Property(status, "Assignment"));
-        Assert.Contains("unlocks this participant", Property(status, "Next"));
+        Assert.Contains("coordinator or owner", Property(status, "Next"));
     }
 
     [Fact]
@@ -188,7 +236,7 @@ public sealed class CoordinationStatusTests
         };
         var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [])), run));
         Assert.Equal("Queued", Property(status, "StateLabel"));
-        Assert.Contains("not dispatched yet", Property(status, "Assignment"));
+        Assert.Contains("1 belong to this run", Property(status, "Assignment"));
         Assert.Contains("queued 30s ago", Property(status, "Receipt"));
         Assert.Contains("when a slot frees", Property(status, "Next"));
     }
@@ -274,7 +322,7 @@ public sealed class CoordinationStatusTests
         var run = new CoordinationRun { Id = "run", State = "Ready", WorkerIdsJson = Json.Write(Array.Empty<string>()) };
         var page = Page(new ControlSnapshot(1, [], [], [], []));
         Assert.Contains("started", Invoke(page, "RunLatestEvidence", run));
-        Assert.Contains("first decision", Invoke(page, "RunNextEvent", run));
+        Assert.Contains("coordinator is available", Invoke(page, "RunNextEvent", run));
     }
 
     [Fact]

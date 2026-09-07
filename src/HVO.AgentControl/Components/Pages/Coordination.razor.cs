@@ -45,7 +45,10 @@ public partial class Coordination
             var commands = runCommands.Where(x => x.WorkerId == id).OrderBy(x => x.CreatedAt).ToList();
             var pending = snapshot.Requests.Where(x => x.WorkerId == id && x.State is "Pending" or "ReplyUnknown").ToList();
             var global = snapshot.Commands.Where(x => x.WorkerId == id).OrderBy(x => x.CreatedAt).ToList();
-            return Describe(id, worker, commands, pending, global);
+            var status = Describe(id, worker, commands, pending, global);
+            return run.State is "Completed" or "Stopped" && status.State == "idle"
+                ? status with { Next = "Next: no further routing; run " + run.State.ToLowerInvariant() + "." }
+                : status;
         });
     }
 
@@ -83,9 +86,10 @@ public partial class Coordination
             stateLabel = waitingPermission && waitingQuestion ? "Waiting on permission and a question" : waitingPermission ? "Waiting on permission" : "Waiting on a question";
             line = waitingPermission && waitingQuestion ? "A tool approval and a task answer are needed. Open the conversation to respond." : waitingPermission ? "A tool approval is needed. Open the conversation to review it." : "A task answer is needed. Open the conversation to respond.";
             ageAt = latest?.UpdatedAt ?? worker.LastObservedAt;
-            assignment = "The current coordination instruction waits on " + WaitingWords(waitingPermission, waitingQuestion) + ".";
-            receipt = "no progress text; last receipt " + Age(latest?.UpdatedAt ?? worker.LastObservedAt);
-            next = "Next: an owner reply in the conversation unlocks this participant.";
+            assignment = "This session waits on " + WaitingWords(waitingPermission, waitingQuestion) + ".";
+            var evidence = globalRunning ?? latestGlobal;
+            receipt = evidence?.LastProgressAt is { } progressAt ? "latest progress " + Age(progressAt) : "last observed " + Age(worker.LastObservedAt);
+            next = waitingPermission ? "Next: the owner must review the tool approval." : "Next: a task answer from the coordinator or owner.";
         }
         else if (hasUnknown || uncertainReply is not null)
         {
@@ -104,7 +108,7 @@ public partial class Coordination
         else if (globalRunning is { } gRunning)
         {
             state = "active"; stateLabel = "Active"; var progress = Clipped(gRunning.ProgressText, 100); line = "Busy on another task; last " + StateWord(gRunning.State).ToLowerInvariant() + (progress.Length == 0 ? " with no progress text yet." : ": \"" + progress + "\"") + QueuedSuffix(queuedBacklog); ageAt = gRunning.LastProgressAt ?? gRunning.UpdatedAt;
-            assignment = "Busy on another task; the coordination instruction is queued behind it.";
+            assignment = commands.Any(x => x.State == Delivery.Queued) ? "Busy on another task; this run has a queued instruction." : "Busy on another task; no instruction from this run is queued.";
             receipt = gRunning.LastProgressAt is null ? "no progress text yet; last receipt " + Age(gRunning.UpdatedAt) : "latest progress " + Age(gRunning.LastProgressAt);
             next = ProgressNext(gRunning);
         }
@@ -118,7 +122,7 @@ public partial class Coordination
         else if (queuedBacklog > 0)
         {
             state = "queued"; stateLabel = "Queued"; line = queuedBacklog == 1 ? "One instruction or operation is recorded and queued; not dispatched to the runtime yet." : queuedBacklog + " instructions or operations are recorded and queued; not dispatched to the runtime yet."; ageAt = global.Where(x => x.State == Delivery.Queued).Min(x => x.CreatedAt);
-            assignment = queuedBacklog == 1 ? "One coordination instruction recorded and queued; not dispatched yet." : queuedBacklog + " coordination instructions recorded and queued; not dispatched yet.";
+            assignment = queuedBacklog + " queued instruction(s) or operation(s) across all work; " + commands.Count(x => x.State == Delivery.Queued) + " belong to this run.";
             receipt = "queued " + Age(global.Where(x => x.State == Delivery.Queued).Max(x => x.CreatedAt));
             next = "Next: dispatch to the runtime when a slot frees.";
         }
@@ -157,7 +161,19 @@ public partial class Coordination
         }
         if (line.Length > 160) line = line[..160] + "…";
         var outcomeChip = (latestFailedCancelled?.State ?? nativeOutcome) is { } chip && chip is Delivery.Failed or Delivery.Cancelled && state is not ("stale" or "outcome") ? chip : null;
+        var currentPrompt = commands.FirstOrDefault(x => x.Kind == "Prompt" && (Delivery.InFlight(x.State) || x.State == Delivery.Queued));
+        if (state is not ("stale" or "uncertain") && currentPrompt is not null)
+        {
+            var summary = PromptSummary(currentPrompt);
+            if (summary.Length > 0) assignment = summary;
+        }
         return new(id, name, runtime, state, stateLabel, line, Age(ageAt), queuedBacklog, outcomeChip, assignment, receipt, next);
+    }
+
+    private static string PromptSummary(CommandRecord command)
+    {
+        try { return Clipped(Json.Read<PromptInput>(command.Payload).Text, 160); }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or ControlException) { return ""; }
     }
 
     private static string ProgressNext(CommandRecord command)
@@ -202,12 +218,12 @@ public partial class Coordination
         if (run.State is "Completed" or "Stopped") return "Next: no further events; run " + run.State.ToLowerInvariant() + ".";
         if (run.State == "Paused") return "Next: no routing decisions until resumed; already dispatched instructions continue independently.";
         var waiting = ParticipantStatuses(run).Count(x => x.State == "waiting");
-        var needsOwner = waiting > 0 ? " An owner reply is needed in a participant conversation." : "";
+        var needsOwner = waiting > 0 ? " A participant needs a tool approval or task answer; inspect its conversation." : "";
         return run.State switch
         {
             "Deciding" => "Next: the coordinator's decision response." + needsOwner,
             "Waiting" => "Next: a participant result, question or progress update." + needsOwner,
-            "Ready" => "Next: dispatch the first decision to the coordinator." + needsOwner,
+            "Ready" => "Next: request a decision when the coordinator is available." + needsOwner,
             _ => "Next: awaiting the next observed decision or participant result." + needsOwner
         };
     }
