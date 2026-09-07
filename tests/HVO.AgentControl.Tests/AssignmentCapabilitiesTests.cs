@@ -73,7 +73,7 @@ public sealed class AssignmentCapabilitiesTests
             return true;
         });
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
     }
 
