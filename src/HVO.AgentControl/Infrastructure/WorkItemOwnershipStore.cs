@@ -112,6 +112,11 @@ public sealed partial class ControlStore
     public Task<WorkItem> TransitionWorkItem(TransitionWorkItemInput input) => Write(async db =>
     {
         var workItem = await db.WorkItems.FindAsync(input.Id) ?? throw new ControlException("Work item not found.", 404);
+        if (workItem.OwnerWorkerId != input.WorkerId)
+        {
+            var existingOwner = await db.Workers.FindAsync(workItem.OwnerWorkerId);
+            throw new ControlException($"Work item is owned by '{(existingOwner?.Name ?? "unknown")}'. Only the owner may transition it.");
+        }
         if (workItem.Revision != input.ExpectedRevision) throw new ControlException("Work item changed; refresh and retry.", 409);
         var validStates = new[] { WorkItemState.Active, WorkItemState.InReview, WorkItemState.InCI, WorkItemState.Completed, WorkItemState.Released, WorkItemState.Abandoned };
         if (!validStates.Contains(input.State))
@@ -218,6 +223,7 @@ public sealed partial class ControlStore
 
     public Task<bool> ValidateOneModifyingOwner(string workItemId, string workerId)
     {
-        return Read(db => db.Workers.AnyAsync(w => w.Id == workerId && !w.Archived));
+        return Read(async db => await db.WorkItems.AnyAsync(w => w.Id == workItemId && w.OwnerWorkerId == workerId) &&
+                               await db.Workers.AnyAsync(w => w.Id == workerId && !w.Archived));
     }
 }

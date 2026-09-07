@@ -112,7 +112,7 @@ public sealed class WorkItemOwnershipTests
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
         var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-trans", "42", "Test", "feat/x", worker.Id, "implementation"));
-        var transitioned = await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, WorkItemState.InReview, "review"));
+        var transitioned = await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker.Id, WorkItemState.InReview, "review"));
         Assert.Equal(WorkItemState.InReview, transitioned.State);
         Assert.Equal("review", transitioned.CurrentPhase);
     }
@@ -123,7 +123,7 @@ public sealed class WorkItemOwnershipTests
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
         var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-inv", "42", "Test", "feat/x", worker.Id));
-        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, WorkItemState.Released, null)));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker.Id, WorkItemState.Released, null)));
     }
 
     [Fact]
@@ -132,7 +132,19 @@ public sealed class WorkItemOwnershipTests
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
         var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-stale", "42", "Test", "feat/x", worker.Id));
-        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision + 1, WorkItemState.InReview, null)));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision + 1, worker.Id, WorkItemState.InReview, null)));
+    }
+
+    [Fact]
+    public async Task TransitionWorkItemWithWrongOwnerThrows()
+    {
+        await using var app = new TestApp();
+        var worker1 = await PersistenceTests.SeedWorker(app.Store);
+        var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
+        var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_trans", Directory = "/home/agent/workspaces/trans", Name = "WorkerTrans" };
+        await app.Store.Write(db => { db.Workers.Add(worker2); return Task.FromResult(true); });
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-trans-wrong", "42", "Test", "feat/x", worker1.Id));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker2.Id, WorkItemState.InReview, null)));
     }
 
     [Fact]
@@ -195,7 +207,7 @@ public sealed class WorkItemOwnershipTests
         var workItem = await app.Store.GetWorkItem("wi-released");
         await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(workItem!.Id, worker.Id));
         workItem = await app.Store.GetWorkItem("wi-abandoned");
-        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem!.Id, workItem.Revision, WorkItemState.Abandoned, null));
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem!.Id, workItem.Revision, worker.Id, WorkItemState.Abandoned, null));
         var active = await app.Store.GetActiveWorkItems();
         Assert.DoesNotContain(active, x => x.Id == "wi-released");
         Assert.DoesNotContain(active, x => x.Id == "wi-abandoned");

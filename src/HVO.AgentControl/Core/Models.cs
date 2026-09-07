@@ -203,7 +203,7 @@ public sealed class WorkItemPhase
 public sealed record WorkItemClaimInput(string WorkItemId, string WorkerId, string? PhaseName = null);
 public sealed record WorkItemReleaseInput(string WorkItemId, string WorkerId, string? PhaseName = null, string? Evidence = null);
 public sealed record CreateWorkItemInput(string Id, string? IssueNumber, string Title, string Branch, string WorkerId, string? PhaseName = null);
-public sealed record TransitionWorkItemInput(string Id, long ExpectedRevision, string State, string? PhaseName = null, string? Evidence = null);
+public sealed record TransitionWorkItemInput(string Id, long ExpectedRevision, string WorkerId, string State, string? PhaseName = null, string? Evidence = null);
 public sealed record AdvancePhaseInput(string WorkItemId, string WorkerId, string FromPhase, string ToPhase, string? Evidence = null);
 
 public sealed class JournalEvent
