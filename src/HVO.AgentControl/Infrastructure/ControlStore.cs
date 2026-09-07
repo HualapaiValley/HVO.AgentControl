@@ -90,6 +90,12 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         if (existing is not null && (existing.DesiredConnected || existing.Transport == "Connected"))
             throw new ControlException("Disconnect the runtime before editing its connection profile.");
         if (existing is not null && existing.Revision != input.Revision) throw new ControlException("Runtime changed; refresh before editing.");
+        if (existing is not null && await db.GitHubAccess.AnyAsync(x => x.Id == input.Id && x.State != "Disabled") &&
+            (existing.Host != input.Host || existing.Port != input.Port || existing.Username != input.Username ||
+             existing.HostKeySha256 != input.HostKeySha256 || existing.HostKeyAlgorithm != input.HostKeyAlgorithm ||
+             existing.CredentialReference != input.CredentialReference || existing.PassphraseReference != input.PassphraseReference ||
+             existing.Authentication != input.Authentication || existing.StateDirectory != input.StateDirectory))
+            throw new ControlException("Disable GitHub credential renewal before changing this runtime's connection identity.");
         if (existing is not null && (await db.Workers.Where(x => x.RuntimeId == input.Id).Select(x => x.Directory).ToListAsync()).Any(path => !Roots(input).Any(root => IsWithin(path, root))))
             throw new ControlException("Allowed roots must still include registered worker workspaces. Disconnect to suspend all dispatch.");
         if (existing is not null && (await db.Workers.AnyAsync(x => x.RuntimeId == input.Id) || await db.Commands.AnyAsync(x => x.RuntimeId == input.Id && (x.State == Delivery.Queued || x.State == Delivery.Unknown || x.State == Delivery.Dispatching))) &&

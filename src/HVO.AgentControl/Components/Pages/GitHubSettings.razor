@@ -1,0 +1,38 @@
+@page "/github"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+
+<PageTitle>AgentControl · GitHub access</PageTitle>
+<div class="shell">
+    <ControlHeader Title="GitHub access" Description="Give execution runtimes access to selected repositories." />
+    @if (error is not null) { <div class="notice error" role="alert">@error</div> }
+    @if (notice is not null) { <div class="notice" role="status">@notice</div> }
+    <section class="panel">
+        <h2>Connect a GitHub App installation</h2>
+        <p>Create a private GitHub App with Contents, Issues and Pull requests set to Read and write, disable its webhook, and install it on the repositories you want workers to use. Enter its App ID, installation ID and generated PEM private key here. The key is encrypted in AgentControl; workers receive expiring installation credentials.</p>
+        <p><a href="https://github.com/settings/apps/new" target="_blank" rel="noopener noreferrer">Register a GitHub App</a> · <a href="https://github.com/settings/installations" target="_blank" rel="noopener noreferrer">Manage installations</a></p>
+        <p>After creating the App, choose <strong>Install App</strong> in its settings, select your account and install it on the required repositories. Then open <strong>Manage installations</strong> above and choose <strong>Configure</strong>. The final number in the URL, for example <code>https://github.com/settings/installations/12345678</code>, is your <strong>Installation ID</strong>. The numeric <strong>App ID</strong> is on the App's settings page. The alphanumeric Client ID is not needed here.</p>
+        <p>All sessions on the selected runtime share this access. Existing personal GitHub logins are preserved; use a dedicated execution runtime for managed credentials. Account access does not imply approval to merge a PR.</p>
+        <fieldset disabled="@busy">
+            <div class="form-grid">
+                <label>Execution runtime<select @bind="runtimeId" @bind:after="SelectRuntime"><option value="">Select a runtime</option>@foreach (var runtime in snapshot?.Runtimes ?? []) { <option value="@runtime.Id">@runtime.Name</option> }</select></label>
+                <label>App ID<input type="number" min="1" @bind="appId" /></label>
+                <label>Installation ID<input type="number" min="1" @bind="installationId" /></label>
+                <label>Repositories (one owner/repository per line)<textarea rows="4" @bind="repositories"></textarea></label>
+                <label>PEM private key (leave empty to keep the stored key)<textarea rows="4" autocomplete="off" spellcheck="false" @bind="privateKey"></textarea></label>
+            </div>
+            <button @onclick="Save" disabled="@(string.IsNullOrEmpty(runtimeId))">Verify and configure access</button>
+        </fieldset>
+    </section>
+    @foreach (var access in grants)
+    {
+        <section class="panel">
+            <h2>@RuntimeName(access.Id) <span class="badge">@access.State</span></h2>
+            <p>@string.Join(", ", HVO.AgentControl.Core.Json.Read<string[]>(access.RepositoriesJson))</p>
+            <p>@access.Detail</p>
+            @if (access.State != "Disabled") { <button class="subtle" disabled="@busy" @onclick="() => Disable(access)">Disable renewal</button> }
+            @if (access.ExpiresAt is long expiry) { <p>Current credential expires @DateTimeOffset.FromUnixTimeMilliseconds(expiry).ToString("u").</p> }
+        </section>
+    }
+</div>

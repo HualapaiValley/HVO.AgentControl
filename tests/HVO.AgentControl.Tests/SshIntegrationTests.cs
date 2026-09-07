@@ -98,6 +98,48 @@ public sealed class SshIntegrationTests
     }
 
     [SshFact]
+    public async Task BackendStopDuringReadOnlyPreflightKeepsPromptForOneSubmission()
+    {
+        var data = Path.Combine(Path.GetTempPath(), "hvo-preflight-" + Guid.NewGuid().ToString("N"));
+        var app = new TestApp(data, FixtureSecrets);
+        var runtime = Profile("a", "Preflight restart", Random.Shared.Next(10001, 20000));
+        try
+        {
+            var store = app.Store;
+            runtime = await store.SaveRuntime(runtime);
+            await store.RuntimeCommand(runtime.Id, "EnsureServer", Guid.NewGuid().ToString());
+            await TestApp.Wait(async () => (await store.Snapshot()).Runtimes.Single().Health == "Healthy", "Preflight runtime failed to connect", 60);
+            var worker = await Create(store, runtime, "preflight", "/home/agent/workspaces/a");
+            await TestApp.Wait(async () => !(await store.Detail(worker.Id)).Worker.Stale, "Worker did not reconcile");
+            var factory = app.Services.GetRequiredService<IRuntimeTransportFactory>();
+            await using var probe = await factory.Connect(runtime, CancellationToken.None);
+            var before = (await probe.Api.Get("/fixture/stats", CancellationToken.None)).GetProperty("submissions").GetInt32();
+            _ = await probe.Api.Get("/fixture/hold-provider", CancellationToken.None);
+            var command = await Prompt(store, worker, "Survive cancellation before any native submission.");
+            await TestApp.Wait(async () => (await probe.Api.Get("/fixture/stats", CancellationToken.None)).GetProperty("providerWaiting").GetBoolean(),
+                "Prompt did not reach the deterministic read-only preflight barrier");
+            var blocked = (await store.Detail(worker.Id)).Commands.Single(x => x.Id == command.Id);
+            Assert.Equal(Delivery.Dispatching, blocked.State);
+            Assert.Null(blocked.NativeMessageId);
+            await app.DisposeAsync();
+            _ = await probe.Api.Get("/fixture/release-provider", CancellationToken.None);
+            app = new TestApp(data, FixtureSecrets); store = app.Store;
+            await Finished(store, command);
+            var completed = (await store.Detail(worker.Id)).Commands.Single(x => x.Id == command.Id);
+            Assert.Equal(1, completed.Attempts);
+            Assert.NotNull(completed.NativeMessageId);
+            Assert.Equal(before + 1, (await probe.Api.Get("/fixture/stats", CancellationToken.None)).GetProperty("submissions").GetInt32());
+            Assert.Equal(worker.NativeSessionId, (await store.Detail(worker.Id)).Worker.NativeSessionId);
+        }
+        finally
+        {
+            var factory = app.Services.GetRequiredService<IRuntimeTransportFactory>();
+            try { await using var connection = await factory.Connect(runtime, CancellationToken.None); await connection.StopOwnedServer(CancellationToken.None); } catch (Exception) { }
+            await app.DisposeAsync();
+        }
+    }
+
+    [SshFact]
     public async Task TwoRuntimesConversationQueueQuestionsAbortAndRestartRecoverWithoutReplay()
     {
         var data = Path.Combine(Path.GetTempPath(), "hvo-ssh-lifecycle-" + Guid.NewGuid().ToString("N"));

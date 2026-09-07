@@ -255,4 +255,10 @@ public sealed record CoordinationControlInput(long ExpectedRevision, string Acti
 public sealed record CoordinationPromptInput(string Id, long ExpectedRevision, string Text);
 public sealed record CoordinatorDecision(string Summary, CoordinatorAction[] Actions, bool Complete = false);
 public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null, string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null);
-public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CommandRecord[] Results, PendingRequest[] Questions);
+public sealed record CoordinatorResult(string Id, string WorkerId, string State, string Detail, string ProgressText,
+    long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted);
+public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);
+public sealed record DecisionReceipt(string Summary, int Round, string DecisionCommandId, long AppliedAt, DecisionActionReceipt[] Dispatched);
+public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
+public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
+    DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null);
