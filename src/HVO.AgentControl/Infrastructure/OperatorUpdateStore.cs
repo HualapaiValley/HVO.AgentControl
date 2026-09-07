@@ -138,7 +138,7 @@ public sealed partial class ControlStore
         var commands = await db.Commands.Where(x => x.WorkerId != null && ids.Contains(x.WorkerId))
             .OrderBy(x => x.CreatedAt).ThenBy(x => x.Id).ToListAsync();
         var requests = await db.Requests.Where(x => ids.Contains(x.WorkerId) && (x.State == "Pending" || x.State == "ReplyUnknown")).ToListAsync();
-        var summaries = ids.Select(id => SummarizeParticipant(run.Id, id, workers.GetValueOrDefault(id), commands, requests)).ToArray();
+        var summaries = ids.Select(id => SummarizeParticipant(run.Id, run.State, id, workers.GetValueOrDefault(id), commands, requests)).ToArray();
         return new(run.Id, run.State, generatedAt,
             summaries.Count(x => x.Phase is "Active" or "Waiting" or "Uncertain"),
             summaries.Count(x => x.Phase == "Available"),
@@ -146,7 +146,7 @@ public sealed partial class ControlStore
             summaries.Count(x => x.Phase is "Stale" or "Failed" or "Cancelled"), summaries);
     }
 
-    private static OperatorParticipantSummary SummarizeParticipant(string runId, string id, WorkerRecord? worker,
+    private static OperatorParticipantSummary SummarizeParticipant(string runId, string runState, string id, WorkerRecord? worker,
         List<CommandRecord> commands, List<PendingRequest> requests)
     {
         var global = commands.Where(x => x.WorkerId == id).ToList();
@@ -162,11 +162,11 @@ public sealed partial class ControlStore
         var latestGlobal = global.LastOrDefault();
         var assignment = PromptSummary(runCurrent);
         var progressAt = runCommands.Where(x => x.LastProgressAt is not null).Select(x => x.LastProgressAt).Max();
-        var receiptAt = runCommands.Select(x => x.LastProgressAt ?? x.AcceptedAt ??
-            (x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled ? x.UpdatedAt : (long?)null)).Max();
+        var receiptAt = runCommands.Select(x => new long?[] { x.LastProgressAt, x.AcceptedAt,
+            x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled ? x.UpdatedAt : null }.Max()).Max();
         string phase, blocker, next;
 
-        if (worker is null || worker.Stale || worker.LastObservedAt is null || worker.Activity == "MissingSession")
+        if (worker is null || worker.Archived || worker.Stale || worker.LastObservedAt is null || worker.Activity == "MissingSession")
         { phase = "Stale"; blocker = "Session unavailable or not observed."; next = "Await a trusted session observation."; }
         else if (permission)
         { phase = "Waiting"; blocker = "Owner tool approval required."; next = question ? "Owner approval and a coordinator or owner answer." : "Owner approval in the worker conversation."; }
@@ -188,6 +188,10 @@ public sealed partial class ControlStore
         { phase = "Active"; blocker = "Native activity has no current run command receipt."; next = "Await the next native observation."; }
         else
         { phase = "Available"; blocker = ""; next = "No current run work; available for a future dispatch."; }
+
+        if (runState is "Completed" or "Stopped")
+            next = "Run " + runState.ToLowerInvariant() + "; no new run assignments. Already dispatched work continues independently. " +
+                (phase is "Waiting" or "Uncertain" or "Stale" ? next : "");
 
         return new(id, worker?.Name ?? "Unknown participant", phase, assignment, worker?.LastObservedAt,
             progressAt, receiptAt, blocker.Length == 0 ? null : blocker, next);

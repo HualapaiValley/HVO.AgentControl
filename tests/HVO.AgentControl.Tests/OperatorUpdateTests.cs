@@ -187,6 +187,39 @@ public sealed class OperatorUpdateTests
         await Assert.ThrowsAsync<ControlException>(() => app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 2), 6_000_000));
     }
 
+
+    [Theory]
+    [InlineData("Completed")]
+    [InlineData("Stopped")]
+    public async Task TerminalSummaryDoesNotSuggestFutureRunDispatch(string state)
+    {
+        await using var app = new TestApp();
+        var (run, _) = await Seed(app.Store);
+        await app.Store.Write(async db => { (await db.CoordinationRuns.FindAsync(run.Id))!.State = state; return true; });
+        var summary = Json.Read<OperatorStatusSummary>((await Configure(app.Store, run.Id)).Single().SummaryJson);
+        Assert.Contains("no new run assignments", Assert.Single(summary.Participants).NextEvent);
+    }
+
+    [Fact]
+    public async Task ArchivedParticipantAndTerminalReceiptAreReportedTruthfully()
+    {
+        await using var app = new TestApp();
+        var (run, worker) = await Seed(app.Store);
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Workers.FindAsync(worker.Id))!;
+            saved.Archived = true; saved.Activity = "Idle";
+            var command = await db.Commands.SingleAsync(x => x.WorkerId == worker.Id);
+            command.State = Delivery.Finished; command.UpdatedAt = 1_000_000;
+            return true;
+        });
+        var summary = Json.Read<OperatorStatusSummary>((await Configure(app.Store, run.Id)).Single().SummaryJson);
+        var participant = Assert.Single(summary.Participants);
+        Assert.Equal("Stale", participant.Phase);
+        Assert.Equal(1_000_000, participant.LastReceiptAt);
+        Assert.Equal(900_000, participant.LastProgressAt);
+    }
+
     private static async Task<(CoordinationRun Run, WorkerRecord Worker)> Seed(ControlStore store)
     {
         var worker = new WorkerRecord
