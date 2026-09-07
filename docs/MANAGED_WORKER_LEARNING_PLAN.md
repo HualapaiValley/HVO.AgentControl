@@ -62,3 +62,24 @@ The current App setup deliberately disables webhooks. Intake requires a reachabl
 2. Preserve versioned task evidence and provide an offline evaluation export before older operational records are pruned.
 3. Complete managed Dev Container lifecycle and fresh task sessions, then exercise warm reuse and bounded scale-out alongside external hosts.
 4. Add GitHub comment intake with authorization, deduplication and durable publication, first against this test repository. Test duplicate webhooks, unauthorized senders, edited instructions, changed PR heads, unavailable capacity, provisioning failure and controller restart.
+
+## Model selection during intake
+
+Owner refinement: choose the model per task and phase, not permanently per worker. Current task-level provider/model overrides already preserve worker defaults and native sessions. All four development runtime catalogs advertise `openai/gpt-6-astra`; catalog visibility is not proof of successful inference or remaining subscription quota. The initial routing policy below is an operational hypothesis to evaluate, not a benchmark result. [Official Astra guidance](https://developers.openai.com/api/docs/models/gpt-6-astra) identifies complex reasoning and coding as intended uses.
+
+| Task characteristics | Initial model policy |
+| --- | --- |
+| Routine intake, progress summaries, bounded low-risk reviews | Luna |
+| Clear, localized implementation and regression tests | Terra |
+| Substantial implementation or integration across components | Sol |
+| Architecture, credential boundaries, migrations/recovery invariants, distributed provisioning, ambiguous cross-repository work or difficult unresolved defects | Astra |
+
+Review model selection follows the risk of the change, not a blanket cheaper-review rule. Use Astra for critical security, migration and recovery reviews even when another model implemented the change. Keep independent reviewers; a stronger author does not replace review. Provisioning #43, GitHub authorization/intake #67, and evidence lifecycle #66 warrant Astra design or critical-path review; routine UI work within those issues can use Terra/Sol.
+
+The durable intake decision should contain task/phase, repository and exact revision, acceptance criteria, complexity/risk/uncertainty and supporting facts, required tools/capabilities, chosen provider/model, concise rationale, routing-policy version, budget and allowed fallback/escalation path. Validate the model against the selected runtime and provider readiness. Choose a compatible free worker after determining task requirements. Owner model choices take precedence. Show the decision and escalation history in the task UI and export them with #66 evidence.
+
+A lightweight classifier can propose a tier; service-enforced policy sets risk floors, allowed models and resource/usage limits. Low-confidence critical classification gets a bounded stronger-model assessment. Escalate after two substantive failed correction attempts, an unresolved critical review finding or demonstrated reasoning difficulty. Tool approvals, missing dependencies, provider outages and stale connections need operational repair, not automatic model escalation. Pass exact findings, prior attempts and artifact revisions to the next model. Switch only at a safe task boundary after accepted or uncertain work is reconciled; never interrupt/replay an active mutation to change models.
+
+If the selected model is unavailable, record the reason and use only a configured fallback that meets the task's risk floor; otherwise leave the task visibly blocked. Do not silently downgrade critical work. Do not interpret ChatGPT subscription usage as API-priced cost. Track observed provider usage/limits separately and leave unavailable cost unknown. Task-level reasoning-effort selection is future work: current overrides clear the default variant and must not pretend to set unsupported action fields.
+
+Rollout: apply this as explicit coordinator guidance for future dispatches now, then implement a versioned durable intake policy shared by website, coordinator and GitHub entry points. Test owner overrides, risk floors, unavailable providers, invalid classifier output, bounded escalation, independent review, restart persistence, and active/uncertain-work protection. The initial live guidance is prompt-based, not yet a service-enforced routing engine.
