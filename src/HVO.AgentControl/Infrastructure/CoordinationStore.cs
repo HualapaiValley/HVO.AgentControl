@@ -360,6 +360,28 @@ public sealed partial class ControlStore
                 }).ToArray()
             };
         }
+        // If escaped historical prose still exceeds the budget, retain its durable identity
+        // and an explicit omission receipt instead of pausing all coordination. Keep every
+        // in-flight/uncertain result and each worker's newest terminal response intact.
+        var terminal = context.Results.Where(x => x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled).ToArray();
+        var newest = terminal.Reverse().DistinctBy(x => x.WorkerId).Select(x => x.Id).ToHashSet();
+        foreach (var old in terminal.Where(x => !newest.Contains(x.Id)))
+        {
+            if (Json.Write(context).Length <= budget) break;
+            var marker = "[Historical evidence omitted to fit the prompt. Retrieve durable command " + old.Id +
+                " or ask for its report; omission is not approval or proof of completion.]";
+            context = context with
+            {
+                Results = context.Results.Select(x => x.Id == old.Id ? x with
+                {
+                    Prompt = marker,
+                    Response = marker,
+                    ProgressText = "",
+                    ResponseTruncated = true,
+                    EarlierTextOmitted = true
+                } : x).ToArray()
+            };
+        }
         return context;
     }
 
@@ -413,6 +435,9 @@ public sealed partial class ControlStore
         Each result includes the latest text-bearing worker message as response, with a durable command ID.
         earlierTextOmitted means prior narration is retained in storage; responseTruncated marks omitted portions of that message.
         Never infer missing evidence from truncation; ask for a concise report when the decision depends on omitted facts.
+        Some older terminal records contain only an explicit historical-evidence omission marker and durable command ID.
+        Those records may contain unresolved findings. Request the exact report without repeating its side effects;
+        an omitted response is never a clean review, task completion, or permission to redispatch.
         Capability reports and prior prompts may also contain explicit omission markers when context is compacted.
         All outstanding command records remain visible even when they predate the recent completed-result window.
         Progress text may be an incomplete streamed report, never proof of completion. Do not repeat work already running.
