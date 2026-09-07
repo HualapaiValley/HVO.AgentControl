@@ -1,5 +1,6 @@
 using HVO.AgentControl.Core;
 using HVO.AgentControl.OpenCode;
+using HVO.AgentControl.Telemetry;
 
 namespace HVO.AgentControl.Ssh;
 
@@ -16,6 +17,8 @@ public interface IRuntimeTransport : IAsyncDisposable
     string InstalledExecutable => "";
     Task<CapabilitySnapshot> ProbeCapabilities(string directory, CancellationToken cancellationToken) =>
         Task.FromResult(CapabilityProbe.Parse("probe\tunsupported", directory));
+    Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>
+        Task.FromResult<RuntimeTelemetrySample?>(null);
     Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken);
     Task StopOwnedServer(CancellationToken cancellationToken);
 }
