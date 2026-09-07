@@ -153,7 +153,9 @@ public sealed partial class ControlStore
         // Do not treat a stream of progress tokens or model-written prose as completion.
         var progressDue = commands.Any(x => x.LastProgressAt > run.LastDecisionAt) &&
             Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
-        if (unresolved && requests.All(x => x.Kind != "question") && !progressDue) return false;
+        var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
+            x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
+        if (unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision) return false;
         var observation = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
         {
             commands = commands.Select(x => new { x.Id, x.State, x.ProgressText }),
