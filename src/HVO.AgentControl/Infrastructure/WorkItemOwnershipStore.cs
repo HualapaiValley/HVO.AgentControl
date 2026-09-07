@@ -17,13 +17,11 @@ public sealed partial class ControlStore
         if (owner.Archived) throw new ControlException("Cannot assign work to an archived worker.", 400);
         var existing = await db.WorkItems.FindAsync(input.Id);
         if (existing is not null) throw new ControlException("Work item ID already exists.", 409);
-        if (input.IssueNumber is not null)
-        {
-            var duplicate = await db.WorkItems.FirstOrDefaultAsync(x =>
-                x.IssueNumber == input.IssueNumber && x.Repository == input.Repository && x.Branch == input.Branch);
-            if (duplicate is not null)
-                throw new ControlException($"Work item for issue #{input.IssueNumber} on branch '{input.Branch}' in repository '{input.Repository}' already exists as '{duplicate.Id}'.");
-        }
+        var liveConflict = await db.WorkItems.FirstOrDefaultAsync(x =>
+            x.Repository == input.Repository && x.Branch == input.Branch &&
+            x.State != WorkItemState.Released && x.State != WorkItemState.Abandoned);
+        if (liveConflict is not null)
+            throw new ControlException($"Branch '{input.Branch}' in repository '{input.Repository}' already has an active work item '{liveConflict.Id}' (issue #{liveConflict.IssueNumber}).");
         var workItem = new WorkItem
         {
             Id = input.Id,
@@ -52,6 +50,8 @@ public sealed partial class ControlStore
     public Task<WorkItem> ClaimWorkItem(WorkItemClaimInput input) => Write(async db =>
     {
         var workItem = await db.WorkItems.FindAsync(input.WorkItemId) ?? throw new ControlException("Work item not found.", 404);
+        if (workItem.State == WorkItemState.Released || workItem.State == WorkItemState.Abandoned)
+            throw new ControlException($"Work item is {workItem.State.ToString().ToLowerInvariant()} and cannot be claimed.");
         if (workItem.OwnerWorkerId != input.WorkerId)
         {
             var existingOwner = await db.Workers.FindAsync(workItem.OwnerWorkerId);

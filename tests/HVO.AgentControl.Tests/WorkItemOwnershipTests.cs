@@ -288,9 +288,97 @@ public sealed class WorkItemOwnershipTests
         await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-dup-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
         var second = new CreateWorkItemInput("wi-dup-2", "42", "Second", "feat/x", "HVO.AgentControl", worker.Id);
         var ex = await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorkItem(second));
-        Assert.Contains("issue #42", ex.Message);
         Assert.Contains("feat/x", ex.Message);
         Assert.Contains("HVO.AgentControl", ex.Message);
+        Assert.Contains("wi-dup-1", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithDifferentIssueSameRepoBranchThrows()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-issue-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var second = new CreateWorkItemInput("wi-issue-2", "99", "Second", "feat/x", "HVO.AgentControl", worker.Id);
+        var ex = await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorkItem(second));
+        Assert.Contains("already has an active work item", ex.Message);
+        Assert.Contains("feat/x", ex.Message);
+        Assert.Contains("HVO.AgentControl", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithNullIssueSameRepoBranchThrows()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-null-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var second = new CreateWorkItemInput("wi-null-2", null, "Second (no issue)", "feat/x", "HVO.AgentControl", worker.Id);
+        var ex = await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorkItem(second));
+        Assert.Contains("already has an active work item", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithSameBranchDifferentRepoSucceedsCrossRepo()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-cross-repo-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var second = new CreateWorkItemInput("wi-cross-repo-2", "99", "Second", "feat/x", "other-repo", worker.Id);
+        var workItem = await app.Store.CreateWorkItem(second);
+        Assert.Equal("wi-cross-repo-2", workItem.Id);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemAfterReleaseFreesBranch()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-release-free", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+            var item = await app.Store.GetWorkItem("wi-release-free");
+            await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(item!.Id, worker.Id));
+            var second = new CreateWorkItemInput("wi-release-free-2", "99", "Second after release", "feat/x", "HVO.AgentControl", worker.Id);
+            var workItem = await app.Store.CreateWorkItem(second);
+            Assert.Equal("wi-release-free-2", workItem.Id);
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var recovered = await restarted.Store.GetWorkItem("wi-release-free-2");
+        Assert.NotNull(recovered);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemAfterAbandonFreesBranch()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-abandon-free", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var item = await app.Store.GetWorkItem("wi-abandon-free");
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(item!.Id, item.Revision, worker.Id, WorkItemState.Abandoned, null));
+        var second = new CreateWorkItemInput("wi-abandon-free-2", "99", "Second after abandon", "feat/x", "HVO.AgentControl", worker.Id);
+        var workItem = await app.Store.CreateWorkItem(second);
+        Assert.Equal("wi-abandon-free-2", workItem.Id);
+    }
+
+    [Fact]
+    public async Task ClaimWorkItemForReleasedWorkItemThrows()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var item = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-claim-released", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
+        await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(item.Id, worker.Id));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.ClaimWorkItem(new WorkItemClaimInput(item.Id, worker.Id)));
+    }
+
+    [Fact]
+    public async Task ClaimWorkItemForAbandonedWorkItemThrows()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var item = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-claim-abandoned", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(item.Id, item.Revision, worker.Id, WorkItemState.Abandoned, null));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.ClaimWorkItem(new WorkItemClaimInput(item.Id, worker.Id)));
     }
 
     [Fact]
