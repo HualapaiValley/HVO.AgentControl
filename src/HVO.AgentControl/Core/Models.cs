@@ -180,6 +180,7 @@ public sealed class WorkItem
     public string? IssueNumber { get; set; }
     public string Title { get; set; } = "";
     public string Branch { get; set; } = "";
+    public string Repository { get; set; } = "";
     public string OwnerWorkerId { get; set; } = "";
     public string State { get; set; } = WorkItemState.Active;
     public string CurrentPhase { get; set; } = "implementation";
@@ -203,7 +204,7 @@ public sealed class WorkItemPhase
 
 public sealed record WorkItemClaimInput(string WorkItemId, string WorkerId, string? PhaseName = null);
 public sealed record WorkItemReleaseInput(string WorkItemId, string WorkerId, string? PhaseName = null, string? Evidence = null);
-public sealed record CreateWorkItemInput(string Id, string? IssueNumber, string Title, string Branch, string WorkerId, string? PhaseName = null);
+public sealed record CreateWorkItemInput(string Id, string? IssueNumber, string Title, string Branch, string Repository, string WorkerId, string? PhaseName = null);
 public sealed record TransitionWorkItemInput(string Id, long ExpectedRevision, string WorkerId, string State, string? PhaseName = null, string? Evidence = null);
 public sealed record AdvancePhaseInput(string WorkItemId, string WorkerId, string FromPhase, string ToPhase, string? Evidence = null);
 

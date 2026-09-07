@@ -11,33 +11,41 @@ public sealed partial class ControlStore
             throw new ControlException("Work item title is required and must be 500 characters or fewer.", 400);
         if (string.IsNullOrWhiteSpace(input.Branch) || input.Branch.Length > 200)
             throw new ControlException("Work item branch is required and must be 200 characters or fewer.", 400);
+        if (string.IsNullOrWhiteSpace(input.Repository) || input.Repository.Length > 500)
+            throw new ControlException("Repository identifier is required and must be 500 characters or fewer.", 400);
         var owner = await db.Workers.FindAsync(input.WorkerId) ?? throw new ControlException("Owner worker not found.", 404);
         if (owner.Archived) throw new ControlException("Cannot assign work to an archived worker.", 400);
         var existing = await db.WorkItems.FindAsync(input.Id);
         if (existing is not null) throw new ControlException("Work item ID already exists.", 409);
+        if (input.IssueNumber is not null)
+        {
+            var duplicate = await db.WorkItems.FirstOrDefaultAsync(x =>
+                x.IssueNumber == input.IssueNumber && x.Repository == input.Repository && x.Branch == input.Branch);
+            if (duplicate is not null)
+                throw new ControlException($"Work item for issue #{input.IssueNumber} on branch '{input.Branch}' in repository '{input.Repository}' already exists as '{duplicate.Id}'.");
+        }
         var workItem = new WorkItem
         {
             Id = input.Id,
             IssueNumber = input.IssueNumber,
             Title = input.Title,
             Branch = input.Branch,
+            Repository = input.Repository,
             OwnerWorkerId = input.WorkerId,
             State = WorkItemState.Active,
             CurrentPhase = input.PhaseName ?? "implementation"
         };
         db.WorkItems.Add(workItem);
-        if (input.PhaseName is not null)
+        var phaseName = input.PhaseName ?? "implementation";
+        db.WorkItemPhases.Add(new WorkItemPhase
         {
-            db.WorkItemPhases.Add(new WorkItemPhase
-            {
-                WorkItemId = input.Id,
-                Name = input.PhaseName,
-                State = WorkItemPhaseState.Active,
-                OwnerWorkerId = input.WorkerId,
-                StartedAt = ControlStore.Now
-            });
-        }
-        Event(db, "WorkItemCreated", payload: new { workItem.Id, workItem.IssueNumber, workItem.Title, workItem.Branch, workItem.OwnerWorkerId }, provenance: "user");
+            WorkItemId = input.Id,
+            Name = phaseName,
+            State = WorkItemPhaseState.Active,
+            OwnerWorkerId = input.WorkerId,
+            StartedAt = ControlStore.Now
+        });
+        Event(db, "WorkItemCreated", payload: new { workItem.Id, workItem.IssueNumber, workItem.Title, workItem.Branch, workItem.Repository, workItem.OwnerWorkerId }, provenance: "user");
         return workItem;
     });
 
@@ -173,6 +181,7 @@ public sealed partial class ControlStore
     {
         var workItem = await db.WorkItems.FindAsync(input.WorkItemId) ?? throw new ControlException("Work item not found.", 404);
         if (workItem.OwnerWorkerId != input.WorkerId) throw new ControlException("Only the work item owner may advance phases.", 403);
+        if (workItem.State == WorkItemState.Released || workItem.State == WorkItemState.Abandoned) throw new ControlException($"Work item is {workItem.State.ToString().ToLowerInvariant()} and cannot be modified.", 409);
         var fromPhase = await db.WorkItemPhases.FirstOrDefaultAsync(x => x.WorkItemId == input.WorkItemId && x.Name == input.FromPhase && x.State == WorkItemPhaseState.Active);
         if (fromPhase is null) throw new ControlException($"Active phase '{input.FromPhase}' not found.", 404);
         var toPhase = await db.WorkItemPhases.FirstOrDefaultAsync(x => x.WorkItemId == input.WorkItemId && x.Name == input.ToPhase);
@@ -223,7 +232,12 @@ public sealed partial class ControlStore
 
     public Task<bool> ValidateOneModifyingOwner(string workItemId, string workerId)
     {
-        return Read(async db => await db.WorkItems.AnyAsync(w => w.Id == workItemId && w.OwnerWorkerId == workerId) &&
-                               await db.Workers.AnyAsync(w => w.Id == workerId && !w.Archived));
+        return Read(async db =>
+        {
+            var workItem = await db.WorkItems.AsNoTracking().FirstOrDefaultAsync(w => w.Id == workItemId && w.OwnerWorkerId == workerId);
+            if (workItem is null) return false;
+            if (workItem.State == WorkItemState.Released || workItem.State == WorkItemState.Abandoned) return false;
+            return await db.Workers.AnyAsync(w => w.Id == workerId && !w.Archived);
+        });
     }
 }

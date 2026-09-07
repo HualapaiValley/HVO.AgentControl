@@ -11,12 +11,13 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var input = new CreateWorkItemInput("wi-1", "42", "Implement feature X", "feat/x", worker.Id, "implementation");
+        var input = new CreateWorkItemInput("wi-1", "42", "Implement feature X", "feat/x", "HVO.AgentControl", worker.Id, "implementation");
         var workItem = await app.Store.CreateWorkItem(input);
         Assert.Equal("wi-1", workItem.Id);
         Assert.Equal("42", workItem.IssueNumber);
         Assert.Equal("Implement feature X", workItem.Title);
         Assert.Equal("feat/x", workItem.Branch);
+        Assert.Equal("HVO.AgentControl", workItem.Repository);
         Assert.Equal(worker.Id, workItem.OwnerWorkerId);
         Assert.Equal(WorkItemState.Active, workItem.State);
         Assert.Equal("implementation", workItem.CurrentPhase);
@@ -27,7 +28,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var input = new CreateWorkItemInput("wi-dup", "42", "First", "feat/x", worker.Id);
+        var input = new CreateWorkItemInput("wi-dup", "42", "First", "feat/x", "HVO.AgentControl", worker.Id);
         await app.Store.CreateWorkItem(input);
         await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorkItem(input with { Title = "Second" }));
     }
@@ -43,7 +44,7 @@ public sealed class WorkItemOwnershipTests
             w.Archived = true;
             return true;
         });
-        var input = new CreateWorkItemInput("wi-archived", "42", "Test", "feat/x", worker.Id);
+        var input = new CreateWorkItemInput("wi-archived", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id);
         await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorkItem(input));
     }
 
@@ -52,7 +53,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-claim", "42", "Test", "feat/x", worker.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-claim", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
         var claimed = await app.Store.ClaimWorkItem(new WorkItemClaimInput(workItem.Id, worker.Id));
         Assert.Equal(workItem.Id, claimed.Id);
         Assert.Equal(workItem.Revision + 1, claimed.Revision);
@@ -66,7 +67,7 @@ public sealed class WorkItemOwnershipTests
         var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
         var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_2", Directory = "/home/agent/workspaces/b", Name = "Worker2" };
         await app.Store.Write(db => { db.Workers.Add(worker2); return Task.FromResult(true); });
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-wrong", "42", "Test", "feat/x", worker1.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-wrong", "42", "Test", "feat/x", "HVO.AgentControl", worker1.Id));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.ClaimWorkItem(new WorkItemClaimInput(workItem.Id, worker2.Id)));
     }
 
@@ -75,7 +76,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-phase", "42", "Test", "feat/x", worker.Id, "implementation"));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-phase", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id, "implementation"));
         var claimed = await app.Store.ClaimWorkItem(new WorkItemClaimInput(workItem.Id, worker.Id, "review"));
         Assert.Equal("review", claimed.CurrentPhase);
         var phases = await app.Store.GetPhases(workItem.Id);
@@ -89,7 +90,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-release", "42", "Test", "feat/x", worker.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-release", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
         var released = await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(workItem.Id, worker.Id, null, "Done"));
         Assert.Equal(WorkItemState.Released, released.State);
     }
@@ -102,7 +103,7 @@ public sealed class WorkItemOwnershipTests
         var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
         var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_3", Directory = "/home/agent/workspaces/c", Name = "Worker3" };
         await app.Store.Write(db => { db.Workers.Add(worker2); return Task.FromResult(true); });
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-rel-wrong", "42", "Test", "feat/x", worker1.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-rel-wrong", "42", "Test", "feat/x", "HVO.AgentControl", worker1.Id));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.ReleaseWorkItem(new WorkItemReleaseInput(workItem.Id, worker2.Id)));
     }
 
@@ -111,7 +112,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-trans", "42", "Test", "feat/x", worker.Id, "implementation"));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-trans", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id, "implementation"));
         var transitioned = await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker.Id, WorkItemState.InReview, "review"));
         Assert.Equal(WorkItemState.InReview, transitioned.State);
         Assert.Equal("review", transitioned.CurrentPhase);
@@ -122,7 +123,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-inv", "42", "Test", "feat/x", worker.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-inv", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker.Id, WorkItemState.Released, null)));
     }
 
@@ -131,7 +132,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-stale", "42", "Test", "feat/x", worker.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-stale", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision + 1, worker.Id, WorkItemState.InReview, null)));
     }
 
@@ -143,7 +144,7 @@ public sealed class WorkItemOwnershipTests
         var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
         var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_trans", Directory = "/home/agent/workspaces/trans", Name = "WorkerTrans" };
         await app.Store.Write(db => { db.Workers.Add(worker2); return Task.FromResult(true); });
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-trans-wrong", "42", "Test", "feat/x", worker1.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-trans-wrong", "42", "Test", "feat/x", "HVO.AgentControl", worker1.Id));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker2.Id, WorkItemState.InReview, null)));
     }
 
@@ -152,7 +153,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-adv", "42", "Test", "feat/x", worker.Id, "implementation"));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-adv", "42", "Test", "feat/x", "HVO.AgentControl", worker.Id, "implementation"));
         var advanced = await app.Store.AdvancePhase(new AdvancePhaseInput(workItem.Id, worker.Id, "implementation", "review", "Phase complete"));
         Assert.Equal("review", advanced.CurrentPhase);
         var phases = await app.Store.GetPhases(workItem.Id);
@@ -170,7 +171,7 @@ public sealed class WorkItemOwnershipTests
         var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
         var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_4", Directory = "/home/agent/workspaces/d", Name = "Worker4" };
         await app.Store.Write(db => { db.Workers.Add(worker2); return Task.FromResult(true); });
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-adv-wrong", "42", "Test", "feat/x", worker1.Id, "implementation"));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-adv-wrong", "42", "Test", "feat/x", "HVO.AgentControl", worker1.Id, "implementation"));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.AdvancePhase(new AdvancePhaseInput(workItem.Id, worker2.Id, "implementation", "review")));
     }
 
@@ -181,7 +182,7 @@ public sealed class WorkItemOwnershipTests
         await using (var app = new TestApp())
         {
             var worker = await PersistenceTests.SeedWorker(app.Store);
-            var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-restart", "42", "Restart test", "feat/restart", worker.Id, "implementation"));
+            var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-restart", "42", "Restart test", "feat/restart", "HVO.AgentControl", worker.Id, "implementation"));
             workItemId = workItem.Id;
             data = app.DataPath; secrets = app.SecretPath;
         }
@@ -201,9 +202,9 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-active", "42", "Active", "feat/active", worker.Id));
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-released", "43", "Released", "feat/released", worker.Id));
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-abandoned", "44", "Abandoned", "feat/abandoned", worker.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-active", "42", "Active", "feat/active", "HVO.AgentControl", worker.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-released", "43", "Released", "feat/released", "HVO.AgentControl", worker.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-abandoned", "44", "Abandoned", "feat/abandoned", "HVO.AgentControl", worker.Id));
         var workItem = await app.Store.GetWorkItem("wi-released");
         await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(workItem!.Id, worker.Id));
         workItem = await app.Store.GetWorkItem("wi-abandoned");
@@ -222,9 +223,9 @@ public sealed class WorkItemOwnershipTests
         var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
         var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_5", Directory = "/home/agent/workspaces/e", Name = "Worker5" };
         await app.Store.Write(db => { db.Workers.Add(worker2); return Task.FromResult(true); });
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-w1", "42", "Worker1 item", "feat/w1", worker1.Id));
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-w2", "43", "Worker2 item", "feat/w2", worker2.Id));
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-w1-2", "44", "Worker1 item 2", "feat/w1-2", worker1.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-w1", "42", "Worker1 item", "feat/w1", "HVO.AgentControl", worker1.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-w2", "43", "Worker2 item", "feat/w2", "HVO.AgentControl", worker2.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-w1-2", "44", "Worker1 item 2", "feat/w1-2", "HVO.AgentControl", worker1.Id));
         var w1Items = await app.Store.GetWorkItemsByOwner(worker1.Id);
         Assert.Equal(2, w1Items.Count);
         Assert.All(w1Items, x => Assert.Equal(worker1.Id, x.OwnerWorkerId));
@@ -235,7 +236,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-owner", "42", "Test", "feat/owner", worker.Id));
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-owner", "42", "Test", "feat/owner", "HVO.AgentControl", worker.Id));
         Assert.True(await app.Store.IsWorkItemOwner(workItem.Id, worker.Id));
         var runtime2 = await app.Store.SaveRuntime(PersistenceTests.Profile());
         var worker2 = new WorkerRecord { RuntimeId = runtime2.Id, ManagedServerId = runtime2.ManagedServerId, NativeSessionId = "ses_6", Directory = "/home/agent/workspaces/f", Name = "Worker6" };
@@ -248,7 +249,7 @@ public sealed class WorkItemOwnershipTests
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
-        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-validate", "42", "Test", "feat/validate", worker.Id));
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-validate", "42", "Test", "feat/validate", "HVO.AgentControl", worker.Id));
         Assert.True(await app.Store.ValidateOneModifyingOwner("wi-validate", worker.Id));
         await app.Store.Write(async db =>
         {
@@ -257,5 +258,92 @@ public sealed class WorkItemOwnershipTests
             return true;
         });
         Assert.False(await app.Store.ValidateOneModifyingOwner("wi-validate", worker.Id));
+    }
+
+    [Fact]
+    public async Task ValidateOneModifyingOwnerReturnsFalseForReleasedState()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-released-val", "42", "Test", "feat/rel", "HVO.AgentControl", worker.Id));
+        await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(workItem.Id, worker.Id));
+        Assert.False(await app.Store.ValidateOneModifyingOwner("wi-released-val", worker.Id));
+    }
+
+    [Fact]
+    public async Task ValidateOneModifyingOwnerReturnsFalseForAbandonedState()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-abandoned-val", "42", "Test", "feat/abd", "HVO.AgentControl", worker.Id));
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker.Id, WorkItemState.Abandoned, null));
+        Assert.False(await app.Store.ValidateOneModifyingOwner("wi-abandoned-val", worker.Id));
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithDuplicateRepoBranchIssueThrows()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-dup-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var second = new CreateWorkItemInput("wi-dup-2", "42", "Second", "feat/x", "HVO.AgentControl", worker.Id);
+        var ex = await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorkItem(second));
+        Assert.Contains("issue #42", ex.Message);
+        Assert.Contains("feat/x", ex.Message);
+        Assert.Contains("HVO.AgentControl", ex.Message);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithSameRepoDifferentBranchSucceeds()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-branch-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var second = new CreateWorkItemInput("wi-branch-2", "42", "Second", "feat/y", "HVO.AgentControl", worker.Id);
+        var workItem = await app.Store.CreateWorkItem(second);
+        Assert.Equal("wi-branch-2", workItem.Id);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithSameBranchDifferentRepoSucceeds()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-repo-1", "42", "First", "feat/x", "HVO.AgentControl", worker.Id));
+        var second = new CreateWorkItemInput("wi-repo-2", "42", "Second", "feat/x", "other-repo", worker.Id);
+        var workItem = await app.Store.CreateWorkItem(second);
+        Assert.Equal("wi-repo-2", workItem.Id);
+    }
+
+    [Fact]
+    public async Task CreateWorkItemWithoutPhaseNameCreatesDefaultPhase()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-nophase", "42", "No phase", "feat/nophase", "HVO.AgentControl", worker.Id));
+        var phases = await app.Store.GetPhases(workItem.Id);
+        Assert.Single(phases);
+        Assert.Equal("implementation", phases[0].Name);
+        Assert.Equal(WorkItemPhaseState.Active, phases[0].State);
+    }
+
+    [Fact]
+    public async Task AdvancePhaseFailsForReleasedWorkItem()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-adv-rel", "42", "Test", "feat/advrel", "HVO.AgentControl", worker.Id, "implementation"));
+        await app.Store.ReleaseWorkItem(new WorkItemReleaseInput(workItem.Id, worker.Id));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AdvancePhase(new AdvancePhaseInput(workItem.Id, worker.Id, "implementation", "review")));
+    }
+
+    [Fact]
+    public async Task AdvancePhaseFailsForAbandonedWorkItem()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var workItem = await app.Store.CreateWorkItem(new CreateWorkItemInput("wi-adv-abd", "42", "Test", "feat/advabd", "HVO.AgentControl", worker.Id, "implementation"));
+        await app.Store.TransitionWorkItem(new TransitionWorkItemInput(workItem.Id, workItem.Revision, worker.Id, WorkItemState.Abandoned, null));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AdvancePhase(new AdvancePhaseInput(workItem.Id, worker.Id, "implementation", "review")));
     }
 }
