@@ -23,16 +23,17 @@ public sealed class GitHubCredentialSupervisor(ControlStore store, Secrets secre
                         if (current is null || current.Revision != grant.Revision || runtime is null || !runtime.DesiredConnected || runtime.Health != "Healthy") continue;
                         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                         deadline.CancelAfter(TimeSpan.FromSeconds(60));
+                        GitHubInstallationToken? credential = null;
                         try
                         {
-                            var credential = await github.Issue(current.AppId, current.InstallationId, secrets.Read(current.PrivateKeyReference), Json.Read<string[]>(current.RepositoriesJson), deadline.Token);
+                            credential = await github.Issue(current.AppId, current.InstallationId, secrets.Read(current.PrivateKeyReference), Json.Read<string[]>(current.RepositoriesJson), deadline.Token);
                             await delivery.Deliver(runtime, credential, deadline.Token);
-                            await Save(grant, "Ready", "GitHub CLI credential delivered; renewal is automatic while connected.", credential.ExpiresAt.ToUnixTimeMilliseconds());
+                            await Save(grant, "Ready", "GitHub CLI credential delivered; renewal is automatic while connected.", credential.ExpiresAt.ToUnixTimeMilliseconds(), credential);
                         }
                         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { throw; }
                         catch (Exception ex)
                         {
-                            await Save(grant, "Blocked", ex is ControlException control ? control.Message : "GitHub credential delivery failed; check connectivity and access.", null);
+                            await Save(grant, "Blocked", ex is ControlException control ? control.Message : "GitHub credential delivery failed; check connectivity and access.", null, credential);
                         }
                     }
                     finally { access.Gate.Release(); }
@@ -45,14 +46,23 @@ public sealed class GitHubCredentialSupervisor(ControlStore store, Secrets secre
         }
     }
 
-    private Task<bool> Save(GitHubAccess grant, string state, string detail, long? expires) => store.Write(async db =>
+    private Task<bool> Save(GitHubAccess grant, string state, string detail, long? expires, GitHubInstallationToken? credential) => store.Write(async db =>
     {
         var current = await db.GitHubAccess.FindAsync(grant.Id);
         if (current is null || current.Revision != grant.Revision) return false;
         current.State = state; current.Detail = detail;
+        if (credential is not null) GitHubAccessService.SavePermissionEvidence(current, credential);
         if (expires.HasValue) current.ExpiresAt = expires;
         current.RetryAt = state == "Blocked" ? ControlStore.Now + 120000 : 0;
-        ControlStore.Event(db, "GitHubCredential" + state, grant.Id, payload: new { state, expires });
+        ControlStore.Event(db, "GitHubCredential" + state, grant.Id, payload: new
+        {
+            state,
+            expires,
+            current.ChecksPermission,
+            current.CommitStatusesPermission,
+            current.ActionsPermission,
+            current.PermissionsVerifiedAt
+        });
         return true;
     });
 }
