@@ -195,7 +195,7 @@ public sealed partial class ControlStore
                 CommandRecord dispatch;
                 if (action.Type == "send_prompt")
                     dispatch = await EnqueuePrompt(db, worker.Id, new(requestId, action.Text!, worker.Revision, ProviderId: action.ProviderId, ModelId: action.ModelId,
-                        Variant: action.ModelId is null ? null : "", IncludeGuidance: action.IncludeGuidance ?? run.IncludeGuidance,
+                        Variant: action.Variant ?? (action.ModelId is null ? null : ""), IncludeGuidance: action.IncludeGuidance ?? run.IncludeGuidance,
                         ProgressMinutes: (action.IncludeGuidance ?? run.IncludeGuidance) ? action.ProgressMinutes ?? run.ProgressMinutes : null), "coordinator:" + run.Id);
                 else
                     dispatch = await EnqueueReply(db, new(requestId, action.RequestId!, null, action.Answers), "coordinator:" + run.Id);
@@ -285,14 +285,18 @@ public sealed partial class ControlStore
             var observed = context.Workers.FirstOrDefault(x => x.Id == action.WorkerId) ?? throw new ControlException("Coordinator targeted a worker outside this run.");
             var current = await db.Workers.FindAsync(observed.Id) ?? throw new ControlException("Worker no longer exists.");
             if (current.Role != SessionRoles.Worker || current.Archived || current.Revision != observed.Revision) throw new ControlException("Worker changed after the coordinator observation; decision paused without dispatch.");
+            if (action.Type != "send_prompt" && action.Variant is not null)
+                throw new ControlException("Reasoning variants apply only to send_prompt actions.");
             if (action.Type == "send_prompt")
             {
                 if (action.ProviderId is not null || action.ModelId is not null)
                 {
                     if (string.IsNullOrWhiteSpace(action.ProviderId) || string.IsNullOrWhiteSpace(action.ModelId))
                         throw new ControlException("Task model selection requires both providerId and modelId.");
-                    ValidateModelOptions(Json.Read<List<ModelChoice>>(current.ModelsJson), action.ProviderId, action.ModelId, current.Agent, "");
                 }
+                if (action.ModelId is not null || action.Variant is not null)
+                    ValidateModelOptions(Json.Read<List<ModelChoice>>(current.ModelsJson), action.ProviderId ?? current.ProviderId,
+                        action.ModelId ?? current.ModelId, current.Agent, action.Variant ?? "");
                 var guidance = action.IncludeGuidance ?? run.IncludeGuidance;
                 AssignmentGuidance.Validate(guidance, action.ProgressMinutes ?? (guidance ? run.ProgressMinutes : null));
                 if (await db.Commands.AnyAsync(x => x.WorkerId == current.Id && (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)) || current.Stale || current.Activity != "Idle")
@@ -416,7 +420,12 @@ public sealed partial class ControlStore
         Optional send_prompt providerId and modelId select a model for that task only; always supply both together.
         Use an override only when the owner has supplied a verified available provider/model for that runtime.
         Omission preserves the worker default. Task overrides never change worker settings or native session identity.
-        A model override clears the default reasoning variant, since a different model may not support it.
+        Optional send_prompt variant selects a verified reasoning setting (for example xhigh) for that task only.
+        It must be supported by the selected model; without a model override it applies to the worker default model.
+        Omit variant to inherit the worker setting when using its default model; an explicit empty string resets it.
+        A model override without variant clears the default reasoning setting, since another model may not support it.
+        Never guess variant names. Unsupported selections reject the entire batch without dispatch; ask for verified options.
+        Do not put variant on answer_question actions.
         Optional send_prompt fields include includeGuidance (boolean) and progressMinutes (1–1440); omitted values inherit
         run defaults. Set includeGuidance:false for simple questions or broadcasts needing no assignment preamble.
         Use only listed worker IDs. You may answer a worker's task question using established instructions. Never grant tool
