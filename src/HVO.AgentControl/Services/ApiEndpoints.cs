@@ -18,6 +18,9 @@ public static class ApiEndpoints
             return await next(context);
         });
         group.MapGet("/csrf", (HttpContext context, IAntiforgery antiforgery) => new { token = antiforgery.GetAndStoreTokens(context).RequestToken });
+        group.MapGet("/providers/opencode-go/key", (ProviderKeyService keys) => keys.Status());
+        group.MapPost("/providers/opencode-go/key", (SaveProviderKey input, ProviderKeyService keys) => keys.Save(input));
+        group.MapPost("/runtimes/{id}/providers/opencode-go", (string id, ApplyProviderKey input, ProviderKeyService keys, CancellationToken token) => keys.Apply(id, input, token));
         group.MapGet("/providers/logins", (ProviderLoginService logins) => logins.List());
         group.MapPost("/runtimes/{id}/providers/chatgpt", (string id, RequestId input, ProviderLoginService logins) => logins.Start(id, input.Id));
         group.MapGet("/github/access", (HVO.AgentControl.GitHub.GitHubAccessService github) => github.List());
@@ -39,6 +42,7 @@ public static class ApiEndpoints
             Results.File(Encoding.UTF8.GetBytes(await store.ExportUsageCsv(new(workerId, providerId, modelId, from, to))),
                 "text/csv; charset=utf-8", "model-usage.csv"));
         group.MapGet("/runtimes", (ControlStore store) => store.Read(db => db.Runtimes.AsNoTracking().ToListAsync()));
+        group.MapGet("/runtimes/{id}/telemetry-history", (string id, int? take, ControlStore store) => store.TelemetryHistory(id, take ?? 10));
         group.MapPost("/runtimes", (RuntimeRecord input, ControlStore store) => store.SaveRuntime(input));
         group.MapPost("/runtimes/verify", (RuntimeVerifyInput input, RuntimeVerificationService verification, CancellationToken token) => verification.Verify(input, token));
         group.MapPost("/runtimes/verified-save", (VerifiedRuntimeInput input, RuntimeVerificationService verification) => verification.SaveForSetup(input));

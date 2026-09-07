@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Infrastructure;
@@ -16,11 +17,14 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<ModelUsageRecord> ModelUsage => Set<ModelUsageRecord>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
+    public DbSet<RuntimeTelemetryHistoryRecord> TelemetryHistory => Set<RuntimeTelemetryHistoryRecord>();
     public DbSet<OperatorUpdateSchedule> OperatorUpdateSchedules => Set<OperatorUpdateSchedule>();
     public DbSet<OperatorStatusUpdate> OperatorStatusUpdates => Set<OperatorStatusUpdate>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        model.Entity<HVO.AgentControl.Services.ProviderCredential>();
+        model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.ManagedServerId, x.NativeSessionId }).IsUnique();
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.Directory }).IsUnique();
@@ -31,6 +35,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<PendingRequest>().HasIndex(x => new { x.WorkerId, x.Kind, x.NativeId }).IsUnique();
         model.Entity<CommandRecord>().HasIndex(x => new { x.State, x.QueueOrder });
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
+        model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);
+        model.Entity<RuntimeTelemetryHistoryRecord>().HasIndex(x => new { x.RuntimeId, x.ObservedAt, x.Sequence });
         model.Entity<OperatorUpdateSchedule>().HasIndex(x => x.CoordinationRunId).IsUnique();
         model.Entity<OperatorStatusUpdate>().Property(x => x.Id).IsRequired();
         model.Entity<OperatorStatusUpdate>().HasIndex(x => x.Id).IsUnique();

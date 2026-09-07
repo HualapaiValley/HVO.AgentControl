@@ -4,8 +4,8 @@ Implementation for issue #35 calculation foundation (namespace `HVO.AgentControl
 This document defines the input facts, parser behavior, calculator guard states, and the
 deterministic output produced from two consecutive samples. Runtime cards now project the
 existing authenticated capability snapshot through this contract, showing available memory and
-quota facts while explicitly retaining `NeedsSecondSample`; polling and live utilization remain
-outside this slice.
+quota facts while explicitly retaining `NeedsSecondSample`. The periodic collector described
+below adds sampled history for supported Linux containers.
 
 It supplements the broader [worker status and observability design](OBSERVABILITY_DESIGN.md)
 without replacing that document's status and usage requirements.
@@ -202,3 +202,13 @@ cgroup quota equals effective capacity.
 - Live Program/UI utilization based on consecutive samples (runtime cards expose only the
   existing point-in-time capability observation).
 - Per-worker breakdown.
+
+## Periodic collection for managed Linux containers
+
+The connection supervisor now owns a background sampler per connected runtime, starting a sample immediately and then waiting 30 seconds after each attempt. It uses a separate asynchronous loop, never overlaps probes, and cancels/drains that loop before disposing its transport. The SSH probe has a five-second command timeout. Probe/storage failures reset the comparison baseline and do not escape into prompt dispatch or runtime enrollment. A reconnect creates a new identity and starts with `NeedsSecondSample`; unsupported scopes produce no synthetic sample.
+
+Initial live collection is deliberately limited to Linux containers with a private cgroup v2 root (`0::/`), a container marker and readable `cpu.stat`/`memory.current`. It reads cumulative `usage_usec`, quota/period from `cpu.max`, and memory current/max. No process enumeration, tool discovery, model call, installed daemon or Docker socket is needed. Values describe that container cgroup and descendants, not a host utilization estimate. Kernel field definitions: [cgroup v2 CPU and memory interfaces](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+
+Computed observations go into the bounded 200-row per-runtime history and existing authenticated history endpoint. The old capability card remains a labelled connection snapshot; consumers must use sampled history and its observation time for live trends. macOS, host-wide Linux and cgroup v1 collectors remain follow-up work in #35, rather than being presented as zero usage.
+
+Validation: deterministic sampler tests cover stalled-probe cancellation, no late observation after cancellation, recovery from probe/storage failure, unsupported scope, baseline reset and counter units. A read-only execution on `hvo-agentcontrol-beta-dev3` returned its actual cumulative CPU counter, 2-core quota and 4 GiB memory limit. No live runtime was restarted or reconfigured for that check.

@@ -7,6 +7,7 @@ using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
 using HVO.AgentControl.Ssh;
+using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -40,6 +41,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         IRuntimeTransport? transport = null;
         CancellationTokenSource? streamCancellation = null;
         Task? reader = null;
+        RuntimeTelemetrySampler? telemetrySampler = null;
         var incoming = Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(512) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = true });
         var streamOverflow = 0;
         var failures = 0;
@@ -47,6 +49,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         long lastStreamFrame = 0;
         async Task Close()
         {
+            if (telemetrySampler is not null) await telemetrySampler.DisposeAsync();
+            telemetrySampler = null;
             if (streamCancellation is not null) await streamCancellation.CancelAsync();
             if (reader is not null) try { await reader; } catch (Exception) { /* classified below or during shutdown */ }
             streamCancellation?.Dispose(); streamCancellation = null; reader = null;
@@ -100,10 +104,18 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             var record = (await db.Runtimes.FindAsync(id))!;
                             record.Transport = "Connected"; record.Health = "Reconciling"; record.Version = version;
                             record.InstalledExecutable = transport.InstalledExecutable; record.Platform = transport.Platform; record.CapabilitiesJson = Json.Write(capabilities); record.Generation++; record.ModelsJson = Json.Write(models);
+                            if (RuntimeTelemetryProjection.FromCapabilities(record.CapabilitiesJson, $"{record.Id}:{record.Generation}") is { } telemetry)
+                                await ControlStore.RecordTelemetry(db, record.Id, telemetry.Result);
                             record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
                             record.Diagnostic = models.Count == 0 ? "Run opencode auth login in this runtime, then refresh. Provider credentials remain remote." : "Connected; reconciling native sessions.";
                             ControlStore.Event(db, "RuntimeConnected", id, generation: record.Generation); return true;
                         });
+                        var telemetryTransport = transport;
+                        var telemetryIdentity = id + ":" + Guid.NewGuid().ToString("N");
+                        telemetrySampler = new RuntimeTelemetrySampler(
+                            cancellation => telemetryTransport.SampleTelemetry(telemetryIdentity, cancellation),
+                            async result => { await store.RecordTelemetry(id, result); },
+                            error => logger.LogDebug("Runtime {RuntimeId} telemetry unavailable ({Category})", id, error.GetType().Name), token);
                         failures = 0;
                     }
                     if (!transport.Connected) throw new IOException("SSH transport disconnected.");
@@ -305,7 +317,11 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                     var request = await store.Read(async db => await db.Requests.FindAsync(reply.RequestId)) ?? throw new ControlException("Request missing.");
                     var current = await api.Snapshot(worker!, options.Value.HistoryLimit, token);
                     var pending = request.Kind == "permission" ? current.Permissions : current.Questions;
-                    if (!pending.Any(x => x.GetProperty("id").GetString() == request.NativeId)) throw new ControlException("Native request is no longer pending; reply was not sent.");
+                    if (!pending.Any(x => x.GetProperty("id").GetString() == request.NativeId))
+                    {
+                        await store.RecordUnavailableReply(command.Id);
+                        break;
+                    }
                     mutationStarted = true;
                     await api.Reply(worker!, request, reply, token);
                     await Complete(command.Id, Delivery.Finished, "Reply accepted for the identified native request.");

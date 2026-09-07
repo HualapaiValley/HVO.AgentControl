@@ -1,3 +1,4 @@
+using HVO.AgentControl.Telemetry;
 using System.Security.Cryptography;
 using System.Text;
 using HVO.AgentControl.Core;
@@ -115,6 +116,9 @@ internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forw
     public bool Connected => ssh.IsConnected && forward.IsStarted;
     public string Platform { get; } = platform;
     public string InstalledExecutable { get; } = installedExecutable;
+
+    public async Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>
+        TelemetryProbe.Parse(await SshRuntimeTransportFactory.Run(ssh, TelemetryProbe.Script, cancellationToken, 5), identity);
 
     public async Task<CapabilitySnapshot> ProbeCapabilities(string directory, CancellationToken cancellationToken)
     {

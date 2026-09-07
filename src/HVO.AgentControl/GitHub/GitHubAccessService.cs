@@ -64,7 +64,7 @@ public sealed class GitHubAccessService(ControlStore store, Secrets secrets, Git
             var key = source is not null ? secrets.Read(source.PrivateKeyReference)
                 : enteredKey.Length > 0 ? enteredKey : previous is not null ? secrets.Read(previous.PrivateKeyReference) : "";
             // Network validation happens outside the database writer gate. No token enters the database.
-            _ = await github.Issue(input.AppId, input.InstallationId, key, repositories, token);
+            var credential = await github.Issue(input.AppId, input.InstallationId, key, repositories, token);
             // Each target owns its encrypted key copy and independently issues expiring tokens.
             var reference = enteredKey.Length > 0 || source is not null ? secrets.StoreEncrypted(key) : previous!.PrivateKeyReference;
             return await store.Write(async db =>
@@ -75,11 +75,30 @@ public sealed class GitHubAccessService(ControlStore store, Secrets secrets, Git
                 record.AppId = input.AppId; record.InstallationId = input.InstallationId; record.PrivateKeyReference = reference;
                 record.RepositoriesJson = Json.Write(repositories); record.State = "Pending"; record.Detail = "Repository access verified; credential delivery pending.";
                 record.RetryAt = 0; record.ExpiresAt = null; record.Revision++;
+                SavePermissionEvidence(record, credential);
                 if (previous is null) db.GitHubAccess.Add(record);
-                ControlStore.Event(db, "GitHubAccessConfigured", runtimeId, payload: new { record.AppId, record.InstallationId, repositories, sourceRuntimeId = source?.Id }, provenance: "user");
+                ControlStore.Event(db, "GitHubAccessConfigured", runtimeId, payload: new
+                {
+                    record.AppId,
+                    record.InstallationId,
+                    repositories,
+                    sourceRuntimeId = source?.Id,
+                    record.ChecksPermission,
+                    record.CommitStatusesPermission,
+                    record.ActionsPermission,
+                    record.PermissionsVerifiedAt
+                }, provenance: "user");
                 return record;
             });
         }
         finally { Gate.Release(); }
+    }
+
+    public static void SavePermissionEvidence(GitHubAccess record, GitHubInstallationToken credential)
+    {
+        record.ChecksPermission = credential.ChecksPermission;
+        record.CommitStatusesPermission = credential.CommitStatusesPermission;
+        record.ActionsPermission = credential.ActionsPermission;
+        record.PermissionsVerifiedAt = credential.PermissionsVerifiedAt?.ToUnixTimeMilliseconds();
     }
 }

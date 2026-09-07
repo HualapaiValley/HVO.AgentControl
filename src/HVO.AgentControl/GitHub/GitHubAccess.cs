@@ -14,6 +14,24 @@ public sealed class GitHubAccess
     public long? ExpiresAt { get; set; }
     public long Revision { get; set; }
     public long RetryAt { get; set; }
+    public string ChecksPermission { get; set; } = GitHubPermissionState.Unknown;
+    public string CommitStatusesPermission { get; set; } = GitHubPermissionState.Unknown;
+    public string ActionsPermission { get; set; } = GitHubPermissionState.Unknown;
+    public long? PermissionsVerifiedAt { get; set; }
+    public string ExactCiInspectionState => new[] { ChecksPermission, CommitStatusesPermission } switch
+    {
+        var permissions when permissions.Any(x => x == GitHubPermissionState.Denied) => "PermissionDenied",
+        var permissions when permissions.Any(x => x != GitHubPermissionState.Granted) => "Unknown",
+        _ when State == "Ready" => "Ready",
+        _ => "CredentialUnavailable"
+    };
+}
+
+public static class GitHubPermissionState
+{
+    public const string Unknown = "Unknown";
+    public const string Granted = "Granted";
+    public const string Denied = "Denied";
 }
 
 public sealed record ConfigureGitHubAccess(long AppId, long InstallationId, string PrivateKey,
