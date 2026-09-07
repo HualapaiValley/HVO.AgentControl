@@ -9,7 +9,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25rem; overflo
 .participant-line p { grid-column: 1 / -1; margin: 0; }
 .chip { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
 .chip-active { background: #1e5d34; color: #d6ffe6; }
-.chip-waiting { background: #6b5114; color: #ffeeb8; }
+.chip-waiting, .chip-retrying { background: #6b5114; color: #ffeeb8; }
 .chip-queued { background: #24506b; color: #d2ecff; }
 .chip-stale { background: #6b2a2a; color: #ffd9d9; }
 .chip-uncertain { background: #5a2f7a; color: #f0dbff; }

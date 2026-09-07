@@ -42,6 +42,7 @@
         <p role="status">@run.Detail</p>
         <h3>Participants</h3>
         <p class="meta">@Aggregate(run)</p>
+        <p class="meta">Latest observed: @RunLatestEvidence(run) · @RunNextEvent(run)</p>
         <ul class="participants">
           @foreach (var participant in ParticipantStatuses(run))
           {
@@ -52,6 +53,8 @@
               <span class="meta">@(participant.Runtime.Length == 0 ? "runtime: unregistered" : "runtime: " + participant.Runtime)</span>
               <span class="meta">@participant.ProgressAge</span>
               <p>@participant.StatusLine</p>
+              <p class="meta">Current assignment: @participant.Assignment</p>
+              <p class="meta">Latest observed: @participant.Receipt · @participant.Next</p>
             </li>
           }
         </ul>
