@@ -1,6 +1,12 @@
 # AgentControl implementation status
 
-## Current checkpoint — advanced coordination and provisioning verification, 2026-09-07
+## Current priority checkpoint — 2026-09-07
+
+The dependency-aware [backlog triage plan](BACKLOG_PRIORITIZATION.md) and `backlog-plan.json` are the current assignment source. Older “next” lists below are historical. Finish active #75 UI/performance and PR review/correction work, then prioritize #5 ownership, #4 enrollment and #7 bounded evidence; #6/#8 unlock #42/#44 and subsequent provisioning/merge automation. #78 tracks periodic triage and evidence-based duplicate/obsolete issue review.
+
+PR73 runtime history and PR74 bounded GitHub CI-read permissions are merged. PR72 usage ledger remains in correction/review; PR76 reasoning, PR77 vanished replies and PR79 periodic sampling are review items. These statements describe repository state, not an assertion that the running host has already deployed them.
+
+## Earlier checkpoint — advanced coordination and provisioning verification, 2026-09-07
 
 PR36 (soak), PR39 (current participant status) and worker-published PR47 (installation help) are merged. The final supervised run completed five assignments with three-way overlap and one delivery attempt each; its real foreground soak passed 679 test executions over eight minutes. Root fixed defects found during verification, approved one specific tool prompt, and corrected one malformed final coordinator response. See [advanced validation and exact limitations](validation/advanced-coordination-2026-09-07.md). This supersedes the older beta checkpoint's publication and next-priority statements below.
 
@@ -8,13 +14,7 @@ GitHub App credential brokerage is deployed. The dedicated devcontainer worker c
 
 Dev Containers use the official CLI. The earlier registered test worker deliberately used `.devcontainer/worker/devcontainer.json` (`agent`), not the repo default config (`vscode`). Its description now exposes that distinction. The owner clarified that repository configuration should be honored by default, with a broad Codespaces-style fallback and deliberate cached image refreshes; lightweight templates are explicit alternatives. [Provisioning](DEVCONTAINER_PROVISIONING.md) records that requirement and the staged implementation plan. Default-config and nested-Docker builds are verified, including their actual users/tools and a fresh cached instance in 15.32 seconds; see [configuration verification](validation/devcontainer-configurations-2026-09-07.md). Automatic UI/coordinator container provisioning and retirement are **not implemented** yet.
 
-Next work, in order:
-
-1. #24: coordinator-only structured output and bounded, durable correction receipts; malformed output must never dispatch actions.
-2. #43: separate Docker-host inventory, durable provisioning requests, host-side CLI execution/reconciliation, verified SSH/OpenCode enrollment, owner/coordinator controls and drain/retention. Root owns the technical implementation. Preserve full repo Features/users; build the broader default after current verification.
-3. #42: explicit project/repository identity, worker-owned preparation and a fresh native session per task; existing workers remain directory-bound. The M4 parent-directory worker does not automatically prepare child repos.
-4. #44/#8: durable issue/PR publication intents and uncertain-write reconciliation, then a complete worker-authored feature → independent review → correction exercise under that mechanism.
-5. #34/#35: durable model usage and runtime telemetry; [observability design](OBSERVABILITY_DESIGN.md) and the per-worker validation report retain the requirements/evidence.
+The priority order from this checkpoint is superseded by [backlog triage](BACKLOG_PRIORITIZATION.md). Its linked design documents remain useful; merged foundations must not be assigned again as unimplemented features.
 
 Issue #3 now has a bounded durable foundation: per-coordination operator schedules, immediate
 baselines, periodic/catch-up update rows, terminal updates on the next scheduler tick,

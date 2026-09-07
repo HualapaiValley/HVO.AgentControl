@@ -1,0 +1,258 @@
+{
+  "version": "2026-09-07.1",
+  "repository": "RoySalisbury/HVO.AgentControl",
+  "items": [
+    {
+      "issue": 1,
+      "priority": 2,
+      "disposition": "epic",
+      "dependsOn": [],
+      "reason": "Beta tracking epic; update delivered evidence, do not dispatch entire epic.",
+      "nextSlice": "Maintain acceptance checklist",
+      "auditedUpdatedAt": "2026-09-07T18:30:18Z"
+    },
+    {
+      "issue": 3,
+      "priority": 2,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Schedules/outbox shipped in PR71; material milestones and active-set changes remain.",
+      "nextSlice": "Immediate milestone and active-set update semantics",
+      "auditedUpdatedAt": "2026-09-07T18:30:20Z"
+    },
+    {
+      "issue": 4,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Stable IDs exist; formal authority generation/receipt contract is still incomplete.",
+      "nextSlice": "Version enrollment/attempt identity and stale-generation tests",
+      "auditedUpdatedAt": "2026-09-07T18:30:21Z"
+    },
+    {
+      "issue": 5,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Core missing ownership prevents reliable cross-task and cross-repo lifecycle.",
+      "nextSlice": "Durable work item and atomic modifying-owner claim with restart tests",
+      "auditedUpdatedAt": "2026-09-07T18:30:23Z"
+    },
+    {
+      "issue": 6,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [
+        5
+      ],
+      "reason": "Reservations need durable task ownership and explicit endpoint identity.",
+      "nextSlice": "Persist endpoint claims and reconcile release",
+      "auditedUpdatedAt": "2026-09-07T18:30:24Z"
+    },
+    {
+      "issue": 7,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing.",
+      "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
+      "auditedUpdatedAt": "2026-09-07T18:30:26Z"
+    },
+    {
+      "issue": 8,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [
+        5
+      ],
+      "reason": "Review receipts are currently reported prose; merge gates need durable exact-head evidence.",
+      "nextSlice": "Persist author/reviewer/head verdict and invalidate changed-head approval",
+      "auditedUpdatedAt": "2026-09-07T18:30:28Z"
+    },
+    {
+      "issue": 9,
+      "priority": 3,
+      "disposition": "candidate",
+      "dependsOn": [
+        4
+      ],
+      "reason": "Additional harness expansion should follow an explicit adapter contract.",
+      "nextSlice": "Evaluate and implement one bounded native adapter",
+      "auditedUpdatedAt": "2026-09-07T18:30:29Z"
+    },
+    {
+      "issue": 10,
+      "priority": 2,
+      "disposition": "needs-triage",
+      "dependsOn": [],
+      "reason": "Status UI shipped in PR71/51; reconcile remaining acceptance with active #75 before another UI change.",
+      "nextSlice": "Reconcile intervention/deadline visibility with #75",
+      "auditedUpdatedAt": "2026-09-07T18:30:31Z"
+    },
+    {
+      "issue": 13,
+      "priority": 2,
+      "disposition": "needs-triage",
+      "dependsOn": [],
+      "reason": "PR63/71 plus prior native exercises cover much of this; verify remaining native scenario evidence.",
+      "nextSlice": "Acceptance-to-test/native-evidence matrix before closure",
+      "auditedUpdatedAt": "2026-09-07T18:30:33Z"
+    },
+    {
+      "issue": 24,
+      "priority": 2,
+      "disposition": "needs-triage",
+      "dependsOn": [],
+      "reason": "Bounded repair/recovery shipped in PR49/52; native schema-constrained free-model verification remains distinct.",
+      "nextSlice": "Verify remaining provider-specific acceptance; do not redo parser recovery",
+      "auditedUpdatedAt": "2026-09-07T18:30:34Z"
+    },
+    {
+      "issue": 34,
+      "priority": 1,
+      "disposition": "review",
+      "dependsOn": [],
+      "reason": "PR72 in correction/review for startup backfill; do not duplicate ledger work.",
+      "nextSlice": "Complete backfill correction and independent review",
+      "auditedUpdatedAt": "2026-09-07T18:30:36Z"
+    },
+    {
+      "issue": 35,
+      "priority": 2,
+      "disposition": "review",
+      "dependsOn": [],
+      "reason": "History merged PR73; periodic Linux sampler PR79; macOS/v1 remain.",
+      "nextSlice": "Review sampler before any additional collector implementation",
+      "auditedUpdatedAt": "2026-09-07T18:30:37Z"
+    },
+    {
+      "issue": 42,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [
+        5,
+        6
+      ],
+      "reason": "Fresh repo task sessions require durable ownership and reservation.",
+      "nextSlice": "Project identity and task-owned worktree/session preparation",
+      "auditedUpdatedAt": "2026-09-07T18:30:39Z"
+    },
+    {
+      "issue": 43,
+      "priority": 2,
+      "disposition": "candidate",
+      "dependsOn": [
+        5,
+        6,
+        42
+      ],
+      "reason": "CLI templates verified; automatic lifecycle depends on ownership/workspace boundaries.",
+      "nextSlice": "Durable Docker-host provisioning workflow; separate ready inventory slice if needed",
+      "auditedUpdatedAt": "2026-09-07T18:30:41Z"
+    },
+    {
+      "issue": 44,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [
+        5,
+        8
+      ],
+      "reason": "App credentials and publication work; durable write intent/uncertain reconciliation remains.",
+      "nextSlice": "Publication outbox with repository-qualified receipts",
+      "auditedUpdatedAt": "2026-09-07T18:30:43Z"
+    },
+    {
+      "issue": 53,
+      "priority": 2,
+      "disposition": "epic",
+      "dependsOn": [],
+      "reason": "Design parent of #75, not a duplicate implementation ticket.",
+      "nextSlice": "Review child #75 against visual references",
+      "auditedUpdatedAt": "2026-09-07T18:30:44Z"
+    },
+    {
+      "issue": 54,
+      "priority": 2,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "ChatGPT website flow shipped PR55; provider readiness and additional methods remain.",
+      "nextSlice": "Durable provider readiness and supported-method discovery; no OAuth cloning",
+      "auditedUpdatedAt": "2026-09-07T18:30:46Z"
+    },
+    {
+      "issue": 65,
+      "priority": 2,
+      "disposition": "review",
+      "dependsOn": [],
+      "reason": "PR77 handles vanished replies; repeated discovery approvals show remaining environment-context work.",
+      "nextSlice": "Review PR77, then prime verified tools/scratch context with #42",
+      "auditedUpdatedAt": "2026-09-07T18:30:47Z"
+    },
+    {
+      "issue": 66,
+      "priority": 2,
+      "disposition": "candidate",
+      "dependsOn": [
+        5
+      ],
+      "reason": "Evidence retention needs stable task identity; #34/#35 enrich records but are not hard blockers for archive foundation.",
+      "nextSlice": "Bounded durable evidence archive before operational pruning",
+      "auditedUpdatedAt": "2026-09-07T18:30:49Z"
+    },
+    {
+      "issue": 67,
+      "priority": 3,
+      "disposition": "candidate",
+      "dependsOn": [
+        42,
+        43,
+        44
+      ],
+      "reason": "External intake must not outrun task isolation, capacity lifecycle and publication reconciliation.",
+      "nextSlice": "Authenticated/deduplicated webhook inbox after prerequisites",
+      "auditedUpdatedAt": "2026-09-07T18:30:50Z"
+    },
+    {
+      "issue": 69,
+      "priority": 1,
+      "disposition": "review",
+      "dependsOn": [
+        5
+      ],
+      "reason": "Per-task model override shipped; reasoning PR76 in review; durable risk policy remains.",
+      "nextSlice": "Review PR76, then persist model routing decisions on work items",
+      "auditedUpdatedAt": "2026-09-07T18:30:52Z"
+    },
+    {
+      "issue": 70,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [
+        8,
+        44
+      ],
+      "reason": "CI read permission merged PR74; exact-review and publication intents still needed for durable automatic merges.",
+      "nextSlice": "Conditional serialized merge intents with refreshed CI/head checks",
+      "auditedUpdatedAt": "2026-09-07T18:30:53Z"
+    },
+    {
+      "issue": 75,
+      "priority": 0,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Explicit owner priority: sluggish chat UI; Astra xhigh already assigned.",
+      "nextSlice": "Finish active chat/performance implementation; preserve approvals and drafts",
+      "auditedUpdatedAt": "2026-09-07T18:30:55Z"
+    },
+    {
+      "issue": 78,
+      "priority": 0,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Owner requested dependency-aware periodic backlog triage.",
+      "nextSlice": "Root executable audit and canonical operating plan; durable scheduler follows",
+      "auditedUpdatedAt": "2026-09-07T18:31:40Z"
+    }
+  ]
+}
