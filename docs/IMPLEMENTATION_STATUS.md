@@ -4,7 +4,7 @@
 
 The dependency-aware [backlog triage plan](BACKLOG_PRIORITIZATION.md) and `backlog-plan.json` are the current assignment source. Older “next” lists below are historical. Finish active #75 UI/performance and PR review/correction work, then prioritize #5 ownership, #4 enrollment and #7 bounded evidence; #6/#8 unlock #42/#44 and subsequent provisioning/merge automation. #78 tracks periodic triage and evidence-based duplicate/obsolete issue review.
 
-PR73 runtime history and PR74 bounded GitHub CI-read permissions are merged. PR72 usage ledger remains in correction/review; PR76 reasoning, PR77 vanished replies and PR79 periodic sampling are review items. These statements describe repository state, not an assertion that the running host has already deployed them.
+PR73 runtime history and PR74 bounded GitHub CI-read permissions are merged. PR72 usage ledger remains in correction/review; PR76 reasoning remains in review; PR77 vanished replies and PR79 periodic sampling are merged. PR81 corrects generated migration history before deployment. These statements describe repository state, not an assertion that the running host has already deployed them.
 
 ## Earlier checkpoint — advanced coordination and provisioning verification, 2026-09-07
 

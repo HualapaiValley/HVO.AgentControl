@@ -66,6 +66,18 @@ class PriorityTests(unittest.TestCase):
         self.assertEqual('active', active['issues'][0]['state'])
         self.assertTrue(active['issues'][0]['planStale'])
 
+    def test_changed_or_missing_pr_evidence_invalidates_unchanged_issue(self):
+        entry = item(1, disposition='review')
+        entry['reviewedPulls'] = [dict(number=10, state='OPEN', headRefOid='old')]
+        for actual in ([], [dict(number=10, state='MERGED', headRefOid='old')],
+                       [dict(number=10, state='OPEN', headRefOid='new')]):
+            with self.subTest(actual=actual):
+                result = backlog.prioritize([issue(1)], plan(entry), now=NOW, pulls=actual)
+                self.assertEqual('needs-triage', result['issues'][0]['state'])
+                self.assertTrue(result['issues'][0]['planStale'])
+        fresh = backlog.prioritize([issue(1)], plan(entry), now=NOW, pulls=entry['reviewedPulls'])
+        self.assertEqual('review', fresh['issues'][0]['state'])
+
     def test_duplicate_identity_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Duplicate'):
             backlog.prioritize([issue(1)], plan(item(1), item(1)), now=NOW)

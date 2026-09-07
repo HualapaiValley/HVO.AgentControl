@@ -7,13 +7,14 @@ import subprocess
 from pathlib import Path
 
 
-def prioritize(issues, plan, active=(), now=None):
+def prioritize(issues, plan, active=(), now=None, pulls=()):
     now = now or dt.datetime.now(dt.timezone.utc)
     catalog = {x['number']: x for x in issues}
     entries = {x['issue']: x for x in plan['items']}
     if len(entries) != len(plan['items']) or len(catalog) != len(issues):
         raise ValueError('Duplicate issue identity in inputs')
     active = set(active)
+    pull_catalog = {x['number']: x for x in pulls}
     visiting, visited, cyclic = [], set(), set()
 
     def visit(number):
@@ -39,6 +40,11 @@ def prioritize(issues, plan, active=(), now=None):
         entry = entries.get(number)
         blockers = []
         stale = bool(entry) and entry.get('auditedUpdatedAt') != issue.get('updatedAt')
+        evidence_stale = bool(entry) and any(
+            any(pull_catalog.get(reference['number'], {}).get(key) != reference.get(key)
+                for key in ('state', 'headRefOid'))
+            for reference in entry.get('reviewedPulls', []))
+        stale = stale or evidence_stale
         disposition = 'needs-triage'
         if entry:
             if entry.get('priority') not in range(4):
@@ -63,7 +69,7 @@ def prioritize(issues, plan, active=(), now=None):
         rows.append({'issue': number, 'title': issue['title'], 'state': state, 'priority': entry.get('priority', 2) if entry else 2,
                      'unblocks': unlocks, 'ageDays': age, 'updatedAt': issue.get('updatedAt'), 'planStale': stale, 'blockers': blockers,
                      'nextSlice': entry.get('nextSlice', '') if entry else '',
-                     'reason': 'Issue changed since audit; refresh plan before assignment' if stale else entry.get('reason', 'Inspect before assignment') if entry else 'Not in audited plan; inspect before assignment'})
+                     'reason': 'Issue or referenced PR evidence changed since audit; refresh plan before assignment' if stale else entry.get('reason', 'Inspect before assignment') if entry else 'Not in audited plan; inspect before assignment'})
     ready = sorted((row for row in rows if row['state'] == 'ready'),
                    key=lambda row: (row['priority'], -row['unblocks'], -row['ageDays'], row['issue']))
     return {'schemaVersion': 1, 'planVersion': plan['version'], 'repository': plan['repository'],
@@ -85,12 +91,15 @@ def main():
         if snapshot['repository'].casefold() != plan['repository'].casefold():
             raise ValueError('Issue snapshot belongs to a different repository')
         issues = snapshot['issues']
+        pulls = snapshot.get('pulls', [])
     else:
         issues = json.loads(subprocess.check_output(['gh', 'issue', 'list', '--repo', plan['repository'],
             '--state', 'all', '--limit', '1000', '--json', 'number,title,state,createdAt,updatedAt'], text=True))
-        if len(issues) >= 1000:
+        pulls = json.loads(subprocess.check_output(['gh', 'pr', 'list', '--repo', plan['repository'],
+            '--state', 'all', '--limit', '1000', '--json', 'number,state,headRefOid'], text=True))
+        if len(issues) >= 1000 or len(pulls) >= 1000:
             raise ValueError('Snapshot may be truncated; use a complete offline snapshot')
-    print(json.dumps(prioritize(issues, plan, args.active), indent=2))
+    print(json.dumps(prioritize(issues, plan, args.active, pulls=pulls), indent=2))
 
 
 if __name__ == '__main__':

@@ -18,8 +18,8 @@ Root's initial audit compared every open issue body with merged PRs, current PRs
 | #78 | P0 active | Root owns executable audit and this plan; durable periodic scheduler remains | none |
 | #34 | P1 correction/review | Usage parsing PR56; PR72 ledger needs backfill correction and fresh review | none for current PR |
 | #69 | P1 review, then foundation | Task models PR57; reasoning PR76; durable routing/risk policy remains | #5 for remaining policy |
-| #65 | P2 review, then workspace work | Child visibility PR60; vanished replies PR77; primed tools and actual task directories remain | #42 integration later |
-| #35 | P2 review | Snapshot calculations PR64 and history PR73; periodic Linux sampler PR79; macOS/v1 remain | none for current PR |
+| #65 | P2 remaining scope blocked | Child visibility PR60 and vanished replies PR77 merged; primed tools and actual task directories remain | #42 |
+| #35 | P2 remaining scope needs triage | Snapshot calculations PR64, history PR73 and periodic Linux sampler PR79 merged; validate deployment, then scope macOS/v1 | none |
 | #5 | P1 ready, first foundation | Missing work-item/phase ownership despite existing command IDs; add atomic claim/restart contract | none |
 | #4 | P1 ready | Existing stable sessions/commands are not the full enrollment/authority-generation contract | none |
 | #7 | P1 ready | PR21/38/41 bound summaries; durable per-consumer cursors/exact retrieval still missing | none |
@@ -50,9 +50,9 @@ python3 scripts/prioritize-backlog.py --active 34 35 65 69 75 78 > /tmp/backlog-
 python3 tests/test_backlog_priority.py
 ```
 
-Supply the **current** active/uncertain issue ownership set each time; the example is a point-in-time audit, not permanent assignments. The tool fetches all issues, including closed prerequisites, from the plan's explicit repository using `gh`. It refuses a potentially truncated 1000-issue snapshot. Offline input uses `--issues file.json` with `{ "repository": "RoySalisbury/HVO.AgentControl", "issues": [...] }`; a repository mismatch fails.
+Supply the **current** active/uncertain issue ownership set each time; the example is a point-in-time audit, not permanent assignments. The tool fetches all issues and PR evidence, including closed prerequisites, from the plan's explicit repository using `gh`. It refuses a potentially truncated 1000-issue snapshot. Offline input uses `--issues file.json` with `{ "repository": "RoySalisbury/HVO.AgentControl", "issues": [...], "pulls": [...] }`; a repository mismatch fails.
 
-Only audited candidates with closed prerequisites and no active claim enter `ready`. Unplanned issues or issues changed since the recorded audit timestamp require triage. Cycles/missing prerequisites block dispatch. Ready candidates sort by owner-assigned priority, number of direct dependents unlocked, age, then issue number for stable ties. Output preserves source update timestamps, blockers and concise rationale. The script never dispatches, closes, merges or edits anything. Revalidate current revisions, runtime eligibility and ownership immediately before dispatch; issue closure alone is not proof of deployment.
+Only audited candidates with closed prerequisites and no active claim enter `ready`. Unplanned issues or issues changed since the recorded audit timestamp require triage. A referenced PR changing state/head, or missing PR evidence, also invalidates the plan even when the issue timestamp is unchanged. Cycles/missing prerequisites block dispatch. Ready candidates sort by owner-assigned priority, number of direct dependents unlocked, age, then issue number for stable ties. Output preserves source update timestamps, blockers and concise rationale. The script never dispatches, closes, merges or edits anything. Revalidate current revisions, runtime eligibility and ownership immediately before dispatch; issue closure alone is not proof of deployment.
 
 ## Periodic coordinator review
 

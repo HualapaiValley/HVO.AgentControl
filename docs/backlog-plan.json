@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-07.1",
+  "version": "2026-09-07.2",
   "repository": "RoySalisbury/HVO.AgentControl",
   "items": [
     {
@@ -9,7 +9,8 @@
       "dependsOn": [],
       "reason": "Beta tracking epic; update delivered evidence, do not dispatch entire epic.",
       "nextSlice": "Maintain acceptance checklist",
-      "auditedUpdatedAt": "2026-09-07T18:30:18Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:18Z",
+      "reviewedPulls": []
     },
     {
       "issue": 3,
@@ -18,7 +19,19 @@
       "dependsOn": [],
       "reason": "Schedules/outbox shipped in PR71; material milestones and active-set changes remain.",
       "nextSlice": "Immediate milestone and active-set update semantics",
-      "auditedUpdatedAt": "2026-09-07T18:30:20Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:20Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "d9e23564494ae1e4ad67a657473b5dd415a68312",
+          "number": 62,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "89780de9b6ad1bc8682525dd9644a62ec6b9abe8",
+          "number": 71,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 4,
@@ -27,7 +40,8 @@
       "dependsOn": [],
       "reason": "Stable IDs exist; formal authority generation/receipt contract is still incomplete.",
       "nextSlice": "Version enrollment/attempt identity and stale-generation tests",
-      "auditedUpdatedAt": "2026-09-07T18:30:21Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:21Z",
+      "reviewedPulls": []
     },
     {
       "issue": 5,
@@ -36,7 +50,8 @@
       "dependsOn": [],
       "reason": "Core missing ownership prevents reliable cross-task and cross-repo lifecycle.",
       "nextSlice": "Durable work item and atomic modifying-owner claim with restart tests",
-      "auditedUpdatedAt": "2026-09-07T18:30:23Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:23Z",
+      "reviewedPulls": []
     },
     {
       "issue": 6,
@@ -47,7 +62,8 @@
       ],
       "reason": "Reservations need durable task ownership and explicit endpoint identity.",
       "nextSlice": "Persist endpoint claims and reconcile release",
-      "auditedUpdatedAt": "2026-09-07T18:30:24Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:24Z",
+      "reviewedPulls": []
     },
     {
       "issue": 7,
@@ -56,7 +72,24 @@
       "dependsOn": [],
       "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing.",
       "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
-      "auditedUpdatedAt": "2026-09-07T18:30:26Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:26Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "87e1dc97153600f1208dc22e5532e64deb933f24",
+          "number": 21,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "020df2d0a2483669eb94e1433d0328104b7eec57",
+          "number": 38,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "bde938e52e60210090f8e4d330b193840a433f5c",
+          "number": 41,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 8,
@@ -67,7 +100,8 @@
       ],
       "reason": "Review receipts are currently reported prose; merge gates need durable exact-head evidence.",
       "nextSlice": "Persist author/reviewer/head verdict and invalidate changed-head approval",
-      "auditedUpdatedAt": "2026-09-07T18:30:28Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:28Z",
+      "reviewedPulls": []
     },
     {
       "issue": 9,
@@ -78,7 +112,8 @@
       ],
       "reason": "Additional harness expansion should follow an explicit adapter contract.",
       "nextSlice": "Evaluate and implement one bounded native adapter",
-      "auditedUpdatedAt": "2026-09-07T18:30:29Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:29Z",
+      "reviewedPulls": []
     },
     {
       "issue": 10,
@@ -87,7 +122,24 @@
       "dependsOn": [],
       "reason": "Status UI shipped in PR71/51; reconcile remaining acceptance with active #75 before another UI change.",
       "nextSlice": "Reconcile intervention/deadline visibility with #75",
-      "auditedUpdatedAt": "2026-09-07T18:30:31Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:31Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "d19827a340645aa869557b98fc78077452012b7f",
+          "number": 39,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "75207c29366aed878f841e31b83fdb03fc31afce",
+          "number": 51,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "89780de9b6ad1bc8682525dd9644a62ec6b9abe8",
+          "number": 71,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 13,
@@ -96,7 +148,29 @@
       "dependsOn": [],
       "reason": "PR63/71 plus prior native exercises cover much of this; verify remaining native scenario evidence.",
       "nextSlice": "Acceptance-to-test/native-evidence matrix before closure",
-      "auditedUpdatedAt": "2026-09-07T18:30:33Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:33Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "b5aff77602c6436c92cf588b190f1c7339e34e30",
+          "number": 25,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "7d99b41b3f5705f9f6ebbeb80c9fac27eeb7ce0e",
+          "number": 36,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "4ef5177692c5f184e9bd4110cafab3ed811f145e",
+          "number": 63,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "89780de9b6ad1bc8682525dd9644a62ec6b9abe8",
+          "number": 71,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 24,
@@ -105,7 +179,19 @@
       "dependsOn": [],
       "reason": "Bounded repair/recovery shipped in PR49/52; native schema-constrained free-model verification remains distinct.",
       "nextSlice": "Verify remaining provider-specific acceptance; do not redo parser recovery",
-      "auditedUpdatedAt": "2026-09-07T18:30:34Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:34Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "10e043ae514ce78d0ca8a45f673c359ea04b1f21",
+          "number": 49,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "9a81efd8b67f83888621f1a9011305d0e994057b",
+          "number": 52,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 34,
@@ -114,16 +200,45 @@
       "dependsOn": [],
       "reason": "PR72 in correction/review for startup backfill; do not duplicate ledger work.",
       "nextSlice": "Complete backfill correction and independent review",
-      "auditedUpdatedAt": "2026-09-07T18:30:36Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:36Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "c228c89215c60b67945bbb0abf260e03fbc89372",
+          "number": 56,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "20add80ee47094505667241006416be05ddd68ad",
+          "number": 72,
+          "state": "OPEN"
+        }
+      ]
     },
     {
       "issue": 35,
       "priority": 2,
-      "disposition": "review",
+      "disposition": "needs-triage",
       "dependsOn": [],
-      "reason": "History merged PR73; periodic Linux sampler PR79; macOS/v1 remain.",
-      "nextSlice": "Review sampler before any additional collector implementation",
-      "auditedUpdatedAt": "2026-09-07T18:30:37Z"
+      "reason": "History PR73 and periodic sampler PR79 merged; deployment validation and macOS/v1 scope remain.",
+      "nextSlice": "Validate deployed sampling before scoping another platform collector",
+      "auditedUpdatedAt": "2026-09-07T18:30:37Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "e2f764e8ed563fe95c7fcbdd8df70c9a743348c2",
+          "number": 64,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "d6b1424ddea5e93d9dbd3ce2717f729da200d01d",
+          "number": 73,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "5ee5fc4ca13396d2f2475877ce42154777cc20c2",
+          "number": 79,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 42,
@@ -135,7 +250,8 @@
       ],
       "reason": "Fresh repo task sessions require durable ownership and reservation.",
       "nextSlice": "Project identity and task-owned worktree/session preparation",
-      "auditedUpdatedAt": "2026-09-07T18:30:39Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:39Z",
+      "reviewedPulls": []
     },
     {
       "issue": 43,
@@ -148,7 +264,19 @@
       ],
       "reason": "CLI templates verified; automatic lifecycle depends on ownership/workspace boundaries.",
       "nextSlice": "Durable Docker-host provisioning workflow; separate ready inventory slice if needed",
-      "auditedUpdatedAt": "2026-09-07T18:30:41Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:41Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "6251e11b75b1e9d680da368ce55f931efb48322e",
+          "number": 45,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "c8b546ee3d0a4eab4818693cca67c927694ea6d2",
+          "number": 48,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 44,
@@ -160,7 +288,24 @@
       ],
       "reason": "App credentials and publication work; durable write intent/uncertain reconciliation remains.",
       "nextSlice": "Publication outbox with repository-qualified receipts",
-      "auditedUpdatedAt": "2026-09-07T18:30:43Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:43Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "f9a4b5922daa9c46e0e9b5978e5c98baceb00f6a",
+          "number": 46,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "9ed4be7ec331942ac50ab640a320895c0e4ec19a",
+          "number": 59,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "73167d6d9ff88b51dd8c04afeb8ea040fab92a46",
+          "number": 74,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 53,
@@ -169,7 +314,14 @@
       "dependsOn": [],
       "reason": "Design parent of #75, not a duplicate implementation ticket.",
       "nextSlice": "Review child #75 against visual references",
-      "auditedUpdatedAt": "2026-09-07T18:30:44Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:44Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "89780de9b6ad1bc8682525dd9644a62ec6b9abe8",
+          "number": 71,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 54,
@@ -178,16 +330,37 @@
       "dependsOn": [],
       "reason": "ChatGPT website flow shipped PR55; provider readiness and additional methods remain.",
       "nextSlice": "Durable provider readiness and supported-method discovery; no OAuth cloning",
-      "auditedUpdatedAt": "2026-09-07T18:30:46Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:46Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "97248fe6c345f2f56a58f8ea53e0b478b2f6e98e",
+          "number": 55,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 65,
       "priority": 2,
-      "disposition": "review",
-      "dependsOn": [],
-      "reason": "PR77 handles vanished replies; repeated discovery approvals show remaining environment-context work.",
-      "nextSlice": "Review PR77, then prime verified tools/scratch context with #42",
-      "auditedUpdatedAt": "2026-09-07T18:30:47Z"
+      "disposition": "candidate",
+      "dependsOn": [
+        42
+      ],
+      "reason": "PR77 merged; actual task directories and child environment context remain.",
+      "nextSlice": "Integrate task-owned scratch/tool inventory into child prompts",
+      "auditedUpdatedAt": "2026-09-07T18:30:47Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "086eb2884323e5d125c7232689f353817cb65b40",
+          "number": 60,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "bae2fa4ac51b768e4c55b02b6c7c0e8735a5fa34",
+          "number": 77,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 66,
@@ -198,7 +371,8 @@
       ],
       "reason": "Evidence retention needs stable task identity; #34/#35 enrich records but are not hard blockers for archive foundation.",
       "nextSlice": "Bounded durable evidence archive before operational pruning",
-      "auditedUpdatedAt": "2026-09-07T18:30:49Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:49Z",
+      "reviewedPulls": []
     },
     {
       "issue": 67,
@@ -211,7 +385,8 @@
       ],
       "reason": "External intake must not outrun task isolation, capacity lifecycle and publication reconciliation.",
       "nextSlice": "Authenticated/deduplicated webhook inbox after prerequisites",
-      "auditedUpdatedAt": "2026-09-07T18:30:50Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:50Z",
+      "reviewedPulls": []
     },
     {
       "issue": 69,
@@ -222,7 +397,19 @@
       ],
       "reason": "Per-task model override shipped; reasoning PR76 in review; durable risk policy remains.",
       "nextSlice": "Review PR76, then persist model routing decisions on work items",
-      "auditedUpdatedAt": "2026-09-07T18:30:52Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:52Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "4c265b30cd6e81d13406b735d6cc014342a81309",
+          "number": 57,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "473b371230729afb70d040dfef17acb098ebdc90",
+          "number": 76,
+          "state": "OPEN"
+        }
+      ]
     },
     {
       "issue": 70,
@@ -234,7 +421,14 @@
       ],
       "reason": "CI read permission merged PR74; exact-review and publication intents still needed for durable automatic merges.",
       "nextSlice": "Conditional serialized merge intents with refreshed CI/head checks",
-      "auditedUpdatedAt": "2026-09-07T18:30:53Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:53Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "73167d6d9ff88b51dd8c04afeb8ea040fab92a46",
+          "number": 74,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 75,
@@ -243,7 +437,8 @@
       "dependsOn": [],
       "reason": "Explicit owner priority: sluggish chat UI; Astra xhigh already assigned.",
       "nextSlice": "Finish active chat/performance implementation; preserve approvals and drafts",
-      "auditedUpdatedAt": "2026-09-07T18:30:55Z"
+      "auditedUpdatedAt": "2026-09-07T18:30:55Z",
+      "reviewedPulls": []
     },
     {
       "issue": 78,
@@ -252,7 +447,8 @@
       "dependsOn": [],
       "reason": "Owner requested dependency-aware periodic backlog triage.",
       "nextSlice": "Root executable audit and canonical operating plan; durable scheduler follows",
-      "auditedUpdatedAt": "2026-09-07T18:31:40Z"
+      "auditedUpdatedAt": "2026-09-07T18:31:40Z",
+      "reviewedPulls": []
     }
   ]
 }
