@@ -78,3 +78,20 @@ Use one bounded workflow at a time initially. Record results in `docs/validation
 Every product change runs the repository-mandated restore, Release build with warnings as errors and format verification. Run meaningful unit/integration/browser checks appropriate to the change. The lab suite runs independently in CI whenever its project exists. Evidence must identify whether execution was native model work, deterministic fixture output or operator action.
 
 Handoff includes repo/issue/PR URLs, UI URL, fleet names and worker IDs, models used, active run state, completed evidence, unresolved blockers, and exact next steps. Never include deploy keys, provider tokens or owner passwords in the repository or reports.
+
+## GitHub tracking
+
+Repository: [RoySalisbury/HVO.AgentControl](https://github.com/RoySalisbury/HVO.AgentControl). Beta epic: [#1](https://github.com/RoySalisbury/HVO.AgentControl/issues/1).
+
+- [#2: Provision reproducible .NET beta development containers](https://github.com/RoySalisbury/HVO.AgentControl/issues/2)
+- [#3: Persist scheduled operator updates independently of model turns](https://github.com/RoySalisbury/HVO.AgentControl/issues/3)
+- [#4: Add participant enrollment and explicit command receipts](https://github.com/RoySalisbury/HVO.AgentControl/issues/4)
+- [#5: Track work-item ownership through review and cleanup](https://github.com/RoySalisbury/HVO.AgentControl/issues/5)
+- [#6: Add endpoint-scoped resource reservations](https://github.com/RoySalisbury/HVO.AgentControl/issues/6)
+- [#7: Persist evidence cursors and bounded coordinator retrieval](https://github.com/RoySalisbury/HVO.AgentControl/issues/7)
+- [#8: Record exact-range reviews and bounded correction handoffs](https://github.com/RoySalisbury/HVO.AgentControl/issues/8)
+- [#9: Investigate and implement one additional native agent adapter](https://github.com/RoySalisbury/HVO.AgentControl/issues/9)
+- [#10: Expose current assignment, expected events and stalls in Coordination](https://github.com/RoySalisbury/HVO.AgentControl/issues/10)
+- [#11: Exercise: review, fix and rereview the pricing lab](https://github.com/RoySalisbury/HVO.AgentControl/issues/11)
+- [#12: Exercise: add a simple shipping rule to the pricing lab](https://github.com/RoySalisbury/HVO.AgentControl/issues/12)
+- [#13: Exercise restart, long tools and uncertain coordination delivery](https://github.com/RoySalisbury/HVO.AgentControl/issues/13)
