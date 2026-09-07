@@ -2,6 +2,8 @@
 
 The fleet has three independent .NET development hosts and uses the existing lightweight coordinator. See [development plan](BETA_DEVELOPMENT_PLAN.md) and [issue #2](https://github.com/RoySalisbury/HVO.AgentControl/issues/2).
 
+For new CLI-provisioned test environments, see [Dev Container provisioning](DEVCONTAINER_PROVISIONING.md) and `.devcontainer/worker/devcontainer.json`. The shared image now includes Python, Node/npm, build tools and container-local sudo for dependency installation. Existing running beta containers retain their original image until deliberately recreated; do not rebuild/recreate active sessions just to apply these additions.
+
 Run from the SSH host with Docker, Python 3, ssh-keygen and authenticated `gh` repository administration:
 
 ```bash

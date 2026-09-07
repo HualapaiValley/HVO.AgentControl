@@ -1,5 +1,7 @@
 # Documentation
 
+- [Dev Container provisioning](DEVCONTAINER_PROVISIONING.md): executable worker template and planned multi-host lifecycle, tool installation and GitHub credentials.
+- [Project workspaces](PROJECT_WORKSPACES.md): current directory-bound workers and the proposed reusable runtime/project/session provisioning model.
 - [Beta assignment guidance](BETA_ASSIGNMENT_GUIDE.md): concrete workspace, dispatch-evidence and completion rules learned from native runs.
 - [Beta validation](validation/beta-development-2026-09-07.md): real review/fix and shipping exercises, failures, interventions and evidence.
 - [Beta development plan](BETA_DEVELOPMENT_PLAN.md): repository bootstrap, development fleet, real review/fix exercises and prioritized delivery phases.

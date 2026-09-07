@@ -15,6 +15,10 @@ RUN apt-get update \
         jq \
         ripgrep \
         shellcheck \
+        tmux \
+        lsof \
+        python3 \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Create the certificate mount's parent directories before Docker mounts the volume.
