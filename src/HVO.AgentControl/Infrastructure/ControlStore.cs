@@ -40,9 +40,10 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         return result;
     }
 
-    public static void Event(ControlDb db, string type, string? runtimeId = null, string? workerId = null,
+    public static JournalEvent Event(ControlDb db, string type, string? runtimeId = null, string? workerId = null,
         string? commandId = null, object? payload = null, string provenance = "service", int generation = 0, string? nativeId = null)
-        => db.Events.Add(new JournalEvent
+    {
+        var journalEvent = new JournalEvent
         {
             Type = type,
             RuntimeId = runtimeId,
@@ -52,7 +53,10 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             Provenance = provenance,
             Generation = generation,
             NativeId = nativeId
-        });
+        };
+        db.Events.Add(journalEvent);
+        return journalEvent;
+    }
 
     public Task<RuntimeRecord> SaveRuntime(RuntimeRecord input) => Write(db => SaveRuntime(db, input));
 

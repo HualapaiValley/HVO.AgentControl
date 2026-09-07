@@ -109,21 +109,10 @@ public sealed partial class ControlStore
         return update;
     });
 
-    public Task<int> PublishOperatorMilestone(string runId, string milestoneKind, long? observedAt = null) =>
-        Write(async db =>
-        {
-            var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
-                .FirstOrDefaultAsync(x => x.CoordinationRunId == runId && x.Enabled);
-            if (schedule is null) return 0;
-            var run = await db.CoordinationRuns.FindAsync(runId);
-            if (run is null) return 0;
-            return await PublishMilestoneInternal(db, schedule, run, milestoneKind, observedAt ?? Now);
-        });
-
-    internal async Task<int> PublishMilestoneInternal(ControlDb db, OperatorUpdateSchedule schedule, CoordinationRun run, string milestoneKind, long now)
+    internal async Task<int> PublishMilestoneInternal(ControlDb db, OperatorUpdateSchedule schedule, CoordinationRun run, string milestoneKind, long now, JournalEvent sourceEvent)
     {
-        var transitionKey = run.Id + ":" + milestoneKind + ":" + now;
-        var milestoneId = schedule.Id + ":milestone:" + transitionKey;
+        if (sourceEvent.Sequence < 1) throw new InvalidOperationException("Persist the source event before publishing its milestone.");
+        var milestoneId = schedule.Id + ":milestone:" + sourceEvent.Id;
 
         if (await db.OperatorStatusUpdates.AnyAsync(x => x.Id == milestoneId)) return 0;
 
@@ -136,12 +125,12 @@ public sealed partial class ControlStore
             Kind = milestoneKind,
             DueAt = now,
             PublishedAt = now,
-            SourceEventSequence = 0,
+            SourceEventSequence = sourceEvent.Sequence,
             ActiveSetRevision = schedule.ActiveSetRevision,
             MissedIntervals = 0,
             SummaryJson = Json.Write(summary)
         });
-        Event(db, "OperatorStatusUpdatePublished", payload: new { scheduleId = schedule.Id, runId = run.Id, kind = milestoneKind, milestoneId });
+        Event(db, "OperatorStatusUpdatePublished", payload: new { scheduleId = schedule.Id, runId = run.Id, kind = milestoneKind, milestoneId, sourceEvent.Sequence });
         return 1;
     }
 

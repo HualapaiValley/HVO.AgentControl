@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -290,26 +291,35 @@ public sealed class OperatorUpdateTests
     }
 
     [Fact]
-    public async Task MilestoneIsIdempotentAndRequiresSchedule()
+    public async Task MilestoneUsesPersistedSourceEventAndIsIdempotent()
     {
         await using var app = new TestApp();
         var (run, _) = await Seed(app.Store);
         const long start = 10_000_000;
         var scheduleId = (await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), start)).Id;
 
-        var firstResult = await app.Store.PublishOperatorMilestone(run.Id, "UniqueKind", start + 1);
+        var firstResult = await app.Store.Write(async db =>
+        {
+            var schedule = (await db.OperatorUpdateSchedules.FindAsync(scheduleId))!;
+            var sourceEvent = ControlStore.Event(db, "CoordinationChanged", payload: new { run.Id, state = "Paused" }, provenance: "user");
+            await db.SaveChangesAsync();
+            var savedRun = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            return await app.Store.PublishMilestoneInternal(db, schedule, savedRun, "Paused", start + 1, sourceEvent);
+        });
         Assert.Equal(1, firstResult);
 
-        var existing = await app.Store.Read(db => db.OperatorStatusUpdates.AsNoTracking().AnyAsync(x => x.ScheduleId == scheduleId && x.Kind == "UniqueKind"));
-        Assert.True(existing);
-
-        await app.Store.Write(async db =>
+        var secondResult = await app.Store.Write(async db =>
         {
-            var schedule = await db.OperatorUpdateSchedules.FindAsync(scheduleId);
-            if (schedule is not null) db.OperatorUpdateSchedules.Remove(schedule);
-            return Task.FromResult(true);
+            var schedule = (await db.OperatorUpdateSchedules.FindAsync(scheduleId))!;
+            var sourceEvent = await db.Events.SingleAsync(e => e.Type == "CoordinationChanged" && e.Payload.Contains(run.Id));
+            var savedRun = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            return await app.Store.PublishMilestoneInternal(db, schedule, savedRun, "Paused", start + 1, sourceEvent);
         });
-        Assert.Equal(0, await app.Store.PublishOperatorMilestone(run.Id, "AfterScheduleRemoval", start + 2));
+        Assert.Equal(0, secondResult);
+
+        var milestone = Assert.Single(await app.Store.OperatorUpdates(), x => x.Kind == "Paused");
+        var transitionEvent = await app.Store.Read(db => db.Events.SingleAsync(e => e.Type == "CoordinationChanged" && e.Payload.Contains(run.Id)));
+        Assert.Equal(transitionEvent.Sequence, milestone.SourceEventSequence);
     }
 
     [Fact]
@@ -403,13 +413,42 @@ public sealed class OperatorUpdateTests
         Assert.NotNull(decisionCommandId);
 
         await FinishDecision(app.Store, run.Id);
-        var beforeApply = await app.Store.OperatorUpdates();
 
         await app.Store.CoordinationTick();
         var afterApply = await app.Store.OperatorUpdates();
         var milestones = afterApply.Where(u => u.Kind is "DecisionApplied" or "Completed").ToList();
         Assert.Single(milestones);
         Assert.Equal(run.Id, milestones[0].CoordinationRunId);
+        Assert.True(milestones[0].SourceEventSequence > 0);
+
+        var transitionEventSeq = await app.Store.Read(db =>
+            db.Events.AsNoTracking().Where(e => e.Type == "CoordinatorDecisionApplied").OrderByDescending(e => e.Sequence).Select(e => e.Sequence).FirstOrDefaultAsync());
+        Assert.Equal(transitionEventSeq, milestones[0].SourceEventSequence);
+    }
+
+    [Fact]
+    public async Task FailedMilestonePublicationRollsBackTransitionEvidence()
+    {
+        await using var app = new TestApp();
+        var (run, _) = await Seed(app.Store);
+        await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 60), 9_000_000);
+        await app.Store.Write(async db =>
+        {
+            (await db.CoordinationRuns.FindAsync(run.Id))!.WorkerIdsJson = "not-json";
+            return true;
+        });
+
+        await Assert.ThrowsAsync<JsonException>(() => app.Store.ControlCoordination(run.Id, new(run.Revision, "stop")));
+
+        var evidence = await app.Store.Read(async db => new
+        {
+            State = (await db.CoordinationRuns.FindAsync(run.Id))!.State,
+            Events = await db.Events.Where(e => e.Type == "CoordinationChanged").ToListAsync(),
+            Updates = await db.OperatorStatusUpdates.Where(u => u.CoordinationRunId == run.Id && u.Kind == "Stopped").ToListAsync()
+        });
+        Assert.Equal("Waiting", evidence.State);
+        Assert.DoesNotContain(evidence.Events, e => e.Payload.Contains(run.Id));
+        Assert.Empty(evidence.Updates);
     }
 
     [Fact]
@@ -427,6 +466,11 @@ public sealed class OperatorUpdateTests
         var milestones = updates.Where(u => u.Kind == "Stopped").ToList();
         Assert.Single(milestones);
         Assert.Equal(run.Id, milestones[0].CoordinationRunId);
+        Assert.True(milestones[0].SourceEventSequence > 0);
+
+        var transitionEventSeq = await app.Store.Read(db =>
+            db.Events.AsNoTracking().Where(e => e.Type == "CoordinationChanged").OrderByDescending(e => e.Sequence).Select(e => e.Sequence).FirstOrDefaultAsync());
+        Assert.Equal(transitionEventSeq, milestones[0].SourceEventSequence);
     }
 
     private static async Task FinishDecision(ControlStore store, string runId)
