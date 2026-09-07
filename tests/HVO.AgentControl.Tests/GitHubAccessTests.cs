@@ -54,13 +54,27 @@ public sealed class GitHubAccessTests
     }
     private static HttpResponseMessage Response(object value) => new(HttpStatusCode.OK) { Content = new StringContent(Json.Write(value)) };
     private static byte[] Decode(string value) => Convert.FromBase64String(value.Replace('-', '+').Replace('_', '/') + new string('=', (4 - value.Length % 4) % 4));
+    private static object Installation(Dictionary<string, string>? permissions = null) => new
+    {
+        account = new { login = "Owner" },
+        app_slug = "agentcontrol-test",
+        permissions = permissions ?? BaselinePermissions()
+    };
+    private static Dictionary<string, string> BaselinePermissions() => new()
+    { ["contents"] = "write", ["issues"] = "write", ["pull_requests"] = "write", ["metadata"] = "read" };
+    private static Dictionary<string, string> ExpandedPermissions()
+    {
+        var permissions = BaselinePermissions();
+        permissions["checks"] = "read"; permissions["statuses"] = "read"; permissions["actions"] = "read";
+        return permissions;
+    }
     private static object Grant(string[]? repositories = null, Dictionary<string, string>? permissions = null, int expiryMinutes = 60) => new
     {
         token = "installation-test-secret",
         expires_at = Now.AddMinutes(expiryMinutes),
         repository_selection = "selected",
         repositories = (repositories ?? ["Owner/Repo"]).Select(x => new { full_name = x }),
-        permissions = permissions ?? new() { ["contents"] = "write", ["issues"] = "write", ["pull_requests"] = "write", ["metadata"] = "read" }
+        permissions = permissions ?? BaselinePermissions()
     };
 
     [Fact]
@@ -76,18 +90,69 @@ public sealed class GitHubAccessTests
             Assert.Equal("123", claims.RootElement.GetProperty("iss").GetString());
             Assert.Equal(Now.AddSeconds(-60).ToUnixTimeSeconds(), claims.RootElement.GetProperty("iat").GetInt64());
             Assert.Equal(Now.AddSeconds(540).ToUnixTimeSeconds(), claims.RootElement.GetProperty("exp").GetInt64());
-            if (request.Method == HttpMethod.Get) return Response(new { account = new { login = "Owner" }, app_slug = "agentcontrol-test" });
+            if (request.Method == HttpMethod.Get) return Response(Installation(ExpandedPermissions()));
             using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
             Assert.Equal("Repo", Assert.Single(body.RootElement.GetProperty("repositories").EnumerateArray()).GetString());
-            Assert.Equal(3, body.RootElement.GetProperty("permissions").EnumerateObject().Count());
+            Assert.Equal(6, body.RootElement.GetProperty("permissions").EnumerateObject().Count());
             Assert.Equal("write", body.RootElement.GetProperty("permissions").GetProperty("pull_requests").GetString());
-            return Response(Grant());
+            Assert.Equal("read", body.RootElement.GetProperty("permissions").GetProperty("checks").GetString());
+            Assert.Equal("read", body.RootElement.GetProperty("permissions").GetProperty("statuses").GetString());
+            Assert.Equal("read", body.RootElement.GetProperty("permissions").GetProperty("actions").GetString());
+            return Response(Grant(permissions: ExpandedPermissions()));
         });
         using var http = new HttpClient(handler);
         var token = await new GitHubAppClient(http, new Clock()).Issue(123, 456, rsa.ExportRSAPrivateKeyPem(), ["Owner/Repo"], CancellationToken.None);
         Assert.Equal(2, handler.Calls);
         Assert.Equal(Now.AddHours(1), token.ExpiresAt);
+        Assert.Equal(GitHubPermissionState.Granted, token.ChecksPermission);
+        Assert.Equal(GitHubPermissionState.Granted, token.CommitStatusesPermission);
+        Assert.Equal(GitHubPermissionState.Granted, token.ActionsPermission);
+        Assert.Equal(Now, token.PermissionsVerifiedAt);
         Assert.DoesNotContain(token.Value, token.ToString());
+    }
+
+    [Fact]
+    public async Task LegacyInstallationKeepsBaselineGrantAndReportsCiReadsDenied()
+    {
+        using var rsa = RSA.Create(2048);
+        using var handler = new Handler(async request =>
+        {
+            if (request.Method == HttpMethod.Get) return Response(Installation());
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            Assert.Equal(3, body.RootElement.GetProperty("permissions").EnumerateObject().Count());
+            Assert.False(body.RootElement.GetProperty("permissions").TryGetProperty("checks", out _));
+            return Response(Grant());
+        });
+        using var http = new HttpClient(handler);
+        var token = await new GitHubAppClient(http, new Clock()).Issue(1, 2, rsa.ExportRSAPrivateKeyPem(), ["Owner/Repo"], CancellationToken.None);
+        Assert.Equal(GitHubPermissionState.Denied, token.ChecksPermission);
+        Assert.Equal(GitHubPermissionState.Denied, token.CommitStatusesPermission);
+        Assert.Equal(GitHubPermissionState.Denied, token.ActionsPermission);
+    }
+
+    [Fact]
+    public async Task ActionsReadIsOptionalForExactCiInspection()
+    {
+        using var rsa = RSA.Create(2048);
+        var installationPermissions = BaselinePermissions();
+        installationPermissions["checks"] = "write";
+        installationPermissions["statuses"] = "read";
+        using var handler = new Handler(request => Task.FromResult(Response(request.Method == HttpMethod.Get
+            ? Installation(installationPermissions)
+            : Grant(permissions: new Dictionary<string, string>(installationPermissions) { ["checks"] = "read" }))));
+        using var http = new HttpClient(handler);
+        var token = await new GitHubAppClient(http, new Clock()).Issue(1, 2, rsa.ExportRSAPrivateKeyPem(), ["Owner/Repo"], CancellationToken.None);
+        Assert.Equal(GitHubPermissionState.Granted, token.ChecksPermission);
+        Assert.Equal(GitHubPermissionState.Granted, token.CommitStatusesPermission);
+        Assert.Equal(GitHubPermissionState.Denied, token.ActionsPermission);
+        var access = new GitHubAccess
+        {
+            State = "Ready",
+            ChecksPermission = token.ChecksPermission,
+            CommitStatusesPermission = token.CommitStatusesPermission,
+            ActionsPermission = token.ActionsPermission
+        };
+        Assert.Equal("Ready", access.ExactCiInspectionState);
     }
 
     [Theory]
@@ -96,6 +161,13 @@ public sealed class GitHubAccessTests
     [InlineData("missing-repository")]
     [InlineData("extra-permission")]
     [InlineData("missing-permission")]
+    [InlineData("downgraded-checks")]
+    [InlineData("escalated-checks")]
+    [InlineData("unrequested-checks")]
+    [InlineData("malformed-installation")]
+    [InlineData("malformed-credential")]
+    [InlineData("malformed-permission")]
+    [InlineData("duplicate-permission")]
     [InlineData("expiry")]
     [InlineData("forbidden")]
     public async Task UnexpectedScopeOrErrorsNeverProduceCredentials(string scenario)
@@ -104,17 +176,41 @@ public sealed class GitHubAccessTests
         using var handler = new Handler(request =>
         {
             if (scenario == "forbidden") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("sensitive-upstream-response") });
-            if (request.Method == HttpMethod.Get) return Task.FromResult(Response(new { account = new { login = scenario == "account" ? "Other" : "Owner" }, app_slug = "agentcontrol-test" }));
-            var permissions = new Dictionary<string, string> { ["contents"] = "write", ["issues"] = "write", ["pull_requests"] = "write" };
+            if (request.Method == HttpMethod.Get)
+            {
+                if (scenario == "malformed-installation") return Task.FromResult(Response(new { account = new { login = "Owner" }, app_slug = "agentcontrol-test", permissions = "invalid" }));
+                var installation = ExpandedPermissions();
+                if (scenario == "unrequested-checks") installation.Remove("checks");
+                return Task.FromResult(Response(new { account = new { login = scenario == "account" ? "Other" : "Owner" }, app_slug = "agentcontrol-test", permissions = installation }));
+            }
+            if (scenario == "malformed-credential") return Task.FromResult(Response(new { token = "installation-test-secret" }));
+            if (scenario == "duplicate-permission") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"token\":\"installation-test-secret\",\"expires_at\":\"2026-09-07T13:00:00Z\",\"repository_selection\":\"selected\",\"repositories\":[{\"full_name\":\"Owner/Repo\"}],\"permissions\":{\"contents\":\"write\",\"issues\":\"write\",\"pull_requests\":\"write\",\"checks\":\"read\",\"checks\":\"read\",\"statuses\":\"read\",\"actions\":\"read\",\"metadata\":\"read\"}}")
+            });
+            var permissions = ExpandedPermissions();
             if (scenario == "extra-permission") permissions["administration"] = "write";
             if (scenario == "missing-permission") permissions["issues"] = "read";
-            return Task.FromResult(Response(Grant(scenario switch { "extra-repository" => ["Owner/Repo", "Owner/Other"], "missing-repository" => [], _ => null }, permissions, scenario == "expiry" ? 1 : 60)));
+            if (scenario == "downgraded-checks") permissions["checks"] = "none";
+            if (scenario == "escalated-checks") permissions["checks"] = "write";
+            if (scenario == "unrequested-checks") permissions["checks"] = "read";
+            object grantedPermissions = scenario == "malformed-permission"
+                ? new Dictionary<string, object>(permissions.ToDictionary(x => x.Key, x => (object)x.Value)) { ["checks"] = 1 }
+                : permissions;
+            return Task.FromResult(Response(new
+            {
+                token = "installation-test-secret",
+                expires_at = Now.AddMinutes(scenario == "expiry" ? 1 : 60),
+                repository_selection = "selected",
+                repositories = (scenario switch { "extra-repository" => ["Owner/Repo", "Owner/Other"], "missing-repository" => [], _ => new[] { "Owner/Repo" } }).Select(x => new { full_name = x }),
+                permissions = grantedPermissions
+            }));
         });
         using var http = new HttpClient(handler);
         var error = await Assert.ThrowsAsync<ControlException>(() => new GitHubAppClient(http, new Clock()).Issue(1, 2, rsa.ExportRSAPrivateKeyPem(), ["Owner/Repo"], CancellationToken.None));
         Assert.DoesNotContain("sensitive-upstream-response", error.Message);
         Assert.DoesNotContain("installation-test-secret", error.Message);
-        if (scenario is "account" or "forbidden") Assert.Equal(1, handler.Calls);
+        if (scenario is "account" or "forbidden" or "malformed-installation") Assert.Equal(1, handler.Calls);
     }
 
     [Theory]
@@ -133,7 +229,7 @@ public sealed class GitHubAccessTests
         var target = await app.Store.SaveRuntime(targetProfile);
         using var rsa = RSA.Create(2048);
         using var handler = new Handler(request => Task.FromResult(Response(request.Method == HttpMethod.Get
-            ? new { account = new { login = "Owner" }, app_slug = "agentcontrol-test" } : Grant())));
+            ? Installation(ExpandedPermissions()) : Grant(permissions: ExpandedPermissions()))));
         using var http = new HttpClient(handler);
         var secrets = app.Services.GetRequiredService<Secrets>();
         var service = new GitHubAccessService(app.Store, secrets, new GitHubAppClient(http, new Clock()));
@@ -148,6 +244,10 @@ public sealed class GitHubAccessTests
         Assert.NotEqual(source.PrivateKeyReference, copied.PrivateKeyReference);
         Assert.Equal(secrets.Read(source.PrivateKeyReference), secrets.Read(copied.PrivateKeyReference));
         Assert.Null(copied.ExpiresAt); Assert.Equal("Pending", copied.State);
+        Assert.Equal("CredentialUnavailable", copied.ExactCiInspectionState);
+        copied.State = "Ready";
+        Assert.Equal("Ready", copied.ExactCiInspectionState);
+        Assert.Equal(Now.ToUnixTimeMilliseconds(), copied.PermissionsVerifiedAt);
         await service.Disable(source.Id, source.Revision, CancellationToken.None);
         Assert.Equal("Pending", (await service.List()).Single(x => x.Id == target.Id).State);
         await Assert.ThrowsAsync<ControlException>(() => service.Configure(target.Id, input with { ExpectedRevision = copied.Revision }, CancellationToken.None));
@@ -155,6 +255,8 @@ public sealed class GitHubAccessTests
         var response = await owner.GetStringAsync("/api/v1/github/access");
         Assert.DoesNotContain("privateKey", response, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("installation-test-secret", response);
+        Assert.Contains("checksPermission", response);
+        Assert.Contains("exactCiInspectionState", response);
         var events = await app.Store.Read(db => Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToListAsync(db.Events));
         Assert.All(events, e => { Assert.DoesNotContain("PRIVATE KEY", e.Payload); Assert.DoesNotContain("installation-test-secret", e.Payload); });
     }
@@ -166,12 +268,13 @@ public sealed class GitHubAccessTests
         var runtime = await app.Store.SaveRuntime(PersistenceTests.Profile());
         using var rsa = RSA.Create(2048);
         var pem = rsa.ExportRSAPrivateKeyPem();
-        using var handler = new Handler(request => Task.FromResult(Response(request.Method == HttpMethod.Get ? new { account = new { login = "Owner" }, app_slug = "agentcontrol-test" } : Grant())));
+        using var handler = new Handler(request => Task.FromResult(Response(request.Method == HttpMethod.Get ? Installation() : Grant())));
         using var http = new HttpClient(handler);
         var secrets = app.Services.GetRequiredService<Secrets>();
         var service = new GitHubAccessService(app.Store, secrets, new GitHubAppClient(http, new Clock()));
         var saved = await service.Configure(runtime.Id, new(1, 2, pem, ["Owner/Repo"], 0), CancellationToken.None);
         Assert.Equal(pem, secrets.Read(saved.PrivateKeyReference));
+        Assert.Equal("PermissionDenied", saved.ExactCiInspectionState);
         Assert.DoesNotContain("PRIVATE KEY", File.ReadAllText(secrets.PathFor(saved.PrivateKeyReference)));
         using var owner = await app.SignIn();
         var response = await owner.GetStringAsync("/api/v1/github/access");

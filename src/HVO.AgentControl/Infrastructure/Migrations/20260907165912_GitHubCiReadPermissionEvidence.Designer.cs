@@ -2,6 +2,7 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -9,9 +10,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260907165912_GitHubCiReadPermissionEvidence")]
+    partial class GitHubCiReadPermissionEvidence
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -237,104 +240,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasIndex("WorkerId", "Sequence");
 
                     b.ToTable("Events");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.OperatorStatusUpdate", b =>
-                {
-                    b.Property<long>("Sequence")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("AcknowledgedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("ActiveSetRevision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("CoordinationRunId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("DueAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Id")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("MissedIntervals")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("PublishedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ScheduleId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("SourceEventSequence")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("SummaryJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Sequence");
-
-                    b.HasIndex("Id")
-                        .IsUnique();
-
-                    b.HasIndex("CoordinationRunId", "Sequence");
-
-                    b.HasIndex("ScheduleId", "Kind", "DueAt")
-                        .IsUnique();
-
-                    b.ToTable("OperatorStatusUpdates");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.OperatorUpdateSchedule", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("ActiveSetRevision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("CoordinationRunId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("Enabled")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("IntervalMinutes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("LastDueAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("LastEmittedEventSequence")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("NextDueAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("Revision")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CoordinationRunId")
-                        .IsUnique();
-
-                    b.ToTable("OperatorUpdateSchedules");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.PendingRequest", b =>
@@ -755,54 +660,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("GitHubAccess");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Telemetry.RuntimeTelemetryHistoryRecord", b =>
-                {
-                    b.Property<long>("Sequence")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<double?>("CpuCoreUsage")
-                        .HasColumnType("REAL");
-
-                    b.Property<double?>("CpuQuotaPercent")
-                        .HasColumnType("REAL");
-
-                    b.Property<long?>("CpuWindowMs")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("MemoryBytes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("MemoryLimitBytes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<double?>("MemoryPercent")
-                        .HasColumnType("REAL");
-
-                    b.Property<string>("Note")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("ObservedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<double?>("QuotaCores")
-                        .HasColumnType("REAL");
-
-                    b.Property<string>("RuntimeId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Sequence");
-
-                    b.HasIndex("RuntimeId", "ObservedAt", "Sequence");
-
-                    b.ToTable("TelemetryHistory");
                 });
 #pragma warning restore 612, 618
         }

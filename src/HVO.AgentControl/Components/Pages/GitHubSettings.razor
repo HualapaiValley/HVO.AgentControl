@@ -10,7 +10,7 @@
     @if (notice is not null) { <div class="notice" role="status">@notice</div> }
     <section class="panel">
         <h2>Connect a GitHub App installation</h2>
-        <p>Create a private GitHub App with Contents, Issues and Pull requests set to Read and write, disable its webhook, and install it on the repositories you want workers to use. Enter its App ID, installation ID and generated PEM private key here. The key is encrypted in AgentControl; workers receive expiring installation credentials.</p>
+        <p>Create a private GitHub App with Contents, Issues and Pull requests set to Read and write, plus Checks and Commit statuses set to Read-only. Actions read access is optional. Disable its webhook, and install it on the repositories you want workers to use. Enter its App ID, installation ID and generated PEM private key here. The key is encrypted in AgentControl; workers receive expiring installation credentials.</p>
         <p><a href="https://github.com/settings/apps/new" target="_blank" rel="noopener noreferrer">Register a GitHub App</a> · <a href="https://github.com/settings/installations" target="_blank" rel="noopener noreferrer">Manage installations</a></p>
         <p>After creating the App, choose <strong>Install App</strong> in its settings, select your account and install it on the required repositories. Then open <strong>Manage installations</strong> above and choose <strong>Configure</strong>. The final number in the URL, for example <code>https://github.com/settings/installations/12345678</code>, is your <strong>Installation ID</strong>. The numeric <strong>App ID</strong> is on the App's settings page. The alphanumeric Client ID is not needed here.</p>
         <p>All sessions on the selected runtime share this access. Existing personal GitHub logins are preserved; use a dedicated execution runtime for managed credentials. Account access does not imply approval to merge a PR.</p>
@@ -33,6 +33,14 @@
             <h2>@RuntimeName(access.Id) <span class="badge">@access.State</span></h2>
             <p>@string.Join(", ", HVO.AgentControl.Core.Json.Read<string[]>(access.RepositoriesJson))</p>
             <p>@access.Detail</p>
+            @if (access.ExactCiInspectionState == "Ready")
+            { <p><strong>Exact CI inspection ready.</strong> Check conclusions still must be queried for the expected PR head revision; missing, unknown or pending checks block a merge.</p> }
+            else if (access.ExactCiInspectionState == "PermissionDenied")
+            { <p><strong>Exact CI inspection blocked by App permissions.</strong> Grant Checks and Commit statuses read access, approve the installation update in GitHub, then verify again. Actions read access is optional.</p> }
+            else if (access.ExactCiInspectionState == "CredentialUnavailable")
+            { <p><strong>CI read permissions verified, but no managed credential is ready.</strong> Resolve the delivery state before relying on CI evidence.</p> }
+            else
+            { <p><strong>Exact CI inspection permissions unknown.</strong> Verify this registration before relying on CI evidence.</p> }
             @if (access.State != "Disabled") { <button class="subtle" disabled="@busy" @onclick="() => Disable(access)">Disable renewal</button> }
             @if (access.ExpiresAt is long expiry) { <p>Current credential expires @DateTimeOffset.FromUnixTimeMilliseconds(expiry).ToString("u").</p> }
         </section>
