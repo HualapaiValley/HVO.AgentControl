@@ -4,9 +4,19 @@
 @inherits ControlPage
 
 <PageTitle>AgentControl · Model access</PageTitle>
-<div class="shell">
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
     <ControlHeader Title="Model access" Description="Connect execution runtimes to your model subscription." />
     @if (error is not null) { <div class="notice error" role="alert">@error</div> }
+    @if (notice is not null) { <div class="notice" role="status">@notice</div> }
+    <section class="panel" aria-label="OpenCode Go key">
+        <h2>OpenCode Go</h2>
+        <p>Save your subscription API key encrypted on AgentHost, then apply it to selected runtimes. The saved key is never shown again. OpenCode stores its own credential copy on each selected runtime.</p>
+        <p role="status">@(keyStatus?.Saved == true ? "Key saved · revision " + keyStatus.Revision : "No key saved")</p>
+        <label for="go-api-key">OpenCode Go API key</label>
+        <input id="go-api-key" type="password" autocomplete="new-password" maxlength="8192" @bind="apiKey" @bind:event="oninput" />
+        <button disabled="@(busy || string.IsNullOrWhiteSpace(apiKey))" @onclick="SaveKey">Save encrypted key</button>
+        <p class="meta">Saving does not change models or resume work. Subscription allowance is checked separately; saving a key does not verify available quota.</p>
+    </section>
     <section class="panel">
         <h2>ChatGPT subscription</h2>
         <p>Choose a runtime, open the sign-in link and enter its device code. No port forwarding is needed. All workers running as the same OS user on that runtime share its OpenCode credentials.</p>
@@ -31,6 +41,11 @@
                 }
             }
             <button disabled="@(busy || pending || !runtime.DesiredConnected || runtime.Health != "Healthy")" @onclick="() => Start(runtime.Id)">@(pending ? "Sign-in pending…" : login?.State == "Connected" ? "Sign in again" : "Sign in with ChatGPT")</button>
+            <button disabled="@(busy || keyStatus?.Saved != true || !runtime.DesiredConnected || runtime.Health != "Healthy")" @onclick="() => ApplyKey(runtime.Id)">Apply saved Go key</button>
+            @if (keyStatus?.Deliveries.FirstOrDefault(x => x.RuntimeId == runtime.Id) is { } delivery)
+            {
+                <p class="meta">Go key revision @delivery.KeyRevision · @(delivery.KeyRevision != keyStatus.Revision ? "Saved key changed; apply the latest revision." : delivery.State == "StoredOnRuntime" ? "Stored by OpenCode. Model access and allowance not yet tested." : delivery.State == "FailedBeforeSend" ? "Connection failed before sending. Retry when the runtime is available." : "Delivery unconfirmed. Applying again safely replaces the same provider key.")</p>
+            }
             @if (runtime.Health != "Healthy") { <p class="meta">Verify and connect this runtime first.</p> }
         </section>
     }
