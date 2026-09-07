@@ -6,8 +6,8 @@ public static class PriceCalculator
     {
         ArgumentOutOfRangeException.ThrowIfNegative(unitPrice);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(quantity);
-        var subtotal = unitPrice;
-        if (quantity > 10) subtotal *= 0.90m;
+        var subtotal = unitPrice * quantity;
+        if (quantity >= 10) subtotal *= 0.90m;
         return Math.Round(subtotal, 2, MidpointRounding.AwayFromZero);
     }
 }
