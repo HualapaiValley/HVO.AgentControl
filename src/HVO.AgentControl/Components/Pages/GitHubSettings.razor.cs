@@ -8,17 +8,29 @@ public partial class GitHubSettings
 {
     [Inject] private GitHubAccessService GitHub { get; set; } = default!;
     private List<GitHubAccess> grants = [];
-    private string runtimeId = "", repositories = "", privateKey = "";
+    private string runtimeId = "", repositories = "", privateKey = "", sourceRuntimeId = "";
+    private long? sourceRevision;
     private long appId, installationId, revision;
 
     protected override async Task SnapshotChanged() => grants = await GitHub.List();
 
     private void SelectRuntime()
     {
+        sourceRuntimeId = ""; sourceRevision = null;
         var grant = grants.FirstOrDefault(x => x.Id == runtimeId);
         appId = grant?.AppId ?? 0; installationId = grant?.InstallationId ?? 0; revision = grant?.Revision ?? 0;
         repositories = grant is null ? "" : string.Join('\n', Json.Read<string[]>(grant.RepositoriesJson));
         privateKey = "";
+    }
+
+    private void SelectSource()
+    {
+        privateKey = "";
+        var source = grants.FirstOrDefault(x => x.Id == sourceRuntimeId);
+        if (source is null) { SelectRuntime(); return; }
+        sourceRevision = source.Revision;
+        appId = source.AppId; installationId = source.InstallationId;
+        repositories = string.Join('\n', Json.Read<string[]>(source.RepositoriesJson));
     }
 
     private Task Save() => Execute(async () =>
@@ -26,7 +38,8 @@ public partial class GitHubSettings
         try
         {
             var result = await GitHub.Configure(runtimeId, new(appId, installationId, privateKey,
-                repositories.Split(['\r', '\n', ','], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries), revision), lifetime.Token);
+                repositories.Split(['\r', '\n', ','], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries), revision,
+                sourceRuntimeId.Length == 0 ? null : sourceRuntimeId, sourceRevision), lifetime.Token);
             revision = result.Revision;
             notice = "Repository access verified. Credential delivery and renewal run while the runtime is connected.";
         }
