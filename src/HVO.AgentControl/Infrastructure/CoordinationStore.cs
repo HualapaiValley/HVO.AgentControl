@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Core;
 using Microsoft.EntityFrameworkCore;
@@ -231,11 +229,7 @@ public sealed partial class ControlStore
         var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
             x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
         if (!ownerFollowup && repair is null && pendingRecovery is null && unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision) return false;
-        var observation = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
-        {
-            commands = commands.Select(x => new { x.Id, x.State, x.ProgressText }),
-            questions = requests.Select(x => new { x.Id, x.State })
-        }))));
+        var observation = CoordinationObservation.Fingerprint(commands, requests);
         if (observation == run.LastObservation) return false;
         var contextWorkers = participants.Select(x => new WorkerRecord
         {

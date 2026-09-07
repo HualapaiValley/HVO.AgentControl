@@ -27,6 +27,8 @@ public sealed class TestApp : WebApplicationFactory<Program>
         {
             var coordinator = services.FirstOrDefault(x => x.ImplementationType == typeof(HVO.AgentControl.Services.CoordinatorService));
             if (coordinator is not null) services.Remove(coordinator);
+            var operatorUpdates = services.FirstOrDefault(x => x.ImplementationType == typeof(HVO.AgentControl.Services.OperatorUpdateService));
+            if (operatorUpdates is not null) services.Remove(operatorUpdates);
         });
         builder.UseSetting("Control:DataDirectory", DataPath);
         builder.UseSetting("Control:SecretsDirectory", SecretPath);

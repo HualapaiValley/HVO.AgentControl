@@ -26,7 +26,8 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true', { timeout: 15000 });
     for (const name of ['Runtimes', 'Workers', 'Coordination', 'Overview']) {
-      await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name, exact: true }).click();
+      const navigation = name === 'Runtimes' ? 'Administration' : 'Main navigation';
+      await page.getByRole('navigation', { name: navigation }).getByRole('link', { name, exact: true }).click();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
       await page.reload();
@@ -40,6 +41,17 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
         await expect(profile).toHaveCount(0);
       }
     }
+    await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const route of ['/', '/workers', '/runtimes', '/coordination']) {
+      await page.goto(base + route);
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    }
+    await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
+    await expect(page.getByRole('navigation', { name: 'Administration' })).toBeVisible();
+    await page.getByRole('button', { name: 'Close worker sidebar', exact: true }).click({ position: { x: 382, y: 420 } });
     expect(errors).toEqual([]);
     console.log('PASS: published application readiness, anonymous API 401, sign-in, interactive navigation/reload on all four pages, runtime form and browser scripts.');
   } finally {
