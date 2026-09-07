@@ -4,8 +4,8 @@ Implementation for issue #35 calculation foundation (namespace `HVO.AgentControl
 This document defines the input facts, parser behavior, calculator guard states, and the
 deterministic output produced from two consecutive samples. Runtime cards now project the
 existing authenticated capability snapshot through this contract, showing available memory and
-quota facts while explicitly retaining `NeedsSecondSample`; polling and live utilization remain
-outside this slice.
+quota facts while explicitly retaining `NeedsSecondSample`. The periodic collector described
+below adds sampled history for supported Linux containers.
 
 It supplements the broader [worker status and observability design](OBSERVABILITY_DESIGN.md)
 without replacing that document's status and usage requirements.
