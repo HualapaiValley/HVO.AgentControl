@@ -95,6 +95,8 @@ public sealed partial class ControlStore
             {
                 existing.AuthorityGeneration = enrollment.AuthorityGeneration;
                 existing.Attempt = input.Attempt;
+                existing.AcknowledgedAt = null;
+                existing.AcknowledgementData = null;
             }
             return existing;
         }
@@ -128,7 +130,7 @@ public sealed partial class ControlStore
         return Read(async db =>
         {
             var enrollment = await db.Enrollments.AsNoTracking().FirstOrDefaultAsync(x => x.Id == input.EnrollmentId);
-            if (enrollment is null || enrollment.AuthorityGeneration != input.AuthorityGeneration) return false;
+            if (enrollment is null || enrollment.State != EnrollmentState.Active || enrollment.AuthorityGeneration != input.AuthorityGeneration) return false;
             return await db.CommandAuthorities.AnyAsync(x =>
                 x.CommandId == input.CommandId &&
                 x.EnrollmentId == input.EnrollmentId);

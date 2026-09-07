@@ -336,4 +336,42 @@ public sealed class EnrollmentAuthorityTests
         Assert.NotNull(cursor);
         Assert.Equal("cursor-r", cursor.CursorValue);
     }
+
+    [Fact]
+    public async Task ValidateCommandAuthorityReturnsFalseForRevokedEnrollment()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-rev-val", "OpenCode", "RevVal"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-rev-val", "enroll-rev-val", 1));
+        await app.Store.RevokeEnrollment("enroll-rev-val");
+        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-rev-val", "enroll-rev-val", 1));
+        Assert.False(isValid);
+    }
+
+    [Fact]
+    public async Task ValidateCommandAuthorityReturnsFalseForSuspendedEnrollment()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-sus-val", "OpenCode", "SusVal"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-sus-val", "enroll-sus-val", 1));
+        await app.Store.SuspendEnrollment("enroll-sus-val");
+        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-sus-val", "enroll-sus-val", 1));
+        Assert.False(isValid);
+    }
+
+    [Fact]
+    public async Task BindCommandAuthorityClearsStaleAckOnRebinding()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-ack-clear", "OpenCode", "AckClear"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-ack-clear", "enroll-ack-clear", 1));
+        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack-clear", "enroll-ack-clear", "old-data"));
+        var before = await app.Store.GetCommandAuthority("cmd-ack-clear");
+        Assert.NotNull(before!.AcknowledgedAt);
+        Assert.Equal("old-data", before.AcknowledgementData);
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-ack-clear", "enroll-ack-clear", 2));
+        var after = await app.Store.GetCommandAuthority("cmd-ack-clear");
+        Assert.Null(after!.AcknowledgedAt);
+        Assert.Null(after.AcknowledgementData);
+    }
 }
