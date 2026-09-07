@@ -62,17 +62,13 @@ log_event() {
   local started_ms="$1" event="$2" batch="$3" iteration="$4" status="$5"
   local now_ms; now_ms=$(date +%s%N)
   local elapsed_ms=$(( ( now_ms - started_ms ) / 1000000 ))
-  printf '{'
-  printf '"ts":"%s","event":"%s","batch":%s,"iteration":%s,"exit":%s,"elapsedMs":%s' \
-    "$(now_iso)" "$event" "$batch" "$iteration" "$status" "$elapsed_ms"
-  printf '}\n' >> "$evidence_path"
+  printf '{"ts":"%s","event":"%s","batch":%s,"iteration":%s,"exit":%s,"elapsedMs":%s}\n' \
+    "$(now_iso)" "$event" "$batch" "$iteration" "$status" "$elapsed_ms" >> "$evidence_path"
 }
 iteration_event() {
   local batch="$1" iteration="$2" status="$3" elapsed_ms="$4" passed="$5" failed="$6" total="$7"
-  printf '{'
-  printf '"ts":"%s","event":"iteration","batch":%s,"iteration":%s,"exit":%s,"elapsedMs":%s,"passed":%s,"failed":%s,"total":%s' \
-    "$(now_iso)" "$batch" "$iteration" "$status" "$elapsed_ms" "$passed" "$failed" "$total"
-  printf '}\n' >> "$evidence_path"
+  printf '{"ts":"%s","event":"iteration","batch":%s,"iteration":%s,"exit":%s,"elapsedMs":%s,"passed":%s,"failed":%s,"total":%s}\n' \
+    "$(now_iso)" "$batch" "$iteration" "$status" "$elapsed_ms" "$passed" "$failed" "$total" >> "$evidence_path"
 }
 
 printf '' > "$evidence_path"
