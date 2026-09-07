@@ -569,6 +569,36 @@ public sealed class CoordinationTests
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
     }
 
+    [Fact]
+    public async Task OwnerFollowupWakesDecisionWhileUnrelatedWorkHasNoNewProgress()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, b) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Long task", [a.Id, b.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Start long task", [new("send_prompt", a.Id, "Long task")]));
+        await app.Store.CoordinationTick();
+        var original = Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(original.Id))!.State = Delivery.Running; return true; });
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        Assert.Null(run.DecisionCommandId);
+        await app.Store.PromptCoordination(run.Id, new(Guid.NewGuid().ToString(), run.Revision, "Give idle worker B an independent task"));
+        await app.Store.Recover();
+        await ObserveIdle(app.Store);
+        await app.Store.CoordinationTick();
+        var awakened = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Deciding", awakened.State); Assert.NotNull(awakened.DecisionCommandId);
+        var context = Json.Read<CoordinatorContext>(awakened.InputJson);
+        Assert.Contains("Give idle worker B", context.Instruction);
+        Assert.Equal(Delivery.Running, Assert.Single(context.Results).State);
+        await app.Store.CoordinationTick();
+        var snapshot = await app.Store.Snapshot();
+        Assert.Single(snapshot.Commands, x => x.Origin == "coordinator:" + run.Id);
+        Assert.Equal(2, snapshot.Commands.Count(x => x.Origin == "coordinator-decision:" + run.Id));
+        Assert.Equal(Delivery.Running, snapshot.Commands.Single(x => x.Id == original.Id).State);
+    }
+
     private static async Task<(WorkerRecord, WorkerRecord, WorkerRecord)> Seed(ControlStore store)
     {
         var coordinator = await PersistenceTests.SeedWorker(store);

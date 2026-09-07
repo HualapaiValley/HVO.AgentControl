@@ -222,6 +222,7 @@ public sealed partial class ControlStore
         var commands = await db.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt).ToArrayAsync();
         var repair = run.InputJson == "{}" ? null : Json.Read<CoordinatorContext>(run.InputJson).Repair;
         var pendingRecovery = run.InputJson == "{}" ? null : ReadRecoveryContext(run).Recovery;
+        var ownerFollowup = run.InputJson != "{}" && ReadRecoveryContext(run).Instruction != run.Instruction;
         var unresolved = commands.Any(x => Delivery.InFlight(x.State) || x.State == Delivery.Queued);
         if (commands.Any(x => x.State == Delivery.Unknown)) { PauseCoordination(run, "A worker's delivery is uncertain. Resolve it before further coordination."); return true; }
         // Do not treat a stream of progress tokens or model-written prose as completion.
@@ -229,7 +230,7 @@ public sealed partial class ControlStore
             Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
         var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
             x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
-        if (repair is null && pendingRecovery is null && unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision) return false;
+        if (!ownerFollowup && repair is null && pendingRecovery is null && unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision) return false;
         var observation = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
         {
             commands = commands.Select(x => new { x.Id, x.State, x.ProgressText }),
