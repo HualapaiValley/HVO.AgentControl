@@ -87,6 +87,12 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     }
 
     public Task<JsonElement> Sessions(string directory, CancellationToken token) => Get(Scope("/session", directory), token);
+    public Task<JsonElement> ProviderAuthMethods(string directory, CancellationToken token) => Get(Scope("/provider/auth", directory), token);
+    public Task<JsonElement> AuthorizeChatGpt(string directory, int method, CancellationToken token) =>
+        Send(HttpMethod.Post, Scope("/provider/openai/oauth/authorize", directory), new { method }, token);
+    public Task<JsonElement> CompleteChatGpt(string directory, int method, CancellationToken token) =>
+        Send(HttpMethod.Post, Scope("/provider/openai/oauth/callback", directory), new { method }, token,
+            timeoutDuration: TimeSpan.FromMinutes(11));
     public Task<JsonElement> Prompt(WorkerRecord worker, CommandRecord command, PromptInput input, CancellationToken token) =>
         Send(HttpMethod.Post, Scope($"/session/{Id(worker.NativeSessionId)}/prompt_async", worker.Directory),
             new
@@ -133,9 +139,9 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     }
 
     public Task<JsonElement> Get(string route, CancellationToken token, int limit = 2_000_000) => Send(HttpMethod.Get, route, null, token, limit);
-    private async Task<JsonElement> Send(HttpMethod method, string route, object? body, CancellationToken token, int limit = 2_000_000)
+    private async Task<JsonElement> Send(HttpMethod method, string route, object? body, CancellationToken token, int limit = 2_000_000, TimeSpan? timeoutDuration = null)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(timeoutDuration ?? TimeSpan.FromSeconds(20));
         using var request = new HttpRequestMessage(method, route);
         if (body is not null) request.Content = JsonContent.Create(body, options: new JsonSerializerOptions(Json.Options) { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
         // Mutations are attempted exactly once. A failed response/timeout is reconciled by the dispatcher.

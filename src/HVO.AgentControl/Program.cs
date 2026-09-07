@@ -68,6 +68,7 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddDbContextFactory<ControlDb>(options => options.UseSqlite($"Data Source={Path.Combine(settings.DataDirectory, "agentcontrol.db")};Default Timeout=10"));
 builder.Services.AddSingleton<ControlStore>();
 builder.Services.AddSingleton<RuntimeVerificationService>();
+builder.Services.AddSingleton<ProviderLoginService>();
 builder.Services.AddSingleton<TerminalService>();
 builder.Services.AddSingleton<IRuntimeTransportFactory, SshRuntimeTransportFactory>();
 builder.Services.AddHostedService<RuntimeSupervisor>();
@@ -92,7 +93,7 @@ app.Use(async (context, next) =>
     context.Response.Headers["X-Content-Type-Options"] = "nosniff";
     context.Response.Headers["X-Frame-Options"] = "DENY";
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
-    if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path == "/") context.Response.Headers.CacheControl = "no-store";
+    if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path == "/" || context.Request.Path == "/providers") context.Response.Headers.CacheControl = "no-store";
     try { await next(); }
     catch (ControlException ex) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = ex.Message }); }
     catch (AntiforgeryValidationException) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = "Invalid antiforgery token; reload the page." }); }
