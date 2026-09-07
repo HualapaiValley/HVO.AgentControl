@@ -53,4 +53,24 @@ public sealed class PriceCalculatorTests
     {
         Assert.Equal(1.01m, PriceCalculator.Total(1.005m, 1));
     }
+
+    [Fact]
+    public void ShippingCostIsChargedBelowThreshold()
+    {
+        Assert.Equal(4.95m, PriceCalculator.ShippingCost(0.00m));
+        Assert.Equal(4.95m, PriceCalculator.ShippingCost(49.99m));
+    }
+
+    [Fact]
+    public void ShippingCostIsFreeAtAndAboveThreshold()
+    {
+        Assert.Equal(0.00m, PriceCalculator.ShippingCost(50.00m));
+        Assert.Equal(0.00m, PriceCalculator.ShippingCost(50.01m));
+    }
+
+    [Fact]
+    public void ShippingCostRejectsNegativeSubtotal()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => PriceCalculator.ShippingCost(-0.01m));
+    }
 }
