@@ -26,19 +26,36 @@
       <label>Instruction<textarea rows="5" maxlength="16000" @bind="instruction" placeholder="Ask Agent 1 what time it is, then tell the other agents what Agent 1 reported."></textarea></label>
       <label class="check"><input type="checkbox" @bind="includeGuidance" /> Include coordination guidance in worker instructions</label>
       @if (includeGuidance) { <label>Progress interval in minutes (0 for milestones only)<input type="number" min="0" max="1440" @bind="progressMinutes" /></label> }
-      <label>Maximum coordinator turns<input type="number" min="1" max="100" @bind="maxRounds" /></label>
+      <label class="check"><input type="checkbox" @bind="continuousSupervision" /> Keep supervising until I pause or stop</label>
+      @if (!continuousSupervision) { <label>Maximum coordinator turns<input type="number" min="1" max="100" @bind="maxRounds" /></label> }
       <button disabled="@(busy || string.IsNullOrEmpty(coordinatorId) || selected.Count == 0 || string.IsNullOrWhiteSpace(instruction) || runs.Any(x => x.State is not ("Completed" or "Stopped")))" @onclick="Start">Start coordination</button>
-      <p class="meta">Worker tasks are ordinary prompts. Tool approvals remain in the conversation's pending requests. The coordinator wakes when results or questions arrive.</p>
+      <p class="meta">The service watches work and available capacity on a timer. It asks the model to plan from current evidence, and rechecks when a slot opens or work changes. Tool approvals remain in pending requests.</p>
     </section>
     @foreach (var run in runs)
     {
       <section class="panel" aria-label="Coordination run" @key="run.Id">
-        <div class="card-heading"><h2>@run.State</h2><span>Coordinator turn @run.Round / @run.MaxRounds</span><a href="@ConversationUrl(run.CoordinatorWorkerId)">Open coordinator conversation</a></div>
+        <div class="card-heading"><h2>@run.State</h2><span>@(run.ContinuousSupervision ? $"{run.Round} model decisions" : $"Coordinator turn {run.Round} / {run.MaxRounds}")</span><a href="@ConversationUrl(run.CoordinatorWorkerId)">Open coordinator conversation</a></div>
         <div class="actions">
-          @if (run.State == "Paused") { <button @onclick='() => Control(run, "resume")'>Resume coordination</button> }
+          @if (run.State == "Paused") { <button disabled="@(busy || run.Round >= run.MaxRounds && !run.ContinuousSupervision)" @onclick='() => Control(run, "resume")'>Resume coordination</button> }
           else if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "pause")'>Pause coordination</button> }
           @if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "stop")'>Stop coordination</button> }
         </div>
+        <p class="meta">Service heartbeat: @(run.LastSupervisorAt == 0 ? "awaiting first check" : DateTimeOffset.FromUnixTimeMilliseconds(run.LastSupervisorAt).ToString("u")) · @(run.ContinuousSupervision ? "Continuous supervision" : "Bounded task")</p>
+        @if (run.ContinuousSupervision && run.State is not ("Stopped" or "Completed"))
+        { <p class="meta">The service keeps supervising until you pause or stop. Model decisions have no fixed turn cutoff.</p> }
+        @if (run.State == "Paused")
+        {
+          <section aria-label="Renew coordination">
+            <h3>Review and continue</h3>
+            <p>This checkpoint retains the run's assignments, native sessions and review receipts.</p>
+            <label>Replacement coordinator instruction<textarea rows="5" maxlength="16000" value="@renewalInstructions.GetValueOrDefault(run.Id, run.Instruction)" @oninput="e => renewalInstructions[run.Id] = e.Value?.ToString() ?? string.Empty"></textarea></label>
+            <label class="check"><input type="checkbox" checked="@renewalSupervision.GetValueOrDefault(run.Id, true)" @onchange="e => renewalSupervision[run.Id] = e.Value is true" /> Keep supervising until I pause or stop</label>
+            @if (!renewalSupervision.GetValueOrDefault(run.Id, true))
+            { <label>Additional coordinator turns<input type="number" min="1" max="100" value="@renewalRounds.GetValueOrDefault(run.Id, Math.Min(100, Math.Max(1, 100 - (run.MaxRounds - run.Round))))" @onchange="e => renewalRounds[run.Id] = int.TryParse(e.Value?.ToString(), out var turns) ? turns : 0" /></label> }
+            <p class="meta">This replaces the accumulated instruction. Review current work and preserve relevant constraints.</p>
+            <button disabled="@busy" @onclick="() => Renew(run)">Apply checkpoint and continue</button>
+          </section>
+        }
         @if (LastCoordinatorSummary(run) is { } lastSummary)
         {
           <p class="meta">Last coordinator summary (may predate current scheduler status): @lastSummary</p>

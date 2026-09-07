@@ -291,19 +291,22 @@ public sealed class CoordinationRun
     public string LastObservation { get; set; } = "";
     public int Round { get; set; }
     public int MaxRounds { get; set; } = 20;
+    public bool ContinuousSupervision { get; set; }
+    public long LastSupervisorAt { get; set; }
     public bool IncludeGuidance { get; set; }
     public int? ProgressMinutes { get; set; }
     public long LastDecisionAt { get; set; }
     public long Revision { get; set; }
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
-public sealed record StartCoordinationInput(string Id, string CoordinatorWorkerId, string Instruction, string[] WorkerIds, int MaxRounds = 20, bool IncludeGuidance = false, int? ProgressMinutes = null);
+public sealed record StartCoordinationInput(string Id, string CoordinatorWorkerId, string Instruction, string[] WorkerIds, int MaxRounds = 20, bool IncludeGuidance = false, int? ProgressMinutes = null, bool ContinuousSupervision = false);
 public sealed record CoordinationControlInput(long ExpectedRevision, string Action);
 public sealed record CoordinationPromptInput(string Id, long ExpectedRevision, string Text);
+public sealed record CoordinationRenewalInput(string Id, long ExpectedRevision, int AdditionalRounds, string Instruction, bool ContinuousSupervision = false);
 public sealed record CoordinatorDecision(string Summary, CoordinatorAction[] Actions, bool Complete = false);
 public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null, string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null, string? ModelId = null, string? Variant = null);
 public sealed record CoordinatorResult(string Id, string WorkerId, string State, string Detail, string ProgressText,
-    long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted);
+    long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted, string Origin = "");
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);
 public sealed record DecisionReceipt(string Summary, int Round, string DecisionCommandId, long AppliedAt, DecisionActionReceipt[] Dispatched);
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
@@ -311,7 +314,7 @@ public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
-    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null);
+    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null);
 
 public sealed class OperatorUpdateSchedule
 {
