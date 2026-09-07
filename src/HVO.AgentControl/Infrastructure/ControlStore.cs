@@ -348,6 +348,24 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         return command;
     });
 
+    // Navigation needs identities and status only. Project in SQL so transcript,
+    // command evidence and model catalogs never enter the sidebar refresh path.
+    public Task<ControlSnapshot> NavigationSnapshot() => Read(async db => new ControlSnapshot(
+        await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0,
+        await db.Runtimes.AsNoTracking().Select(x => new RuntimeRecord { Id = x.Id, Name = x.Name }).ToListAsync(),
+        await db.Workers.AsNoTracking().Select(x => new WorkerRecord
+        {
+            Id = x.Id,
+            RuntimeId = x.RuntimeId,
+            Name = x.Name,
+            Project = x.Project,
+            Description = x.Description,
+            Role = x.Role,
+            Archived = x.Archived,
+            Stale = x.Stale,
+            Activity = x.Activity
+        }).ToListAsync(), [], []));
+
     public Task<ControlSnapshot> Snapshot() => Read(async db => new ControlSnapshot(
         await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0, await db.Runtimes.AsNoTracking().ToListAsync(),
         await db.Workers.AsNoTracking().ToListAsync(),
