@@ -1,0 +1,40 @@
+name: hvo-agentcontrol-beta
+x-development: &development
+  image: hvo-agentcontrol-development:local
+  build:
+    context: .
+    dockerfile: docker/development/Dockerfile
+  restart: unless-stopped
+  network_mode: bridge
+  cpus: 2
+  mem_limit: 4g
+  pids_limit: 512
+services:
+  dev1:
+    <<: *development
+    container_name: hvo-agentcontrol-beta-dev1
+    volumes:
+      - dev1-home:/home/agent
+      - dev1-ssh:/etc/ssh
+      - ./.fixture/beta-auth/dev1:/run/agentcontrol:ro
+  dev2:
+    <<: *development
+    container_name: hvo-agentcontrol-beta-dev2
+    volumes:
+      - dev2-home:/home/agent
+      - dev2-ssh:/etc/ssh
+      - ./.fixture/beta-auth/dev2:/run/agentcontrol:ro
+  dev3:
+    <<: *development
+    container_name: hvo-agentcontrol-beta-dev3
+    volumes:
+      - dev3-home:/home/agent
+      - dev3-ssh:/etc/ssh
+      - ./.fixture/beta-auth/dev3:/run/agentcontrol:ro
+volumes:
+  dev1-home:
+  dev1-ssh:
+  dev2-home:
+  dev2-ssh:
+  dev3-home:
+  dev3-ssh:
