@@ -44,9 +44,9 @@ run many times under one sustained pass. It is never invoked by CI.
   timeout), and the whole run has the overall guard.
 - The runner fails closed: an iteration is a clean pass only when dotnet
   exits `0`, a test summary is present, `Total` is nonzero, `Passed` is
-  nonzero, and `Failed` is zero. Per-iteration outcome is recorded explicitly
+  equal to `Total`, and `Failed` is zero. A mixture of passed and skipped tests also fails. Per-iteration outcome is recorded explicitly
   as one of `success`, `failure`, `zero-tests`, `skipped-only`,
-  `missing-evidence`, or `timeout`; every non-success outcome terminates the
+  `incomplete-tests`, `missing-evidence`, or `timeout`; every non-success outcome terminates the
   run with a nonzero exit. A batch that cannot complete its target inside the
   remaining overall deadline, and a failed evidence validation (validator
   failure or any invalid line), also terminate the run with a nonzero exit.
@@ -94,3 +94,6 @@ and never runs in CI.
 - Bounded time: every iteration is duration-capped and the whole run has a
   hard upper guard.
 - The runner and all artifacts stay inside the repository working tree.
+## Runner regression checks
+
+Run `python3 tests/test_soak_runner.py scripts/run-coordination-soak.sh`. These isolated probes use a stub `dotnet` to exercise runner deadlines, partial/all-skipped tests, missing/zero-test evidence and validator failures. They do not substitute for the real .NET suite or the long soak. CI runs them separately.

@@ -23,7 +23,7 @@
 #     duration guard.
 #   * The runner FAILS CLOSED on missing/invalid/failed/skipped/timeout
 #     evidence: an iteration counts as a clean pass only when dotnet exits 0,
-#     the summary is present, Total is nonzero, Passed is nonzero and Failed
+#     the summary is present, Total is nonzero, Passed equals Total and Failed
 #     is zero. Zero-test, all-skipped, missing-summary, timeout and test
 #     failure outcomes terminate the run with a nonzero exit, as does a batch
 #     that cannot complete its target inside the remaining overall deadline
@@ -257,6 +257,13 @@ for batch in $(seq 1 "$batch_count"); do
       total_skipped_only=$(( total_skipped_only + 1 ))
       iteration_event "$batch" "$batch_iterations" "skipped-only" "$status" "$iter_elapsed" "$passed" "$failed" "$total"
       echo "[batch $batch] iteration $batch_iterations SKIPPED-ONLY (exit=$status, passed=0, total=$total) in ${iter_elapsed}ms; failing closed." >&2
+      run_exit=$failed_run
+      break
+    elif (( status == 0 && failed == 0 && passed != total )); then
+      batch_missing_evidence=$(( batch_missing_evidence + 1 ))
+      total_missing_evidence=$(( total_missing_evidence + 1 ))
+      iteration_event "$batch" "$batch_iterations" "incomplete-tests" "$status" "$iter_elapsed" "$passed" "$failed" "$total"
+      echo "[batch $batch] iteration $batch_iterations INCOMPLETE-TESTS (passed=$passed, total=$total); skipped or unaccounted tests cannot pass." >&2
       run_exit=$failed_run
       break
     elif (( status != 0 || failed > 0 )); then
