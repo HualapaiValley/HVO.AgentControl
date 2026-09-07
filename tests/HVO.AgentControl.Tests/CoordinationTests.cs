@@ -7,6 +7,93 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class CoordinationTests
 {
+    [Fact]
+    public async Task FormatRepairBudgetAndCommandReceiptsSurviveRestart()
+    {
+        string data, secrets, runId;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var (coordinator, a, _) = await Seed(app.Store);
+            runId = (await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Do a task", [a.Id]))).Id;
+            await app.Store.CoordinationTick();
+            var first = (await app.Store.Coordinations()).Single().DecisionCommandId!;
+            await Finish(app.Store, first, "Here is my answer: {\"summary\":\"Done\",\"complete\":true,\"actions\":[]}");
+            await app.Store.CoordinationTick();
+            var recovery = (await app.Store.Coordinations()).Single();
+            Assert.Equal("Ready", recovery.State);
+            Assert.Equal(new DecisionRepair(1, first), Json.Read<CoordinatorContext>(recovery.InputJson).Repair);
+            Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + runId);
+        }
+        await using var restarted = new TestApp(data, secrets);
+        Assert.False(await restarted.Store.CoordinationTick()); // reconnect must be observed before recovery dispatch
+        await ObserveIdle(restarted.Store);
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            await restarted.Store.CoordinationTick();
+            var run = (await restarted.Store.Coordinations()).Single();
+            Assert.Equal("Deciding", run.State);
+            Assert.Equal(attempt, Json.Read<CoordinatorContext>(run.InputJson).Repair!.Attempt);
+            Assert.False(await restarted.Store.CoordinationTick());
+            await Finish(restarted.Store, run.DecisionCommandId!, "still not routing JSON");
+            await restarted.Store.CoordinationTick();
+        }
+        Assert.Equal("Paused", (await restarted.Store.Coordinations()).Single().State);
+        Assert.False(await restarted.Store.CoordinationTick());
+        var snapshot = await restarted.Store.Snapshot();
+        Assert.Equal(3, snapshot.Commands.Count(x => x.Origin == "coordinator-decision:" + runId));
+        Assert.DoesNotContain(snapshot.Commands, x => x.Origin == "coordinator:" + runId);
+        await restarted.Store.Read(async db =>
+        {
+            Assert.Equal(3, await db.Events.CountAsync(x => x.Type == "CoordinatorDecisionRejected"));
+            Assert.Equal(2, await db.Events.CountAsync(x => x.Type == "CoordinatorCorrectionRequested"));
+            return true;
+        });
+    }
+
+    [Fact]
+    public async Task FormatCorrectionRefreshesObservationAndDispatchesOnlyOnce()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Do a task", [a.Id]));
+        await app.Store.CoordinationTick();
+        await Finish(app.Store, (await app.Store.Coordinations()).Single().DecisionCommandId!, "not JSON");
+        await app.Store.CoordinationTick();
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(a.Id))!.Revision++; return true; });
+        await app.Store.CoordinationTick();
+        var observed = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson).Workers.Single();
+        Assert.Equal((await app.Store.Snapshot()).Workers.Single(x => x.Id == a.Id).Revision, observed.Revision);
+        await FinishDecision(app.Store, run.Id, new("Assign", [new("send_prompt", a.Id, "Do the task")]));
+        await app.Store.CoordinationTick();
+        await app.Store.CoordinationTick();
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+        Assert.Null(Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson).Repair);
+    }
+
+    [Fact]
+    public async Task FormatRecoveryRespectsRoundLimitAndNeverRetriesUncertainDelivery()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Do a task", [a.Id], MaxRounds: 1));
+        await app.Store.CoordinationTick();
+        await Finish(app.Store, (await app.Store.Coordinations()).Single().DecisionCommandId!, "not JSON");
+        await app.Store.CoordinationTick();
+        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator-decision:" + run.Id);
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            saved.State = "Deciding";
+            (await db.Commands.FindAsync(saved.DecisionCommandId!))!.State = Delivery.Unknown;
+            return true;
+        });
+        await app.Store.CoordinationTick();
+        Assert.Contains("delivery needs attention", (await app.Store.Coordinations()).Single().Detail);
+        Assert.Null(Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson).Repair);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

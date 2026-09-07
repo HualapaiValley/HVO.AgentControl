@@ -260,5 +260,6 @@ public sealed record CoordinatorResult(string Id, string WorkerId, string State,
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);
 public sealed record DecisionReceipt(string Summary, int Round, string DecisionCommandId, long AppliedAt, DecisionActionReceipt[] Dispatched);
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
+public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
-    DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null);
+    DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null);
