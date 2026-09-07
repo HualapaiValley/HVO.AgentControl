@@ -254,7 +254,7 @@ public sealed record StartCoordinationInput(string Id, string CoordinatorWorkerI
 public sealed record CoordinationControlInput(long ExpectedRevision, string Action);
 public sealed record CoordinationPromptInput(string Id, long ExpectedRevision, string Text);
 public sealed record CoordinatorDecision(string Summary, CoordinatorAction[] Actions, bool Complete = false);
-public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null, string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null, string? ModelId = null);
+public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null, string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null, string? ModelId = null, string? Variant = null);
 public sealed record CoordinatorResult(string Id, string WorkerId, string State, string Detail, string ProgressText,
     long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted);
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);

@@ -553,6 +553,76 @@ public sealed class CoordinationTests
     }
 
     [Theory]
+    [InlineData(true, "xhigh", "xhigh")]
+    [InlineData(true, null, "")]
+    [InlineData(false, "xhigh", "xhigh")]
+    [InlineData(false, "", "")]
+    [InlineData(false, null, "high")]
+    public async Task TaskReasoningIsPinnedAcrossRestart(bool overrideModel, string? variant, string expected)
+    {
+        string data, secrets, workerId, commandId, execution;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var (coordinator, worker, _) = await Seed(app.Store);
+            workerId = worker.Id;
+            await app.Store.Write(async db =>
+            {
+                var saved = (await db.Workers.FindAsync(workerId))!;
+                saved.ProviderId = "openai"; saved.ModelId = "default"; saved.Variant = "high";
+                saved.ModelsJson = Json.Write(new[] { new ModelChoice("openai", "default", "Default", ["high", "xhigh"]),
+                    new ModelChoice("openai", "astra", "Astra", ["xhigh"]) });
+                return true;
+            });
+            var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Design", [workerId]));
+            await app.Store.CoordinationTick();
+            await FinishDecision(app.Store, run.Id, new("Design task", [new("send_prompt", workerId, "Design the layout",
+                ProviderId: overrideModel ? "openai" : null, ModelId: overrideModel ? "astra" : null, Variant: variant)]));
+            await app.Store.CoordinationTick();
+            var command = Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+            commandId = command.Id; execution = command.ExecutionPayload;
+            var prompt = Json.Read<PromptInput>(execution);
+            Assert.Equal(expected, prompt.Variant);
+            Assert.Equal(overrideModel ? "astra" : "default", prompt.ModelId);
+            Assert.Equal("openai", prompt.ProviderId);
+        }
+        await using var restarted = new TestApp(data: data, secrets: secrets);
+        await restarted.Store.Recover();
+        var snapshot = await restarted.Store.Snapshot();
+        Assert.Equal(execution, snapshot.Commands.Single(x => x.Id == commandId).ExecutionPayload);
+        var defaults = snapshot.Workers.Single(x => x.Id == workerId);
+        Assert.Equal("default", defaults.ModelId); Assert.Equal("high", defaults.Variant);
+    }
+
+    [Theory]
+    [InlineData(false, "send_prompt")]
+    [InlineData(true, "send_prompt")]
+    [InlineData(false, "answer_question")]
+    public async Task InvalidTaskReasoningRejectsEntireBatch(bool overrideModel, string actionType)
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, b) = await Seed(app.Store);
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(b.Id))!;
+            worker.ProviderId = "openai"; worker.ModelId = "default";
+            worker.ModelsJson = Json.Write(new[] { new ModelChoice("openai", "default", "Default", ["high"]),
+                new ModelChoice("openai", "review", "Review", ["high"]) });
+            return true;
+        });
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Batch", [a.Id, b.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Batch", [new("send_prompt", a.Id, "Valid first task"),
+            new(actionType, b.Id, "Invalid reasoning", ProviderId: overrideModel ? "openai" : null,
+                ModelId: overrideModel ? "review" : null, Variant: "xhigh")]));
+        await app.Store.CoordinationTick();
+        var rejected = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Recovering", rejected.State);
+        Assert.Contains(actionType == "send_prompt" ? "reasoning variant supported" : "only to send_prompt", rejected.Detail);
+        Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+    }
+
+    [Theory]
     [InlineData(null, "review")]
     [InlineData("openai", null)]
     [InlineData("openai", "unavailable")]
