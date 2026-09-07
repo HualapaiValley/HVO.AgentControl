@@ -42,6 +42,7 @@ jobs:
         run: |
           if test -f tests/CoordinationLab/CoordinationLab.csproj; then
             dotnet test tests/CoordinationLab/CoordinationLab.csproj --configuration Release
+            dotnet format tests/CoordinationLab/CoordinationLab.csproj --no-restore --verify-no-changes
           fi
 
       - name: Start disposable SSH fixtures

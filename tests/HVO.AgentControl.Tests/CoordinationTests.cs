@@ -51,7 +51,7 @@ public sealed class CoordinationTests
         Assert.Equal(oversizedReport, evidence.ResponseTruncated);
         Assert.True(evidence.EarlierTextOmitted);
         Assert.True(evidence.Response.Length <= 6000);
-        Assert.True(evidence.ProgressText.Length <= 2000);
+        Assert.Empty(evidence.ProgressText);
         Assert.Equal(nativeResult, (await app.Store.Snapshot()).Commands.Single(x => x.Id == assignment.Id).ResultJson);
         await FinishDecision(app.Store, run.Id, new("Clean review received.", [], true));
         await app.Store.CoordinationTick();
