@@ -7,6 +7,58 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class CoordinationTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task VerboseNativeHistoryPreservesFinalEvidenceAndCanComplete(bool oversizedReport)
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Review the exact commit.", [a.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Review", [new("send_prompt", a.Id, "Review and report the exact SHA.")]));
+        await app.Store.CoordinationTick();
+        var assignment = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
+        var report = "CLEAN: all requested checks passed.\n" + (oversizedReport ? new string('x', 10000) : "10 tests passed.\n") +
+            "Reviewed SHA: a242c6b293fd93428309b3276d8efe6c357c946c";
+        var nativeResult = Json.Write(new
+        {
+            messages = new[]
+            {
+                new { parts = new[] { new { type = "text", text = "Old narration: " + new string('n', 20000) } } },
+                new { parts = new[] { new { type = "tool", text = "Raw tool output: " + new string('t', 80000) } } },
+                new { parts = new[] { new { type = "text", text = report } } },
+                new { parts = new[] { new { type = "step-finish", text = "" } } }
+            }
+        });
+        await app.Store.Write(async db =>
+        {
+            var command = (await db.Commands.FindAsync(assignment.Id))!;
+            command.State = Delivery.Finished; command.ResultJson = nativeResult;
+            command.ProgressText = new string('p', 20000);
+            return true;
+        });
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        Assert.Equal("Deciding", run.State);
+        Assert.True(run.InputJson.Length < 20000);
+        Assert.DoesNotContain("Old narration", run.InputJson);
+        Assert.DoesNotContain("Raw tool output", run.InputJson);
+        var evidence = Assert.Single(Json.Read<CoordinatorContext>(run.InputJson).Results);
+        Assert.Equal(assignment.Id, evidence.Id);
+        Assert.Contains("CLEAN: all requested checks passed.", evidence.Response);
+        Assert.Contains("a242c6b293fd93428309b3276d8efe6c357c946c", evidence.Response);
+        Assert.Equal(oversizedReport, evidence.ResponseTruncated);
+        Assert.True(evidence.EarlierTextOmitted);
+        Assert.True(evidence.Response.Length <= 6000);
+        Assert.True(evidence.ProgressText.Length <= 2000);
+        Assert.Equal(nativeResult, (await app.Store.Snapshot()).Commands.Single(x => x.Id == assignment.Id).ResultJson);
+        await FinishDecision(app.Store, run.Id, new("Clean review received.", [], true));
+        await app.Store.CoordinationTick();
+        Assert.Equal("Completed", (await app.Store.Coordinations()).Single().State);
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+    }
+
     [Fact]
     public async Task IntermediateProgressAndCapabilitiesReachCoordinatorWithoutDuplicateAssignments()
     {
