@@ -470,7 +470,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             }
             var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             if (!user) continue;
-            var assistants = snapshot.Messages.Where(x => x.GetProperty("info").TryGetProperty("parentID", out var parent) && parent.GetString() == command.NativeMessageId).ToArray();
+            var assistants = NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId);
             var ended = assistants.Any(x => x.GetProperty("info").GetProperty("time").TryGetProperty("completed", out _));
             var failed = assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
             command.AcceptedAt ??= ControlStore.Now;
