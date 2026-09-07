@@ -20,6 +20,8 @@ Report by worker, provider/model and time window. Separate queue wait, command w
 
 The advanced exercise exports a deduplicated observational usage artifact from retained command results/transcripts. It proves data availability; it is not the durable ledger or an all-time billing report.
 
+The first durable implementation slice is documented in [MODEL_USAGE_LEDGER.md](MODEL_USAGE_LEDGER.md).
+
 ## Runtime measurements
 
 Sample without a model over the existing authenticated transport at a bounded interval. CPU usage requires counter deltas and effective allocation; explicitly label core usage versus percent of quota. Display current memory against the measured runtime limit, with host-visible data kept distinct. Preserve sample time and stale/unavailable states; discard invalid/reset CPU deltas and wait for the next valid sample after reconnect.

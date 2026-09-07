@@ -19,6 +19,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await store.Recover();
+        await store.BackfillUsage();
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -413,6 +414,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         {
             var info = message.GetProperty("info"); var nativeId = info.GetProperty("id").GetString()!;
             var json = message.GetRawText();
+            if (await ControlStore.ObserveUsage(db, worker, message, ControlStore.Now)) changed = true;
             var record = await db.Messages.SingleOrDefaultAsync(x => x.WorkerId == workerId && x.NativeId == nativeId);
             if (record?.Json == json) continue;
             changed = true;

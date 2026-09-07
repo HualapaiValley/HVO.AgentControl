@@ -1,3 +1,4 @@
+using System.Text;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.AspNetCore.Antiforgery;
@@ -29,6 +30,11 @@ public static class ApiEndpoints
         group.MapPost("/coordinations/{id}/control", (string id, CoordinationControlInput input, ControlStore store) => store.ControlCoordination(id, input));
         group.MapPost("/coordinations/{id}/prompts", (string id, CoordinationPromptInput input, ControlStore store) => store.PromptCoordination(id, input));
         group.MapGet("/snapshot", (ControlStore store) => store.Snapshot());
+        group.MapGet("/usage", (string? workerId, string? providerId, string? modelId, long? from, long? to, ControlStore store) =>
+            store.Usage(new(workerId, providerId, modelId, from, to)));
+        group.MapGet("/usage/export", async (string? workerId, string? providerId, string? modelId, long? from, long? to, ControlStore store) =>
+            Results.File(Encoding.UTF8.GetBytes(await store.ExportUsageCsv(new(workerId, providerId, modelId, from, to))),
+                "text/csv; charset=utf-8", "model-usage.csv"));
         group.MapGet("/runtimes", (ControlStore store) => store.Read(db => db.Runtimes.AsNoTracking().ToListAsync()));
         group.MapPost("/runtimes", (RuntimeRecord input, ControlStore store) => store.SaveRuntime(input));
         group.MapPost("/runtimes/verify", (RuntimeVerifyInput input, RuntimeVerificationService verification, CancellationToken token) => verification.Verify(input, token));
