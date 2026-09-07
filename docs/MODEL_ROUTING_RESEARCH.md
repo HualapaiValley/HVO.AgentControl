@@ -10,7 +10,7 @@ This is a research baseline for #69 intake, #34 usage, #82 limits/fallback and #
 | Bounded implementation and routine fixes | Current Go MiniMax M2.7 / MiMo V2.5 baseline | MiniMax M3 first, then GLM-5.3-Flash | Sol or Astra when permitted and necessary |
 | Independent review | A qualified model different from the implementer | GLM-5.3-Flash, then DeepSeek V4 Flash | Sol/Astra for credentials, migrations, concurrency and recovery |
 | Large-context integration | Test M3 or MiMo before expanding context | MiMo V2.5 Pro, GLM-5.3, Kimi K3 for selected difficult cases | Astra for the hardest unresolved work |
-| Deterministic chores | Code, CLI or telemetry query | Free MiMo for tasks that actually need language interpretation | Park rather than repeatedly ask a model to recover infrastructure |
+| Deterministic chores | Code, CLI or telemetry query | A qualified inexpensive language model when interpretation is needed | Park rather than repeatedly ask a model to recover infrastructure |
 
 These assignments describe task phases, not permanent worker specialties. Keep the explicitly requested Astra UI task parked during the ChatGPT budget hold. New candidates need an isolated canary before admission; the current live allowlist remains MiMo V2.5 and MiniMax M2.7 on Go.
 
@@ -68,7 +68,24 @@ Our `openai/*` workers authenticate through ChatGPT, so API prices are compariso
 
 Zen separately lists Sol at **$2/$10** through **September 18, 2026**, a temporary 50% discount. Its DeepSeek rate card also differs from Go's. Store provider and billing route with every price. Zen supports workspace/member spend limits, but balance auto-reload is a separate payment control. [Zen pricing](https://opencode.ai/docs/zen/)
 
-Zen's free MiMo, Big Pickle, Nemotron and Contributor offerings are trial/feedback options, not guaranteed permanent fallback capacity. Some have data-use restrictions or training/feedback terms; do not silently route arbitrary repository context to them. Start with owner-approved synthetic/public fixtures. Big Pickle's identity is opaque, so no exact open-weight benchmark can reliably be attached to it. [Zen availability and privacy](https://opencode.ai/docs/zen/#privacy)
+Zen lists free MiMo, Big Pickle, Nemotron and Contributor offers, with trial availability and offer-specific data terms. NVIDIA trials prohibit personal/confidential submissions; Contributor offers include training permission. Big Pickle's identity is opaque, so do not attach another checkpoint's benchmark to it. [Zen availability and privacy](https://opencode.ai/docs/zen/#privacy)
+
+## Select the model and its access route separately
+
+Free and promotional offers are first-class candidates for implementation, review and coordination. Price does not establish capability. Evaluate free MiMo V2.5 alongside Go MiMo V2.5; where served revision, tools, context and observed quality are equivalent, prefer the eligible free route to preserve subscription allowance. An opaque model such as Big Pickle can qualify through our own task evaluations without a published checkpoint identity.
+
+Keep Luna, Terra, Sol and Astra eligible according to task needs and available usage. The earlier ChatGPT budget hold is an operational state to recheck, not a permanent exclusion. Prefer **Go Luna before ChatGPT-backed Luna** when both satisfy the task and the Go pool is healthy. This is an owner preference, not a claim that Go always has the lower opportunity cost: protect allowance needed for other queued work and select an alternative when Go is constrained. The observed route context limits differ, so even identical model names do not make routes interchangeable.
+
+Selection has two stages:
+
+1. Filter by explicit owner model/route requirements, data eligibility, effective capabilities, credentials/readiness, risk floor and known limits. A model-only override can allow equivalent access routes; a route-pinned override must be preserved.
+2. Rank eligible model-and-route pairs using task-specific success, expected completion time, full-task financial cost, shared allowance pressure and owner preferences. Free/promotional access and Go-before-ChatGPT Luna receive a preference when quality and availability are comparable. Stronger OpenAI models remain valid when their expected success justifies their resource use. Record the factors and policy version rather than claiming an arbitrary numerical weight is calibrated.
+
+A free route can have strict quotas, latency or concurrency limits. A subscription route reporting zero token cost is not a free offer. Do not transfer a paid route's readiness or benchmark results to a free alias without evidence of served-model equivalence and a route-level canary. Independent review should use independent task context and suitable model diversity; switching providers for the same model alone does not establish diversity.
+
+Maintain an **offer registry** separate from model capability profiles. Each offer records provider, billing route, exact alias/revision (or unknown), evidence of equivalence, price versus subscription debit, context/tools/modalities, rate/concurrency limits, eligibility and data terms, source, discovery and verification dates, expiry or unknown expiry, and canary results. Separate discovered, qualified, unavailable and expired offers. Preserve historical offer versions for usage reports.
+
+Check official catalogs and offers daily and on catalog/provider errors; allow an operator to register a deal for evaluation. New deals enter a bounded canary before routing admission. Revalidate unknown-expiry trials and withdraw expired offers from new assignments; never silently convert an expired free route into paid usage. Fallback must stay within the owner's authorized billing policy. Do not interrupt a healthy task or replay a completed tool action merely because a cheaper offer appeared. These registry and routing behaviors are proposed work for #69/#82, not implemented controls.
 
 ## Observed integration facts and discrepancies
 
@@ -83,7 +100,7 @@ Read-only snapshot of our installed OpenCode 1.18.29 catalog and prior rollout e
 
 ## Pilot and intake implementation
 
-Build an isolated, repeatable pilot before automatic promotion. Start with current MiMo/M2.7 controls plus M3 and GLM-5.3-Flash; add DeepSeek after the first results. Use the same pinned OpenCode version, container image, repository revision, permissions, toolchain and task budget. Test cold and warm context separately. Resolve real provider access first without interpreting a tiny arithmetic probe as a coding score.
+Build an isolated, repeatable pilot before automatic promotion. Start with current MiMo/M2.7 controls plus free MiMo V2.5, M3 and GLM-5.3-Flash; compare Go Luna with ChatGPT-backed Luna when allowance permits, then add DeepSeek after the first results. Use the same pinned OpenCode version, container image, repository revision, permissions, toolchain and task budget. Test cold and warm context separately. Resolve real provider access first without interpreting a tiny arithmetic probe as a coding score.
 
 Use fixtures for: coordinator JSON/worker-ID discipline; a C# defect with hidden assertions; a Blazor layout with browser assertions; a seeded review with known severe findings; merge-conflict recovery; and long-running interruption after a recorded side effect. Include a migration/credential-boundary fixture for evaluation while keeping those production tasks at the existing strong-model floor. Repeat representative tasks, retain failures, and report sample sizes and uncertainty. Tiny pilots only establish candidacy.
 
@@ -91,6 +108,6 @@ Measure accepted task outcome, missed severe findings, false-positive review fin
 
 Intake should first filter by owner override, effective capabilities, provider readiness, shared-pool health, budget and risk floor. Among eligible candidates, choose using task-specific observed success and expected total cost/time; require stronger assessment when uncertainty is high. Record the decision and policy version. Review independence matters more than making every reviewer cheap. Provider outages and missing CLI tools are infrastructure failures, not evidence to increase reasoning.
 
-Research metadata should be separate from executable policy: provider/model/revision, billing route, retrieval date, rate-card expiry, context/output limits, adapter-supported modalities/variants, benchmark provenance, local evaluation count, and approval status. Refresh at least weekly and on catalog, pricing or provider-error changes; expire the Sol promotion explicitly. HF's documented leaderboard API can supply source/verification metadata for periodic review, but cannot grant runtime readiness or rewrite an owner's model choice.
+Research metadata should be separate from executable policy: provider/model/revision, billing route, retrieval date, rate-card expiry, context/output limits, adapter-supported modalities/variants, benchmark provenance, local evaluation count, and approval status. Refresh capability research at least weekly, with daily offer discovery as described above and immediate checks on catalog, pricing or provider-error changes; expire the Sol promotion explicitly. HF's documented leaderboard API can supply source/verification metadata for periodic review, but cannot grant runtime readiness or rewrite an owner's model choice.
 
 Implementation links: #69 selection/risk floors, #34 usage ledger, #82 shared limits and safe continuation, #84 provider refresh. Automatic fallback must reconcile uncertain tool effects and remain inside the approved provider/model policy. The initial research does not enable paid overage, change current defaults, or lower the Astra requirement for the parked UI work.
