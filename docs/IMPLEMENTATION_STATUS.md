@@ -1,5 +1,23 @@
 # AgentControl implementation status
 
+## Current checkpoint — advanced coordination and provisioning verification, 2026-09-07
+
+PR36 (soak), PR39 (current participant status) and worker-published PR47 (installation help) are merged. The final supervised run completed five assignments with three-way overlap and one delivery attempt each; its real foreground soak passed 679 test executions over eight minutes. Root fixed defects found during verification, approved one specific tool prompt, and corrected one malformed final coordinator response. See [advanced validation and exact limitations](validation/advanced-coordination-2026-09-07.md). This supersedes the older beta checkpoint's publication and next-priority statements below.
+
+GitHub App credential brokerage is deployed. The dedicated devcontainer worker can read issues, publish comments/reviews, push a branch and create a PR with its scoped installation credential. Automatic renewal is implemented; the observed live exercise does not establish a multi-hour renewal endurance result. Publication intent/reconciliation is still #44. The App setup guide is [Worker GitHub access](GITHUB_ACCESS.md).
+
+Dev Containers use the official CLI. The earlier registered test worker deliberately used `.devcontainer/worker/devcontainer.json` (`agent`), not the repo default config (`vscode`). Its description now exposes that distinction. The owner clarified that repository configuration should be honored by default, with a broad Codespaces-style fallback and deliberate cached image refreshes; lightweight templates are explicit alternatives. [Provisioning](DEVCONTAINER_PROVISIONING.md) records that requirement and the staged implementation plan. Default-config and nested-Docker builds are verified, including their actual users/tools and a fresh cached instance in 15.32 seconds; see [configuration verification](validation/devcontainer-configurations-2026-09-07.md). Automatic UI/coordinator container provisioning and retirement are **not implemented** yet.
+
+Next work, in order:
+
+1. #24: coordinator-only structured output and bounded, durable correction receipts; malformed output must never dispatch actions.
+2. #43: separate Docker-host inventory, durable provisioning requests, host-side CLI execution/reconciliation, verified SSH/OpenCode enrollment, owner/coordinator controls and drain/retention. Root owns the technical implementation. Preserve full repo Features/users; build the broader default after current verification.
+3. #42: explicit project/repository identity, worker-owned preparation and a fresh native session per task; existing workers remain directory-bound. The M4 parent-directory worker does not automatically prepare child repos.
+4. #44/#8: durable issue/PR publication intents and uncertain-write reconciliation, then a complete worker-authored feature → independent review → correction exercise under that mechanism.
+5. #34/#35: durable model usage and runtime telemetry; [observability design](OBSERVABILITY_DESIGN.md) and the per-worker validation report retain the requirements/evidence.
+
+The live owner fleet remains intentionally running. Historical statements below about no GitHub repository, no production input, or stopped beta resources describe earlier checkpoints only.
+
 ## Beta execution checkpoint — 2026-09-07
 
 Both native beta runs are complete: pricing review → separate fixer → exact-SHA re-review (PR #18), and shipping implementation → review → README correction → re-review (PR #22). The lab now has 13 passing tests. Real controller context overflow was fixed in PR #21; a final CI preflight-cancellation race (#26) is fixed in PR #25; web restart during active native work preserved caller identity and one delivery attempt. See [full validation and interventions](validation/beta-development-2026-09-07.md) and [assignment guidance](BETA_ASSIGNMENT_GUIDE.md). This is supervised beta evidence, not unattended readiness. Next priorities are #23/#24 (decision receipts/output), #19 (effective limits), #3/#7 (scheduled updates/evidence), then #10 (workflow visibility).
