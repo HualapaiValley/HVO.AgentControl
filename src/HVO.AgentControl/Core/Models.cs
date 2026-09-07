@@ -163,6 +163,52 @@ public sealed class WorkspaceClaim
     public string? WorkerId { get; set; }
 }
 
+public static class EnrollmentState
+{
+    public const string Active = "Active", Suspended = "Suspended", Revoked = "Revoked";
+}
+
+public sealed class ParticipantEnrollment
+{
+    [Key] public string Id { get; set; } = "";
+    public string AdapterType { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string State { get; set; } = EnrollmentState.Active;
+    public int AuthorityGeneration { get; set; }
+    public long EnrolledAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long LastSeenAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long Revision { get; set; }
+}
+
+public sealed class CommandAuthority
+{
+    [Key] public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string CommandId { get; set; } = "";
+    public string EnrollmentId { get; set; } = "";
+    public int AuthorityGeneration { get; set; }
+    public int Attempt { get; set; } = 1;
+    public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long? AcknowledgedAt { get; set; }
+    public string? AcknowledgementData { get; set; }
+}
+
+public sealed class EvidenceCursor
+{
+    [Key] public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string EnrollmentId { get; set; } = "";
+    public string CursorName { get; set; } = "";
+    public string CursorValue { get; set; } = "";
+    public long LastConsumedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long? LastAcknowledgedAt { get; set; }
+}
+
+public sealed record CreateEnrollmentInput(string Id, string AdapterType, string DisplayName);
+public sealed record AdvanceAuthorityInput(string EnrollmentId, int ExpectedGeneration);
+public sealed record BindCommandAuthorityInput(string CommandId, string EnrollmentId, int Attempt);
+public sealed record AcknowledgeCommandInput(string CommandId, string EnrollmentId, string? AcknowledgementData = null);
+public sealed record AdvanceCursorInput(string EnrollmentId, string CursorName, string CursorValue);
+public sealed record ValidateCommandAuthorityInput(string CommandId, string EnrollmentId, int AuthorityGeneration);
+
 public sealed class JournalEvent
 {
     [Key] public long Sequence { get; set; }

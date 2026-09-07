@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260907202536_EnrollmentAuthority")]
+    partial class EnrollmentAuthority
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
