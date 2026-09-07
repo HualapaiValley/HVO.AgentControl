@@ -16,21 +16,14 @@ public sealed partial class ControlStore
         var commandCount = 0;
         var accepted = 0;
         var changed = 0;
-        var observedAt = Now;
+        var observations = new List<UsageObservation>();
 
         foreach (var message in await db.Messages.AsNoTracking().ToListAsync())
         {
             if (!workers.TryGetValue(message.WorkerId, out var worker)) continue;
             transcriptCount++;
-            try
-            {
-                using var document = JsonDocument.Parse(message.Json);
-                var result = await UpsertUsage(db, new(worker.RuntimeId, worker.NativeSessionId, message.NativeId),
-                    worker.Id, worker.Role, document.RootElement, observedAt, UsageEvidence.Transcript);
-                if (result.Accepted) accepted++;
-                if (result.Changed) changed++;
-            }
-            catch (JsonException) { }
+            observations.Add(new(new(worker.RuntimeId, worker.NativeSessionId, message.NativeId), worker.Id, worker.Role,
+                message.Json, message.NativeCreatedAt, UsageSource.Transcript));
         }
 
         var commands = await db.Commands.AsNoTracking().Where(x => x.ResultJson != "").ToListAsync();
@@ -44,11 +37,23 @@ public sealed partial class ControlStore
                     commandCount++;
                     if (!TryIdentity(command.RuntimeId, message, out var identity)) continue;
                     var worker = command.WorkerId is not null ? workers.GetValueOrDefault(command.WorkerId) : null;
-                    var result = await UpsertUsage(db, identity, command.WorkerId, worker?.Role ?? "Unknown",
-                        message, observedAt, UsageEvidence.CommandResult);
-                    if (result.Accepted) accepted++;
-                    if (result.Changed) changed++;
+                    observations.Add(new(identity, command.WorkerId, worker?.Role ?? "Unknown", message.GetRawText(),
+                        command.UpdatedAt, UsageSource.CommandResult));
                 }
+            }
+            catch (JsonException) { }
+        }
+        foreach (var observation in observations.OrderBy(x => x.ObservedAt).ThenBy(x => x.Source)
+                     .ThenBy(x => x.Identity.RuntimeId, StringComparer.Ordinal).ThenBy(x => x.Identity.SessionId, StringComparer.Ordinal)
+                     .ThenBy(x => x.Identity.MessageId, StringComparer.Ordinal).ThenBy(x => x.Json, StringComparer.Ordinal))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(observation.Json);
+                var result = await UpsertUsage(db, observation.Identity, observation.WorkerId, observation.SessionRole,
+                    document.RootElement, observation.ObservedAt, observation.Source);
+                if (result.Accepted) accepted++;
+                if (result.Changed) changed++;
             }
             catch (JsonException) { }
         }
@@ -103,14 +108,14 @@ public sealed partial class ControlStore
     internal static async Task<bool> ObserveUsage(ControlDb db, WorkerRecord worker, JsonElement message, long observedAt)
     {
         var result = await UpsertUsage(db, new(worker.RuntimeId, worker.NativeSessionId, message.GetProperty("info").GetProperty("id").GetString()!),
-            worker.Id, worker.Role, message, observedAt, UsageEvidence.Transcript);
+            worker.Id, worker.Role, message, observedAt, UsageSource.Transcript);
         return result.Changed;
     }
 
     private static async Task<UsageUpsertResult> UpsertUsage(ControlDb db, UsageIdentity identity, string? workerId,
-        string sessionRole, JsonElement message, long observedAt, UsageEvidence evidence)
+        string sessionRole, JsonElement message, long observedAt, UsageSource source)
     {
-        var parsed = OpenCodeUsageParser.Parse(message, identity, observedAt);
+        var parsed = OpenCodeUsageParser.Parse(message, identity, observedAt, source);
         if (parsed.Usage is null) return new(false, false);
         var incoming = parsed.Usage;
         var row = await db.ModelUsage.FindAsync(identity.RuntimeId, identity.SessionId, identity.MessageId);
@@ -125,12 +130,12 @@ public sealed partial class ControlStore
                 SessionRole = sessionRole
             };
             Apply(row, incoming);
-            MarkEvidence(row, evidence);
+            MarkEvidence(row, source);
             db.ModelUsage.Add(row);
             return new(true, true);
         }
 
-        var changed = MarkEvidence(row, evidence);
+        var changed = MarkEvidence(row, source);
         if (row.WorkerId is null && workerId is not null) { row.WorkerId = workerId; changed = true; }
         if (row.SessionRole == "Unknown" && sessionRole != "Unknown") { row.SessionRole = sessionRole; changed = true; }
         var existing = ToUsage(row);
@@ -177,7 +182,8 @@ public sealed partial class ControlStore
         CacheWriteTokens = row.CacheWriteTokens,
         Cost = row.ProviderCost,
         Currency = row.Currency,
-        ObservedAt = row.ObservedAt
+        ObservedAt = row.ObservedAt,
+        Source = row.SeenInTranscript ? UsageSource.Transcript : UsageSource.CommandResult
     };
 
     private static void Apply(ModelUsageRecord row, OpenCodeUsage usage)
@@ -190,10 +196,10 @@ public sealed partial class ControlStore
     }
 
     private static bool SameRevision(OpenCodeUsage left, OpenCodeUsage right) => left with { ObservedAt = 0 } == right with { ObservedAt = 0 };
-    private static bool MarkEvidence(ModelUsageRecord row, UsageEvidence evidence)
+    private static bool MarkEvidence(ModelUsageRecord row, UsageSource source)
     {
-        if (evidence == UsageEvidence.Transcript && !row.SeenInTranscript) { row.SeenInTranscript = true; return true; }
-        if (evidence == UsageEvidence.CommandResult && !row.SeenInCommandResult) { row.SeenInCommandResult = true; return true; }
+        if (source == UsageSource.Transcript && !row.SeenInTranscript) { row.SeenInTranscript = true; return true; }
+        if (source == UsageSource.CommandResult && !row.SeenInCommandResult) { row.SeenInCommandResult = true; return true; }
         return false;
     }
 
@@ -215,6 +221,7 @@ public sealed partial class ControlStore
     private static string Number(long value) => value.ToString(CultureInfo.InvariantCulture);
     private static string Csv(string? value) => value is null ? "" : value.IndexOfAny([',', '"', '\r', '\n']) < 0 ? value : "\"" + value.Replace("\"", "\"\"") + "\"";
 
-    private enum UsageEvidence { Transcript, CommandResult }
+    private sealed record UsageObservation(UsageIdentity Identity, string? WorkerId, string SessionRole, string Json,
+        long ObservedAt, UsageSource Source);
     private sealed record UsageUpsertResult(bool Accepted, bool Changed);
 }

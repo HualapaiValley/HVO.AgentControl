@@ -87,6 +87,51 @@ public sealed class UsagePersistenceTests
     }
 
     [Fact]
+    public async Task BackfillPreservesSourceChronologyAndTranscriptPrecedenceAcrossRestart()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var transcript = Message("assistant-source-order", worker.NativeSessionId, 1000, 2000,
+                18, 10, 5, 3, 4, 1, 1.25m, "USD");
+            var staleCommand = Message("assistant-source-order", worker.NativeSessionId, 1000, 2000,
+                999, 999, 999, 999, 999, 999, 9.99m, "USD");
+            await SaveTranscript(app.Store, worker, transcript);
+            using var staleDocument = JsonDocument.Parse(staleCommand);
+            await app.Store.Write(db =>
+            {
+                db.Commands.Add(new CommandRecord
+                {
+                    Id = "command-stale-usage",
+                    RuntimeId = worker.RuntimeId,
+                    WorkerId = worker.Id,
+                    Kind = "Prompt",
+                    ResultJson = JsonSerializer.Serialize(new { messages = new[] { staleDocument.RootElement } }),
+                    UpdatedAt = 9000
+                });
+                return Task.FromResult(true);
+            });
+
+            Assert.Equal(2, (await app.Store.BackfillUsage()).Accepted);
+            var row = Assert.Single((await app.Store.Usage(new())).Rows);
+            Assert.Equal(1000, row.ObservedAt);
+            Assert.Equal(10, row.InputTokens);
+            Assert.True(row.SeenInTranscript);
+            Assert.True(row.SeenInCommandResult);
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var backfill = await restarted.Store.BackfillUsage();
+        Assert.Equal(2, backfill.Accepted);
+        Assert.Equal(0, backfill.Changed);
+        var afterRestart = Assert.Single((await restarted.Store.Usage(new())).Rows);
+        Assert.Equal(1000, afterRestart.ObservedAt);
+        Assert.Equal(10, afterRestart.InputTokens);
+    }
+
+    [Fact]
     public async Task ReportSeparatesRolesCurrenciesMissingValuesAndExportsStableRows()
     {
         await using var app = new TestApp();

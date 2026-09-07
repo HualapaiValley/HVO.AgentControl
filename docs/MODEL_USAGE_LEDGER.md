@@ -9,7 +9,10 @@ stored observation timestamp.
 The supervisor records assistant usage while reconciling native history and performs an
 idempotent startup backfill from retained transcript rows and completed command results. Source
 flags show which retained evidence contained a message. Usage rows have no registration foreign
-key and are not removed with bounded transcript history or worker deletion.
+key and are not removed with bounded transcript history or worker deletion. Startup backfill retains
+the transcript native-created and command-result update chronology rather than assigning startup
+time. For equal native revisions, transcript evidence takes precedence over command-result
+evidence, so a stale retained command result cannot replace a reconciled transcript row.
 
 Authenticated endpoints:
 
