@@ -13,6 +13,9 @@ public enum TelemetryState
     CounterReset,
     InvalidElapsed,
     Stale,
+    InvalidInput,
+    ArithmeticOverflow,
+    NonFiniteResult,
     CpuUnavailable,
     QuotaUnavailable,
     MemoryLimitUnknown
@@ -47,9 +50,9 @@ public sealed record RuntimeTelemetrySample(
 /// </summary>
 /// <param name="State">The guard that applied (or <see cref="TelemetryState.OK"/>).</param>
 /// <param name="ObservedAt">The newer sample's observation time, Unix epoch milliseconds.</param>
-/// <param name="CpuQuotaPercent">Container-quota-normalized CPU percent in [0, 100], or <see langword="null"/>.</param>
+/// <param name="CpuQuotaPercent">Container-quota-normalized CPU percent, or <see langword="null"/>. Values above 100 are preserved.</param>
 /// <param name="CpuCoreUsage">Absolute CPU usage in cores (CPU seconds per wall second); distinct from quota percent.</param>
-/// <param name="MemoryPercent">Current memory percent in [0, 100], or <see langword="null"/> when no limit is known.</param>
+/// <param name="MemoryPercent">Current memory percent, or <see langword="null"/> when no limit is known. Values above 100 are preserved.</param>
 /// <param name="QuotaCores">The quota used for normalization, in cores.</param>
 /// <param name="CpuWindowMs">Wall time between the two samples in milliseconds.</param>
 /// <param name="MemoryBytes">Newest raw memory usage in bytes, preserved even when percent is unknown.</param>

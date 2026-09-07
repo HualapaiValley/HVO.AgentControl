@@ -4,9 +4,9 @@ namespace HVO.AgentControl.Telemetry;
 
 /// <summary>
 /// Parses unchanged CapabilityProbe-shaped tab-separated facts (and canonical telemetry keys)
-/// into a typed <see cref="RuntimeTelemetrySample"/>. Values that are empty, non-numeric, or
+/// into a typed <see cref="RuntimeTelemetrySample"/>. Values that are empty, negative, non-numeric, or
 /// sentinel "unlimited" markers produce <see langword="null"/> and are preserved as unknown
-/// rather than guessed. The input contracts are documented in docs/OBSERVABILITY_DESIGN.md.
+/// rather than guessed. The input contracts are documented in docs/RUNTIME_TELEMETRY_CONTRACT.md.
 /// </summary>
 public static class TelemetryParser
 {
@@ -20,13 +20,13 @@ public static class TelemetryParser
     /// <summary>
     /// Parses a fact dictionary. Both the static CapabilityProbe keys (cpuQuotaV2,
     /// cpuQuotaMicrosV1, cpuPeriodMicrosV1, memoryLimitV2, memoryLimitV1, memoryCurrentV2, os,
-    /// logicalCores) and the canonical sampled keys documented in OBSERVABILITY_DESIGN.md are
+    /// logicalCores) and the canonical sampled keys documented in RUNTIME_TELEMETRY_CONTRACT.md are
     /// accepted; unknown keys are ignored.
     /// </summary>
     public static RuntimeTelemetrySample Parse(IReadOnlyDictionary<string, string> facts, long observedAt, string identity)
     {
-        var cumulativeCpuUsec = ParseLong(facts, "accumCpuUsec", "cpuUsageUsec", "usageUsec", "procCpuUsec");
-        var memoryBytes = ParseLong(facts, "memoryCurrentBytes", "memoryCurrentV2", "memoryUsageV1");
+        var cumulativeCpuUsec = ParseNonNegativeLong(facts, "accumCpuUsec", "cpuUsageUsec", "usageUsec", "procCpuUsec");
+        var memoryBytes = ParseNonNegativeLong(facts, "memoryCurrentBytes", "memoryCurrentV2", "memoryUsageV1");
         var memoryLimit = ParseMemoryLimit(facts);
         var quotaCores = ParseQuotaCores(facts);
         var platform = ParsePlatform(facts);
@@ -51,15 +51,15 @@ public static class TelemetryParser
 
     private static long? ParseMemoryLimit(IReadOnlyDictionary<string, string> facts)
     {
-        var canonical = ParseLong(facts, "memoryLimitBytes", "memoryLimitV2");
+        var canonical = ParseNonNegativeLong(facts, "memoryLimitBytes", "memoryLimitV2");
         if (canonical is not null) return canonical;
-        var v1 = ParseLong(facts, "memoryLimitV1");
+        var v1 = ParseNonNegativeLong(facts, "memoryLimitV1");
         return v1 is { } limit && limit < CgroupV1UnlimitedMemoryThreshold ? limit : null;
     }
 
     private static double? ParseQuotaCores(IReadOnlyDictionary<string, string> facts)
     {
-        var canonical = ParseDouble(facts, "cpuQuotaCores");
+        var canonical = ParseFiniteDouble(facts, "cpuQuotaCores");
         if (canonical is not null) return canonical > 0 ? canonical : null;
 
         if (facts.TryGetValue("cpuQuotaV2", out var cpuMax))
@@ -69,15 +69,18 @@ public static class TelemetryParser
             {
                 if (double.TryParse(tokens[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var quota) &&
                     double.TryParse(tokens[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var period) &&
-                    quota > 0 && period > 0)
-                    return quota / period;
+                    double.IsFinite(quota) && double.IsFinite(period) && quota > 0 && period > 0)
+                {
+                    var cores = quota / period;
+                    return double.IsFinite(cores) && cores > 0 ? cores : null;
+                }
             }
             return null;
         }
 
-        var quotaUs = ParseLong(facts, "cpuQuotaMicrosV1");
-        var periodUs = ParseLong(facts, "cpuPeriodMicrosV1");
-        if (quotaUs is { } q && periodUs is { } p && q >= 0 && p > 0) return q / (double)p;
+        var quotaUs = ParseNonNegativeLong(facts, "cpuQuotaMicrosV1");
+        var periodUs = ParseNonNegativeLong(facts, "cpuPeriodMicrosV1");
+        if (quotaUs is { } q && periodUs is { } p && q > 0 && p > 0) return q / (double)p;
         return null;
     }
 
@@ -89,12 +92,13 @@ public static class TelemetryParser
         return PlatformUnknown;
     }
 
-    private static long? ParseLong(IReadOnlyDictionary<string, string> facts, params string[] keys)
+    private static long? ParseNonNegativeLong(IReadOnlyDictionary<string, string> facts, params string[] keys)
     {
         foreach (var key in keys)
         {
             if (facts.TryGetValue(key, out var raw) &&
-                long.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+                long.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) &&
+                value >= 0)
                 return value;
         }
         return null;
@@ -112,12 +116,13 @@ public static class TelemetryParser
         return null;
     }
 
-    private static double? ParseDouble(IReadOnlyDictionary<string, string> facts, params string[] keys)
+    private static double? ParseFiniteDouble(IReadOnlyDictionary<string, string> facts, params string[] keys)
     {
         foreach (var key in keys)
         {
             if (facts.TryGetValue(key, out var raw) &&
-                double.TryParse(raw.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+                double.TryParse(raw.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) &&
+                double.IsFinite(value))
                 return value;
         }
         return null;

@@ -184,14 +184,15 @@ public sealed class TelemetryCalculatorTests
     }
 
     [Fact]
-    public void PercentClampsToOneHundredButCoreUsageStaysAbsolute()
+    public void OverQuotaRatioIsPreservedAndExplained()
     {
         var first = Sample(1000, cpu: 0, mem: 5120, limit: 10240, quota: 2);
         var second = Sample(2000, cpu: 5_000_000, mem: 5120, limit: 10240, quota: 2);
         var result = TelemetryCalculator.Compute(first, second);
 
-        Assert.Equal(100.0, result.CpuQuotaPercent!.Value);
+        Assert.Equal(250.0, result.CpuQuotaPercent!.Value);
         Assert.Equal(5.0, result.CpuCoreUsage!.Value);
+        Assert.Contains("exceeds 100%", result.Note);
     }
 
     [Fact]
@@ -276,5 +277,108 @@ public sealed class TelemetryCalculatorTests
         Assert.Equal(12345, sample.CumulativeCpuUsec);
         Assert.Equal(0.5, sample.QuotaCores);
         Assert.Equal(16, sample.HostLogicalCores);
+    }
+
+    [Fact]
+    public void ParserRejectsNegativeCpuAndMemoryValues()
+    {
+        var parsed = TelemetryParser.Parse(new Dictionary<string, string>
+        {
+            ["accumCpuUsec"] = "-1",
+            ["memoryCurrentBytes"] = "-2",
+            ["memoryLimitBytes"] = "-3",
+            ["cpuQuotaMicrosV1"] = "-4",
+            ["cpuPeriodMicrosV1"] = "100000"
+        }, 1000, SessA);
+
+        Assert.Null(parsed.CumulativeCpuUsec);
+        Assert.Null(parsed.MemoryBytes);
+        Assert.Null(parsed.MemoryLimitBytes);
+        Assert.Null(parsed.QuotaCores);
+    }
+
+    [Theory]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
+    public void ParserRejectsNonFiniteQuota(string rawQuota)
+    {
+        var parsed = TelemetryParser.Parse(new Dictionary<string, string>
+        {
+            ["cpuQuotaCores"] = rawQuota
+        }, 1000, SessA);
+
+        Assert.Null(parsed.QuotaCores);
+    }
+
+    [Fact]
+    public void CalculatorRejectsInvalidDirectRecordInputs()
+    {
+        var invalid = Sample(1000, cpu: -1, mem: -2, limit: -3, quota: double.NaN);
+        var result = TelemetryCalculator.Compute(null, invalid);
+
+        Assert.Equal(TelemetryState.InvalidInput, result.State);
+        Assert.Null(result.CpuQuotaPercent);
+        Assert.Null(result.CpuCoreUsage);
+        Assert.Null(result.MemoryPercent);
+    }
+
+    [Fact]
+    public void CalculatorRejectsNonFiniteDirectQuota()
+    {
+        var first = Sample(1000, cpu: 0, mem: 1, limit: 2, quota: double.PositiveInfinity);
+        var second = Sample(2000, cpu: 1_000, mem: 1, limit: 2, quota: double.PositiveInfinity);
+        var result = TelemetryCalculator.Compute(first, second);
+
+        Assert.Equal(TelemetryState.InvalidInput, result.State);
+        Assert.Null(result.CpuQuotaPercent);
+    }
+
+    [Fact]
+    public void QuotaChangeSuppressesCurrentQuotaNormalization()
+    {
+        var first = Sample(1000, cpu: 0, mem: 1, limit: 2, quota: 1);
+        var second = Sample(2000, cpu: 1_000_000, mem: 1, limit: 2, quota: 2);
+        var result = TelemetryCalculator.Compute(first, second);
+
+        Assert.Equal(TelemetryState.QuotaUnavailable, result.State);
+        Assert.Null(result.CpuQuotaPercent);
+        Assert.Equal(1.0, result.CpuCoreUsage);
+        Assert.Contains("changed between samples", result.Note);
+    }
+
+    [Fact]
+    public void ExtremeValidSamplesRemainFiniteWithoutOverflow()
+    {
+        var first = Sample(0, cpu: 0, mem: long.MaxValue, limit: long.MaxValue, quota: 1);
+        var second = Sample(long.MaxValue, cpu: long.MaxValue, mem: long.MaxValue, limit: long.MaxValue, quota: 1);
+        var result = TelemetryCalculator.Compute(first, second, new TelemetryCalculatorOptions(long.MaxValue));
+
+        Assert.Equal(TelemetryState.OK, result.State);
+        Assert.True(double.IsFinite(result.CpuCoreUsage!.Value));
+        Assert.True(double.IsFinite(result.CpuQuotaPercent!.Value));
+        Assert.True(double.IsFinite(result.MemoryPercent!.Value));
+    }
+
+    [Fact]
+    public void TinyQuotaThatOverflowsRatioIsExplicitlyNonFinite()
+    {
+        var first = Sample(1000, cpu: 0, mem: 1, limit: 2, quota: double.Epsilon);
+        var second = Sample(2000, cpu: long.MaxValue, mem: 1, limit: 2, quota: double.Epsilon);
+        var result = TelemetryCalculator.Compute(first, second);
+
+        Assert.Equal(TelemetryState.NonFiniteResult, result.State);
+        Assert.Null(result.CpuQuotaPercent);
+    }
+
+    [Fact]
+    public void NegativeTimestampIsExplicitlyInvalidInsteadOfOverflowing()
+    {
+        var first = Sample(long.MinValue, cpu: 0, quota: 1);
+        var second = Sample(long.MaxValue, cpu: 1, quota: 1);
+        var result = TelemetryCalculator.Compute(first, second, new TelemetryCalculatorOptions(long.MaxValue));
+
+        Assert.Equal(TelemetryState.InvalidInput, result.State);
+        Assert.Null(result.CpuQuotaPercent);
     }
 }
