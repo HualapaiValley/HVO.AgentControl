@@ -1,6 +1,6 @@
 # Pricing coordination lab
 
-This deliberately incomplete draft is a coordination exercise, not production pricing software. Review it against the contract below. Build/test success alone does not establish correctness.
+This lab implementation has been corrected against the pricing and shipping contract below. Review it against the contract. Build/test success alone does not establish correctness.
 
 - Unit price is a nonnegative decimal; quantity is a positive integer. Reject invalid inputs.
 - Subtotal is unit price multiplied by quantity.
