@@ -26,7 +26,8 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true', { timeout: 15000 });
     for (const name of ['Runtimes', 'Workers', 'Coordination', 'Overview']) {
-      await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name, exact: true }).click();
+      const navigation = name === 'Runtimes' ? 'Administration' : 'Main navigation';
+      await page.getByRole('navigation', { name: navigation }).getByRole('link', { name, exact: true }).click();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
       await page.reload();

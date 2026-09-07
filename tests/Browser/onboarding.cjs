@@ -22,7 +22,7 @@ function docker(args, input) { return execFileSync('docker', ['exec', '-i', cont
     csrf = (await (await context.request.get(base+'/api/v1/csrf')).json()).token;
     const fixture = JSON.parse(fs.readFileSync(path.join(root,'.fixture/runtime-a.json')));
     const name = 'Guided onboarding ' + Date.now();
-    await page.getByRole('navigation').getByRole('link',{name:'Runtimes',exact:true}).click();
+    await page.getByRole('navigation',{name:'Administration'}).getByRole('link',{name:'Runtimes',exact:true}).click();
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
     await page.getByRole('button',{name:'Add runtime',exact:true}).click();
     const profile = page.getByRole('region',{name:'Runtime profile'});
