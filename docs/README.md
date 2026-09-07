@@ -1,5 +1,7 @@
 # Documentation
 
+- [Managed worker learning plan](MANAGED_WORKER_LEARNING_PLAN.md): approval findings, analysis-record gaps, Dev Container-first execution and future GitHub task intake.
+
 - [Current implementation checkpoint](IMPLEMENTATION_STATUS.md): shipped work, active fleet and next implementation slices.
 - [Advanced coordination verification](validation/advanced-coordination-2026-09-07.md): concurrent assignments, soak, managed GitHub publication and supervising interventions.
 - [Observability design](OBSERVABILITY_DESIGN.md): worker status, runtime measurements and durable model-usage requirements.
