@@ -41,6 +41,7 @@ public sealed partial class ControlStore
             throw new ControlException("Resolve pending operations and workspace claims before deleting this runtime.");
         var command = await Record(db, input.Id, id, null, "DeleteRuntime", payload);
         command.State = Delivery.Finished; command.Detail = "Runtime registration deleted. Remote processes, files, credentials and audit records retained.";
+        await db.TelemetryHistory.Where(x => x.RuntimeId == id).ExecuteDeleteAsync();
         db.Runtimes.Remove(runtime);
         return command;
     });

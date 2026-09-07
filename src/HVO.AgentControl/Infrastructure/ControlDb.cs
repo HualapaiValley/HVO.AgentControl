@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Infrastructure;
@@ -15,6 +16,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<TranscriptMessage> Messages => Set<TranscriptMessage>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
+    public DbSet<RuntimeTelemetryHistoryRecord> TelemetryHistory => Set<RuntimeTelemetryHistoryRecord>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -25,5 +27,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<PendingRequest>().HasIndex(x => new { x.WorkerId, x.Kind, x.NativeId }).IsUnique();
         model.Entity<CommandRecord>().HasIndex(x => new { x.State, x.QueueOrder });
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
+        model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);
+        model.Entity<RuntimeTelemetryHistoryRecord>().HasIndex(x => new { x.RuntimeId, x.ObservedAt, x.Sequence });
     }
 }

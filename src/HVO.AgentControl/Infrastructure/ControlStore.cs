@@ -1,5 +1,6 @@
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Ssh;
+using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -8,6 +9,7 @@ namespace HVO.AgentControl.Infrastructure;
 // All writes/claims share this gate in the single, file-locked replica. Network calls never hold it.
 public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, IOptions<ControlOptions> options, Secrets secrets)
 {
+    private const int TelemetryHistoryLimit = 200;
     private readonly SemaphoreSlim gate = new(1);
     public event Action? Changed;
     public static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -53,6 +55,38 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         });
 
     public Task<RuntimeRecord> SaveRuntime(RuntimeRecord input) => Write(db => SaveRuntime(db, input));
+
+    public Task<RuntimeTelemetryHistoryRecord> RecordTelemetry(string runtimeId, RuntimeTelemetry telemetry) => Write(async db =>
+    {
+        if (await db.Runtimes.FindAsync(runtimeId) is null) throw new ControlException("Runtime not found.", 404);
+        var expired = await db.TelemetryHistory.Where(x => x.RuntimeId == runtimeId)
+            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Sequence).Skip(TelemetryHistoryLimit - 1).ToListAsync();
+        db.TelemetryHistory.RemoveRange(expired);
+        var record = new RuntimeTelemetryHistoryRecord
+        {
+            RuntimeId = runtimeId,
+            ObservedAt = telemetry.ObservedAt,
+            State = telemetry.State.ToString(),
+            CpuQuotaPercent = telemetry.CpuQuotaPercent,
+            CpuCoreUsage = telemetry.CpuCoreUsage,
+            MemoryPercent = telemetry.MemoryPercent,
+            QuotaCores = telemetry.QuotaCores,
+            CpuWindowMs = telemetry.CpuWindowMs,
+            MemoryBytes = telemetry.MemoryBytes,
+            MemoryLimitBytes = telemetry.MemoryLimitBytes,
+            Note = telemetry.Note
+        };
+        db.TelemetryHistory.Add(record);
+        return record;
+    });
+
+    public Task<List<RuntimeTelemetryHistoryRecord>> TelemetryHistory(string runtimeId, int limit = 100) => Read(async db =>
+    {
+        if (limit is < 1 or > TelemetryHistoryLimit) throw new ControlException($"Telemetry history limit must be between 1 and {TelemetryHistoryLimit}.", 400);
+        if (await db.Runtimes.FindAsync(runtimeId) is null) throw new ControlException("Runtime not found.", 404);
+        return await db.TelemetryHistory.AsNoTracking().Where(x => x.RuntimeId == runtimeId)
+            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Sequence).Take(limit).ToListAsync();
+    });
 
     public Task<CommandRecord> SaveRuntimeForSetup(RuntimeRecord input, string requestId) => Write(async db =>
     {
