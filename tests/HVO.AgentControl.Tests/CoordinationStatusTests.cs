@@ -155,6 +155,12 @@ public sealed class CoordinationStatusTests
     private static string Invoke(Coordination page, string method, CoordinationRun run) =>
         (string)typeof(Coordination).GetMethod(method, InstancePrivate)!.Invoke(page, [run])!;
 
+    private static string? SchedulerReason(Coordination page, CoordinationRun run) =>
+        (string?)typeof(Coordination).GetMethod("SchedulerWaitReason", InstancePrivate)!.Invoke(page, [run]);
+
+    private static string? LastSummary(Coordination page, CoordinationRun run) =>
+        (string?)typeof(Coordination).GetMethod("LastCoordinatorSummary", InstancePrivate)!.Invoke(page, [run]);
+
     private static WorkerRecord Observe(WorkerRecord worker) { worker.Stale = false; worker.LastObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); return worker; }
 
     private static CoordinationRun RunWith(WorkerRecord worker) => new() { Id = "run", WorkerIdsJson = Json.Write(new[] { worker.Id }) };
@@ -357,5 +363,64 @@ public sealed class CoordinationStatusTests
             AcceptedAt = now - 120_000
         };
         Assert.Contains("receipt 1m ago", Invoke(Page(new ControlSnapshot(1, [], [worker], [command], [])), "RunLatestEvidence", run));
+    }
+
+    [Theory]
+    [InlineData("Paused", "owner pause")]
+    [InlineData("Recovering", "recovery backoff")]
+    public void SchedulerReasonReportsOwnerAndRecoveryBlocks(string state, string expected)
+    {
+        var run = new CoordinationRun { Id = "run", State = state, WorkerIdsJson = Json.Write(Array.Empty<string>()) };
+        Assert.Contains(expected, SchedulerReason(Page(new ControlSnapshot(1, [], [], [], [])), run));
+    }
+
+    [Fact]
+    public void SchedulerReasonReportsTurnBudgetAndCoordinatorAvailability()
+    {
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = "coordinator", WorkerIdsJson = Json.Write(new[] { worker.Id }), Round = 1, MaxRounds = 1 };
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var page = Page(new ControlSnapshot(1, [], [coordinator, worker], [], []));
+        Assert.Contains("turn budget", SchedulerReason(page, run));
+
+        run.Round = 0;
+        coordinator.Stale = true;
+        Assert.Contains("stale", SchedulerReason(page, run));
+
+        coordinator.Stale = false; coordinator.Activity = "Active";
+        Assert.Contains("coordinator is busy", SchedulerReason(page, run));
+    }
+
+    [Fact]
+    public void SchedulerReasonDistinguishesUnresolvedWorkAndUnchangedEvidence()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = coordinator.Id, WorkerIdsJson = Json.Write(new[] { worker.Id }), LastDecisionAt = now };
+        var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running, CreatedAt = now, UpdatedAt = now };
+        var page = Page(new ControlSnapshot(1, [], [coordinator, worker], [command], []));
+        Assert.Contains("worker work is still unresolved", SchedulerReason(page, run));
+
+        command.State = Delivery.Finished;
+        run.LastObservation = CoordinationObservation.Fingerprint([command], []);
+        Assert.Contains("evidence is unchanged", SchedulerReason(page, run));
+    }
+
+    [Fact]
+    public void SchedulerReasonDoesNotReplaceLastCoordinatorSummary()
+    {
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            State = "Paused",
+            WorkerIdsJson = Json.Write(Array.Empty<string>()),
+            Detail = "Workers are done.",
+            DecisionJson = Json.Write(new CoordinatorDecision("Workers are done.", [], true))
+        };
+        var page = Page(new ControlSnapshot(1, [], [], [], []));
+
+        Assert.Equal("Workers are done.", LastSummary(page, run));
+        Assert.Contains("owner pause", SchedulerReason(page, run));
     }
 }

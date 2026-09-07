@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Infrastructure;
 
 namespace HVO.AgentControl.Components.Pages;
 
@@ -237,6 +238,63 @@ public partial class Coordination
             "Ready" => "Next: request a decision when the coordinator is available." + needsOwner,
             _ => "Next: awaiting the next observed decision or participant result." + needsOwner
         };
+    }
+
+    private string? LastCoordinatorSummary(CoordinationRun run)
+    {
+        try
+        {
+            var summary = Json.Read<CoordinatorDecision>(run.DecisionJson).Summary;
+            return string.IsNullOrWhiteSpace(summary) ? null : Clipped(summary, 600);
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or ControlException)
+        { return null; }
+    }
+
+    private string? SchedulerWaitReason(CoordinationRun run)
+    {
+        if (snapshot is null || run.State is "Completed" or "Stopped") return null;
+        if (run.State == "Paused") return "owner pause is active; no new decision is sent until the run is resumed.";
+        if (run.State == "Recovering") return "automatic recovery backoff is active; no new decision is sent until its retry is due.";
+        if (run.Round >= run.MaxRounds && run.DecisionCommandId is null) return "the configured coordinator turn budget is exhausted; no new decision is sent.";
+
+        var coordinator = snapshot.Workers.FirstOrDefault(x => x.Id == run.CoordinatorWorkerId);
+        if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator)
+            return "the coordinator is unavailable; no new decision is sent.";
+        if (coordinator.Stale) return "the coordinator session is stale; no new decision is sent until it is observed.";
+
+        if (run.DecisionCommandId is { } decisionId)
+        {
+            var decision = snapshot.Commands.FirstOrDefault(x => x.Id == decisionId);
+            if (decision is not null && decision.State != Delivery.Finished)
+                return "a coordinator decision is already " + StateWord(decision.State).ToLowerInvariant() + "; no additional decision is sent.";
+        }
+
+        var coordinatorBusy = coordinator.Activity != "Idle" || snapshot.Commands.Any(x => x.WorkerId == coordinator.Id &&
+            (x.State == Delivery.Queued || Delivery.InFlight(x.State)));
+        if (coordinatorBusy) return "the coordinator is busy; no new decision is sent until it is idle.";
+
+        var participantIds = run.WorkerIdsJson is { Length: > 0 } json ? Json.Read<string[]>(json) : [];
+        var participants = snapshot.Workers.Where(x => participantIds.Contains(x.Id)).ToArray();
+        if (participants.Length != participantIds.Length || participants.Any(x => x.Archived || x.Role != SessionRoles.Worker))
+            return "a participant is unavailable; no new decision is sent.";
+
+        var requests = snapshot.Requests.Where(x => participantIds.Contains(x.WorkerId) && x.State == "Pending" && x.ReplyCommandId is null).ToArray();
+        var commands = snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt).ToArray();
+        if (commands.Any(x => x.State == Delivery.Unknown))
+            return "worker delivery is unresolved; no new decision is sent until its outcome is confirmed.";
+
+        var unresolved = commands.Any(x => Delivery.InFlight(x.State) || x.State == Delivery.Queued);
+        var progressDue = commands.Any(x => x.LastProgressAt > run.LastDecisionAt) &&
+            ControlStore.Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
+        var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
+            x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
+        if (unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision)
+            return "assigned worker work is still unresolved with no new result, question, or due progress; no new decision is sent.";
+
+        if (CoordinationObservation.Fingerprint(commands, requests) == run.LastObservation)
+            return "worker evidence is unchanged since the last coordinator observation; no new decision is sent.";
+        return null;
     }
 
     private static string StateWord(string state) => state switch

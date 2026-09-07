@@ -39,7 +39,18 @@
           else if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "pause")'>Pause coordination</button> }
           @if (run.State is not ("Completed" or "Stopped")) { <button class="subtle" @onclick='() => Control(run, "stop")'>Stop coordination</button> }
         </div>
-        <p role="status">@run.Detail</p>
+        @if (LastCoordinatorSummary(run) is { } lastSummary)
+        {
+          <p class="meta">Last coordinator summary (may predate current scheduler status): @lastSummary</p>
+        }
+        @if (run.Detail != LastCoordinatorSummary(run))
+        {
+          <p role="status">Coordination detail: @run.Detail</p>
+        }
+        @if (SchedulerWaitReason(run) is { } schedulerReason)
+        {
+          <p role="status">Scheduler observed: @schedulerReason</p>
+        }
         <h3>Participants</h3>
         <p class="meta">@Aggregate(run)</p>
         <p class="meta">Latest observed: @RunLatestEvidence(run) · @RunNextEvent(run)</p>
