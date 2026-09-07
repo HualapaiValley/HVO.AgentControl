@@ -5,7 +5,7 @@ using Xunit;
 
 namespace HVO.AgentControl.Tests;
 
-public sealed class CoordinationTests
+public sealed partial class CoordinationTests
 {
     [Fact]
     public async Task HostedCoordinatorRecoversAfterRepeatedBadOutputWithoutOwnerIntervention()

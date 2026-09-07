@@ -11,6 +11,7 @@ public sealed class CoordinatorService(ControlStore store, ILogger<CoordinatorSe
         {
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
+                await RunIteration(() => store.CoordinationSupervisionTick(), detail => store.RecoverActiveCoordination(detail), logger, stoppingToken);
                 await RunIteration(() => store.CoordinationTick(), detail => store.RecoverActiveCoordination(detail), logger, stoppingToken);
             }
         }
