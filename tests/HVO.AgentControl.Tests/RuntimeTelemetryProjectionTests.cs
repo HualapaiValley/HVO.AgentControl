@@ -40,12 +40,14 @@ public sealed class RuntimeTelemetryProjectionTests
         Assert.Null(RuntimeTelemetryProjection.FromCapabilities(json, "runtime:1"));
     }
 
-    [Fact]
-    public void FailedCapabilityProbeIsUnavailable()
+    [Theory]
+    [InlineData("unavailable")]
+    [InlineData("unsupported")]
+    public void FailedOrUnsupportedCapabilityProbeIsUnavailable(string probe)
     {
         var snapshot = new CapabilitySnapshot(1234, "probe", "/work", new Dictionary<string, string>
         {
-            ["probe"] = "unavailable"
+            ["probe"] = probe
         });
 
         Assert.Null(RuntimeTelemetryProjection.FromCapabilities(Json.Write(snapshot), "runtime:1"));
