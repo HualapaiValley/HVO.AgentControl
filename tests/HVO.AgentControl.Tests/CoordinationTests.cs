@@ -8,6 +8,44 @@ namespace HVO.AgentControl.Tests;
 public sealed class CoordinationTests
 {
     [Fact]
+    public async Task HostedCoordinatorRecoversAfterRepeatedBadOutputWithoutOwnerIntervention()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        using var service = new HVO.AgentControl.Services.CoordinatorService(app.Store,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<HVO.AgentControl.Services.CoordinatorService>.Instance);
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            string? previous = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                await TestApp.Wait(async () => (await app.Store.Coordinations()).Single().DecisionCommandId is { } id && id != previous,
+                    "automatic coordinator command", 15);
+                previous = (await app.Store.Coordinations()).Single().DecisionCommandId!;
+                await Finish(app.Store, previous, "Invalid JSON from native fixture");
+            }
+            await TestApp.Wait(async () => (await app.Store.Coordinations()).Single().State == "Recovering", "automatic recovery state", 15);
+            Assert.Equal(3, (await app.Store.Snapshot()).Commands.Count(x => x.Origin == "coordinator-decision:" + run.Id));
+            // Let the real 30-second deadline elapse. No owner resume or timestamp mutation.
+            await TestApp.Wait(async () => (await app.Store.Coordinations()).Single().DecisionCommandId is { } id && id != previous,
+                "timer-driven recovery after backoff", 45);
+            previous = (await app.Store.Coordinations()).Single().DecisionCommandId;
+            await FinishDecision(app.Store, run.Id, new("Assign after recovery", [new("send_prompt", a.Id, "Perform the task once.")]));
+            await TestApp.Wait(async () => (await app.Store.Snapshot()).Commands.Any(x => x.Origin == "coordinator:" + run.Id), "recovered dispatch", 15);
+            var dispatch = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
+            await Finish(app.Store, dispatch.Id, "Task completed.");
+            await TestApp.Wait(async () => (await app.Store.Coordinations()).Single().DecisionCommandId is { } id && id != previous,
+                "follow-up decision after worker result", 15);
+            await FinishDecision(app.Store, run.Id, new("Recovered", [], true));
+            await TestApp.Wait(async () => (await app.Store.Coordinations()).Single().State == "Completed", "automatic completion", 15);
+            Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+        }
+        finally { await service.StopAsync(CancellationToken.None); }
+    }
+
+    [Fact]
     public async Task FormatRepairBudgetAndCommandReceiptsSurviveRestart()
     {
         string data, secrets, runId;
@@ -38,7 +76,7 @@ public sealed class CoordinationTests
             await Finish(restarted.Store, run.DecisionCommandId!, "still not routing JSON");
             await restarted.Store.CoordinationTick();
         }
-        Assert.Equal("Paused", (await restarted.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await restarted.Store.Coordinations()).Single().State);
         Assert.False(await restarted.Store.CoordinationTick());
         var snapshot = await restarted.Store.Snapshot();
         Assert.Equal(3, snapshot.Commands.Count(x => x.Origin == "coordinator-decision:" + runId));
@@ -49,7 +87,116 @@ public sealed class CoordinationTests
             Assert.Equal(2, await db.Events.CountAsync(x => x.Type == "CoordinatorCorrectionRequested"));
             return true;
         });
+        await RecoveryDue(restarted.Store, runId);
+        await restarted.Store.CoordinationTick();
+        Assert.Equal("Deciding", (await restarted.Store.Coordinations()).Single().State);
+        await FinishDecision(restarted.Store, runId, new("Recovered without dispatch", [], true));
+        await restarted.Store.CoordinationTick();
+        var finished = (await restarted.Store.Coordinations()).Single();
+        Assert.Equal("Completed", finished.State);
+        Assert.Null(Json.Read<CoordinatorContext>(finished.InputJson).Recovery);
+        Assert.Equal(4, (await restarted.Store.Snapshot()).Commands.Count(x => x.Origin == "coordinator-decision:" + runId));
     }
+
+    [Fact]
+    public async Task RecoveryDeadlineSurvivesRestartAndRetainsThePendingDecisionIdentity()
+    {
+        string data, secrets, runId, commandId;
+        long retryAt;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var (coordinator, a, _) = await Seed(app.Store);
+            runId = (await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]))).Id;
+            await app.Store.CoordinationTick();
+            commandId = (await app.Store.Coordinations()).Single().DecisionCommandId!;
+            await app.Store.RecoverActiveCoordination("Injected scheduling failure.");
+            var run = (await app.Store.Coordinations()).Single();
+            retryAt = Json.Read<CoordinatorContext>(run.InputJson).Recovery!.RetryAt;
+            Assert.False(await app.Store.CoordinationTick());
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var saved = (await restarted.Store.Coordinations()).Single();
+        Assert.Equal(retryAt, Json.Read<CoordinatorContext>(saved.InputJson).Recovery!.RetryAt);
+        Assert.False(await restarted.Store.CoordinationTick());
+        await ObserveIdle(restarted.Store);
+        await RecoveryDue(restarted.Store, runId);
+        await restarted.Store.CoordinationTick();
+        Assert.Equal(commandId, (await restarted.Store.Coordinations()).Single().DecisionCommandId);
+        Assert.Single((await restarted.Store.Snapshot()).Commands);
+        await FinishDecision(restarted.Store, runId, new("Recovered", [], true));
+        await restarted.Store.CoordinationTick();
+        Assert.Equal("Completed", (await restarted.Store.Coordinations()).Single().State);
+    }
+
+    [Fact]
+    public async Task FailedCoordinatorTurnUsesBackoffAndFreshCommandInsteadOfStopping()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        await app.Store.CoordinationTick();
+        var first = (await app.Store.Coordinations()).Single().DecisionCommandId!;
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(first))!.State = Delivery.Failed; return true; });
+        await app.Store.CoordinationTick();
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
+        Assert.False(await app.Store.CoordinationTick());
+        await RecoveryDue(app.Store, run.Id);
+        await app.Store.CoordinationTick();
+        Assert.NotEqual(first, (await app.Store.Coordinations()).Single().DecisionCommandId);
+        Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+    }
+
+    [Fact]
+    public async Task RecoveryBackoffIsCappedAndExplicitOwnerPauseWins()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        foreach (var delay in new[] { 30_000, 60_000, 120_000, 240_000, 300_000, 300_000 })
+        {
+            var before = ControlStore.Now;
+            await app.Store.RecoverActiveCoordination("Injected failure.");
+            run = (await app.Store.Coordinations()).Single();
+            Assert.InRange(Json.Read<CoordinatorContext>(run.InputJson).Recovery!.RetryAt - before, delay, delay + 3000);
+            Assert.False(await app.Store.CoordinationTick());
+        }
+        await app.Store.ControlCoordination(run.Id, new(run.Revision, "pause"));
+        await RecoveryDue(app.Store, run.Id);
+        Assert.False(await app.Store.CoordinationTick());
+        Assert.False(await app.Store.RecoverActiveCoordination("Must not resume an owner-paused run."));
+        Assert.Empty((await app.Store.Snapshot()).Commands);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"messages\":[{}]}")]
+    [InlineData("{\"messages\":[{\"parts\":[{\"type\":\"text\",\"text\":\"{}\"}]}]}")]
+    public async Task MalformedDecisionEnvelopeAndMissingRequiredFieldsEnterRecovery(string result)
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        await app.Store.CoordinationTick();
+        var run = (await app.Store.Coordinations()).Single();
+        await app.Store.Write(async db =>
+        {
+            var command = (await db.Commands.FindAsync(run.DecisionCommandId!))!;
+            command.State = Delivery.Finished; command.ResultJson = result;
+            return true;
+        });
+        await app.Store.CoordinationTick();
+        Assert.Equal("Ready", (await app.Store.Coordinations()).Single().State);
+        Assert.NotNull(Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson).Repair);
+    }
+
+    private static Task<bool> RecoveryDue(ControlStore store, string id) => store.Write(async db =>
+    {
+        var run = (await db.CoordinationRuns.FindAsync(id))!;
+        var context = Json.Read<CoordinatorContext>(run.InputJson);
+        run.InputJson = Json.Write(context with { Recovery = context.Recovery! with { RetryAt = ControlStore.Now - 1 } });
+        return true;
+    });
 
     [Fact]
     public async Task FormatCorrectionRefreshesObservationAndDispatchesOnlyOnce()
@@ -224,7 +371,7 @@ public sealed class CoordinationTests
     }
 
     [Fact]
-    public async Task StaleBatchHasNoPartialDispatchAndPausedDecisionCannotDispatch()
+    public async Task StaleBatchHasNoPartialDispatchAndRecoveryWaitCannotDispatch()
     {
         await using var app = new TestApp();
         var (coordinator, a, b) = await Seed(app.Store);
@@ -233,7 +380,7 @@ public sealed class CoordinationTests
         await FinishDecision(app.Store, run.Id, new("Ask", [new("send_prompt", a.Id, "Memory?"), new("send_prompt", b.Id, "Memory?")]));
         await app.Store.Write(async db => { (await db.Workers.FindAsync(b.Id))!.Revision++; return true; });
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
         await app.Store.CoordinationTick();
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
@@ -291,14 +438,13 @@ public sealed class CoordinationTests
         await app.Store.CoordinationTick();
         await FinishDecision(app.Store, run.Id, new("Approve", [new("approve_tool", a.Id)]));
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
-        var paused = (await app.Store.Coordinations()).Single();
-        await app.Store.ControlCoordination(run.Id, new(paused.Revision, "resume"));
+        await RecoveryDue(app.Store, run.Id);
         await app.Store.CoordinationTick();
         await FinishDecision(app.Store, run.Id, new("Wrong target", [new("send_prompt", "not-in-this-run", "Do work")]));
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
     }
 

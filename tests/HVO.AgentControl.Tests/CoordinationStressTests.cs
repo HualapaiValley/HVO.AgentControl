@@ -66,7 +66,7 @@ public sealed class CoordinationStressTests
             new CoordinatorAction("send_prompt", workers[1].Id, "Memory usage?")
         }));
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
         await app.Store.CoordinationTick();
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
@@ -96,7 +96,7 @@ public sealed class CoordinationStressTests
             new CoordinatorAction("send_prompt", workers[1].Id, "Memory usage?")
         }));
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
     }
 
@@ -154,7 +154,7 @@ public sealed class CoordinationStressTests
         }));
         await app.Store.Write(async db => { (await db.Workers.FindAsync(workers[1].Id))!.Revision++; return true; });
         await app.Store.CoordinationTick();
-        Assert.Equal("Paused", (await app.Store.Coordinations()).Single().State);
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
         await app.Store.CoordinationTick();
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);

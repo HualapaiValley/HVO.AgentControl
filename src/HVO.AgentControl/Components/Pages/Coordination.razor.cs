@@ -227,6 +227,7 @@ public partial class Coordination
     {
         if (run.State is "Completed" or "Stopped") return "Next: no further events; run " + run.State.ToLowerInvariant() + ".";
         if (run.State == "Paused") return "Next: no routing decisions until resumed; already dispatched instructions continue independently.";
+        if (run.State == "Recovering") return "Next: automatic coordinator retry after backoff; worker monitoring continues.";
         var waiting = ParticipantStatuses(run).Count(x => x.State == "waiting");
         var needsOwner = waiting > 0 ? " A participant needs a tool approval or task answer; inspect its conversation." : "";
         return run.State switch
