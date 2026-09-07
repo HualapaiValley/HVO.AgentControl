@@ -73,3 +73,23 @@ public sealed record RuntimeTelemetry(
     /// <summary>True only when the calculation completed and percentages were not guarded.</summary>
     public bool IsUsable => State == TelemetryState.OK;
 }
+
+/// <summary>
+/// Durable calculated telemetry for one runtime observation. This is append-only history;
+/// collectors are responsible for obtaining samples and passing calculated results to the store.
+/// </summary>
+public sealed class RuntimeTelemetryHistoryRecord
+{
+    public long Sequence { get; set; }
+    public string RuntimeId { get; set; } = "";
+    public long ObservedAt { get; set; }
+    public string State { get; set; } = "";
+    public double? CpuQuotaPercent { get; set; }
+    public double? CpuCoreUsage { get; set; }
+    public double? MemoryPercent { get; set; }
+    public double? QuotaCores { get; set; }
+    public long? CpuWindowMs { get; set; }
+    public long? MemoryBytes { get; set; }
+    public long? MemoryLimitBytes { get; set; }
+    public string? Note { get; set; }
+}

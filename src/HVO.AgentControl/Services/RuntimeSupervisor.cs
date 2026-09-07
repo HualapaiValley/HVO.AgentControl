@@ -7,6 +7,7 @@ using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
 using HVO.AgentControl.Ssh;
+using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -99,6 +100,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             var record = (await db.Runtimes.FindAsync(id))!;
                             record.Transport = "Connected"; record.Health = "Reconciling"; record.Version = version;
                             record.InstalledExecutable = transport.InstalledExecutable; record.Platform = transport.Platform; record.CapabilitiesJson = Json.Write(capabilities); record.Generation++; record.ModelsJson = Json.Write(models);
+                            if (RuntimeTelemetryProjection.FromCapabilities(record.CapabilitiesJson, $"{record.Id}:{record.Generation}") is { } telemetry)
+                                await ControlStore.RecordTelemetry(db, record.Id, telemetry.Result);
                             record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
                             record.Diagnostic = models.Count == 0 ? "Run opencode auth login in this runtime, then refresh. Provider credentials remain remote." : "Connected; reconciling native sessions.";
                             ControlStore.Event(db, "RuntimeConnected", id, generation: record.Generation); return true;

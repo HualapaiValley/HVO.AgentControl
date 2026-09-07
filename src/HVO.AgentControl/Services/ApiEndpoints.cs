@@ -33,6 +33,7 @@ public static class ApiEndpoints
         group.MapPost("/operator-updates/{id}/ack", (string id, ControlStore store) => store.AcknowledgeOperatorUpdate(id));
         group.MapGet("/snapshot", (ControlStore store) => store.Snapshot());
         group.MapGet("/runtimes", (ControlStore store) => store.Read(db => db.Runtimes.AsNoTracking().ToListAsync()));
+        group.MapGet("/runtimes/{id}/telemetry-history", (string id, int? take, ControlStore store) => store.TelemetryHistory(id, take ?? 10));
         group.MapPost("/runtimes", (RuntimeRecord input, ControlStore store) => store.SaveRuntime(input));
         group.MapPost("/runtimes/verify", (RuntimeVerifyInput input, RuntimeVerificationService verification, CancellationToken token) => verification.Verify(input, token));
         group.MapPost("/runtimes/verified-save", (VerifiedRuntimeInput input, RuntimeVerificationService verification) => verification.SaveForSetup(input));
