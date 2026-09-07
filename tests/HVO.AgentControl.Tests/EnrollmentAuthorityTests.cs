@@ -1,5 +1,6 @@
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -206,7 +207,7 @@ public sealed class EnrollmentAuthorityTests
         await using var app = new TestApp();
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-ack", "OpenCode", "Ack"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-ack", "enroll-ack", 1));
-        var acknowledged = await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack", "enroll-ack", "result-data"));
+        var acknowledged = await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack", "enroll-ack", 1, 1, "result-data"));
         Assert.NotNull(acknowledged.AcknowledgedAt);
         Assert.Equal("result-data", acknowledged.AcknowledgementData);
     }
@@ -218,7 +219,7 @@ public sealed class EnrollmentAuthorityTests
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-ack2", "OpenCode", "Ack2"));
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-ack3", "OpenCode", "Ack3"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-ack2", "enroll-ack2", 1));
-        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack2", "enroll-ack3")));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack2", "enroll-ack3", 1, 1)));
     }
 
     [Fact]
@@ -227,7 +228,7 @@ public sealed class EnrollmentAuthorityTests
         await using var app = new TestApp();
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-valid", "OpenCode", "Valid"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-valid", "enroll-valid", 1));
-        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-valid", "enroll-valid", 1));
+        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-valid", "enroll-valid", 1, 1));
         Assert.True(isValid);
     }
 
@@ -238,7 +239,7 @@ public sealed class EnrollmentAuthorityTests
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-old", "OpenCode", "Old"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-old", "enroll-old", 1));
         await app.Store.AdvanceAuthority(new AdvanceAuthorityInput("enroll-old", 1));
-        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-old", "enroll-old", 1));
+        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-old", "enroll-old", 2, 1));
         Assert.False(isValid);
     }
 
@@ -299,7 +300,7 @@ public sealed class EnrollmentAuthorityTests
         await using var app = new TestApp();
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-ack4", "OpenCode", "Ack4"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-ack4", "enroll-ack4", 1));
-        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack4", "enroll-ack4"));
+        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack4", "enroll-ack4", 1, 1));
         var isAcked = await app.Store.IsCommandAcknowledged("cmd-ack4");
         Assert.True(isAcked);
     }
@@ -344,7 +345,7 @@ public sealed class EnrollmentAuthorityTests
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-rev-val", "OpenCode", "RevVal"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-rev-val", "enroll-rev-val", 1));
         await app.Store.RevokeEnrollment("enroll-rev-val");
-        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-rev-val", "enroll-rev-val", 1));
+        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-rev-val", "enroll-rev-val", 1, 1));
         Assert.False(isValid);
     }
 
@@ -355,7 +356,7 @@ public sealed class EnrollmentAuthorityTests
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-sus-val", "OpenCode", "SusVal"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-sus-val", "enroll-sus-val", 1));
         await app.Store.SuspendEnrollment("enroll-sus-val");
-        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-sus-val", "enroll-sus-val", 1));
+        var isValid = await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-sus-val", "enroll-sus-val", 1, 1));
         Assert.False(isValid);
     }
 
@@ -365,7 +366,7 @@ public sealed class EnrollmentAuthorityTests
         await using var app = new TestApp();
         await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-ack-clear", "OpenCode", "AckClear"));
         await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-ack-clear", "enroll-ack-clear", 1));
-        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack-clear", "enroll-ack-clear", "old-data"));
+        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-ack-clear", "enroll-ack-clear", 1, 1, "old-data"));
         var before = await app.Store.GetCommandAuthority("cmd-ack-clear");
         Assert.NotNull(before!.AcknowledgedAt);
         Assert.Equal("old-data", before.AcknowledgementData);
@@ -373,5 +374,77 @@ public sealed class EnrollmentAuthorityTests
         var after = await app.Store.GetCommandAuthority("cmd-ack-clear");
         Assert.Null(after!.AcknowledgedAt);
         Assert.Null(after.AcknowledgementData);
+    }
+
+    [Fact]
+    public async Task AcknowledgeCommandFailsAfterRevocation()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-rev-ack", "OpenCode", "RevAck"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-rev-ack", "enroll-rev-ack", 1));
+        await app.Store.RevokeEnrollment("enroll-rev-ack");
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-rev-ack", "enroll-rev-ack", 1, 1)));
+    }
+
+    [Fact]
+    public async Task AcknowledgeCommandFailsWithStaleGeneration()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-stale-ack", "OpenCode", "StaleAck"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-stale-ack", "enroll-stale-ack", 1));
+        await app.Store.AdvanceAuthority(new AdvanceAuthorityInput("enroll-stale-ack", 1));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-stale-ack", "enroll-stale-ack", 1, 1)));
+    }
+
+    [Fact]
+    public async Task AcknowledgeCommandFailsWithWrongAttempt()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-wrong-attempt", "OpenCode", "WrongAttempt"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-wrong-attempt", "enroll-wrong-attempt", 1));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-wrong-attempt", "enroll-wrong-attempt", 1, 2)));
+    }
+
+    [Fact]
+    public async Task AcknowledgeCommandWithRebindToNewAttemptClearsOldAndRejectsLateOldAck()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-rebind-late", "OpenCode", "RebindLate"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-rebind-late", "enroll-rebind-late", 1));
+        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-rebind-late", "enroll-rebind-late", 1, 1, "first-ack-data"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-rebind-late", "enroll-rebind-late", 2));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-rebind-late", "enroll-rebind-late", 1, 1, "late-old-ack")));
+        var after = await app.Store.GetCommandAuthority("cmd-rebind-late");
+        Assert.Equal(2, after!.Attempt);
+        Assert.Equal(1, after.AuthorityGeneration);
+    }
+
+    [Fact]
+    public async Task ValidateCommandAuthorityChecksStoredBindingGenerationAndAttempt()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-stored-check", "OpenCode", "StoredCheck"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-stored-check", "enroll-stored-check", 1));
+        Assert.False(await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-stored-check", "enroll-stored-check", 1, 2)));
+        Assert.False(await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-stored-check", "enroll-stored-check", 2, 1)));
+        Assert.True(await app.Store.ValidateCommandAuthority(new ValidateCommandAuthorityInput("cmd-stored-check", "enroll-stored-check", 1, 1)));
+    }
+
+    [Fact]
+    public async Task RebindEmitsSupersededEventPreservingOldReceipt()
+    {
+        await using var app = new TestApp();
+        await app.Store.CreateEnrollment(new CreateEnrollmentInput("enroll-supersede-event", "OpenCode", "SupersedeEvent"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-supersede-event", "enroll-supersede-event", 1));
+        await app.Store.AcknowledgeCommand(new AcknowledgeCommandInput("cmd-supersede-event", "enroll-supersede-event", 1, 1, "receipt-data"));
+        await app.Store.BindCommandAuthority(new BindCommandAuthorityInput("cmd-supersede-event", "enroll-supersede-event", 2));
+        var allEvents = await app.Store.Read(db => db.Events.ToListAsync());
+        var supersededEvents = allEvents.Where(e => e.Type == "CommandAuthoritySuperseded").ToList();
+        Assert.NotEmpty(supersededEvents);
+        var payload = System.Text.Json.JsonDocument.Parse(supersededEvents[0].Payload);
+        Assert.Equal("cmd-supersede-event", payload.RootElement.GetProperty("commandId").GetString());
+        Assert.Equal(1, payload.RootElement.GetProperty("supersededGeneration").GetInt32());
+        Assert.Equal(1, payload.RootElement.GetProperty("supersededAttempt").GetInt32());
+        Assert.Equal("receipt-data", payload.RootElement.GetProperty("supersededData").GetString());
     }
 }

@@ -93,6 +93,18 @@ public sealed partial class ControlStore
             if (existing.EnrollmentId != input.EnrollmentId) throw new ControlException("Command already bound to a different enrollment.");
             if (existing.AuthorityGeneration != enrollment.AuthorityGeneration || existing.Attempt != input.Attempt)
             {
+                if (existing.AcknowledgedAt is not null)
+                {
+                    Event(db, "CommandAuthoritySuperseded", payload: new
+                    {
+                        existing.CommandId,
+                        existing.EnrollmentId,
+                        SupersededGeneration = existing.AuthorityGeneration,
+                        SupersededAttempt = existing.Attempt,
+                        SupersededAt = existing.AcknowledgedAt,
+                        SupersededData = existing.AcknowledgementData
+                    }, provenance: "system");
+                }
                 existing.AuthorityGeneration = enrollment.AuthorityGeneration;
                 existing.Attempt = input.Attempt;
                 existing.AcknowledgedAt = null;
@@ -117,11 +129,20 @@ public sealed partial class ControlStore
 
     public Task<CommandAuthority> AcknowledgeCommand(AcknowledgeCommandInput input) => Write(async db =>
     {
-        var authority = await db.CommandAuthorities.FirstOrDefaultAsync(x => x.CommandId == input.CommandId && x.EnrollmentId == input.EnrollmentId)
-            ?? throw new ControlException("Command authority not found.", 404);
+        var enrollment = await db.Enrollments.AsNoTracking().FirstOrDefaultAsync(x => x.Id == input.EnrollmentId);
+        if (enrollment is null || enrollment.State != EnrollmentState.Active)
+            throw new ControlException("Enrollment is not active.", 400);
+        if (enrollment.AuthorityGeneration != input.AuthorityGeneration)
+            throw new ControlException("Authority generation mismatch; enrollment has advanced.", 409);
+        var authority = await db.CommandAuthorities.FirstOrDefaultAsync(x =>
+            x.CommandId == input.CommandId &&
+            x.EnrollmentId == input.EnrollmentId &&
+            x.AuthorityGeneration == input.AuthorityGeneration &&
+            x.Attempt == input.Attempt)
+            ?? throw new ControlException("Command authority not found for the specified generation and attempt.", 404);
         authority.AcknowledgedAt = ControlStore.Now;
         authority.AcknowledgementData = input.AcknowledgementData;
-        Event(db, "CommandAcknowledged", payload: new { authority.CommandId, authority.EnrollmentId }, provenance: "user");
+        Event(db, "CommandAcknowledged", payload: new { authority.CommandId, authority.EnrollmentId, authority.AuthorityGeneration, authority.Attempt }, provenance: "user");
         return authority;
     });
 
@@ -133,7 +154,9 @@ public sealed partial class ControlStore
             if (enrollment is null || enrollment.State != EnrollmentState.Active || enrollment.AuthorityGeneration != input.AuthorityGeneration) return false;
             return await db.CommandAuthorities.AnyAsync(x =>
                 x.CommandId == input.CommandId &&
-                x.EnrollmentId == input.EnrollmentId);
+                x.EnrollmentId == input.EnrollmentId &&
+                x.AuthorityGeneration == input.AuthorityGeneration &&
+                x.Attempt == input.Attempt);
         });
     }
 

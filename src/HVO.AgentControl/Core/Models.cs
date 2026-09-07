@@ -206,9 +206,9 @@ public sealed class EvidenceCursor
 public sealed record CreateEnrollmentInput(string Id, string AdapterType, string DisplayName);
 public sealed record AdvanceAuthorityInput(string EnrollmentId, int ExpectedGeneration);
 public sealed record BindCommandAuthorityInput(string CommandId, string EnrollmentId, int Attempt);
-public sealed record AcknowledgeCommandInput(string CommandId, string EnrollmentId, string? AcknowledgementData = null);
+public sealed record AcknowledgeCommandInput(string CommandId, string EnrollmentId, int AuthorityGeneration, int Attempt, string? AcknowledgementData = null);
 public sealed record AdvanceCursorInput(string EnrollmentId, string CursorName, string CursorValue);
-public sealed record ValidateCommandAuthorityInput(string CommandId, string EnrollmentId, int AuthorityGeneration);
+public sealed record ValidateCommandAuthorityInput(string CommandId, string EnrollmentId, int AuthorityGeneration, int Attempt);
 
 public sealed class JournalEvent
 {
