@@ -95,6 +95,12 @@
           {
             <p class="telemetry unavailable">Resource snapshot unavailable until an authenticated capability probe succeeds.</p>
           }
+          @if (telemetryHistory.TryGetValue(runtime.Id, out var history) && history.Count > 0)
+          {
+            <details><summary>Recorded telemetry history</summary>
+              @foreach (var observation in history) { <p class="meta">@observation.State · @Age(observation.ObservedAt) · CPU @(observation.CpuQuotaPercent?.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) ?? "unknown")% · Memory @Bytes(observation.MemoryBytes)</p> }
+            </details>
+          }
           @if (runtime.Health != "Healthy") { <p class="notice">@runtime.Diagnostic</p> }
           <div class="actions">
             <a class="button-link subtle" href="@("/terminal?runtime=" + runtime.Id)" target="_blank" rel="noopener">Open admin terminal</a>

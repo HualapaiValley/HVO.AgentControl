@@ -15,6 +15,7 @@ public partial class Runtimes
     private RuntimeVerification? runtimeVerification;
     private string sshPassword = "", sshPrivateKey = "", sshPassphrase = "";
     private string? runtimeSetupId, runtimeConnectId;
+    private Dictionary<string, List<RuntimeTelemetryHistoryRecord>> telemetryHistory = [];
 
     private static RuntimeTelemetryProjection? Telemetry(RuntimeRecord runtime) =>
         RuntimeTelemetryProjection.FromCapabilities(runtime.CapabilitiesJson, $"{runtime.Id}:{runtime.Generation}");
@@ -29,14 +30,16 @@ public partial class Runtimes
         return amount.ToString(amount >= 10 || unit == 0 ? "0" : "0.0", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
     }
 
-    protected override Task SnapshotChanged()
+    protected override async Task SnapshotChanged()
     {
+        telemetryHistory = [];
+        foreach (var runtime in snapshot!.Runtimes)
+            telemetryHistory[runtime.Id] = await Store.TelemetryHistory(runtime.Id, 5);
         if (runtimeSetupId is not null && snapshot!.Runtimes.Any(x => x.Id == runtimeSetupId && x.Health == "Healthy"))
         {
             var ready = runtimeSetupId; runtimeSetupId = null;
             Navigation.NavigateTo(WorkerSetupUrl(ready));
         }
-        return Task.CompletedTask;
     }
     private void NewRuntime() { CancelRuntime(); runtimeEdit = new RuntimeRecord { Authentication = "password" }; }
     private void EditRuntime(RuntimeRecord runtime) { CancelRuntime(); runtimeEdit = Json.Read<RuntimeRecord>(Json.Write(runtime)); }

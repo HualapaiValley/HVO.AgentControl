@@ -56,12 +56,12 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
 
     public Task<RuntimeRecord> SaveRuntime(RuntimeRecord input) => Write(db => SaveRuntime(db, input));
 
-    public Task<RuntimeTelemetryHistoryRecord> RecordTelemetry(string runtimeId, RuntimeTelemetry telemetry) => Write(async db =>
+    public Task<RuntimeTelemetryHistoryRecord> RecordTelemetry(string runtimeId, RuntimeTelemetry telemetry) =>
+        Write(db => RecordTelemetry(db, runtimeId, telemetry));
+
+    internal static async Task<RuntimeTelemetryHistoryRecord> RecordTelemetry(ControlDb db, string runtimeId, RuntimeTelemetry telemetry)
     {
         if (await db.Runtimes.FindAsync(runtimeId) is null) throw new ControlException("Runtime not found.", 404);
-        var expired = await db.TelemetryHistory.Where(x => x.RuntimeId == runtimeId)
-            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Sequence).Skip(TelemetryHistoryLimit - 1).ToListAsync();
-        db.TelemetryHistory.RemoveRange(expired);
         var record = new RuntimeTelemetryHistoryRecord
         {
             RuntimeId = runtimeId,
@@ -77,8 +77,13 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             Note = telemetry.Note
         };
         db.TelemetryHistory.Add(record);
+        // Include this observation before retaining the newest rows, even when probes arrive out of order.
+        await db.SaveChangesAsync();
+        var expired = await db.TelemetryHistory.Where(x => x.RuntimeId == runtimeId)
+            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Sequence).Skip(TelemetryHistoryLimit).ToListAsync();
+        db.TelemetryHistory.RemoveRange(expired);
         return record;
-    });
+    }
 
     public Task<List<RuntimeTelemetryHistoryRecord>> TelemetryHistory(string runtimeId, int limit = 100) => Read(async db =>
     {

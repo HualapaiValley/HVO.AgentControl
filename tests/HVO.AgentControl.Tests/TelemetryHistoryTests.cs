@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Telemetry;
 using Xunit;
@@ -40,8 +42,27 @@ public sealed class TelemetryHistoryTests
         Assert.Equal(200, history.Count);
         Assert.Equal(200, history[0].ObservedAt);
         Assert.Equal(1, history[^1].ObservedAt);
+        await app.Store.RecordTelemetry(runtime.Id, Sample(0, TelemetryState.OK));
+        history = await app.Store.TelemetryHistory(runtime.Id, 200);
+        Assert.Equal(200, history.Count);
+        Assert.Equal(1, history[^1].ObservedAt);
         await app.Store.DeleteRuntime(runtime.Id, new(Guid.NewGuid().ToString(), runtime.Revision));
         Assert.Equal(0, await app.Store.Read(db => Task.FromResult(db.TelemetryHistory.Count())));
+    }
+
+    [Fact]
+    public async Task TelemetryHistoryEndpointIsAuthorizedAndBounded()
+    {
+        await using var app = new TestApp();
+        var runtime = await app.Store.SaveRuntime(PersistenceTests.Profile());
+        await app.Store.RecordTelemetry(runtime.Id, Sample(1000, TelemetryState.OK));
+        using var anonymous = app.CreateClient(new() { AllowAutoRedirect = false });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/v1/runtimes/" + runtime.Id + "/telemetry-history")).StatusCode);
+
+        using var owner = await app.SignIn();
+        var history = await owner.GetFromJsonAsync<List<RuntimeTelemetryHistoryRecord>>("/api/v1/runtimes/" + runtime.Id + "/telemetry-history?take=1");
+        Assert.Equal(1000, Assert.Single(history!).ObservedAt);
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.GetAsync("/api/v1/runtimes/" + runtime.Id + "/telemetry-history?take=201")).StatusCode);
     }
 
     private static RuntimeTelemetry Sample(long observedAt, TelemetryState state) => new(
