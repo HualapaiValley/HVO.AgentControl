@@ -14,12 +14,19 @@ verified.
 
 Normalization rules:
 
-- `max` / `-1` (or v1 values `<= 0` and >= `1 << 62`, the "no limit" sentinels) mean
-  unlimited and contribute no constraint.
-- Malformed quota/period/cpuset/memory values contribute no constraint and never
-  crash the probe.
+- Positively observed `max` / `-1` (or v1 memory values `<= 0` and >= `1 << 62`, the
+  "no limit" sentinels) mean unlimited and contribute no constraint.
+- An unreadable or unknown cgroup limit means the constraint is **unavailable**: inside
+  a container, `effectiveCpuCores` / `effectiveMemoryBytes` become `unknown` and host
+  capacity is never labeled verified container capacity. Raw host facts stay recorded.
+- The effective cpuset is read from both the v2 layout
+  (`/sys/fs/cgroup/cpuset.cpus.effective`) and the v1 layout
+  (`/sys/fs/cgroup/cpuset/cpuset.cpus[.effective]`) and normalized together.
+- Malformed, overflowing, or overlapping quota/period/cpuset/memory values contribute
+  no constraint, never crash the probe, and are reported `unknown` when nothing else
+  is verifiable.
 - Non-container and macOS inputs fall back to the host-visible values (`logicalCores`,
-  `memoryKiB`, `memoryBytes`).
+  `memoryKiB`, `memoryBytes`), matching the actual execution scope.
 - Host memory KiB is multiplied by 1024 with overflow guarding; overflowing input
   yields `unknown`.
 

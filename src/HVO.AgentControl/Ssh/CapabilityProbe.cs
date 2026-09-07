@@ -22,7 +22,7 @@ public static class CapabilityProbe
         return new(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), "probe", directory, facts);
     }
 
-    /// <summary>Effective CPU quota/cpuset/host minimum normalized from raw probe facts; fractional quotas allowed. "unknown" when nothing is verifiable.</summary>
+    /// <summary>Effective CPU quota/cpuset/host minimum normalized from raw probe facts; fractional quotas allowed. "unknown" when no container constraint is verifiable.</summary>
     public static string EffectiveCpuCores(Dictionary<string, string> facts)
     {
         var host = TryNonUnknown(facts, "logicalCores", out var rawLogical)
@@ -31,29 +31,39 @@ public static class CapabilityProbe
         if (!IsContainerLike(facts))
             return host is { } hostOnly ? Format(hostOnly) : "unknown";
 
+        var quota = CpuQuotaCores(facts);
+        var setV2 = CpuSetCount(facts, "cpuSetV2");
+        var setV1 = CpuSetCount(facts, "cpuSetV1");
+        if (quota.Status == Constraint.Unavailable && setV2.Status == Constraint.Unavailable && setV1.Status == Constraint.Unavailable)
+            return "unknown";
+
         var candidates = new List<decimal>();
         if (host is { } hostCores) candidates.Add(hostCores);
-        if (CpuQuotaCores(facts) is { } quotaCores) candidates.Add(quotaCores);
-        if (CpuSetCount(facts) is { } setCores) candidates.Add(setCores);
+        if (quota.Status == Constraint.Constrained) candidates.Add(quota.Cores);
+        if (setV2.Status == Constraint.Constrained) candidates.Add(setV2.Count);
+        if (setV1.Status == Constraint.Constrained) candidates.Add(setV1.Count);
         return candidates.Count == 0 ? "unknown" : Format(candidates.Min());
     }
 
-    /// <summary>Effective memory in bytes normalized from host-visible memory and the cgroup limit; "unknown" when nothing is verifiable.</summary>
+    /// <summary>Effective memory in bytes normalized from host-visible memory and the cgroup limit; "unknown" when no container limit is verifiable.</summary>
     public static string EffectiveMemoryBytes(Dictionary<string, string> facts)
     {
         var host = HostMemoryBytes(facts);
         if (!IsContainerLike(facts))
             return host is { } hostOnly ? Format(hostOnly) : "unknown";
 
+        var limit = MemoryLimitBytes(facts);
+        if (limit.Status == Constraint.Unavailable) return "unknown";
+
         var candidates = new List<long>();
         if (host is { } hostBytes) candidates.Add(hostBytes);
-        if (CgroupMemoryLimitBytes(facts) is { } limitBytes) candidates.Add(limitBytes);
+        if (limit.Status == Constraint.Constrained) candidates.Add(limit.Bytes);
         return candidates.Count == 0 ? "unknown" : Format(candidates.Min());
     }
 
     private static bool IsContainerLike(Dictionary<string, string> facts) =>
         string.Equals(facts.GetValueOrDefault("executionScope"), "container", StringComparison.Ordinal)
-        || facts.ContainsKey("cpuQuotaV2") || facts.ContainsKey("cpuSetV2")
+        || facts.ContainsKey("cpuQuotaV2") || facts.ContainsKey("cpuSetV2") || facts.ContainsKey("cpuSetV1")
         || facts.ContainsKey("cpuQuotaMicrosV1") || facts.ContainsKey("cpuPeriodMicrosV1")
         || facts.ContainsKey("memoryLimitV2") || facts.ContainsKey("memoryLimitV1");
 
@@ -65,48 +75,78 @@ public static class CapabilityProbe
         return false;
     }
 
-    private static decimal? CpuQuotaCores(Dictionary<string, string> facts)
+    private static (Constraint Status, decimal Cores) CpuQuotaCores(Dictionary<string, string> facts)
     {
         if (TryNonUnknown(facts, "cpuQuotaV2", out var max))
         {
             var parts = max.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length >= 2 && ParsePositiveLong(parts[1]) is { } period)
             {
-                if (parts[0] is "max" or "-1") return null;
-                return ParsePositiveDecimal(parts[0]) is { } quota ? quota / period : null;
+                if (parts[0] is "max" or "-1") return (Constraint.Unlimited, 0);
+                if (ParsePositiveDecimal(parts[0]) is { } quota) return (Constraint.Constrained, quota / period);
             }
-            return null;
+            return (Constraint.Unavailable, 0);
         }
 
         if (TryNonUnknown(facts, "cpuQuotaMicrosV1", out var quotaMicros)
-            && TryNonUnknown(facts, "cpuPeriodMicrosV1", out var periodMicros)
-            && ParsePositiveLong(periodMicros) is { } v1Period
-            && ParsePositiveDecimal(quotaMicros) is { } v1Quota)
-            return v1Quota / v1Period;
-        return null;
+            && TryNonUnknown(facts, "cpuPeriodMicrosV1", out var periodMicros))
+        {
+            if (ParsePositiveLong(periodMicros) is not { } v1Period) return (Constraint.Unavailable, 0);
+            if (quotaMicros == "-1") return (Constraint.Unlimited, 0);
+            if (ParsePositiveDecimal(quotaMicros) is { } v1Quota) return (Constraint.Constrained, v1Quota / v1Period);
+            return (Constraint.Unavailable, 0);
+        }
+        return (Constraint.Unavailable, 0);
     }
 
-    private static long? CpuSetCount(Dictionary<string, string> facts)
+    private static (Constraint Status, long Count) CpuSetCount(Dictionary<string, string> facts, string key)
     {
-        if (!TryNonUnknown(facts, "cpuSetV2", out var set)) return null;
-        long total = 0;
+        if (!TryNonUnknown(facts, key, out var set)) return (Constraint.Unavailable, 0);
+        var intervals = new List<(long Lo, long Hi)>();
         foreach (var token in set.Split(',', StringSplitOptions.RemoveEmptyEntries))
         {
             var dash = token.IndexOf('-');
             if (dash < 0)
             {
-                if (ParseNonNegativeLong(token) is null) return null;
-                total += 1;
+                if (ParseNonNegativeLong(token) is not { } single) return (Constraint.Unavailable, 0);
+                intervals.Add((single, single));
             }
             else
             {
                 var low = ParseNonNegativeLong(token[..dash]);
                 var high = ParseNonNegativeLong(token[(dash + 1)..]);
-                if (low is not { } lo || high is not { } hi || hi < lo) return null;
-                total += hi - lo + 1;
+                if (low is not { } lo || high is not { } hi || hi < lo) return (Constraint.Unavailable, 0);
+                if (hi - lo + 1 < 0) return (Constraint.Unavailable, 0);
+                intervals.Add((lo, hi));
             }
         }
-        return total > 0 ? total : null;
+        intervals.Sort();
+        for (var i = 1; i < intervals.Count; i++)
+            if (intervals[i].Lo <= intervals[i - 1].Hi) return (Constraint.Unavailable, 0);
+        long total = 0;
+        foreach (var (lo, hi) in intervals)
+        {
+            var count = hi - lo + 1;
+            if (count < 0 || long.MaxValue - total < count) return (Constraint.Unavailable, 0);
+            total += count;
+        }
+        return total > 0 ? (Constraint.Constrained, total) : (Constraint.Unavailable, 0);
+    }
+
+    private static (Constraint Status, long Bytes) MemoryLimitBytes(Dictionary<string, string> facts)
+    {
+        if (TryNonUnknown(facts, "memoryLimitV2", out var max))
+        {
+            if (max is "max" or "-1") return (Constraint.Unlimited, 0);
+            if (ParsePositiveLong(max) is { } value) return (Constraint.Constrained, value);
+            return (Constraint.Unavailable, 0);
+        }
+        if (TryNonUnknown(facts, "memoryLimitV1", out var bytes))
+        {
+            if (!long.TryParse(bytes, NumberStyles.Integer, CultureInfo.InvariantCulture, out var limit)) return (Constraint.Unavailable, 0);
+            return limit <= 0 || limit >= (1L << 62) ? (Constraint.Unlimited, 0) : (Constraint.Constrained, limit);
+        }
+        return (Constraint.Unavailable, 0);
     }
 
     private static long? HostMemoryBytes(Dictionary<string, string> facts)
@@ -118,21 +158,6 @@ public static class CapabilityProbe
         if (TryNonUnknown(facts, "memoryBytes", out var bytes)
             && long.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var b) && b > 0)
             return b;
-        return null;
-    }
-
-    private static long? CgroupMemoryLimitBytes(Dictionary<string, string> facts)
-    {
-        if (TryNonUnknown(facts, "memoryLimitV2", out var max))
-        {
-            if (max is "max" or "-1") return null;
-            return ParsePositiveLong(max);
-        }
-        if (TryNonUnknown(facts, "memoryLimitV1", out var bytes))
-        {
-            if (!long.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var limit)) return null;
-            return limit <= 0 || limit >= (1L << 62) ? null : limit;
-        }
         return null;
     }
 
@@ -148,6 +173,8 @@ public static class CapabilityProbe
     private static string Format(decimal value) => value.ToString("0.######", CultureInfo.InvariantCulture);
 
     private static string Format(long value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private enum Constraint { Unavailable, Unlimited, Constrained }
 
     // No installations, credentials, external network requests or unbounded hardware enumeration.
     public static string Script(string directory) => "cd " + BootstrapScript.Quote(directory) + " || exit 1\n" + """
@@ -170,6 +197,7 @@ public static class CapabilityProbe
         emit executionScope "$scope"
         emit cpuQuotaV2 "$(cat /sys/fs/cgroup/cpu.max 2>/dev/null)"
         emit cpuSetV2 "$(cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null)"
+        emit cpuSetV1 "$(cat /sys/fs/cgroup/cpuset/cpuset.cpus.effective 2>/dev/null || cat /sys/fs/cgroup/cpuset/cpuset.cpus 2>/dev/null)"
         emit memoryLimitV2 "$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"
         emit memoryCurrentV2 "$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"
         emit cpuQuotaMicrosV1 "$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)"

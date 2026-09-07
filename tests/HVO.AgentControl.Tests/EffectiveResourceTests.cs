@@ -147,4 +147,62 @@ public sealed class EffectiveResourceTests
         Assert.Equal("2", probe.Facts["effectiveCpuCores"]);
         Assert.Equal("4294967296", probe.Facts["effectiveMemoryBytes"]);
     }
+
+    [Fact]
+    public void V1CpusetConstraintIsEnforced()
+    {
+        Assert.Equal("2", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "8"), ("cpuSetV1", "0-1"), ("executionScope", "container"))));
+        Assert.Equal("4", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "16"), ("cpuQuotaMicrosV1", "-1"), ("cpuPeriodMicrosV1", "100000"),
+            ("cpuSetV1", "0-3"), ("executionScope", "container"))));
+        Assert.Equal("8", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "8"), ("cpuSetV1", "0-7"), ("executionScope", "container"))));
+    }
+
+    [Fact]
+    public void UnavailableContainerLimitsAreUnknownNotHostCapacity()
+    {
+        var cpu = Parse(("logicalCores", "8"), ("memoryKiB", "1048576"), ("executionScope", "container"));
+        Assert.Equal("unknown", cpu.Facts["effectiveCpuCores"]);
+        Assert.Equal("unknown", cpu.Facts["effectiveMemoryBytes"]);
+        Assert.Equal("8", cpu.Facts["logicalCores"]);
+        Assert.Equal("1048576", cpu.Facts["memoryKiB"]);
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "8"), ("cpuQuotaV2", "unknown"), ("cpuSetV2", "unknown"), ("executionScope", "container"))));
+        Assert.Equal("unknown", CapabilityProbe.EffectiveMemoryBytes(Facts(
+            ("memoryKiB", "1048576"), ("memoryLimitV2", "unknown"), ("executionScope", "container"))));
+    }
+
+    [Fact]
+    public void CpusetOverflowIsRejectedNotPlausible()
+    {
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "0-9223372036854775807,0-9223372036854775807,0"),
+            ("executionScope", "container"))));
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "0-9223372036854775807"), ("executionScope", "container"))));
+    }
+
+    [Fact]
+    public void CpusetMalformedRangesAreUnknown()
+    {
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "4-1"), ("executionScope", "container"))));
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "0,-1"), ("executionScope", "container"))));
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "abc"), ("executionScope", "container"))));
+    }
+
+    [Fact]
+    public void CpusetOverlappingRangesAreUnknown()
+    {
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "0-7,3-4"), ("executionScope", "container"))));
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "0,0"), ("executionScope", "container"))));
+        Assert.Equal("unknown", CapabilityProbe.EffectiveCpuCores(Facts(
+            ("logicalCores", "64"), ("cpuSetV2", "0-7,7-9"), ("executionScope", "container"))));
+    }
 }
