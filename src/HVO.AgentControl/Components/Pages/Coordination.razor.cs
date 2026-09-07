@@ -30,7 +30,9 @@ public partial class Coordination
     private Task Control(CoordinationRun run, string action) => Execute(async () => { await Store.ControlCoordination(run.Id, new(run.Revision, action)); });
 
     private sealed record ParticipantStatus(string WorkerId, string Name, string Runtime, string State, string StateLabel,
-        string StatusLine, string ProgressAge, int QueuedBacklog, string? Outcome);
+        string StatusLine, string ProgressAge, int QueuedBacklog, string? Outcome, string Assignment = "", string Receipt = "", string Next = "");
+
+    private static string WaitingWords(bool permission, bool question) => permission && question ? "a tool approval and a task answer" : permission ? "a tool approval" : "a task answer";
 
     private IEnumerable<ParticipantStatus> ParticipantStatuses(CoordinationRun run)
     {
@@ -67,44 +69,101 @@ public partial class Coordination
             ? w.Outcome == Delivery.Failed ? "Failed" : "Cancelled"
             : "";
         var nativeBusy = worker is not null && worker.Activity is "Active" or "Retrying" or "WaitingPermission" or "WaitingQuestion";
-        string state, stateLabel, line; long? ageAt;
+        string state, stateLabel, line, assignment, receipt, next; long? ageAt;
         if (worker is null || worker.Stale || worker.LastObservedAt is null || worker.Activity == "MissingSession")
-        { state = "stale"; stateLabel = "Stale"; line = "Session is unavailable or was never observed; command and result state are not trusted."; ageAt = worker?.LastObservedAt; }
+        {
+            state = "stale"; stateLabel = "Stale"; line = "Session is unavailable or was never observed; command and result state are not trusted."; ageAt = worker?.LastObservedAt;
+            assignment = commands.Count == 0 ? "No coordination instruction recorded." : "The recorded coordination instruction is not trusted until the session is observed.";
+            receipt = worker?.LastObservedAt is null ? "never observed" : "last observed " + Age(worker.LastObservedAt);
+            next = "Next: the session must become reachable and observed before assignment state is trusted.";
+        }
         else if (waitingPermission || waitingQuestion)
         {
             state = "waiting";
             stateLabel = waitingPermission && waitingQuestion ? "Waiting on permission and a question" : waitingPermission ? "Waiting on permission" : "Waiting on a question";
             line = waitingPermission && waitingQuestion ? "A tool approval and a task answer are needed. Open the conversation to respond." : waitingPermission ? "A tool approval is needed. Open the conversation to review it." : "A task answer is needed. Open the conversation to respond.";
             ageAt = latest?.UpdatedAt ?? worker.LastObservedAt;
+            assignment = "The current coordination instruction waits on " + WaitingWords(waitingPermission, waitingQuestion) + ".";
+            receipt = "no progress text; last receipt " + Age(latest?.UpdatedAt ?? worker.LastObservedAt);
+            next = "Next: an owner reply in the conversation unlocks this participant.";
         }
         else if (hasUnknown || uncertainReply is not null)
-        { state = "uncertain"; stateLabel = "Uncertain"; line = "A delivery has no confirmed outcome. Resolve it before assigning more work; another task may still be running."; ageAt = global.FirstOrDefault(x => x.State == Delivery.Unknown)?.UpdatedAt ?? latest?.UpdatedAt ?? worker.LastObservedAt; }
+        {
+            state = "uncertain"; stateLabel = "Uncertain"; line = "A delivery has no confirmed outcome. Resolve it before assigning more work; another task may still be running."; ageAt = global.FirstOrDefault(x => x.State == Delivery.Unknown)?.UpdatedAt ?? latest?.UpdatedAt ?? worker.LastObservedAt;
+            assignment = "The current delivery has no confirmed outcome; assignment state is not trusted yet.";
+            receipt = "last receipt " + Age(ageAt);
+            next = "Next: confirm the delivery outcome before assigning more work.";
+        }
         else if (runRunning is { } running)
-        { state = "active"; stateLabel = "Active"; var progress = Clipped(running.ProgressText, 100); line = StateWord(running.State) + (progress.Length == 0 ? " with no progress text yet." : ": \"" + progress + "\"") + QueuedSuffix(queuedBacklog); ageAt = running.LastProgressAt ?? running.UpdatedAt; }
+        {
+            state = "active"; stateLabel = "Active"; var progress = Clipped(running.ProgressText, 100); line = StateWord(running.State) + (progress.Length == 0 ? " with no progress text yet." : ": \"" + progress + "\"") + QueuedSuffix(queuedBacklog); ageAt = running.LastProgressAt ?? running.UpdatedAt;
+            assignment = "Current coordination instruction " + StateWord(running.State).ToLowerInvariant() + "; recorded " + Age(running.CreatedAt) + ".";
+            receipt = running.LastProgressAt is null ? "no progress text yet; last receipt " + Age(running.UpdatedAt) : "latest progress " + Age(running.LastProgressAt);
+            next = ProgressNext(running);
+        }
         else if (globalRunning is { } gRunning)
-        { state = "active"; stateLabel = "Active"; var progress = Clipped(gRunning.ProgressText, 100); line = "Busy on another task; last " + StateWord(gRunning.State).ToLowerInvariant() + (progress.Length == 0 ? " with no progress text yet." : ": \"" + progress + "\"") + QueuedSuffix(queuedBacklog); ageAt = gRunning.LastProgressAt ?? gRunning.UpdatedAt; }
+        {
+            state = "active"; stateLabel = "Active"; var progress = Clipped(gRunning.ProgressText, 100); line = "Busy on another task; last " + StateWord(gRunning.State).ToLowerInvariant() + (progress.Length == 0 ? " with no progress text yet." : ": \"" + progress + "\"") + QueuedSuffix(queuedBacklog); ageAt = gRunning.LastProgressAt ?? gRunning.UpdatedAt;
+            assignment = "Busy on another task; the coordination instruction is queued behind it.";
+            receipt = gRunning.LastProgressAt is null ? "no progress text yet; last receipt " + Age(gRunning.UpdatedAt) : "latest progress " + Age(gRunning.LastProgressAt);
+            next = ProgressNext(gRunning);
+        }
         else if (nativeBusy)
-        { state = "active"; stateLabel = "Active"; line = "Native session reports " + worker!.Activity.ToLowerInvariant() + " without a dispatched run command recorded; not idle."; ageAt = worker.LastObservedAt; }
+        {
+            state = "active"; stateLabel = "Active"; line = "Native session reports " + worker!.Activity.ToLowerInvariant() + " without a dispatched run command recorded; not idle."; ageAt = worker.LastObservedAt;
+            assignment = "Native activity is underway without a recorded coordination instruction.";
+            receipt = "last observed " + Age(worker.LastObservedAt);
+            next = "Next: await the native session's next observed report.";
+        }
         else if (queuedBacklog > 0)
-        { state = "queued"; stateLabel = "Queued"; line = queuedBacklog == 1 ? "One instruction or operation is recorded and queued; not dispatched to the runtime yet." : queuedBacklog + " instructions or operations are recorded and queued; not dispatched to the runtime yet."; ageAt = global.Where(x => x.State == Delivery.Queued).Min(x => x.CreatedAt); }
+        {
+            state = "queued"; stateLabel = "Queued"; line = queuedBacklog == 1 ? "One instruction or operation is recorded and queued; not dispatched to the runtime yet." : queuedBacklog + " instructions or operations are recorded and queued; not dispatched to the runtime yet."; ageAt = global.Where(x => x.State == Delivery.Queued).Min(x => x.CreatedAt);
+            assignment = queuedBacklog == 1 ? "One coordination instruction recorded and queued; not dispatched yet." : queuedBacklog + " coordination instructions recorded and queued; not dispatched yet.";
+            receipt = "queued " + Age(global.Where(x => x.State == Delivery.Queued).Max(x => x.CreatedAt));
+            next = "Next: dispatch to the runtime when a slot frees.";
+        }
         else if (latestFailedCancelled is { } outcome || nativeOutcome.Length > 0 || worker!.Activity == "Unknown")
         {
             if (latestFailedCancelled is { } o)
-            { state = "outcome"; stateLabel = o.State == Delivery.Failed ? "Failed" : "Cancelled"; line = "The latest dispatched instruction " + o.State.ToLowerInvariant() + "; a separate fact from availability, not verified completion."; ageAt = o.UpdatedAt; }
+            {
+                state = "outcome"; stateLabel = o.State == Delivery.Failed ? "Failed" : "Cancelled"; line = "The latest dispatched instruction " + o.State.ToLowerInvariant() + "; a separate fact from availability, not verified completion."; ageAt = o.UpdatedAt;
+                assignment = "The latest coordination instruction ended " + o.State.ToLowerInvariant() + ".";
+                receipt = "receipt " + Age(o.UpdatedAt);
+                next = "Next: review the " + o.State.ToLowerInvariant() + " result; no further work is scheduled for this participant.";
+            }
             else if (nativeOutcome.Length > 0)
-            { state = "outcome"; stateLabel = nativeOutcome; line = "The native turn " + nativeOutcome.ToLowerInvariant() + "; a separate fact from availability, not verified completion."; ageAt = latest?.UpdatedAt ?? worker.LastObservedAt; }
+            {
+                state = "outcome"; stateLabel = nativeOutcome; line = "The native turn " + nativeOutcome.ToLowerInvariant() + "; a separate fact from availability, not verified completion."; ageAt = latest?.UpdatedAt ?? worker.LastObservedAt;
+                assignment = "The native turn ended " + nativeOutcome.ToLowerInvariant() + "; the coordination instruction state is unverified.";
+                receipt = "last receipt " + Age(ageAt);
+                next = "Next: review the " + nativeOutcome.ToLowerInvariant() + " turn; no further work is scheduled for this participant.";
+            }
             else
-            { state = "uncertain"; stateLabel = "Uncertain activity"; line = "Native status is unknown; the participant is not treated as idle or available."; ageAt = worker.LastObservedAt; }
+            {
+                state = "uncertain"; stateLabel = "Uncertain activity"; line = "Native status is unknown; the participant is not treated as idle or available."; ageAt = worker.LastObservedAt;
+                assignment = "No reliable current coordination assignment; native status is unknown.";
+                receipt = "last observed " + Age(worker.LastObservedAt);
+                next = "Next: confirm native status in the conversation before assigning work.";
+            }
         }
         else
         {
             state = "idle"; stateLabel = "Idle";
             line = "Native reports no active task or pending work; idle means available, not that the assigned work is verified complete.";
             ageAt = latest?.UpdatedAt ?? worker.LastObservedAt;
+            assignment = latest is null ? "No coordination instruction recorded for this participant." : "No current coordination instruction; last recorded " + latest.Kind.ToLowerInvariant() + " " + Age(latest.UpdatedAt) + ".";
+            receipt = latest?.UpdatedAt is { } updated ? "last receipt " + Age(updated) : "last observed " + Age(worker!.LastObservedAt);
+            next = "Next: ready for the coordinator's next dispatch when the run decides.";
         }
         if (line.Length > 160) line = line[..160] + "…";
         var outcomeChip = (latestFailedCancelled?.State ?? nativeOutcome) is { } chip && chip is Delivery.Failed or Delivery.Cancelled && state is not ("stale" or "outcome") ? chip : null;
-        return new(id, name, runtime, state, stateLabel, line, Age(ageAt), queuedBacklog, outcomeChip);
+        return new(id, name, runtime, state, stateLabel, line, Age(ageAt), queuedBacklog, outcomeChip, assignment, receipt, next);
+    }
+
+    private static string ProgressNext(CommandRecord command)
+    {
+        var requested = AssignmentGuidance.ProgressStatus(command);
+        return requested.Length == 0 ? "Next: await a progress update or completion of the running turn." : "Next: " + requested;
     }
 
     private static string QueuedSuffix(int queued) => queued > 0 ? " · " + queued + " queued" : "";
@@ -123,6 +182,34 @@ public partial class Coordination
         var failed = statuses.Count(x => x.State == "outcome" || x.Outcome is not null);
         if (failed > 0) parts.Add("Failed/Cancelled " + failed);
         return string.Join(" · ", parts);
+    }
+
+    private string RunLatestEvidence(CoordinationRun run)
+    {
+        if (snapshot is null) return "not available";
+        var commands = snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id || x.Origin == "coordinator-decision:" + run.Id).ToList();
+        long? progressAt = commands.Where(x => x.LastProgressAt is not null).Max(x => x.LastProgressAt);
+        long? updateAt = commands.Count > 0 ? commands.Max(x => x.UpdatedAt) : null;
+        long? dispatchAt = run.LastDecisionAt > 0 ? run.LastDecisionAt : null;
+        long? newest = new long?[] { progressAt, updateAt, dispatchAt }.Where(x => x is not null).Max();
+        if (newest is null) return "started " + Age(run.CreatedAt);
+        var label = newest == progressAt ? "progress" : updateAt is not null && newest == updateAt ? "receipt" : "activity";
+        return label + " " + Age(newest);
+    }
+
+    private string RunNextEvent(CoordinationRun run)
+    {
+        if (run.State is "Completed" or "Stopped") return "Next: no further events; run " + run.State.ToLowerInvariant() + ".";
+        if (run.State == "Paused") return "Next: no routing decisions until resumed; already dispatched instructions continue independently.";
+        var waiting = ParticipantStatuses(run).Count(x => x.State == "waiting");
+        var needsOwner = waiting > 0 ? " An owner reply is needed in a participant conversation." : "";
+        return run.State switch
+        {
+            "Deciding" => "Next: the coordinator's decision response." + needsOwner,
+            "Waiting" => "Next: a participant result, question or progress update." + needsOwner,
+            "Ready" => "Next: dispatch the first decision to the coordinator." + needsOwner,
+            _ => "Next: awaiting the next observed decision or participant result." + needsOwner
+        };
     }
 
     private static string StateWord(string state) => state switch

@@ -75,4 +75,225 @@ public sealed class CoordinationStatusTests
         Assert.Contains(available ? "Available 1" : "Available 0", aggregate);
         if (oldFailure) Assert.Null(status.GetType().GetProperty("Outcome")!.GetValue(status));
     }
+
+    private static readonly BindingFlags InstancePrivate = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    private static Coordination Page(ControlSnapshot snapshot)
+    {
+        var page = new Coordination();
+        typeof(ControlPage).GetField("snapshot", InstancePrivate)!.SetValue(page, snapshot);
+        return page;
+    }
+
+    private static object[] Statuses(Coordination page, CoordinationRun run) =>
+        ((IEnumerable)typeof(Coordination).GetMethod("ParticipantStatuses", InstancePrivate)!.Invoke(page, [run])!).Cast<object>().ToArray();
+
+    private static string Property(object status, string name) => (string)status.GetType().GetProperty(name)!.GetValue(status)!;
+
+    private static string Invoke(Coordination page, string method, CoordinationRun run) =>
+        (string)typeof(Coordination).GetMethod(method, InstancePrivate)!.Invoke(page, [run])!;
+
+    private static WorkerRecord Observe(WorkerRecord worker) { worker.Stale = false; worker.LastObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); return worker; }
+
+    private static CoordinationRun RunWith(WorkerRecord worker) => new() { Id = "run", WorkerIdsJson = Json.Write(new[] { worker.Id }) };
+
+    [Fact]
+    public void QuietRunningWorkIsNotLabeledFailed()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Running,
+            CreatedAt = now - 30_000,
+            UpdatedAt = now - 30_000,
+            AcceptedAt = now - 30_000
+        };
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [])), run));
+        Assert.Equal("Active", Property(status, "StateLabel"));
+        Assert.Contains("no progress text yet", Property(status, "Receipt"));
+        Assert.DoesNotContain("failed", Property(status, "Receipt"));
+        Assert.DoesNotContain("failed", Property(status, "Next"));
+        Assert.Contains("Next:", Property(status, "Next"));
+    }
+
+    [Fact]
+    public void ProgressEvidenceShowsLatestProgressAge()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Running,
+            CreatedAt = now - 60_000,
+            UpdatedAt = now - 120_000,
+            AcceptedAt = now - 120_000,
+            LastProgressAt = now - 60_000,
+            ProgressText = "Compiled"
+        };
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [])), run));
+        Assert.Contains("latest progress 1m ago", Property(status, "Receipt"));
+        Assert.Contains("recorded 1m ago", Property(status, "Assignment"));
+    }
+
+    [Fact]
+    public void WaitingOnQuestionStatesBlockedOnOwnerReply()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Running,
+            CreatedAt = now - 30_000,
+            UpdatedAt = now - 30_000,
+            AcceptedAt = now - 30_000
+        };
+        var question = new PendingRequest { WorkerId = worker.Id, Kind = "question", State = "Pending" };
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [question])), run));
+        Assert.Equal("Waiting on a question", Property(status, "StateLabel"));
+        Assert.Contains("waits on a task answer", Property(status, "Assignment"));
+        Assert.Contains("unlocks this participant", Property(status, "Next"));
+    }
+
+    [Fact]
+    public void QueuedInstructionShowsDispatchAsNextEvent()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Queued,
+            CreatedAt = now - 30_000,
+            UpdatedAt = now - 30_000
+        };
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [])), run));
+        Assert.Equal("Queued", Property(status, "StateLabel"));
+        Assert.Contains("not dispatched yet", Property(status, "Assignment"));
+        Assert.Contains("queued 30s ago", Property(status, "Receipt"));
+        Assert.Contains("when a slot frees", Property(status, "Next"));
+    }
+
+    [Fact]
+    public void UnobservedSessionIsNotTrusted()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle", Stale = true, LastObservedAt = null };
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Queued,
+            CreatedAt = now - 30_000,
+            UpdatedAt = now - 30_000
+        };
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [])), run));
+        Assert.Equal("Stale", Property(status, "StateLabel"));
+        Assert.Contains("not trusted", Property(status, "Assignment"));
+        Assert.Equal("never observed", Property(status, "Receipt"));
+        Assert.Contains("reachable and observed", Property(status, "Next"));
+    }
+
+    [Fact]
+    public void IdleParticipantShowsReadyForNextDispatch()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [], [])), run));
+        Assert.Equal("Idle", Property(status, "StateLabel"));
+        Assert.Contains("No coordination instruction recorded", Property(status, "Assignment"));
+        Assert.Contains("ready for the coordinator's next dispatch", Property(status, "Next"));
+    }
+
+    [Fact]
+    public void FailedOutcomeGivesReviewAsNextEvent()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = RunWith(worker);
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Failed,
+            CreatedAt = now - 30_000,
+            UpdatedAt = now - 30_000
+        };
+        var status = Assert.Single(Statuses(Page(new ControlSnapshot(1, [], [worker], [command], [])), run));
+        Assert.Equal("Failed", Property(status, "StateLabel"));
+        Assert.Contains("ended failed", Property(status, "Assignment"));
+        Assert.Contains("review the failed result", Property(status, "Next"));
+    }
+
+    [Theory]
+    [InlineData("Completed")]
+    [InlineData("Stopped")]
+    public void EndedRunsHaveNoFurtherEvents(string state)
+    {
+        var run = new CoordinationRun { Id = "run", State = state, WorkerIdsJson = Json.Write(Array.Empty<string>()) };
+        var page = Page(new ControlSnapshot(1, [], [], [], []));
+        Assert.Contains("no further events", Invoke(page, "RunNextEvent", run));
+    }
+
+    [Fact]
+    public void PausedRunWaitsForResume()
+    {
+        var run = new CoordinationRun { Id = "run", State = "Paused", WorkerIdsJson = Json.Write(Array.Empty<string>()) };
+        var page = Page(new ControlSnapshot(1, [], [], [], []));
+        Assert.Contains("until resumed", Invoke(page, "RunNextEvent", run));
+    }
+
+    [Fact]
+    public void FreshRunShowsStartedEvidenceAndFirstDispatch()
+    {
+        var run = new CoordinationRun { Id = "run", State = "Ready", WorkerIdsJson = Json.Write(Array.Empty<string>()) };
+        var page = Page(new ControlSnapshot(1, [], [], [], []));
+        Assert.Contains("started", Invoke(page, "RunLatestEvidence", run));
+        Assert.Contains("first decision", Invoke(page, "RunNextEvent", run));
+    }
+
+    [Fact]
+    public void RunShowsLatestReceiptAge()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Name = "Worker", Activity = "Idle" });
+        var run = new CoordinationRun { Id = "run", WorkerIdsJson = Json.Write(new[] { worker.Id }) };
+        var command = new CommandRecord
+        {
+            Id = "current",
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            Origin = "coordinator:run",
+            State = Delivery.Running,
+            CreatedAt = now - 120_000,
+            UpdatedAt = now - 90_000,
+            AcceptedAt = now - 120_000
+        };
+        Assert.Contains("receipt 1m ago", Invoke(Page(new ControlSnapshot(1, [], [worker], [command], [])), "RunLatestEvidence", run));
+    }
 }
