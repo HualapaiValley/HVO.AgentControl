@@ -85,7 +85,7 @@
           @if (Telemetry(runtime) is { } telemetry)
           {
             <div class="telemetry" aria-label="Runtime resource observation">
-              <strong>Resource snapshot</strong>
+              <strong>@telemetry.Freshness(HVO.AgentControl.Infrastructure.ControlStore.Now, runtime.DesiredConnected && runtime.Health == "Healthy")</strong>
               <span>Memory @Bytes(telemetry.Sample.MemoryBytes) / @Bytes(telemetry.Sample.MemoryLimitBytes)</span>
               <span>CPU quota @(telemetry.Sample.QuotaCores is { } quota ? quota.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " cores" : "unknown")</span>
               <small>Observed @Age(telemetry.Sample.ObservedAt). @telemetry.Result.Note</small>

@@ -6,6 +6,12 @@ namespace HVO.AgentControl.Telemetry;
 
 public sealed record RuntimeTelemetryProjection(RuntimeTelemetrySample Sample, RuntimeTelemetry Result)
 {
+    public string Freshness(long now, bool connected) =>
+        !connected ? "Historical snapshot — runtime disconnected" :
+        Sample.ObservedAt > now ? "Snapshot timestamp is in the future; freshness unknown" :
+        now - Sample.ObservedAt > 60_000 ? "Historical snapshot — not live resource usage" :
+        "Recent resource snapshot";
+
     public static RuntimeTelemetryProjection? FromCapabilities(string capabilitiesJson, string identity)
     {
         try

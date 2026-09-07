@@ -258,19 +258,20 @@ public partial class Coordination
         if (run.State == "Recovering") return "automatic recovery backoff is active; no new decision is sent until its retry is due.";
         if (run.Round >= run.MaxRounds && run.DecisionCommandId is null) return "the configured coordinator turn budget is exhausted; no new decision is sent.";
 
-        var coordinator = snapshot.Workers.FirstOrDefault(x => x.Id == run.CoordinatorWorkerId);
-        if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator)
-            return "the coordinator is unavailable; no new decision is sent.";
-        if (coordinator.Stale) return "the coordinator session is stale; no new decision is sent until it is observed.";
-
         if (run.DecisionCommandId is { } decisionId)
         {
             var decision = snapshot.Commands.FirstOrDefault(x => x.Id == decisionId);
             if (decision is null)
                 return "the recorded coordinator decision is not in this bounded snapshot; its completion is unavailable here.";
-            if (decision is not null && decision.State != Delivery.Finished)
-                return "a coordinator decision is already " + StateWord(decision.State).ToLowerInvariant() + "; no additional decision is sent.";
+            return decision.State == Delivery.Finished
+                ? "the recorded decision is finished and awaits scheduler reconciliation; its actions are not yet confirmed."
+                : "a coordinator decision is already " + StateWord(decision.State).ToLowerInvariant() + "; awaiting scheduler reconciliation.";
         }
+
+        var coordinator = snapshot.Workers.FirstOrDefault(x => x.Id == run.CoordinatorWorkerId);
+        if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator)
+            return "the coordinator is unavailable; no new decision is sent.";
+        if (coordinator.Stale) return "the coordinator session is stale; no new decision is sent until it is observed.";
 
         var coordinatorBusy = coordinator.Activity != "Idle" || snapshot.Commands.Any(x => x.WorkerId == coordinator.Id &&
             (x.State == Delivery.Queued || Delivery.InFlight(x.State)));
@@ -283,27 +284,18 @@ public partial class Coordination
 
         var context = ReadContext(run);
         var ownerFollowup = context is not null && context.Instruction != run.Instruction;
-        if (!ownerFollowup && participants.Any(x => x.Stale))
-            return "a participant session is stale; no new decision is sent until it is observed.";
-        if (!ownerFollowup && participants.Any(x => x.Activity != "Idle"))
-            return "a participant is busy; no new decision is sent until it is idle.";
-
-        var requests = snapshot.Requests.Where(x => participantIds.Contains(x.WorkerId) && x.State == "Pending" && x.ReplyCommandId is null).ToArray();
         var commands = snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt).ToArray();
+        var requests = snapshot.Requests.Where(x => participantIds.Contains(x.WorkerId) && x.State == "Pending" && x.ReplyCommandId is null).ToArray();
         if (commands.Any(x => x.State == Delivery.Unknown))
-            return "worker delivery is unresolved; no new decision is sent until its outcome is confirmed.";
-        if (!ownerFollowup && commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State)))
-            return "assigned worker work is still unresolved; no new decision is sent.";
-
-        if (context?.Repair is not null)
-            return "a coordinator format correction is pending; no new decision is sent until the correction is requested.";
-        if (context?.Recovery is not null)
-            return "automatic recovery is pending; no new decision is sent until its retry is due.";
-
+            return "a worker delivery is uncertain; reconcile it before further coordination.";
         var progressDue = commands.Any(x => x.LastProgressAt > run.LastDecisionAt) &&
             ControlStore.Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
         var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
             x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
+        if (!ownerFollowup && context?.Repair is null && context?.Recovery is null &&
+            commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State)) &&
+            requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision)
+            return "assigned worker work is still unresolved; no new decision is sent.";
 
         if (CoordinationObservation.Fingerprint(commands, requests) == run.LastObservation)
             return "worker evidence is unchanged since the last coordinator observation; no new decision is sent.";

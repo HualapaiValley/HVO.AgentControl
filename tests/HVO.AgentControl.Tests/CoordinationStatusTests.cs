@@ -403,10 +403,10 @@ public sealed class CoordinationStatusTests
     }
 
     [Theory]
-    [InlineData("stale", "participant session is stale")]
-    [InlineData("active", "participant is busy")]
-    [InlineData("in-flight", "assigned worker work is still unresolved")]
-    public void FinishedDecisionStillReportsParticipantAvailabilityBeforeRecoveryStatus(string availability, string expected)
+    [InlineData("stale", "awaits scheduler reconciliation")]
+    [InlineData("active", "awaits scheduler reconciliation")]
+    [InlineData("in-flight", "awaits scheduler reconciliation")]
+    public void FinishedDecisionIsReconciledBeforeParticipantAvailability(string availability, string expected)
     {
         var coordinator = Observe(new WorkerRecord { Id = "coordinator", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Coordinator });
         var worker = Observe(new WorkerRecord { Id = "worker", RuntimeId = "runtime", Activity = "Idle", Role = SessionRoles.Worker });
@@ -488,10 +488,10 @@ public sealed class CoordinationStatusTests
             InputJson = Json.Write(new CoordinatorContext("Task", [], [], [], Repair: new(1, "rejected")))
         };
         var page = Page(new ControlSnapshot(1, [], [coordinator, worker], [], []));
-        Assert.Contains("format correction", SchedulerReason(page, run));
+        Assert.Contains("evidence is unchanged", SchedulerReason(page, run));
 
         run.InputJson = Json.Write(new CoordinatorContext("Task", [], [], [], Recovery: new(1, 1234, "retry")));
-        Assert.Contains("recovery is pending", SchedulerReason(page, run));
+        Assert.Contains("evidence is unchanged", SchedulerReason(page, run));
     }
 
     [Fact]
@@ -506,4 +506,27 @@ public sealed class CoordinationStatusTests
         Assert.Contains("bounded snapshot", reason);
         Assert.Contains("unavailable", reason);
     }
+    [Theory]
+    [InlineData("progress")]
+    [InlineData("completion")]
+    [InlineData("question")]
+    [InlineData("repair")]
+    public void NewEvidenceCanWakeSchedulerWhileAnotherWorkerRuns(string signal)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var coordinator = Observe(new WorkerRecord { Id = "coordinator", Activity = "Idle", Role = SessionRoles.Coordinator });
+        var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Active", Role = SessionRoles.Worker });
+        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = coordinator.Id,
+            WorkerIdsJson = Json.Write(new[] { worker.Id }), LastDecisionAt = now - 120_000 };
+        var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running };
+        var commands = new List<CommandRecord> { command };
+        var requests = new List<PendingRequest>();
+        if (signal == "progress") command.LastProgressAt = now;
+        if (signal == "completion") commands.Add(new CommandRecord { Id = "finished", WorkerId = worker.Id,
+            Origin = "coordinator:run", State = Delivery.Finished, UpdatedAt = now });
+        if (signal == "question") requests.Add(new PendingRequest { WorkerId = worker.Id, Kind = "question", State = "Pending" });
+        if (signal == "repair") run.InputJson = Json.Write(new CoordinatorContext(run.Instruction, [], [], [], Repair: new(1, "rejected")));
+        Assert.Null(SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], commands, requests)), run));
+    }
+
 }

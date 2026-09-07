@@ -84,4 +84,17 @@ public sealed class RuntimeTelemetryProjectionTests
         Assert.Null(projection.Sample.QuotaCores);
         Assert.Equal(TelemetryState.NeedsSecondSample, projection.Result.State);
     }
+    [Theory]
+    [InlineData(1000, true, "Recent")]
+    [InlineData(61001, true, "Historical")]
+    [InlineData(1000, false, "disconnected")]
+    [InlineData(0, true, "future")]
+    public void DisplayFreshnessDoesNotPresentOldOrDisconnectedDataAsLive(long now, bool connected, string expected)
+    {
+        var snapshot = new CapabilitySnapshot(1, "probe", "/work", new Dictionary<string, string> { ["os"] = "Linux" });
+        var projection = RuntimeTelemetryProjection.FromCapabilities(Json.Write(snapshot), "runtime:1");
+        Assert.NotNull(projection);
+        Assert.Contains(expected, projection.Freshness(now, connected));
+    }
+
 }
