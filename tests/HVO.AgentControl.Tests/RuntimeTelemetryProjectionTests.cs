@@ -41,6 +41,31 @@ public sealed class RuntimeTelemetryProjectionTests
     }
 
     [Fact]
+    public void FailedCapabilityProbeIsUnavailable()
+    {
+        var snapshot = new CapabilitySnapshot(1234, "probe", "/work", new Dictionary<string, string>
+        {
+            ["probe"] = "unavailable"
+        });
+
+        Assert.Null(RuntimeTelemetryProjection.FromCapabilities(Json.Write(snapshot), "runtime:1"));
+    }
+
+    [Theory]
+    [InlineData("{\"observedAt\":1234,\"source\":\"probe\",\"scope\":\"/work\",\"facts\":{\"os\":null}}")]
+    [InlineData("{\"observedAt\":1234,\"source\":\"probe\",\"scope\":\"/work\",\"facts\":{\"os\":\"Linux\",\"cpuQuotaCores\":null,\"cpuQuotaV2\":null,\"memoryCurrentV2\":null,\"memoryLimitV2\":null,\"logicalCores\":null}}")]
+    public void NullValuedPersistedFactsRemainUnknown(string json)
+    {
+        var projection = RuntimeTelemetryProjection.FromCapabilities(json, "runtime:1");
+
+        Assert.NotNull(projection);
+        Assert.Null(projection.Sample.MemoryBytes);
+        Assert.Null(projection.Sample.MemoryLimitBytes);
+        Assert.Null(projection.Sample.QuotaCores);
+        Assert.Null(projection.Sample.HostLogicalCores);
+    }
+
+    [Fact]
     public void MissingResourceFactsRemainExplicitlyUnknown()
     {
         var snapshot = new CapabilitySnapshot(1234, "probe", "/work", new Dictionary<string, string>
