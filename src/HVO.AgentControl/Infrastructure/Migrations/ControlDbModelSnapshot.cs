@@ -602,6 +602,47 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
                     b.ToTable("WorkspaceClaims");
                 });
+
+            modelBuilder.Entity("HVO.AgentControl.GitHub.GitHubAccess", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AppId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("InstallationId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PrivateKeyReference")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RepositoriesJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("RetryAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("GitHubAccess");
+                });
 #pragma warning restore 612, 618
         }
     }

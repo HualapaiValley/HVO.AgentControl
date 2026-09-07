@@ -50,7 +50,7 @@ The prototype adoption review remains the design reference. These issue records 
 
 ## First exercise contract
 
-The lab calculates an order total from a decimal unit price and positive integer quantity. Reject negative price and nonpositive quantity. Multiply price by quantity, apply a ten-percent discount at quantity ten or above, then round the final result to two decimals using AwayFromZero. The initial PR intentionally contains arithmetic/boundary/rounding defects with only a narrow passing test. Its description labels it as a coordination exercise and it stays draft until independently reviewed and fixed.
+The lab calculates an order total from a decimal unit price and positive integer quantity. Reject negative price and nonpositive quantity. Multiply price by quantity, apply a ten-percent discount at quantity ten or above, then round the final result to two decimals using AwayFromZero. The initial PR intentionally contains arithmetic and discount-boundary defects with only a narrow passing test. Its description labels it as a coordination exercise and it stays draft until independently reviewed and fixed.
 
 Coordinator receives PR/branch/base/head, requirements, agent roles and permitted actions. Reviewer uses the exact local diff and produces findings with reproducible examples. Fixer uses a separate clone, fetches the PR branch, implements fixes and regression tests, and pushes the exercise branch. Reviewer fetches the new head, verifies each finding and runs the relevant tests. No worker merges, deletes branches or edits the production application during this exercise.
 
@@ -78,3 +78,30 @@ Use one bounded workflow at a time initially. Record results in `docs/validation
 Every product change runs the repository-mandated restore, Release build with warnings as errors and format verification. Run meaningful unit/integration/browser checks appropriate to the change. The lab suite runs independently in CI whenever its project exists. Evidence must identify whether execution was native model work, deterministic fixture output or operator action.
 
 Handoff includes repo/issue/PR URLs, UI URL, fleet names and worker IDs, models used, active run state, completed evidence, unresolved blockers, and exact next steps. Never include deploy keys, provider tokens or owner passwords in the repository or reports.
+
+## GitHub tracking
+
+Repository: [RoySalisbury/HVO.AgentControl](https://github.com/RoySalisbury/HVO.AgentControl). Beta epic: [#1](https://github.com/RoySalisbury/HVO.AgentControl/issues/1).
+
+- [#2: Provision reproducible .NET beta development containers](https://github.com/RoySalisbury/HVO.AgentControl/issues/2)
+- [#3: Persist scheduled operator updates independently of model turns](https://github.com/RoySalisbury/HVO.AgentControl/issues/3)
+- [#4: Add participant enrollment and explicit command receipts](https://github.com/RoySalisbury/HVO.AgentControl/issues/4)
+- [#5: Track work-item ownership through review and cleanup](https://github.com/RoySalisbury/HVO.AgentControl/issues/5)
+- [#6: Add endpoint-scoped resource reservations](https://github.com/RoySalisbury/HVO.AgentControl/issues/6)
+- [#7: Persist evidence cursors and bounded coordinator retrieval](https://github.com/RoySalisbury/HVO.AgentControl/issues/7)
+- [#8: Record exact-range reviews and bounded correction handoffs](https://github.com/RoySalisbury/HVO.AgentControl/issues/8)
+- [#9: Investigate and implement one additional native agent adapter](https://github.com/RoySalisbury/HVO.AgentControl/issues/9)
+- [#10: Expose current assignment, expected events and stalls in Coordination](https://github.com/RoySalisbury/HVO.AgentControl/issues/10)
+- [#11: Exercise: review, fix and rereview the pricing lab](https://github.com/RoySalisbury/HVO.AgentControl/issues/11)
+- [#12: Exercise: add a simple shipping rule to the pricing lab](https://github.com/RoySalisbury/HVO.AgentControl/issues/12)
+- [#13: Exercise restart, long tools and uncertain coordination delivery](https://github.com/RoySalisbury/HVO.AgentControl/issues/13)
+
+## Observed beta follow-up issues
+
+- [#19: Effective container capability limits](https://github.com/RoySalisbury/HVO.AgentControl/issues/19).
+- [#20: Final evidence context overflow](https://github.com/RoySalisbury/HVO.AgentControl/issues/20), fixed by PR #21.
+- [#23: Applied versus superseded routing proposals](https://github.com/RoySalisbury/HVO.AgentControl/issues/23).
+- [#24: Schema-constrained coordinator output and bounded repair](https://github.com/RoySalisbury/HVO.AgentControl/issues/24).
+- [#26: Preserve unsent prompts through preflight shutdown](https://github.com/RoySalisbury/HVO.AgentControl/issues/26), fixed in PR #25.
+
+Use the [assignment guide](BETA_ASSIGNMENT_GUIDE.md) for the next run. See [native validation and intervention evidence](validation/beta-development-2026-09-07.md) before increasing complexity or claiming unattended operation.

@@ -31,6 +31,8 @@ public sealed partial class ControlStore
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, id, null, "DeleteRuntime", payload);
         var runtime = await db.Runtimes.FindAsync(id) ?? throw new ControlException("Runtime not found.", 404);
         if (runtime.Revision != input.ExpectedRevision) throw new ControlException("Runtime changed; refresh before deleting.");
+        if (await db.GitHubAccess.AnyAsync(x => x.Id == id && x.State != "Disabled"))
+            throw new ControlException("Disable GitHub credential renewal before deleting this runtime.");
         var count = await db.Workers.CountAsync(x => x.RuntimeId == id);
         if (count > 0) throw new ControlException($"Runtime is in use by {count} worker/coordinator registration(s), including archived workers. Delete those registrations first.");
         if (activeTerminals.GetValueOrDefault(id) > 0) throw new ControlException("Close this runtime's admin terminals before deleting it.");
