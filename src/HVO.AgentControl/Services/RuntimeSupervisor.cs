@@ -40,6 +40,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         IRuntimeTransport? transport = null;
         CancellationTokenSource? streamCancellation = null;
         Task? reader = null;
+        RuntimeTelemetrySampler? telemetrySampler = null;
         var incoming = Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(512) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = true });
         var streamOverflow = 0;
         var failures = 0;
@@ -47,6 +48,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         long lastStreamFrame = 0;
         async Task Close()
         {
+            if (telemetrySampler is not null) await telemetrySampler.DisposeAsync();
+            telemetrySampler = null;
             if (streamCancellation is not null) await streamCancellation.CancelAsync();
             if (reader is not null) try { await reader; } catch (Exception) { /* classified below or during shutdown */ }
             streamCancellation?.Dispose(); streamCancellation = null; reader = null;
@@ -106,6 +109,12 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             record.Diagnostic = models.Count == 0 ? "Run opencode auth login in this runtime, then refresh. Provider credentials remain remote." : "Connected; reconciling native sessions.";
                             ControlStore.Event(db, "RuntimeConnected", id, generation: record.Generation); return true;
                         });
+                        var telemetryTransport = transport;
+                        var telemetryIdentity = id + ":" + Guid.NewGuid().ToString("N");
+                        telemetrySampler = new RuntimeTelemetrySampler(
+                            cancellation => telemetryTransport.SampleTelemetry(telemetryIdentity, cancellation),
+                            async result => { await store.RecordTelemetry(id, result); },
+                            error => logger.LogDebug("Runtime {RuntimeId} telemetry unavailable ({Category})", id, error.GetType().Name), token);
                         failures = 0;
                     }
                     if (!transport.Connected) throw new IOException("SSH transport disconnected.");
