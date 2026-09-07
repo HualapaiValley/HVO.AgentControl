@@ -47,7 +47,9 @@ run many times under one sustained pass. It is never invoked by CI.
   nonzero, and `Failed` is zero. Per-iteration outcome is recorded explicitly
   as one of `success`, `failure`, `zero-tests`, `skipped-only`,
   `missing-evidence`, or `timeout`; every non-success outcome terminates the
-  run with a nonzero exit.
+  run with a nonzero exit. A batch that cannot complete its target inside the
+  remaining overall deadline, and a failed evidence validation (validator
+  failure or any invalid line), also terminate the run with a nonzero exit.
 - Every evidence line is ONE whole, valid JSON object. The produced
   `evidence.jsonl` is validated line-by-line at the end (via `python3`
   `json.loads`, or `jq -e .` when python3 is unavailable), and the valid /

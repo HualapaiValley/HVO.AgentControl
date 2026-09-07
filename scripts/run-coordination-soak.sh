@@ -25,9 +25,12 @@
 #     evidence: an iteration counts as a clean pass only when dotnet exits 0,
 #     the summary is present, Total is nonzero, Passed is nonzero and Failed
 #     is zero. Zero-test, all-skipped, missing-summary, timeout and test
-#     failure outcomes terminate the run with a nonzero exit.
+#     failure outcomes terminate the run with a nonzero exit, as does a batch
+#     that cannot complete its target inside the remaining overall deadline
+#     and a failed evidence validation.
 #   * Every evidence line is one whole, valid JSON object; the produced
-#     evidence file is validated line-by-line at the end.
+#     evidence file is validated line-by-line at the end, and a validator
+#     failure itself fails the run.
 #
 # Tuning (env): SOAK_BATCHES (4), SOAK_BATCH_SECONDS (120),
 #   SOAK_MAX_TOTAL_SECONDS (900), SOAK_BUILD_SECONDS (300),
@@ -91,11 +94,12 @@ iteration_event() {
 }
 
 # Validate every non-empty evidence line is a whole, valid JSON object.
+# Returns 0 only when a validator ran AND every line was valid JSON.
 verify_evidence_jsonl() {
   local lines=0 valid=0 invalid=0
   if command -v python3 >/dev/null 2>&1; then
-    read -r lines valid invalid <<< "$(
-      python3 -c '
+    local result python_status
+    result=$(python3 -c '
 import sys, json
 lines = valid = invalid = 0
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -110,16 +114,23 @@ with open(sys.argv[1], encoding="utf-8") as f:
         except Exception:
             invalid += 1
 print(lines, valid, invalid)
-' "$evidence_path"
-    )"
-  elif command -v jq >/dev/null 2>&1; then
-    if jq -e . "$evidence_path" >/dev/null 2>&1; then
-      lines=$(grep -c -v '^[[:space:]]*$' "$evidence_path" || true)
-      valid=$lines
-    else
-      lines=$(grep -c -v '^[[:space:]]*$' "$evidence_path" || true)
-      invalid=$lines
+' "$evidence_path" 2>&1)
+    python_status=$?
+    if (( python_status != 0 )); then
+      echo "Evidence validation failed: python3 exited $python_status." >&2
+      return 2
     fi
+    read -r lines valid invalid <<< "$result"
+  elif command -v jq >/dev/null 2>&1; then
+    local jq_status
+    jq -e '.' "$evidence_path" >/dev/null 2>&1
+    jq_status=$?
+    if (( jq_status != 0 )); then
+      echo "Evidence validation failed: jq exited $jq_status." >&2
+      return 2
+    fi
+    lines=$(grep -c -v '^[[:space:]]*$' "$evidence_path" || true)
+    valid=$lines
   else
     echo "No JSON validator (python3 or jq) available; cannot verify evidence." >&2
     return 2
@@ -166,6 +177,7 @@ for batch in $(seq 1 "$batch_count"); do
   batch_timeouts=0
   batch_skipped_only=0
   batch_missing_evidence=0
+  batch_blocked=0
   echo "[batch $batch/$batch_count] starting (target ${batch_seconds}s of test execution)."
   write_event "{\"ts\":\"$(now_iso)\",\"event\":\"batch_start\",\"batch\":$batch}"
 
@@ -184,7 +196,9 @@ for batch in $(seq 1 "$batch_count"); do
     remaining_batch_ms=$(( batch_seconds * 1000 - batch_elapsed ))
     remaining_overall_ms=$(( max_total_seconds * 1000 - overall_elapsed ))
     if (( remaining_batch_ms >= remaining_overall_ms )); then
-      echo "[batch $batch] stopping iteration starts: remaining batch (${remaining_batch_ms}ms) cannot finish before the overall guard (${remaining_overall_ms}ms remaining)." >&2
+      echo "[batch $batch] CANNOT COMPLETE: remaining batch (${remaining_batch_ms}ms) exceeds the overall deadline remaining (${remaining_overall_ms}ms); failing closed." >&2
+      run_exit=$failed_run
+      batch_blocked=1
       break
     fi
     # The per-iteration timeout is bounded by the remaining OVERALL deadline,
@@ -262,7 +276,7 @@ for batch in $(seq 1 "$batch_count"); do
 
   batch_elapsed_ms=$(ms_since "$batch_started")
   echo "[batch $batch/$batch_count] done: $batch_iterations iteration(s), ${batch_elapsed_ms}ms elapsed, passed=$batch_passed, failed=$batch_failed, zero-tests=$batch_zero_tests, timeouts=$batch_timeouts, skipped-only=$batch_skipped_only, missing-evidence=$batch_missing_evidence."
-  write_event "{\"ts\":\"$(now_iso)\",\"event\":\"batch_end\",\"batch\":$batch,\"iterations\":$batch_iterations,\"elapsedMs\":$batch_elapsed_ms,\"passed\":$batch_passed,\"failed\":$batch_failed,\"zeroTests\":$batch_zero_tests,\"timeouts\":$batch_timeouts,\"skippedOnly\":$batch_skipped_only,\"missingEvidence\":$batch_missing_evidence}"
+  write_event "{\"ts\":\"$(now_iso)\",\"event\":\"batch_end\",\"batch\":$batch,\"iterations\":$batch_iterations,\"elapsedMs\":$batch_elapsed_ms,\"passed\":$batch_passed,\"failed\":$batch_failed,\"zeroTests\":$batch_zero_tests,\"timeouts\":$batch_timeouts,\"skippedOnly\":$batch_skipped_only,\"missingEvidence\":$batch_missing_evidence,\"blockedByDeadline\":$batch_blocked}"
   if (( run_exit != ok )); then
     break
   fi
@@ -271,12 +285,21 @@ done
 total_elapsed_ms=$(ms_since "$run_started")
 echo "Coordination soak complete: $total_iterations iteration(s), ${total_elapsed_ms}ms total, passed=$total_passed, failed=$total_failed, zero-tests=$total_zero_tests, timeouts=$total_timeouts, skipped-only=$total_skipped_only, missing-evidence=$total_missing_evidence, exit=$run_exit."
 
-read -r ev_lines ev_valid ev_invalid <<< "$(verify_evidence_jsonl)"
+verify_output="$(verify_evidence_jsonl)"
+verify_status=$?
+read -r ev_lines ev_valid ev_invalid <<< "$verify_output"
 ev_valid=${ev_valid:-0}; ev_invalid=${ev_invalid:-0}
-if (( ev_invalid > 0 )); then
-  echo "WARNING: evidence validation found $ev_invalid invalid JSON line(s) of $ev_lines." >&2
+if (( verify_status != 0 )); then
+  echo "Evidence validation FAILED; failing the run closed." >&2
+  ev_valid=0; ev_invalid=1; ev_lines=0
+  run_exit=$failed_run
 else
-  echo "Evidence JSON validation passed: $ev_valid/$ev_lines lines are valid JSON objects."
+  if (( ev_invalid > 0 )); then
+    echo "WARNING: evidence validation found $ev_invalid invalid JSON line(s) of $ev_lines." >&2
+    run_exit=$failed_run
+  else
+    echo "Evidence JSON validation passed: $ev_valid/$ev_lines lines are valid JSON objects."
+  fi
 fi
 write_event "{\"ts\":\"$(now_iso)\",\"event\":\"evidence_validated\",\"lines\":$ev_lines,\"valid\":$ev_valid,\"invalid\":$ev_invalid}"
 write_event "{\"ts\":\"$(now_iso)\",\"event\":\"run_end\",\"exit\":$run_exit,\"runTag\":\"$run_tag\",\"iterations\":$total_iterations,\"totalElapsedMs\":$total_elapsed_ms,\"passed\":$total_passed,\"failed\":$total_failed,\"zeroTests\":$total_zero_tests,\"timeouts\":$total_timeouts,\"skippedOnly\":$total_skipped_only,\"missingEvidence\":$total_missing_evidence}"
