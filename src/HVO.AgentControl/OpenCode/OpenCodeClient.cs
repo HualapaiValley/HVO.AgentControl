@@ -123,9 +123,12 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
         var status = statuses.TryGetProperty(worker.NativeSessionId, out var item) ? item.GetProperty("type").GetString() ?? "unknown" : "idle";
         var permissions = Capabilities.CanReplyToPermissions ? await Get(Scope("/permission", worker.Directory), token) : default;
         var questions = Capabilities.CanReplyToQuestions ? await Get(Scope("/question", worker.Directory), token) : default;
-        JsonElement[] ForSession(JsonElement array) => array.ValueKind == JsonValueKind.Array
-            ? array.EnumerateArray().Where(x => x.GetProperty("sessionID").GetString() == worker.NativeSessionId).ToArray() : [];
-        return new(session, history.EnumerateArray().ToArray(), status, ForSession(permissions), ForSession(questions));
+        using var ancestryDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        ancestryDeadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var ownership = new NativeRequestOwnership(worker.NativeSessionId, worker.Directory,
+            (id, cancellation) => Get(Scope($"/session/{Id(id)}", worker.Directory), cancellation));
+        return new(session, history.EnumerateArray().ToArray(), status,
+            await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token));
     }
 
     public Task<HttpResponseMessage> Subscribe(CancellationToken token) => SubscribeCore(token);
