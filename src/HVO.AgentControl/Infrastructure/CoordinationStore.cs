@@ -196,7 +196,8 @@ public sealed partial class ControlStore
                 var requestId = Guid.NewGuid().ToString();
                 CommandRecord dispatch;
                 if (action.Type == "send_prompt")
-                    dispatch = await EnqueuePrompt(db, worker.Id, new(requestId, action.Text!, worker.Revision, IncludeGuidance: action.IncludeGuidance ?? run.IncludeGuidance,
+                    dispatch = await EnqueuePrompt(db, worker.Id, new(requestId, action.Text!, worker.Revision, ProviderId: action.ProviderId, ModelId: action.ModelId,
+                        Variant: action.ModelId is null ? null : "", IncludeGuidance: action.IncludeGuidance ?? run.IncludeGuidance,
                         ProgressMinutes: (action.IncludeGuidance ?? run.IncludeGuidance) ? action.ProgressMinutes ?? run.ProgressMinutes : null), "coordinator:" + run.Id);
                 else
                     dispatch = await EnqueueReply(db, new(requestId, action.RequestId!, null, action.Answers), "coordinator:" + run.Id);
@@ -291,6 +292,12 @@ public sealed partial class ControlStore
             if (current.Role != SessionRoles.Worker || current.Archived || current.Revision != observed.Revision) throw new ControlException("Worker changed after the coordinator observation; decision paused without dispatch.");
             if (action.Type == "send_prompt")
             {
+                if (action.ProviderId is not null || action.ModelId is not null)
+                {
+                    if (string.IsNullOrWhiteSpace(action.ProviderId) || string.IsNullOrWhiteSpace(action.ModelId))
+                        throw new ControlException("Task model selection requires both providerId and modelId.");
+                    ValidateModelOptions(Json.Read<List<ModelChoice>>(current.ModelsJson), action.ProviderId, action.ModelId, current.Agent, "");
+                }
                 var guidance = action.IncludeGuidance ?? run.IncludeGuidance;
                 AssignmentGuidance.Validate(guidance, action.ProgressMinutes ?? (guidance ? run.ProgressMinutes : null));
                 if (await db.Commands.AnyAsync(x => x.WorkerId == current.Id && (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)) || current.Stale || current.Activity != "Idle")
@@ -410,6 +417,11 @@ public sealed partial class ControlStore
         Capability reports and prior prompts may also contain explicit omission markers when context is compacted.
         All outstanding command records remain visible even when they predate the recent completed-result window.
         Progress text may be an incomplete streamed report, never proof of completion. Do not repeat work already running.
+        Workers are general-purpose: assign by availability, capabilities and workspace ownership, not historic names.
+        Optional send_prompt providerId and modelId select a model for that task only; always supply both together.
+        Use an override only when the owner has supplied a verified available provider/model for that runtime.
+        Omission preserves the worker default. Task overrides never change worker settings or native session identity.
+        A model override clears the default reasoning variant, since a different model may not support it.
         Optional send_prompt fields include includeGuidance (boolean) and progressMinutes (1–1440); omitted values inherit
         run defaults. Set includeGuidance:false for simple questions or broadcasts needing no assignment preamble.
         Use only listed worker IDs. You may answer a worker's task question using established instructions. Never grant tool

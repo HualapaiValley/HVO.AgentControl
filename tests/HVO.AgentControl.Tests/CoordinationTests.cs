@@ -525,6 +525,50 @@ public sealed class CoordinationTests
         Assert.Contains(ledger, d => d.CommandId == dispatched[1].Id && d.State == Delivery.Finished);
     }
 
+    [Fact]
+    public async Task TaskModelOverrideIsPinnedWithoutChangingWorkerDefaults()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(a.Id))!;
+            worker.ProviderId = "openai"; worker.ModelId = "implementation"; worker.Variant = "high";
+            worker.ModelsJson = Json.Write(new[] { new ModelChoice("openai", "review", "Review") });
+            return true;
+        });
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Review", [a.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Review with available model", [new("send_prompt", a.Id, "Review exact commit", ProviderId: "openai", ModelId: "review")]));
+        await app.Store.CoordinationTick();
+        var snapshot = await app.Store.Snapshot();
+        var command = Assert.Single(snapshot.Commands, x => x.Origin == "coordinator:" + run.Id);
+        var payload = Json.Read<PromptInput>(command.ExecutionPayload);
+        Assert.Equal("review", payload.ModelId); Assert.Equal("openai", payload.ProviderId); Assert.Equal("", payload.Variant);
+        var saved = snapshot.Workers.Single(x => x.Id == a.Id);
+        Assert.Equal("implementation", saved.ModelId); Assert.Equal("high", saved.Variant); Assert.Equal(a.NativeSessionId, saved.NativeSessionId);
+        await app.Store.Recover();
+        Assert.Equal(command.ExecutionPayload, (await app.Store.Snapshot()).Commands.Single(x => x.Id == command.Id).ExecutionPayload);
+        Assert.Equal("Waiting", (await app.Store.Coordinations()).Single().State);
+    }
+
+    [Theory]
+    [InlineData(null, "review")]
+    [InlineData("openai", null)]
+    [InlineData("openai", "unavailable")]
+    public async Task InvalidTaskModelRejectsEntireBatch(string? provider, string? model)
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, b) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Two tasks", [a.Id, b.Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Batch", [new("send_prompt", a.Id, "Allowed default"),
+            new("send_prompt", b.Id, "Invalid model", ProviderId: provider, ModelId: model)]));
+        await app.Store.CoordinationTick();
+        Assert.Equal("Recovering", (await app.Store.Coordinations()).Single().State);
+        Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+    }
+
     private static async Task<(WorkerRecord, WorkerRecord, WorkerRecord)> Seed(ControlStore store)
     {
         var coordinator = await PersistenceTests.SeedWorker(store);
