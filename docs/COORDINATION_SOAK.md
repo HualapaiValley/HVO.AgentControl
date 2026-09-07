@@ -29,20 +29,32 @@ run many times under one sustained pass. It is never invoked by CI.
   `HVO.AgentControl.Tests`, building once first.
 - `SOAK_BATCHES` batches, each accumulating at least `SOAK_BATCH_SECONDS` of
   actual `dotnet test` execution before the batch moves on.
-- Stops on the first failing (non-zero) iteration and its batch.
+- Stops on the first failing iteration and its batch.
 - Hard upper guard `SOAK_MAX_TOTAL_SECONDS` aborts the whole run regardless
   of batch progress.
-- Writes machine-readable evidence to
-  `artifacts/coordination-soak/evidence.jsonl`: per-iteration elapsed time,
-  exit status, and `Passed/Failed/Total` counts, plus batch and run markers.
-- Per-suite timeout is bounded to the remaining duration with a `timeout`
-  kill so no single iteration can run away.
+- Each invocation writes to a UNIQUE timestamped evidence directory
+  `artifacts/coordination-soak-<UTC timestamp>-<pid>`; separate invocations
+  never truncate or reuse directories or files, and all artifacts including
+  failure logs are preserved. `SOAK_ARTIFACT_ROOT` overrides the base path.
+- The build step has its own hard `SOAK_BUILD_SECONDS` timeout, every test
+  iteration is bounded by the remaining batch duration through `timeout`
+  (which returns 124 on timeout), and the whole run has the overall guard.
+- Per-iteration outcome is recorded explicitly as one of `success`,
+  `failure`, `zero-tests`, or `timeout`. A counted passing iteration requires
+  a NONZERO expected test count and a clean pass. Zero-test iterations (for
+  example a marginal iteration capped against the remaining batch time) are
+  recorded as `zero-tests` and are never counted green.
+- Every evidence line is ONE whole, valid JSON object. The produced
+  `evidence.jsonl` is validated line-by-line at the end (via `python3`
+  `json.loads`, or `jq -e .` when python3 is unavailable), and the valid /
+  total line counts are recorded in an `evidence_validated` event.
 - `set -u` only, no `set -e`, so the probing loop can observe each command's
   exit code directly; every command exit status is preserved, never piped
   through a hiding pipeline.
 
-Defaults: 4 batches x 120 s, hard guard 900 s, `Release` configuration,
-artifacts in `artifacts/coordination-soak`.
+Defaults: 4 batches x 120 s, hard guard 900 s, build timeout 300 s,
+iteration minimum 10 s, `Release` configuration, artifacts under
+`artifacts/coordination-soak-<run tag>`.
 
 ## Usage
 
@@ -58,6 +70,9 @@ bash scripts/run-coordination-soak.sh
 SOAK_BATCHES=4 SOAK_BATCH_SECONDS=120 \
   bash scripts/run-coordination-soak.sh
 ```
+
+Each run produces its own evidence directory, so repeated or concurrent
+invocations never clobber one another:
 
 ## CI behavior
 
