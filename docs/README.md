@@ -1,5 +1,6 @@
 # Documentation
 
+- [Worker GitHub access](GITHUB_ACCESS.md): App setup, scoped credential delivery, renewal and live-validation requirements.
 - [Dev Container provisioning](DEVCONTAINER_PROVISIONING.md): executable worker template and planned multi-host lifecycle, tool installation and GitHub credentials.
 - [Project workspaces](PROJECT_WORKSPACES.md): current directory-bound workers and the proposed reusable runtime/project/session provisioning model.
 - [Beta assignment guidance](BETA_ASSIGNMENT_GUIDE.md): concrete workspace, dispatch-evidence and completion rules learned from native runs.

@@ -5,6 +5,7 @@ namespace HVO.AgentControl.Infrastructure;
 
 public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(options)
 {
+    public DbSet<HVO.AgentControl.GitHub.GitHubAccess> GitHubAccess => Set<HVO.AgentControl.GitHub.GitHubAccess>();
     public DbSet<CoordinationRun> CoordinationRuns => Set<CoordinationRun>();
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
     public DbSet<WorkerRecord> Workers => Set<WorkerRecord>();

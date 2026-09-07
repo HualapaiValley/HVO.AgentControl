@@ -17,6 +17,11 @@ public static class ApiEndpoints
             return await next(context);
         });
         group.MapGet("/csrf", (HttpContext context, IAntiforgery antiforgery) => new { token = antiforgery.GetAndStoreTokens(context).RequestToken });
+        group.MapGet("/github/access", (HVO.AgentControl.GitHub.GitHubAccessService github) => github.List());
+        group.MapPost("/runtimes/{id}/github/disable", (string id, DeleteRegistrationInput input,
+            HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Disable(id, input.ExpectedRevision, token));
+        group.MapPost("/runtimes/{id}/github", (string id, HVO.AgentControl.GitHub.ConfigureGitHubAccess input,
+            HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Configure(id, input, token));
         group.MapGet("/coordinations", (ControlStore store) => store.Coordinations());
         group.MapPost("/coordinations", (StartCoordinationInput input, ControlStore store) => store.StartCoordination(input));
         group.MapPost("/coordinations/{id}/control", (string id, CoordinationControlInput input, ControlStore store) => store.ControlCoordination(id, input));
