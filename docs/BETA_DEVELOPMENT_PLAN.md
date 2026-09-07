@@ -102,5 +102,6 @@ Repository: [RoySalisbury/HVO.AgentControl](https://github.com/RoySalisbury/HVO.
 - [#20: Final evidence context overflow](https://github.com/RoySalisbury/HVO.AgentControl/issues/20), fixed by PR #21.
 - [#23: Applied versus superseded routing proposals](https://github.com/RoySalisbury/HVO.AgentControl/issues/23).
 - [#24: Schema-constrained coordinator output and bounded repair](https://github.com/RoySalisbury/HVO.AgentControl/issues/24).
+- [#26: Preserve unsent prompts through preflight shutdown](https://github.com/RoySalisbury/HVO.AgentControl/issues/26), fixed in PR #25.
 
 Use the [assignment guide](BETA_ASSIGNMENT_GUIDE.md) for the next run. See [native validation and intervention evidence](validation/beta-development-2026-09-07.md) before increasing complexity or claiming unattended operation.

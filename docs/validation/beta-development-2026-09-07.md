@@ -67,6 +67,12 @@ The [curated native evidence](beta-native-2026-09-07.json) includes command timi
 - Independent supervision noticed the shipping README still called the corrected lab an incomplete draft. The coordinator was asked to include that inconsistency in native review. This is disclosed supervisory input, not an unaided model finding.
 - GitHub publication and merge remain authenticated host actions. Reports are explicitly attributed copies of real native worker output; workers do not yet autonomously post PR comments through a scoped application integration.
 
+## Final CI restart regression
+
+The first final-evidence CI run (`34089852859`) caught another timing-dependent failure in the SSH lifecycle test: backend shutdown cancelled a prompt during read-only model/snapshot preflight, before any native submission, and the command was marked Failed. [Issue #26](https://github.com/RoySalisbury/HVO.AgentControl/issues/26) records it. The fix keeps that known-unsent prompt queued and does not count the interrupted preflight as a native submission attempt. Ordinary errors/timeouts remain failures; cancellation after the mutation boundary retains uncertain-delivery handling.
+
+A deterministic fixture barrier now blocks the next provider lookup, stops the backend while the prompt is demonstrably Dispatching with no native caller ID, restarts it, and verifies the same command completes with exactly one native submission and unchanged session identity. The focused real-SSH fixture check passed, followed by the full suite: 36 passed, two optional native-provider tests skipped, zero failures (38 total). Required restore, Release warnings-as-errors build and format verification passed. Reused fixture containers now receive the current fixture executable, preventing stale test behavior after a local image rebuild. This is deterministic protocol evidence, separate from the real model runs above.
+
 ## Next priorities
 
 Keep the fleet running for the owner to inspect. Prioritize #23/#24 (decision receipts/output), #19 (effective capability limits), #3/#7 (service-owned updates and bounded evidence retrieval), and #10 (clear current assignment/blocker/expected event). Enrollment and lifecycle/resource claims remain #4–#6; additional harness work is #9. Continue failure exercises in #13 before claiming unattended coordination or broad multi-harness support.
