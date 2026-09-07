@@ -516,14 +516,25 @@ public sealed class CoordinationStatusTests
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var coordinator = Observe(new WorkerRecord { Id = "coordinator", Activity = "Idle", Role = SessionRoles.Coordinator });
         var worker = Observe(new WorkerRecord { Id = "worker", Activity = "Active", Role = SessionRoles.Worker });
-        var run = new CoordinationRun { Id = "run", CoordinatorWorkerId = coordinator.Id,
-            WorkerIdsJson = Json.Write(new[] { worker.Id }), LastDecisionAt = now - 120_000 };
+        var run = new CoordinationRun
+        {
+            Id = "run",
+            CoordinatorWorkerId = coordinator.Id,
+            WorkerIdsJson = Json.Write(new[] { worker.Id }),
+            LastDecisionAt = now - 120_000
+        };
         var command = new CommandRecord { Id = "work", WorkerId = worker.Id, Origin = "coordinator:run", State = Delivery.Running };
         var commands = new List<CommandRecord> { command };
         var requests = new List<PendingRequest>();
         if (signal == "progress") command.LastProgressAt = now;
-        if (signal == "completion") commands.Add(new CommandRecord { Id = "finished", WorkerId = worker.Id,
-            Origin = "coordinator:run", State = Delivery.Finished, UpdatedAt = now });
+        if (signal == "completion") commands.Add(new CommandRecord
+        {
+            Id = "finished",
+            WorkerId = worker.Id,
+            Origin = "coordinator:run",
+            State = Delivery.Finished,
+            UpdatedAt = now
+        });
         if (signal == "question") requests.Add(new PendingRequest { WorkerId = worker.Id, Kind = "question", State = "Pending" });
         if (signal == "repair") run.InputJson = Json.Write(new CoordinatorContext(run.Instruction, [], [], [], Repair: new(1, "rejected")));
         Assert.Null(SchedulerReason(Page(new ControlSnapshot(1, [], [coordinator, worker], commands, requests)), run));

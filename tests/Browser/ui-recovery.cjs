@@ -65,7 +65,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     }
     await page.getByRole('button',{name:'Expand worker sidebar'}).click();
     await expect(page.getByRole('complementary',{name:'Worker navigation'})).not.toHaveClass(/is-collapsed/);
-   await page.getByRole('button',{name:'Close worker sidebar'}).click();
+   await page.getByRole('button',{name:'Close worker sidebar'}).click({position:{x:382,y:420}});
   await page.goto(base+'/?worker='+worker.id); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
   expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
   await page.screenshot({path:path.join(artifacts,'ui-conversation-mobile.png'),fullPage:true});

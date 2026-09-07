@@ -50,7 +50,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     }
     await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
     await expect(page.getByRole('navigation', { name: 'Administration' })).toBeVisible();
-    await page.getByRole('button', { name: 'Close worker sidebar', exact: true }).click();
+    await page.getByRole('button', { name: 'Close worker sidebar', exact: true }).click({ position: { x: 382, y: 420 } });
     expect(errors).toEqual([]);
     console.log('PASS: published application readiness, anonymous API 401, sign-in, interactive navigation/reload on all four pages, runtime form and browser scripts.');
   } finally {
