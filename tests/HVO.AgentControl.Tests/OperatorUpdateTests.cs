@@ -116,6 +116,25 @@ public sealed class OperatorUpdateTests
     }
 
     [Fact]
+    public async Task UnknownNativeActivityIsNotReportedAsAvailable()
+    {
+        await using var app = new TestApp();
+        var (run, worker) = await Seed(app.Store);
+        await app.Store.Write(async db =>
+        {
+            (await db.Workers.SingleAsync(x => x.Id == worker.Id)).Activity = "Unknown";
+            (await db.Commands.SingleAsync(x => x.WorkerId == worker.Id)).State = Delivery.Finished;
+            return true;
+        });
+
+        await app.Store.ConfigureOperatorUpdates(run.Id, new(Guid.NewGuid().ToString(), 1), 4_750_000);
+        var summary = Json.Read<OperatorStatusSummary>((await app.Store.OperatorUpdates()).Single().SummaryJson);
+        var participant = Assert.Single(summary.Participants);
+        Assert.Equal("Uncertain", participant.Phase);
+        Assert.Equal("Native activity is unknown.", participant.Blocker);
+    }
+
+    [Fact]
     public async Task TerminalTickPublishesOnceAndDisablesSchedule()
     {
         await using var app = new TestApp();

@@ -182,6 +182,8 @@ public sealed partial class ControlStore
         { phase = "Queued"; blocker = "Queued work is not dispatched."; next = "Dispatch when runtime capacity is available."; }
         else if (latestGlobal?.State is Delivery.Failed or Delivery.Cancelled)
         { phase = latestGlobal.State; blocker = "Explicit command outcome requires review."; next = "Review the recorded outcome."; }
+        else if (worker.Activity == "Unknown")
+        { phase = "Uncertain"; blocker = "Native activity is unknown."; next = "Await a trusted native observation."; }
         else if (worker.Activity is "Active" or "Retrying" or "WaitingPermission" or "WaitingQuestion")
         { phase = "Active"; blocker = "Native activity has no current run command receipt."; next = "Await the next native observation."; }
         else
