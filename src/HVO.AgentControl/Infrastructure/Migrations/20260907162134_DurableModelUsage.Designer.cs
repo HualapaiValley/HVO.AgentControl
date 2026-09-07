@@ -318,6 +318,104 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.ToTable("ModelUsage");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.OperatorStatusUpdate", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("AcknowledgedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ActiveSetRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CoordinationRunId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("DueAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Id")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("MissedIntervals")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PublishedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ScheduleId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("SourceEventSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SummaryJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("Id")
+                        .IsUnique();
+
+                    b.HasIndex("CoordinationRunId", "Sequence");
+
+                    b.HasIndex("ScheduleId", "Kind", "DueAt")
+                        .IsUnique();
+
+                    b.ToTable("OperatorStatusUpdates");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.OperatorUpdateSchedule", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ActiveSetRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CoordinationRunId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("IntervalMinutes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("LastDueAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastEmittedEventSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("NextDueAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CoordinationRunId")
+                        .IsUnique();
+
+                    b.ToTable("OperatorUpdateSchedules");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.PendingRequest", b =>
                 {
                     b.Property<string>("Id")
