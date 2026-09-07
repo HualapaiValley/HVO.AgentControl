@@ -18,7 +18,7 @@ public sealed class GitHubAccess
     public string CommitStatusesPermission { get; set; } = GitHubPermissionState.Unknown;
     public string ActionsPermission { get; set; } = GitHubPermissionState.Unknown;
     public long? PermissionsVerifiedAt { get; set; }
-    public string ExactCiInspectionState => new[] { ChecksPermission, CommitStatusesPermission, ActionsPermission } switch
+    public string ExactCiInspectionState => new[] { ChecksPermission, CommitStatusesPermission } switch
     {
         var permissions when permissions.Any(x => x == GitHubPermissionState.Denied) => "PermissionDenied",
         var permissions when permissions.Any(x => x != GitHubPermissionState.Granted) => "Unknown",

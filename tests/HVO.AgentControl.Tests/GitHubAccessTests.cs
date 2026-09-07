@@ -131,7 +131,7 @@ public sealed class GitHubAccessTests
     }
 
     [Fact]
-    public async Task MixedInstallationPermissionsRemainDistinct()
+    public async Task ActionsReadIsOptionalForExactCiInspection()
     {
         using var rsa = RSA.Create(2048);
         var installationPermissions = BaselinePermissions();
@@ -145,6 +145,14 @@ public sealed class GitHubAccessTests
         Assert.Equal(GitHubPermissionState.Granted, token.ChecksPermission);
         Assert.Equal(GitHubPermissionState.Granted, token.CommitStatusesPermission);
         Assert.Equal(GitHubPermissionState.Denied, token.ActionsPermission);
+        var access = new GitHubAccess
+        {
+            State = "Ready",
+            ChecksPermission = token.ChecksPermission,
+            CommitStatusesPermission = token.CommitStatusesPermission,
+            ActionsPermission = token.ActionsPermission
+        };
+        Assert.Equal("Ready", access.ExactCiInspectionState);
     }
 
     [Theory]
