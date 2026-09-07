@@ -254,7 +254,7 @@ public partial class Coordination
     private string? SchedulerWaitReason(CoordinationRun run)
     {
         if (snapshot is null || run.State is "Completed" or "Stopped") return null;
-        if (run.State == "Paused") return "owner pause is active; no new decision is sent until the run is resumed.";
+        if (run.State == "Paused") return PauseReason(run);
         if (run.State == "Recovering") return "automatic recovery backoff is active; no new decision is sent until its retry is due.";
         if (run.Round >= run.MaxRounds && run.DecisionCommandId is null) return "the configured coordinator turn budget is exhausted; no new decision is sent.";
 
@@ -266,6 +266,8 @@ public partial class Coordination
         if (run.DecisionCommandId is { } decisionId)
         {
             var decision = snapshot.Commands.FirstOrDefault(x => x.Id == decisionId);
+            if (decision is null)
+                return "the recorded coordinator decision is not in this bounded snapshot; its completion is unavailable here.";
             if (decision is not null && decision.State != Delivery.Finished)
                 return "a coordinator decision is already " + StateWord(decision.State).ToLowerInvariant() + "; no additional decision is sent.";
         }
@@ -279,22 +281,56 @@ public partial class Coordination
         if (participants.Length != participantIds.Length || participants.Any(x => x.Archived || x.Role != SessionRoles.Worker))
             return "a participant is unavailable; no new decision is sent.";
 
+        if (participants.Any(x => x.Stale))
+            return "a participant session is stale; no new decision is sent until it is observed.";
+        if (participants.Any(x => x.Activity != "Idle"))
+            return "a participant is busy; no new decision is sent until it is idle.";
+
         var requests = snapshot.Requests.Where(x => participantIds.Contains(x.WorkerId) && x.State == "Pending" && x.ReplyCommandId is null).ToArray();
         var commands = snapshot.Commands.Where(x => x.Origin == "coordinator:" + run.Id).OrderBy(x => x.CreatedAt).ToArray();
         if (commands.Any(x => x.State == Delivery.Unknown))
             return "worker delivery is unresolved; no new decision is sent until its outcome is confirmed.";
+        if (commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State)))
+            return "assigned worker work is still unresolved; no new decision is sent.";
 
-        var unresolved = commands.Any(x => Delivery.InFlight(x.State) || x.State == Delivery.Queued);
+        var context = ReadContext(run);
+        if (context?.Repair is not null)
+            return "a coordinator format correction is pending; no new decision is sent until the correction is requested.";
+        if (context?.Recovery is not null)
+            return "automatic recovery is pending; no new decision is sent until its retry is due.";
+
         var progressDue = commands.Any(x => x.LastProgressAt > run.LastDecisionAt) &&
             ControlStore.Now - run.LastDecisionAt >= (run.ProgressMinutes ?? 1) * 60000L;
         var completedSinceDecision = commands.Any(x => x.UpdatedAt > run.LastDecisionAt &&
             x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled);
-        if (unresolved && requests.All(x => x.Kind != "question") && !progressDue && !completedSinceDecision)
-            return "assigned worker work is still unresolved with no new result, question, or due progress; no new decision is sent.";
 
         if (CoordinationObservation.Fingerprint(commands, requests) == run.LastObservation)
             return "worker evidence is unchanged since the last coordinator observation; no new decision is sent.";
         return null;
+    }
+
+    private static string PauseReason(CoordinationRun run)
+    {
+        var context = ReadContext(run);
+        if (context?.Repair is not null || run.Detail.Contains("format", StringComparison.OrdinalIgnoreCase))
+            return "the coordinator output could not be used; no new decision is sent.";
+        if (run.Detail.Contains("turn limit", StringComparison.OrdinalIgnoreCase) || run.Detail.Contains("round limit", StringComparison.OrdinalIgnoreCase))
+            return "the configured coordinator turn budget is exhausted; no new decision is sent.";
+        if (run.Detail.Contains("delivery", StringComparison.OrdinalIgnoreCase) || run.Detail.Contains("uncertain", StringComparison.OrdinalIgnoreCase))
+            return "a delivery outcome needs review; no new decision is sent.";
+        if (run.Detail.Contains("participant", StringComparison.OrdinalIgnoreCase))
+            return "a participant is unavailable; no new decision is sent.";
+        return run.Detail.StartsWith("Coordination paused.", StringComparison.Ordinal)
+            ? "owner pause is active; no new decision is sent until the run is resumed."
+            : "coordination is paused; inspect the current detail before resuming.";
+    }
+
+    private static CoordinatorContext? ReadContext(CoordinationRun run)
+    {
+        if (run.InputJson == "{}") return null;
+        try { return Json.Read<CoordinatorContext>(run.InputJson); }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or ControlException)
+        { return null; }
     }
 
     private static string StateWord(string state) => state switch
