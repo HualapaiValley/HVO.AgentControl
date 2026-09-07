@@ -16,6 +16,13 @@ Next work, in order:
 4. #44/#8: durable issue/PR publication intents and uncertain-write reconciliation, then a complete worker-authored feature → independent review → correction exercise under that mechanism.
 5. #34/#35: durable model usage and runtime telemetry; [observability design](OBSERVABILITY_DESIGN.md) and the per-worker validation report retain the requirements/evidence.
 
+Issue #3 now has a bounded durable foundation: per-coordination operator schedules, immediate
+baselines, periodic/catch-up update rows, terminal updates on the next scheduler tick,
+deterministic database-state summaries, authenticated bounded retrieval, and idempotent
+acknowledgement run independently of model turns. The Activity UI, immediate material milestones,
+active-set change baselines, retention, and external delivery remain follow-up scope. See
+[durable operator updates](OPERATOR_UPDATES.md).
+
 The live owner fleet remains intentionally running. Historical statements below about no GitHub repository, no production input, or stopped beta resources describe earlier checkpoints only.
 
 ## Beta execution checkpoint — 2026-09-07
