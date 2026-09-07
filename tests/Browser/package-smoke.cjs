@@ -59,6 +59,10 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       expect(keyMetadata).not.toContain('browser-fixture-key');
       expect(keyMetadata).not.toContain('secretReference');
     }
+    const workerSearch = page.getByRole('searchbox', { name: 'Find a worker' });
+    await workerSearch.fill('fixture-no-matching-worker-identity');
+    await expect(page.getByRole('navigation', { name: 'Conversations' })).toContainText('No task workers match.');
+    await workerSearch.fill('');
     await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
     await page.setViewportSize({ width: 390, height: 844 });
