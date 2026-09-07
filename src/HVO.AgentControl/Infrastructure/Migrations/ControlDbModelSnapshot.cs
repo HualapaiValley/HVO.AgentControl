@@ -133,9 +133,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("BudgetWindowEndsAt")
-                        .HasColumnType("INTEGER");
-
                     b.Property<bool>("ContinuousSupervision")
                         .HasColumnType("INTEGER");
 
@@ -193,12 +190,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.Property<string>("State")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
-                    b.Property<int>("TurnWindowMinutes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("TurnsPerWindow")
-                        .HasColumnType("INTEGER");
 
                     b.Property<string>("WorkerIdsJson")
                         .IsRequired()

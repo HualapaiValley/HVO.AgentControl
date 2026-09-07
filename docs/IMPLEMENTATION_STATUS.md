@@ -2,7 +2,7 @@
 
 ## Current priority checkpoint — 2026-09-07
 
-C# [continuous supervision](COORDINATION_SUPERVISION.md) implements the owner-requested heartbeat in #96: automatic bounded model-turn windows, restart persistence, idle reassessment, direct owner-assignment evidence, and explicit pause/stop precedence. OpenCode is a decision helper; its completion must not end supervision. Legacy paused runs can enable this mode on their existing checkpoint. See the linked document for exact behavior and remaining backlog/merge gate scope. Repository implementation and live deployment must still be verified separately.
+C# [continuous supervision](COORDINATION_SUPERVISION.md) implements the owner-requested heartbeat in #96: no fixed turn cutoff, restart persistence, immediate capacity reassessment, direct owner-assignment evidence, and explicit pause/stop precedence. OpenCode is a decision helper; its completion must not end supervision. Legacy paused runs can enable this mode on their existing checkpoint. See the linked document for exact behavior and remaining backlog/merge gate scope. Repository implementation and live deployment must still be verified separately.
 
 The dependency-aware [backlog triage plan](BACKLOG_PRIORITIZATION.md) and `backlog-plan.json` are the current assignment source. Older “next” lists below are historical. Finish active #75 UI/performance and PR review/correction work, then prioritize #5 ownership, #4 enrollment and #7 bounded evidence; #6/#8 unlock #42/#44 and subsequent provisioning/merge automation. #78 tracks periodic triage and evidence-based duplicate/obsolete issue review.
 

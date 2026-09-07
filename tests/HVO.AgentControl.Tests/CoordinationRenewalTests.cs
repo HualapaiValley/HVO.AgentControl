@@ -10,6 +10,23 @@ namespace HVO.AgentControl.Tests;
 public sealed partial class CoordinationTests
 {
     [Fact]
+    public async Task LegacyExhaustedCheckpointCanEnableContinuousModeWithoutInventingAnotherTurnGrant()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Bounded task", [a.Id], MaxRounds: 1));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Waiting", []));
+        await app.Store.CoordinationTick();
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single();
+        run = await app.Store.RenewCoordination(run.Id, new(Guid.NewGuid().ToString(), run.Revision, 0, "Keep supervising backlog", true));
+        Assert.Equal(1, run.MaxRounds);
+        await app.Store.CoordinationTick();
+        Assert.Equal(2, (await app.Store.Coordinations()).Single().Round);
+    }
+
+    [Fact]
     public async Task RenewalPreservesAssignmentsAndDecisionReceiptAcrossRestartWithoutReplayingWork()
     {
         string data, secrets, runId, assignmentId, sessionId;

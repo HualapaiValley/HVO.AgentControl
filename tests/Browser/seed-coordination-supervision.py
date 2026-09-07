@@ -25,5 +25,5 @@ with sqlite3.connect(sys.argv[1]) as db:
                                "NativeSessionId": "ses_" + worker, "Directory": "/fixture/" + worker})
     insert(db, "CoordinationRuns", {"Id": "supervision-browser-run", "CoordinatorWorkerId": "supervision-coordinator",
                                    "Instruction": "Existing bounded browser task", "WorkerIdsJson": json.dumps(["supervision-worker"]),
-                                   "State": "Paused", "Round": 1, "MaxRounds": 1, "TurnsPerWindow": 1,
-                                   "TurnWindowMinutes": 60, "InputJson": "{}", "DecisionJson": "{}", "CreatedAt": now})
+                                   "State": "Paused", "Round": 1, "MaxRounds": 1,
+                                   "InputJson": "{}", "DecisionJson": "{}", "CreatedAt": now})

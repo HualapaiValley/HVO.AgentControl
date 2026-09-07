@@ -47,17 +47,17 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       const run = page.getByRole('region', { name: 'Coordination run', exact: true });
       await expect(run.getByRole('button', { name: 'Resume coordination', exact: true })).toBeDisabled();
       const renewal = run.getByRole('region', { name: 'Renew coordination', exact: true });
-      await renewal.getByLabel('Additional coordinator turns', { exact: true }).fill('2');
+      await expect(renewal.getByLabel('Additional coordinator turns', { exact: true })).toHaveCount(0);
       await renewal.getByLabel('Replacement coordinator instruction', { exact: true }).fill('Continue existing browser task under service supervision.');
       await expect(renewal.getByLabel('Keep supervising until I pause or stop')).toBeChecked();
-      await renewal.getByRole('button', { name: 'Continue with renewed budget' }).click();
+      await renewal.getByRole('button', { name: 'Apply checkpoint and continue' }).click();
       await expect(run.getByRole('heading', { name: 'Ready', exact: true })).toBeVisible();
       await expect(run).toContainText('Continuous supervision');
-      await expect(run).toContainText('2 model turns remain');
+      await expect(run).toContainText('no fixed turn cutoff');
       await expect.poll(async () => (await (await context.request.get(base + '/api/v1/coordinations')).json())[0].lastSupervisorAt).toBeGreaterThan(0);
       await page.reload();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
-      await expect(run).toContainText('2 model turns remain');
+      await expect(run).toContainText('no fixed turn cutoff');
       await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
       await page.setViewportSize({ width: 390, height: 844 });
       await run.getByRole('button', { name: 'Pause coordination', exact: true }).click();
@@ -70,7 +70,8 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       const saved = (await (await context.request.get(base + '/api/v1/coordinations')).json())[0];
       expect(saved.id).toBe('supervision-browser-run');
       expect(saved.round).toBe(1);
-      expect(saved.maxRounds).toBe(3);
+      expect(saved.maxRounds).toBe(1);
+      expect(saved.continuousSupervision).toBe(true);
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
     }

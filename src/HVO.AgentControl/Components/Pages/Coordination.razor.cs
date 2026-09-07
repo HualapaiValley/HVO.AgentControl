@@ -10,7 +10,6 @@ public partial class Coordination
     private string coordinatorId = "", instruction = "";
     private int maxRounds = 20;
     private bool continuousSupervision = true;
-    private int turnWindowMinutes = 60;
     private bool includeGuidance = true;
     private int progressMinutes = 5;
     private string? requestId;
@@ -20,18 +19,16 @@ public partial class Coordination
     private readonly Dictionary<string, int> renewalRounds = [];
     private readonly Dictionary<string, CoordinationRenewalInput> renewalRequests = [];
     private readonly Dictionary<string, bool> renewalSupervision = [];
-    private readonly Dictionary<string, int> renewalWindowMinutes = [];
     private Task Renew(CoordinationRun run) => Execute(async () =>
     {
         var instruction = renewalInstructions.GetValueOrDefault(run.Id, run.Instruction);
-        var rounds = renewalRounds.GetValueOrDefault(run.Id, Math.Min(100, Math.Max(1, 100 - (run.MaxRounds - run.Round))));
         var supervise = renewalSupervision.GetValueOrDefault(run.Id, true);
-        var minutes = renewalWindowMinutes.GetValueOrDefault(run.Id, 60);
-        if (!renewalRequests.TryGetValue(run.Id, out var input) || input.Instruction != instruction || input.AdditionalRounds != rounds || input.ExpectedRevision != run.Revision || input.ContinuousSupervision != supervise || input.TurnWindowMinutes != minutes)
-            renewalRequests[run.Id] = input = new(Guid.NewGuid().ToString(), run.Revision, rounds, instruction, supervise, minutes);
+        var rounds = supervise ? 0 : renewalRounds.GetValueOrDefault(run.Id, Math.Min(100, Math.Max(1, 100 - (run.MaxRounds - run.Round))));
+        if (!renewalRequests.TryGetValue(run.Id, out var input) || input.Instruction != instruction || input.AdditionalRounds != rounds || input.ExpectedRevision != run.Revision || input.ContinuousSupervision != supervise)
+            renewalRequests[run.Id] = input = new(Guid.NewGuid().ToString(), run.Revision, rounds, instruction, supervise);
         await Store.RenewCoordination(run.Id, input);
         renewalRequests.Remove(run.Id); renewalInstructions.Remove(run.Id); renewalRounds.Remove(run.Id);
-        renewalSupervision.Remove(run.Id); renewalWindowMinutes.Remove(run.Id);
+        renewalSupervision.Remove(run.Id);
         notice = "Coordination renewed. Existing assignments, sessions and receipts are retained.";
     });
     private Task SendFollowup(CoordinationRun run) => Execute(async () =>
@@ -45,7 +42,7 @@ public partial class Coordination
     private Task Start() => Execute(async () =>
     {
         requestId ??= Guid.NewGuid().ToString();
-        await Store.StartCoordination(new(requestId, coordinatorId, instruction, selected.Where(x => x != coordinatorId).Order().ToArray(), maxRounds, includeGuidance, includeGuidance && progressMinutes > 0 ? progressMinutes : null, continuousSupervision, turnWindowMinutes));
+        await Store.StartCoordination(new(requestId, coordinatorId, instruction, selected.Where(x => x != coordinatorId).Order().ToArray(), maxRounds, includeGuidance, includeGuidance && progressMinutes > 0 ? progressMinutes : null, continuousSupervision));
         requestId = null; notice = "Coordination started. Its conversation and delivery log remain available here.";
     });
     private Task Control(CoordinationRun run, string action) => Execute(async () => { await Store.ControlCoordination(run.Id, new(run.Revision, action)); });
@@ -276,7 +273,7 @@ public partial class Coordination
         if (snapshot is null || run.State is "Completed" or "Stopped") return null;
         if (run.State == "Paused") return PauseReason(run);
         if (run.State == "Recovering") return "automatic recovery backoff is active; no new decision is sent until its retry is due.";
-        if (run.Round >= run.MaxRounds && run.DecisionCommandId is null) return "the configured coordinator turn budget is exhausted; no new decision is sent.";
+        if (!run.ContinuousSupervision && run.Round >= run.MaxRounds && run.DecisionCommandId is null) return "the configured coordinator turn budget is exhausted; no new decision is sent.";
 
         if (run.DecisionCommandId is { } decisionId)
         {

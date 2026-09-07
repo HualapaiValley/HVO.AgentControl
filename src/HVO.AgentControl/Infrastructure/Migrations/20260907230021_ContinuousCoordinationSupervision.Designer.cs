@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260907222657_ContinuousCoordinationSupervision")]
+    [Migration("20260907230021_ContinuousCoordinationSupervision")]
     partial class ContinuousCoordinationSupervision
     {
         /// <inheritdoc />
@@ -136,9 +136,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("BudgetWindowEndsAt")
-                        .HasColumnType("INTEGER");
-
                     b.Property<bool>("ContinuousSupervision")
                         .HasColumnType("INTEGER");
 
@@ -196,12 +193,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.Property<string>("State")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
-                    b.Property<int>("TurnWindowMinutes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("TurnsPerWindow")
-                        .HasColumnType("INTEGER");
 
                     b.Property<string>("WorkerIdsJson")
                         .IsRequired()
