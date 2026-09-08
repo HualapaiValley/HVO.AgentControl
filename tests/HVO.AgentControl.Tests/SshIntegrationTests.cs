@@ -220,7 +220,12 @@ public sealed class SshIntegrationTests
             await TestApp.Wait(async () => (await store.Detail(w1.Id)).Worker.Activity == "Active" &&
                 (await store.Detail(w2.Id)).Worker.Activity == "Active", "Both workers must be active before testing isolated cancellation");
             var abort = await store.Abort(w1.Id, Guid.NewGuid().ToString());
-            await Finished(store, abort); await Finished(store, abortable);
+            await Finished(store, abort);
+            await TestApp.Wait(async () => (await store.Snapshot()).Commands.Single(x => x.Id == abortable.Id).State == Delivery.Cancelled,
+                "Interrupted prompt did not settle as cancelled");
+            var abortCommands = (await store.Snapshot()).Commands;
+            Assert.Equal(Delivery.Finished, abortCommands.Single(x => x.Id == abort.Id).State);
+            Assert.Equal(Delivery.Cancelled, abortCommands.Single(x => x.Id == abortable.Id).State);
             Assert.NotEqual("Idle", (await store.Detail(w2.Id)).Worker.Activity);
             await Finished(store, unaffected);
             Assert.Equal("Cancelled", (await store.Detail(w1.Id)).Worker.Outcome);

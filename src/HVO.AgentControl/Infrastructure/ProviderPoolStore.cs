@@ -133,7 +133,7 @@ public sealed partial class ControlStore
             return prior;
         }
         var source = await db.Commands.FindAsync(input.SourceCommandId) ?? throw new ControlException("Source command not found.", 404);
-        if (source.WorkerId is null || source.State != Delivery.Failed)
+        if (source.WorkerId is null || source.State is not (Delivery.Failed or Delivery.Finished))
             throw new ControlException("Reconcile the source command to a terminal provider failure before proposing fallback.");
         if (await db.Set<ProviderFallbackReceipt>().FirstOrDefaultAsync(x => x.SourceCommandId == source.Id) is not null)
             throw new ControlException("A fallback recommendation is already recorded for this source command.");
@@ -152,6 +152,8 @@ public sealed partial class ControlStore
             .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Id).FirstOrDefaultAsync();
         if (failure is null)
             throw new ControlException("The source command has no recorded provider failure for its held pool.");
+        if (source.State == Delivery.Finished && failure.CommandId != source.Id)
+            throw new ControlException("A finished source command requires its own provider failure provenance.");
         var targetPoolId = "provider:" + input.ProviderId;
         if (targetPoolId == sourcePoolId) throw new ControlException("Fallback must use a different provider pool.");
         var targetPool = await db.Set<ProviderPool>().FindAsync(targetPoolId);

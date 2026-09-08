@@ -487,7 +487,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         foreach (var command in commands)
         {
             if (command.Kind == "Abort" && activity == "Idle" && command.State == Delivery.Accepted)
-            { command.State = Delivery.Cancelled; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
+            { command.State = Delivery.Finished; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
             if (command.Kind != "Prompt") continue;
             if (nativeRetry is not null)
             {
