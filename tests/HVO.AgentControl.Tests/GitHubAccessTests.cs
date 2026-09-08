@@ -6,6 +6,7 @@ using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.GitHub;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Ssh;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -246,6 +247,20 @@ public sealed class GitHubAccessTests
     }
 
     [Fact]
+    public void ManagedGitHubConfigUsesProtectedRuntimeStateAndServerEnvironmentPropagatesExactPath()
+    {
+        var runtime = PersistenceTests.Profile();
+        runtime.StateDirectory = "/home/agent/state-managed";
+        var directory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
+        Assert.Equal("/home/agent/state-managed/gh-config", directory);
+        var environment = BootstrapScript.ServerEnvironment(runtime, "server-password");
+        Assert.Contains("export GH_CONFIG_DIR='/home/agent/state-managed/gh-config'", environment);
+        var invalid = PersistenceTests.Profile();
+        invalid.StateDirectory = "/";
+        Assert.Throws<ControlException>(() => BootstrapScript.ManagedGitHubConfigDirectory(invalid));
+    }
+
+    [Fact]
     public async Task ReusingRegistrationNarrowsScopeAndKeepsIndependentEncryptedCredentials()
     {
         await using var app = new TestApp();
@@ -347,23 +362,25 @@ public sealed class GitHubAccessTests
             Assert.True(process.ExitCode == 0, await error);
             return await output;
         }
-        await Docker("test ! -e /home/agent/.config/gh && printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh");
+        await Docker("printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh && mkdir -p /home/agent/.config/gh && printf personal-login > /home/agent/.config/gh/hosts.yml");
         try
         {
+            var managedDirectory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
             await delivery.Deliver(runtime, new("fixture-token-one", Now.AddHours(1)), CancellationToken.None);
-            var first = await Docker("cat /home/agent/.config/gh/hosts.yml; stat -c '%a' /home/agent/.config/gh/hosts.yml");
+            var first = await Docker("cat " + managedDirectory + "/hosts.yml; stat -c '%a' " + managedDirectory + "/hosts.yml");
             Assert.Contains("fixture-token-one", first); Assert.Contains("600", first);
-            await delivery.Deliver(runtime, new("fixture-token-two", Now.AddHours(1)), CancellationToken.None);
-            var second = await Docker("cat /home/agent/.config/gh/hosts.yml");
-            Assert.Contains("fixture-token-two", second); Assert.DoesNotContain("fixture-token-one", second);
-            await Docker("printf 'enterprise.example.com:\\n    user: personal\\n    oauth_token: sentinel\\n' >> /home/agent/.config/gh/hosts.yml");
-            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-drop-unrelated", Now.AddHours(1)), CancellationToken.None));
-            var preserved = await Docker("cat /home/agent/.config/gh/hosts.yml");
-            Assert.Contains("enterprise.example.com", preserved); Assert.Contains("sentinel", preserved);
-            await Docker("rm /home/agent/.config/gh/.agentcontrol-owner; printf 'personal-login' > /home/agent/.config/gh/hosts.yml");
-            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-replace", Now.AddHours(1)), CancellationToken.None));
             Assert.Equal("personal-login", await Docker("cat /home/agent/.config/gh/hosts.yml"));
+            await delivery.Deliver(runtime, new("fixture-token-two", Now.AddHours(1)), CancellationToken.None);
+            var second = await Docker("cat " + managedDirectory + "/hosts.yml");
+            Assert.Contains("fixture-token-two", second); Assert.DoesNotContain("fixture-token-one", second);
+            await Docker("printf 'enterprise.example.com:\\n    user: personal\\n    oauth_token: sentinel\\n' >> " + managedDirectory + "/hosts.yml");
+            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-drop-unrelated", Now.AddHours(1)), CancellationToken.None));
+            var preserved = await Docker("cat " + managedDirectory + "/hosts.yml");
+            Assert.Contains("enterprise.example.com", preserved); Assert.Contains("sentinel", preserved);
+            await Docker("rm " + managedDirectory + "/.agentcontrol-owner; printf personal-login > " + managedDirectory + "/hosts.yml");
+            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-replace", Now.AddHours(1)), CancellationToken.None));
+            Assert.Equal("personal-login", await Docker("cat " + managedDirectory + "/hosts.yml"));
         }
-        finally { await Docker("rm -f /home/agent/.config/gh/hosts.yml /home/agent/.config/gh/.agentcontrol-owner /usr/local/bin/gh; rmdir /home/agent/.config/gh"); }
+        finally { await Docker("rm -rf " + runtime.StateDirectory + " /home/agent/.config/gh /usr/local/bin/gh"); }
     }
 }

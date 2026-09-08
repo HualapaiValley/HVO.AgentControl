@@ -23,15 +23,16 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
         using var ssh = new SshClient(connection);
         SshRuntimeTransportFactory.AttachHostKey(ssh, runtime.HostKeySha256);
         await ssh.ConnectAsync(token);
-        var directory = (await SshRuntimeTransportFactory.Run(ssh, "printf '%s' \"${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}\"", token)).TrimEnd('\n');
-        ControlStore.ValidatePath(directory);
+        var directory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
         var q = BootstrapScript.Quote(directory);
+        var state = BootstrapScript.Quote(runtime.StateDirectory);
         // A host's existing personal GitHub login is never implicitly replaced.
         await SshRuntimeTransportFactory.Run(ssh, $$"""
             command -v gh >/dev/null || { echo GH_MISSING; exit 1; }
             test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" || { echo GITHUB_ENVIRONMENT_OVERRIDE; exit 1; }
-            test ! -L {{q}} && umask 077 && mkdir -p {{q}} &&
-            test "$(cd {{q}} && pwd -P)" = {{q}} &&
+            test ! -L {{state}} && test "$(cd {{state}} && pwd -P)" = {{state}} &&
+            umask 077 && mkdir -p {{q}} &&
+            test ! -L {{q}} && test "$(cd {{q}} && pwd -P)" = {{q}} &&
             test ! -L {{q}}/hosts.yml && test ! -L {{q}}/.agentcontrol-owner &&
             ( { test ! -e {{q}}/hosts.yml && test ! -e {{q}}/.agentcontrol-owner; } ||
               { test -e {{q}}/hosts.yml && test "$(cat {{q}}/.agentcontrol-owner 2>/dev/null)" = {{BootstrapScript.Quote(runtime.ManagedServerId)}}; } ) ||

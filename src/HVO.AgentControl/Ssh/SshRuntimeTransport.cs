@@ -39,7 +39,7 @@ public sealed class SshRuntimeTransportFactory(Secrets secrets) : IRuntimeTransp
                 await sftp.ConnectAsync(cancellationToken);
                 Upload(sftp, runtime.StateDirectory + "/ensure.sh", BootstrapScript.Create(runtime));
                 Upload(sftp, runtime.StateDirectory + "/launch.sh", BootstrapScript.Launcher(runtime));
-                Upload(sftp, runtime.StateDirectory + "/server.env", "export OPENCODE_SERVER_USERNAME=opencode\nexport OPENCODE_SERVER_PASSWORD=" + BootstrapScript.Quote(password) + "\n");
+                Upload(sftp, runtime.StateDirectory + "/server.env", BootstrapScript.ServerEnvironment(runtime, password));
             }
             var result = await Run(ssh, "/bin/sh " + BootstrapScript.Quote(runtime.StateDirectory + "/ensure.sh"), cancellationToken, 240);
             forward = new ForwardedPortLocal("127.0.0.1", 0, "127.0.0.1", (uint)runtime.ApiPort);
