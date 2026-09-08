@@ -221,8 +221,18 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("Generation")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsCurrent")
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("NativeSessionId")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PredecessorId")
                         .HasColumnType("TEXT");
 
                     b.Property<long>("Revision")
@@ -248,10 +258,18 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
                     b.HasIndex("ControlServiceId");
 
+                    b.HasIndex("PredecessorId")
+                        .IsUnique()
+                        .HasFilter("PredecessorId IS NOT NULL");
+
                     b.HasIndex("WorkerId")
                         .IsUnique();
 
                     b.HasIndex("ScopeKind", "ScopeId")
+                        .IsUnique()
+                        .HasFilter("IsCurrent = 1");
+
+                    b.HasIndex("ScopeKind", "ScopeId", "Generation")
                         .IsUnique();
 
                     b.ToTable("ControlSessions");

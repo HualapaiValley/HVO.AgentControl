@@ -1795,6 +1795,38 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.ToTable("ProviderKeyDelivery");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Services.ProviderReadinessReceipt", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("KeyRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProviderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ProviderReadinessReceipt");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Telemetry.RuntimeTelemetryHistoryRecord", b =>
                 {
                     b.Property<long>("Sequence")
