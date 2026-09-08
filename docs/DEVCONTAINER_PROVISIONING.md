@@ -88,6 +88,12 @@ Missing tools can be installed by the worker within the environment's permission
 
 ## Implementation sequence for automatic provisioning (#43)
 
+### Current adapter boundary
+
+The deployed control service now exposes an injectable, fixtureable `IDevContainerCliOperationAdapter` contract. It consumes registered host, project, runtime-environment and selected configuration identities; derives immutable request/host/project/runtime/configuration labels; records requested/resolved/observed DTO evidence; bounds reported output to 4096 characters; and classifies reconciliation as observed, uncertain, or failed. It is intentionally non-executing: `Execute` returns `missing_provisioner_authority`, never starts the CLI, shell, Docker, a native session, or a container, and does not claim provisioning success.
+
+This boundary is not durable lifecycle authority. The later request-record work must provide a pinned provisioner identity, host workspace and credential authority, persist a receipt before remote effects, execute the pinned official CLI on that host, retain bounded logs, and reconcile exact labels after restart. Until then, absent or ambiguous observations remain `Uncertain`; no retry, enrollment, rebuild, teardown, or cleanup is authorized.
+
 Build this as a durable control-plane workflow, with the first real host being hvo-dev-03. Additional Docker hosts use the same transport and lifecycle; they are not separate implementations. The existing CLI-created test worker remains a compatibility fixture until this workflow can produce and enroll its own replacement.
 
 1. **Host inventory and request records.** Add a separate Docker host registration with pinned SSH identity, encrypted login references, an absolute host workspace root, reachable SSH publish address, permitted port range, architecture and configured capacity. Execution runtimes and Docker hosts remain separate identities. Host verification checks Docker daemon access, the pinned Dev Container CLI, disk, architecture, workspace ownership and the controller's endpoint reachability. A request records its UUID, host ID/revision, repository and source SHA, selected configuration path/digest, template version, resource reservation and intended runtime/worker IDs. An identical request returns its existing record; conflicting reuse is rejected. Persist the card before starting any remote work.
