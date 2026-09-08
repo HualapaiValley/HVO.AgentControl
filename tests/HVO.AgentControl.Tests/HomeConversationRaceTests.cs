@@ -153,6 +153,26 @@ public sealed class HomeConversationRaceTests
         Assert.Null(home.Visible);
     }
 
+    [Fact]
+    public async Task BackgroundRefreshCannotReplacePinnedOutcomeRevision()
+    {
+        await using var app = new TestApp();
+        var (a, _) = await SeedWorkers(app.Store);
+        var command = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Review this assignment", a.Revision));
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.State = Delivery.Finished; return true; });
+        var home = Home(app.Store, (id, before) => app.Store.Detail(id, before));
+
+        await home.Navigate(a.Id);
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(a.Id))!.Revision++; return true; });
+        await home.BackgroundRefresh();
+        await home.Record("VerifiedComplete", "Evidence from the stale review form.");
+
+        Assert.NotNull(home.VisibleError);
+        var detail = await app.Store.Detail(a.Id);
+        Assert.Equal("Assigned", detail.Assignments.Single(x => x.Id == command.Id).Outcome);
+        Assert.Equal("Unassigned", detail.Worker.Outcome);
+    }
+
     private static TestHome Home(ControlStore store, Func<string, long?, Task<WorkerDetail>> read) => new(store, read);
     private static TaskCompletionSource Source() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -193,6 +213,10 @@ public sealed class HomeConversationRaceTests
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
+        public Task Record(string outcome, string evidence)
+        {
+            SetField("outcome", outcome); SetField("evidence", evidence); return Invoke("RecordOutcome");
+        }
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before);
 
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;

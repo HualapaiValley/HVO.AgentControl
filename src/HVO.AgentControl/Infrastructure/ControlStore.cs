@@ -430,7 +430,8 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             ?? throw new ControlException("Reviewed prompt command was not found for this worker.", 404);
         if (command.State is not (Delivery.Finished or Delivery.Failed or Delivery.Cancelled))
             throw new ControlException("Only a settled prompt delivery can receive a reviewed outcome.");
-        var assignment = await db.Assignments.FindAsync(command.Id) ?? throw new ControlException("Reviewed assignment was not found.", 404);
+        var assignment = await db.Assignments.FindAsync(command.Id);
+        if (assignment is null || assignment.WorkerId != workerId) throw new ControlException("Reviewed assignment was not found for this worker.", 404);
         worker.Outcome = input.Outcome; worker.Revision++;
         assignment.Outcome = input.Outcome; assignment.Evidence = input.Evidence;
         Event(db, "AssignmentOutcomeRecorded", worker.RuntimeId, workerId, command?.Id, input, "user");

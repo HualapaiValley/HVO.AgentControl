@@ -76,6 +76,26 @@ public sealed class AssignmentOutcomeTests
         Assert.Equal("Assigned", (await app.Store.Detail(first.Id)).Assignments.Single().Outcome);
     }
 
+    [Fact]
+    public async Task AssignmentFromAnotherWorkerCannotReceiveOutcome()
+    {
+        await using var app = new TestApp();
+        var first = await PersistenceTests.SeedWorker(app.Store);
+        var second = await PersistenceTests.SeedWorker(app.Store);
+        var command = Prompt(first, Delivery.Finished, "wrong-assignment-owner");
+        await app.Store.Write(db =>
+        {
+            db.Commands.Add(command);
+            db.Assignments.Add(new AssignmentRecord { Id = command.Id, WorkerId = second.Id });
+            return Task.FromResult(true);
+        });
+        var revision = (await app.Store.Detail(first.Id)).Worker.Revision;
+
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.SetOutcome(first.Id,
+            new(command.Id, revision, "VerifiedComplete", "Wrong assignment owner must not attest.")));
+        Assert.Equal("Assigned", (await app.Store.Detail(second.Id)).Assignments.Single().Outcome);
+    }
+
     private static CommandRecord Prompt(WorkerRecord worker, string state, string suffix) => new()
     {
         Id = Guid.NewGuid().ToString(),
