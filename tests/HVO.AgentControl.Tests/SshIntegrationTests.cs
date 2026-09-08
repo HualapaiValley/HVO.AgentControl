@@ -87,6 +87,81 @@ public sealed class SshIntegrationTests
         await first.StopOwnedServer(CancellationToken.None);
     }
 
+    [SshFact]
+    public async Task CanonicalWorkerDirectoriesDoNotBlockUnchangedRemoteRootAliases()
+    {
+        await using var app = new TestApp(secrets: FixtureSecrets);
+        var factory = new SshRuntimeTransportFactory(new Secrets(Options.Create(new ControlOptions { SecretsDirectory = FixtureSecrets })));
+        var dotted = Profile("a", "Dotted root profile", Random.Shared.Next(40000, 50000));
+        dotted.StateDirectory = "/home/agent/issue-124-state-" + dotted.ManagedServerId;
+        dotted.AllowedRoots = "/home/agent/workspaces/.";
+        var link = "/home/agent/issue-124-link-" + Guid.NewGuid().ToString("N");
+        IRuntimeTransport? connection = null;
+        try
+        {
+            dotted = await app.Store.SaveRuntime(dotted);
+            connection = await factory.Connect(dotted, CancellationToken.None);
+            var dottedWorkspace = await connection.Workspace(dotted,
+                new(Guid.NewGuid().ToString(), dotted.Id, "dotted", "fixture", "/home/agent/workspaces/./a", "fixture", "deterministic"), CancellationToken.None);
+            Assert.Equal("/home/agent/workspaces/a", dottedWorkspace.Directory);
+            await AddWorker(dotted, dottedWorkspace.Directory, "ses_issue124_dot");
+            dotted.Name = "Dotted root renamed";
+            dotted = await app.Store.SaveRuntime(dotted);
+            Assert.Equal("Dotted root renamed", dotted.Name);
+
+            Assert.Equal(0, (await Docker("a", "ln", "-s", "/home/agent/workspaces", link)).ExitCode);
+            var symlink = Profile("a", "Symlink root profile", dotted.ApiPort + 1);
+            symlink.StateDirectory = "/home/agent/issue-124-state-" + symlink.ManagedServerId;
+            symlink.AllowedRoots = link;
+            symlink = await app.Store.SaveRuntime(symlink);
+            var linkedWorkspace = await connection.Workspace(symlink,
+                new(Guid.NewGuid().ToString(), symlink.Id, "linked", "fixture", link + "/a", "fixture", "deterministic"), CancellationToken.None);
+            Assert.Equal("/home/agent/workspaces/a", linkedWorkspace.Directory);
+            await AddWorker(symlink, linkedWorkspace.Directory, "ses_issue124_link");
+            symlink.Name = "Symlink root renamed";
+            symlink = await app.Store.SaveRuntime(symlink);
+            Assert.Equal("Symlink root renamed", symlink.Name);
+
+            symlink.AllowedRoots = "/home/agent/workspaces/b";
+            await Assert.ThrowsAsync<ControlException>(() => app.Store.SaveRuntime(symlink));
+        }
+        finally
+        {
+            if (connection is not null)
+            {
+                try { await connection.StopOwnedServer(CancellationToken.None); } catch (Exception) { }
+                await connection.DisposeAsync();
+            }
+            var state = BootstrapScript.Quote(dotted.StateDirectory);
+            var owner = BootstrapScript.Quote(dotted.ManagedServerId + ":" + dotted.ApiPort);
+            var socket = BootstrapScript.Quote(dotted.TmuxName);
+            var managedServer = BootstrapScript.Quote(dotted.ManagedServerId);
+            var cleanup = await Docker("a", "sh", "-c", $$"""
+                if test -f {{state}}/owner; then test "$(cat {{state}}/owner)" = {{owner}} || exit 1; fi
+                if tmux -L {{socket}} has-session -t managed 2>/dev/null; then
+                  marker=$(tmux -L {{socket}} show-option -v -t managed @hvo-owner 2>/dev/null || true)
+                  if test -n "$marker"; then test "$marker" = {{managedServer}} || exit 1; fi
+                  tmux -L {{socket}} kill-session -t managed || exit 1
+                fi
+                rm -rf -- {{BootstrapScript.Quote(link)}} {{state}}
+                """);
+            Assert.Equal(0, cleanup.ExitCode);
+        }
+
+        Task AddWorker(RuntimeRecord runtime, string directory, string nativeSessionId) => app.Store.Write(db =>
+        {
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = nativeSessionId,
+                Directory = directory,
+                Name = "Canonical worker"
+            });
+            return Task.FromResult(true);
+        });
+    }
+
     private static async Task<(int ExitCode, string Output)> Docker(string target, params string[] args)
     {
         var start = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true };

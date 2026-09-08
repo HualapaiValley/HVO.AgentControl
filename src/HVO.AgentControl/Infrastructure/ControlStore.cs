@@ -143,7 +143,10 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
              existing.CredentialReference != input.CredentialReference || existing.PassphraseReference != input.PassphraseReference ||
              existing.Authentication != input.Authentication || existing.StateDirectory != input.StateDirectory))
             throw new ControlException("Disable GitHub credential renewal before changing this runtime's connection identity.");
-        if (existing is not null && (await db.Workers.Where(x => x.RuntimeId == input.Id).Select(x => x.Directory).ToListAsync()).Any(path => !Roots(input).Any(root => IsWithin(path, root))))
+        // Worker directories are physical SSH paths. An unchanged remote alias is already
+        // constrained by the identity under which that worker was originally admitted.
+        if (existing is not null && !KeepsWorkerLocationIdentity(existing, input) &&
+            (await db.Workers.Where(x => x.RuntimeId == input.Id).Select(x => x.Directory).ToListAsync()).Any(path => !Roots(input).Any(root => IsWithin(path, root))))
             throw new ControlException("Allowed roots must still include registered worker workspaces. Disconnect to suspend all dispatch.");
         if (existing is not null && (await db.Workers.AnyAsync(x => x.RuntimeId == input.Id) || await db.Commands.AnyAsync(x => x.RuntimeId == input.Id && (x.State == Delivery.Queued || x.State == Delivery.Unknown || x.State == Delivery.Dispatching))) &&
             (existing.Host != input.Host || existing.Port != input.Port || existing.Username != input.Username ||
@@ -196,6 +199,12 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
 
     public static string[] Roots(RuntimeRecord runtime) => runtime.AllowedRoots.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
     public static bool IsWithin(string path, string root) => path == root.TrimEnd('/') || path.StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal);
+    private static bool KeepsWorkerLocationIdentity(RuntimeRecord existing, RuntimeRecord input) =>
+        existing.AllowedRoots == input.AllowedRoots && existing.Host == input.Host && existing.Port == input.Port &&
+        existing.Username == input.Username && existing.HostKeySha256 == input.HostKeySha256 &&
+        existing.HostKeyAlgorithm == input.HostKeyAlgorithm && existing.StateDirectory == input.StateDirectory &&
+        existing.ApiPort == input.ApiPort;
+
     public static void ValidatePath(string path)
     {
         if (!path.StartsWith('/') || path.Length > 2048 || path.Contains('\0') || path.Split('/').Any(x => x == ".."))
