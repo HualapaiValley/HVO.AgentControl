@@ -24,6 +24,39 @@ public static class BootstrapScript
         install={{(runtime.InstallIfMissing ? "yes" : "no")}}
         startup={{Quote(StartupOptions.Fingerprint(runtime))}}
         cd "$state"
+        observation=native-process-current
+        replacements=native-process-replacements
+        observe_native() {
+          os=$(uname -s)
+          pid=$(tmux -L "$socket" display-message -p -t managed '#{pane_pid}' 2>/dev/null || true)
+          case "$pid" in ''|*[!0-9]*) printf 'Unavailable\t%s\t\t\n' "$os"; return ;; esac
+          if [ "$os" != Linux ]; then printf 'Unsupported\t%s\t%s\t\n' "$os" "$pid"; return; fi
+          if [ ! -r "/proc/$pid/stat" ] || [ ! -r /proc/sys/kernel/random/boot_id ]; then printf 'Unavailable\tLinux\t%s\t\n' "$pid"; return; fi
+          stat=$(cat "/proc/$pid/stat")
+          rest=${stat##*) }
+          index=1; start=''
+          for field in $rest; do [ "$index" = 20 ] && start=$field; index=$((index+1)); done
+          boot=$(cat /proc/sys/kernel/random/boot_id)
+          case "$start:$boot" in :*|*[!0-9a-fA-F:-]*) printf 'Unavailable\tLinux\t%s\t\n' "$pid"; return ;; esac
+          printf 'Observed\tLinux\t%s\t%s:%s\n' "$pid" "$boot" "$start"
+        }
+        remember_observation() {
+          printf '%s\n' "$1" > "$observation.new"
+          mv "$observation.new" "$observation"
+        }
+        remember_replacement() {
+          old_state=$(printf '%s' "$1" | cut -f 1)
+          old_pid=$(printf '%s' "$1" | cut -f 3)
+          old_marker=$(printf '%s' "$1" | cut -f 4)
+          new_state=$(printf '%s' "$2" | cut -f 1)
+          new_pid=$(printf '%s' "$2" | cut -f 3)
+          new_marker=$(printf '%s' "$2" | cut -f 4)
+          [ "$old_state" = Observed ] && [ "$new_state" = Observed ] &&
+            { [ "$old_pid" != "$new_pid" ] || [ "$old_marker" != "$new_marker" ]; } || return 0
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tUnknown\n' "$old_pid" "$old_marker" "$new_pid" "$new_marker" "$3" "$4" "$5" >> "$replacements"
+          tail -n 32 "$replacements" > "$replacements.new"
+          mv "$replacements.new" "$replacements"
+        }
         for utility in tmux lsof curl; do command -v "$utility" >/dev/null 2>&1 || { echo "PREREQUISITE:$utility"; exit 31; }; done
         count=0
         until mkdir bootstrap.lock 2>/dev/null; do
@@ -31,18 +64,28 @@ public static class BootstrapScript
         done
         trap 'rmdir bootstrap.lock' EXIT
         if [ -f owner ] && [ "$(cat owner)" != "$owner:$port" ]; then echo 'OWNERSHIP_CONFLICT'; exit 33; fi
+        previous=$(cat "$observation" 2>/dev/null || printf 'Unknown\tUnknown\t\t\n')
+        dead_evidence=Unknown
+        dead_code=''
         if tmux -L "$socket" has-session -t managed 2>/dev/null; then
           [ -f owner ] && [ "$(tmux -L "$socket" show-option -v -t managed @hvo-owner)" = "$owner" ] || { echo 'OWNERSHIP_CONFLICT'; exit 33; }
           dead=$(tmux -L "$socket" display-message -p -t managed '#{pane_dead}')
           if [ "$dead" != 1 ]; then
-            previous=$(cat startup-options 2>/dev/null || printf '{{StartupOptions.Fingerprint(new RuntimeRecord())}}')
-            [ "$previous" = "$startup" ] || { echo 'STARTUP_OPTIONS_CHANGED_STOP_REQUIRED'; exit 42; }
+            previous_startup=$(cat startup-options 2>/dev/null || printf '{{StartupOptions.Fingerprint(new RuntimeRecord())}}')
+            [ "$previous_startup" = "$startup" ] || { echo 'STARTUP_OPTIONS_CHANGED_STOP_REQUIRED'; exit 42; }
             pid=$(tmux -L "$socket" display-message -p -t managed '#{pane_pid}')
             listeners=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN || true)
             [ "$listeners" = "$pid" ] || { echo 'LIVE_PROCESS_UNHEALTHY_OR_PORT_CONFLICT'; exit 34; }
+            current=$(observe_native)
+            remember_replacement "$previous" "$current" IncarnationChanged Unknown ''
+            remember_observation "$current"
             printf 'READY\n'; uname -sm
             exit 0
           fi
+          signal=$(tmux -L "$socket" display-message -p -t managed '#{pane_dead_signal}' 2>/dev/null || true)
+          status=$(tmux -L "$socket" display-message -p -t managed '#{pane_dead_status}' 2>/dev/null || true)
+          case "$signal" in ''|0|*[!0-9]*) ;; *) dead_evidence=Signal; dead_code=$signal ;; esac
+          if [ "$dead_evidence" = Unknown ]; then case "$status" in ''|*[!0-9]*) ;; *) dead_evidence=ExitStatus; dead_code=$status ;; esac; fi
         fi
         [ -z "$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN || true)" ] || { echo 'PORT_CONFLICT'; exit 35; }
         binary="$configured"
@@ -91,7 +134,12 @@ public static class BootstrapScript
         for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
           pid=$(tmux -L "$socket" display-message -p -t managed '#{pane_pid}')
           listeners=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN || true)
-          if [ "$listeners" = "$pid" ]; then printf 'READY\n'; uname -sm; exit 0; fi
+          if [ "$listeners" = "$pid" ]; then
+            current=$(observe_native)
+            remember_replacement "$previous" "$current" DeadPaneRespawn "$dead_evidence" "$dead_code"
+            remember_observation "$current"
+            printf 'READY\n'; uname -sm; exit 0
+          fi
           sleep 1
         done
         echo 'SERVER_START_FAILED'; exit 41

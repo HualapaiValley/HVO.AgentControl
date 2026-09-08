@@ -67,10 +67,17 @@ public sealed partial class ControlStore
             .Take(take + 1).ToListAsync();
         var truncated = rows.Count > take;
         if (truncated) rows.RemoveAt(rows.Count - 1);
+        var incomplete = earliest > 0 && afterSequence < earliest - 1;
+        var previous = afterSequence;
+        foreach (var row in rows)
+        {
+            incomplete |= row.Sequence - previous > 1;
+            previous = row.Sequence;
+        }
         var next = rows.Count == 0 ? afterSequence : rows[^1].Sequence;
         var budget = EvidencePayloadCharacterBudget;
         var events = rows.Select(row => Project(row, ref budget)).ToArray();
-        return new EvidencePage(afterSequence, next, earliest, earliest > 0 && afterSequence < earliest - 1,
+        return new EvidencePage(afterSequence, next, earliest, incomplete,
             truncated, events.Any(x => x.PayloadOmitted), EvidencePayloadCharacterBudget, events);
     }
 
