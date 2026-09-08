@@ -1,20 +1,21 @@
-const { chromium, expect } = require('@playwright/test');
+let chromium, expect;
 const fs = require('node:fs'), path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createFixture, cleanupFixture } = require('./setup-recovery-ownership.cjs');
 const root = path.resolve(__dirname, '../..'), base = process.env.HVO_BASE_URL || 'http://127.0.0.1:5056';
 const container = 'hvo-agentcontrol-setup-' + Date.now();
 const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-(async () => {
+async function runSetupRecovery({docker,launchBrowser,exercise,fixtureName=container}) {
  let browser, ownedContainer;
  try {
-  ownedContainer=createFixture(docker,container);
+  ownedContainer=createFixture(docker,fixtureName);
   docker(['cp',root+'/.fixture/secrets/fixture-key.pub',ownedContainer+':/home/agent/.ssh/authorized_keys']);
   docker(['exec',ownedContainer,'chown','agent:agent','/home/agent/.ssh/authorized_keys']);
   docker(['exec',ownedContainer,'chmod','600','/home/agent/.ssh/authorized_keys']);
   docker(['exec',ownedContainer,'mv','/usr/bin/tmux','/usr/bin/tmux.hvo-test-hidden']);
   const info=JSON.parse(docker(['inspect',ownedContainer]))[0], host=info.NetworkSettings.Networks.bridge.IPAddress;
-  browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+  browser=await launchBrowser();
+  if(exercise) { await exercise({browser,fixtureName,host,ownedContainer,docker}); return; }
   const context=await browser.newContext(), page=await context.newPage(); const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+'/login');await page.getByLabel('Owner password').fill(fs.readFileSync(root+'/.fixture/secrets/owner-password','utf8').trim());
   await page.getByRole('button',{name:'Sign in',exact:true}).click();await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
@@ -50,4 +51,12 @@ const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: [
   await context.request.post(base+'/api/v1/runtimes/'+saved.id+'/disconnect',{headers:{'X-CSRF-TOKEN':csrf},data:{id:crypto.randomUUID()}});
   console.log('PASS: missing tmux blocks agent startup but permits secure save and a real terminal; restoring tmux permits re-verification and worker setup without re-entering credentials.');
  } finally { try { if(browser)await browser.close(); } finally { cleanupFixture(docker,ownedContainer); } }
-})().catch(e=>{console.error(e);process.exit(1);});
+ }
+
+if(require.main===module) {
+ ({chromium,expect}=require('@playwright/test'));
+ runSetupRecovery({docker,launchBrowser:()=>chromium.launch({headless:true,args:['--no-sandbox']})})
+  .catch(e=>{console.error(e);process.exit(1);});
+}
+
+module.exports={runSetupRecovery};
