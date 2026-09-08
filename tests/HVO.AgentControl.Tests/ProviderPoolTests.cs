@@ -4,6 +4,7 @@ using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
+using HVO.AgentControl.Services;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -274,6 +275,30 @@ public sealed class ProviderPoolTests
         });
         Assert.Equal("Abort", (await Claim())!.Kind);
         Assert.Equal(Delivery.Queued, await app.Store.Read(async db => (await db.Commands.FindAsync(command.Id))!.State));
+    }
+
+    [Fact]
+    public async Task RefreshCompletedRemainsBlockedUntilExternalCanaryRecordsReady()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = Command(worker, "opencode-go");
+        await app.Store.Write(async db =>
+        {
+            db.Set<ProviderReadinessReceipt>().Add(new()
+            {
+                Id = "opencode-go:" + worker.RuntimeId,
+                RuntimeId = worker.RuntimeId,
+                ProviderId = "opencode-go",
+                State = "RefreshCompleted",
+                Detail = "Model access is not yet tested."
+            });
+            Assert.False(await ControlStore.ProviderDispatchAllowed(db, worker, command));
+            var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync("opencode-go:" + worker.RuntimeId);
+            receipt!.State = "Ready"; receipt.Detail = "External canary evidence recorded.";
+            Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, command));
+            return true;
+        });
     }
 
     [Fact]
