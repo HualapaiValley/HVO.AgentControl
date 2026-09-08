@@ -117,6 +117,34 @@ public sealed partial class GitHubAppClient(HttpClient http, TimeProvider clock)
             PermissionState(requestedPermissions, "actions"), observedAt);
     }
 
+    public async Task<GitHubPullRequestObservation> Observe(string token, string repository, int number,
+        CancellationToken cancellationToken)
+    {
+        ValidateRepository(repository);
+        if (number <= 0) throw new ControlException("Pull request number must be positive.", 400);
+        using var pull = await SendToken(HttpMethod.Get, $"repos/{repository}/pulls/{number}", token, null, cancellationToken);
+        using var checks = await SendToken(HttpMethod.Get, $"repos/{repository}/commits/{Sha(pull.RootElement, "head", "sha")}/check-runs", token, null, cancellationToken);
+        using var statuses = await SendToken(HttpMethod.Get, $"repos/{repository}/commits/{Sha(pull.RootElement, "head", "sha")}/status", token, null, cancellationToken);
+        using var reviews = await SendToken(HttpMethod.Get, $"repos/{repository}/pulls/{number}/reviews", token, null, cancellationToken);
+        var owner = repository.Split('/')[0];
+        var unresolved = await UnresolvedThreads(token, owner, repository.Split('/')[1], number, cancellationToken);
+        return new GitHubPullRequestObservation(
+            Sha(pull.RootElement, "head", "sha"), Sha(pull.RootElement, "base", "sha"),
+            String(pull.RootElement, "state"), pull.RootElement.TryGetProperty("mergeable", out var mergeable) && mergeable.ValueKind == JsonValueKind.True,
+            String(pull.RootElement, "user", "login"), Reviews(reviews.RootElement), Checks(checks.RootElement), Statuses(statuses.RootElement), unresolved);
+    }
+
+    public async Task<string?> Merge(string token, string repository, int number, string expectedHeadSha,
+        CancellationToken cancellationToken)
+    {
+        ValidateRepository(repository);
+        if (number <= 0 || !ShaPattern().IsMatch(expectedHeadSha)) throw new ControlException("Invalid pull request merge identity.", 400);
+        using var response = await SendToken(HttpMethod.Put, $"repos/{repository}/pulls/{number}/merge", token,
+            new { sha = expectedHeadSha, merge_method = "merge" }, cancellationToken);
+        return response.RootElement.TryGetProperty("merged", out var merged) && merged.ValueKind == JsonValueKind.True
+            ? response.RootElement.GetProperty("sha").GetString() : null;
+    }
+
     private async Task<JsonDocument> Send(HttpMethod method, string path, string jwt, object? body, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, ApiRoot + path);
@@ -131,6 +159,47 @@ public sealed partial class GitHubAppClient(HttpClient http, TimeProvider clock)
         try { return JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken)); }
         catch (JsonException) { throw new ControlException("GitHub returned an invalid credential response."); }
     }
+
+    private async Task<JsonDocument> SendToken(HttpMethod method, string path, string token, object? body, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(token) || token.Any(char.IsControl)) throw new ControlException("GitHub credential is unavailable.");
+        using var request = new HttpRequestMessage(method, ApiRoot + path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Headers.UserAgent.ParseAdd("HVO.AgentControl/1.0");
+        request.Headers.Accept.ParseAdd("application/vnd.github+json");
+        request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+        if (body is not null) request.Content = JsonContent.Create(body);
+        using var response = await http.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new ControlException($"GitHub request failed (HTTP {(int)response.StatusCode}); refresh the installation credential.");
+        try { return JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken)); }
+        catch (JsonException) { throw new ControlException("GitHub returned an invalid response."); }
+    }
+
+    private async Task<int> UnresolvedThreads(string token, string owner, string name, int number, CancellationToken cancellationToken)
+    {
+        const string query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved,isOutdated}}}}}";
+        using var response = await SendToken(HttpMethod.Post, "graphql", token,
+            new { query, variables = new { owner, name, number } }, cancellationToken);
+        return response.RootElement.GetProperty("data").GetProperty("repository").GetProperty("pullRequest")
+            .GetProperty("reviewThreads").GetProperty("nodes").EnumerateArray()
+            .Count(x => x.GetProperty("isResolved").GetBoolean() is false && x.GetProperty("isOutdated").GetBoolean() is false);
+    }
+
+    private static string Sha(JsonElement document, string parent, string property) =>
+        document.GetProperty(parent).GetProperty(property).GetString() ?? throw new ControlException("GitHub returned an invalid pull request response.");
+    private static string String(JsonElement document, string parent, string property) =>
+        document.GetProperty(parent).GetProperty(property).GetString() ?? "";
+    private static string String(JsonElement document, string property) => document.GetProperty(property).GetString() ?? "";
+    private static string[] Reviews(JsonElement document) => document.EnumerateArray()
+        .Where(x => x.TryGetProperty("state", out var state) && state.GetString() == "APPROVED" && x.TryGetProperty("commit_id", out var commit) && commit.GetString() is { Length: > 0 })
+        .Select(x => x.GetProperty("user").GetProperty("login").GetString() + "@" + x.GetProperty("commit_id").GetString()).ToArray();
+    private static GitHubCheck[] Checks(JsonElement document) => document.GetProperty("check_runs").EnumerateArray()
+        .Select(x => new GitHubCheck(String(x, "name"), String(x, "status"), x.TryGetProperty("conclusion", out var conclusion) ? conclusion.GetString() ?? "" : "")).ToArray();
+    private static GitHubCheck[] Statuses(JsonElement document) => document.GetProperty("statuses").EnumerateArray()
+        .Select(x => new GitHubCheck(String(x, "context"), "completed", String(x, "state"))).ToArray();
+    private static void ValidateRepository(string repository)
+    { if (!RepositoryPattern().IsMatch(repository)) throw new ControlException("Repository must use owner/repository form.", 400); }
 
     private static string Base64(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
@@ -155,4 +224,10 @@ public sealed partial class GitHubAppClient(HttpClient http, TimeProvider clock)
 
     [GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$")]
     private static partial Regex RepositoryPattern();
+    [GeneratedRegex(@"^[0-9a-f]{40}$", RegexOptions.IgnoreCase)]
+    private static partial Regex ShaPattern();
 }
+
+public sealed record GitHubCheck(string Name, string Status, string Conclusion);
+public sealed record GitHubPullRequestObservation(string HeadSha, string BaseSha, string State, bool Mergeable,
+    string AuthorIdentity, string[] ApprovedReviews, GitHubCheck[] Checks, GitHubCheck[] Statuses, int UnresolvedThreads);

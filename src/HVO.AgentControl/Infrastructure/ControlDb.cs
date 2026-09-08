@@ -13,6 +13,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<InventoryMutationReceipt> InventoryMutations => Set<InventoryMutationReceipt>();
     public DbSet<RuntimeEnvironmentRecord> RuntimeEnvironments => Set<RuntimeEnvironmentRecord>();
     public DbSet<HVO.AgentControl.GitHub.GitHubAccess> GitHubAccess => Set<HVO.AgentControl.GitHub.GitHubAccess>();
+    public DbSet<GitHubMergeIntent> GitHubMergeIntents => Set<GitHubMergeIntent>();
+    public DbSet<GitHubCheckObservation> GitHubCheckObservations => Set<GitHubCheckObservation>();
     public DbSet<CoordinationRun> CoordinationRuns => Set<CoordinationRun>();
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
     public DbSet<WorkerRecord> Workers => Set<WorkerRecord>();
@@ -70,6 +72,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<HVO.AgentControl.Services.ProviderCredential>();
         model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<HVO.AgentControl.Services.ProviderReadinessReceipt>();
+        model.Entity<GitHubMergeIntent>().HasIndex(x => new { x.Repository, x.PullRequestNumber, x.ExpectedHeadSha }).IsUnique();
+        model.Entity<GitHubCheckObservation>().HasIndex(x => new { x.Repository, x.PullRequestNumber, x.HeadSha, x.ObservedAt });
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
         model.Entity<RuntimeRecord>().Property(x => x.ConnectionKind).HasDefaultValue(RuntimeConnections.Ssh);
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.ManagedServerId, x.NativeSessionId }).IsUnique();
