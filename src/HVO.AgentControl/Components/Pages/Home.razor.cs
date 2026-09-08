@@ -18,6 +18,7 @@ public partial class Home
     private bool includeGuidance;
     private int progressMinutes = 5;
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
+    private readonly ConversationSelection selection = new();
     private readonly Dictionary<string, string> answers = [];
     private readonly Dictionary<string, HashSet<string>> choices = [];
     private readonly Dictionary<string, string> replyIds = [];
@@ -26,7 +27,7 @@ public partial class Home
     protected override async Task OnParametersSetAsync()
     {
         if (appliedWorkerId == WorkerId) return;
-        appliedWorkerId = WorkerId; selectedId = WorkerId; detail = null;
+        appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = "";
         olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; promptRequestId = null;
         await Refresh();
@@ -35,13 +36,20 @@ public partial class Home
     {
         selectedId ??= WorkerId;
         if (selectedId is null) return;
-        if (!snapshot!.Workers.Any(x => x.Id == selectedId))
+        var current = selection.Capture(selectedId);
+        if (!snapshot!.Workers.Any(x => x.Id == current.WorkerId))
         {
             detail = null; error = "This worker is unavailable. Choose another agent conversation."; return;
         }
-        detail = await Store.Detail(selectedId);
-        var settled = detail.Commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled).ToList();
-        if (!settled.Any(x => x.Id == outcomeCommandId)) outcomeCommandId = settled.OrderByDescending(x => x.CreatedAt).FirstOrDefault()?.Id ?? "";
+        try
+        {
+            var loaded = await ReadDetail(current.WorkerId!);
+            if (!selection.IsCurrent(current)) return;
+            detail = loaded;
+            var settled = detail.Commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled).ToList();
+            if (!settled.Any(x => x.Id == outcomeCommandId)) outcomeCommandId = settled.OrderByDescending(x => x.CreatedAt).FirstOrDefault()?.Id ?? "";
+        }
+        catch when (!selection.IsCurrent(current)) { }
     }
     private void SelectConversation(ChangeEventArgs args)
     {
@@ -54,13 +62,15 @@ public partial class Home
     }
     private Task SendPrompt() => Execute(async () =>
     {
+        var current = SelectedDetail();
         promptRequestId ??= Guid.NewGuid().ToString();
-        var command = await Store.Prompt(selectedId!, new(promptRequestId, promptText, detail!.Worker.Revision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
+        var command = await Store.Prompt(current.Worker.Id, new(promptRequestId, promptText, current.Worker.Revision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
         notice = "Instruction queued. You can leave this page while the worker runs."; promptText = ""; promptRequestId = null;
     });
     private Task StatusInquiry() => Execute(async () =>
     {
-        await Store.Prompt(selectedId!, new(Guid.NewGuid().ToString(), "Report current progress, completed validation, blockers, and the next step. Do not start unrelated work.", detail!.Worker.Revision, StatusInquiry: true));
+        var current = SelectedDetail();
+        await Store.Prompt(current.Worker.Id, new(Guid.NewGuid().ToString(), "Report current progress, completed validation, blockers, and the next step. Do not start unrelated work.", current.Worker.Revision, StatusInquiry: true));
         notice = "A progress inquiry is queued; current observed state remains visible above.";
     });
     private Task Abort() => Execute(async () => { await Store.Abort(selectedId!, Guid.NewGuid().ToString()); notice = "Cancellation request recorded. Watch delivery and native state for the result."; });
@@ -105,11 +115,23 @@ public partial class Home
     }
     private Task OlderHistory() => Execute(async () =>
     {
-        var before = olderMessages.Concat(detail!.Messages).Select(x => (long?)x.NativeCreatedAt).Min();
-        var history = await Store.Detail(selectedId!, before);
+        var current = SelectedDetail();
+        var selected = selection.Capture(current.Worker.Id);
+        var before = olderMessages.Concat(current.Messages).Select(x => (long?)x.NativeCreatedAt).Min();
+        WorkerDetail history;
+        try { history = await ReadDetail(current.Worker.Id, before); }
+        catch when (!selection.IsCurrent(selected)) { return; }
+        if (!selection.IsCurrent(selected)) return;
         olderMessages.AddRange(history.Messages.Where(x => olderMessages.All(y => y.NativeId != x.NativeId)));
         if (history.Messages.Count == 0) notice = "No earlier messages are stored locally. Native OpenCode history remains on the runtime.";
     });
+    private WorkerDetail SelectedDetail()
+    {
+        var current = detail;
+        if (current is null || current.Worker.Id != selectedId) throw new ControlException("The selected conversation changed. Wait for its details before taking an action.");
+        return current;
+    }
+    protected virtual Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => Store.Detail(workerId, before);
     private static string Timestamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToString("MMM d HH:mm:ss 'UTC'");
     private static string Pretty(string json)
     {
@@ -163,6 +185,7 @@ public partial class Home
     }
     public override async ValueTask DisposeAsync()
     {
+        selection.Invalidate();
         await base.DisposeAsync();
         if (module is not null) try { await module.DisposeAsync(); } catch (JSDisconnectedException) { }
     }
