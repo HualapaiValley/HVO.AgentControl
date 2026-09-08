@@ -19,6 +19,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<ModelUsageRecord> ModelUsage => Set<ModelUsageRecord>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
+    public DbSet<WorkItem> WorkItems => Set<WorkItem>();
+    public DbSet<WorkItemPhase> WorkItemPhases => Set<WorkItemPhase>();
     public DbSet<ParticipantEnrollment> Enrollments => Set<ParticipantEnrollment>();
     public DbSet<CommandAuthority> CommandAuthorities => Set<CommandAuthority>();
     public DbSet<EvidenceCursor> EvidenceCursors => Set<EvidenceCursor>();
@@ -44,6 +46,13 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
         model.Entity<EvidenceConsumerCursor>().HasKey(x => x.ConsumerId);
         model.Entity<EvidenceReadReceipt>().HasIndex(x => new { x.ConsumerId, x.AcknowledgedAt });
+        model.Entity<WorkItem>().HasIndex(x => x.IssueNumber);
+        model.Entity<WorkItem>().HasIndex(x => x.Branch);
+        model.Entity<WorkItem>().HasIndex(x => new { x.Repository, x.Branch })
+            .IsUnique()
+            .HasFilter("State NOT IN ('Released', 'Abandoned')");
+        model.Entity<WorkItem>().HasIndex(x => x.OwnerWorkerId);
+        model.Entity<WorkItemPhase>().HasIndex(x => new { x.WorkItemId, x.Name }).IsUnique();
         model.Entity<ParticipantEnrollment>().HasIndex(x => x.AdapterType);
         model.Entity<ParticipantEnrollment>().HasIndex(x => x.State);
         model.Entity<CommandAuthority>().HasIndex(x => x.CommandId).IsUnique();
