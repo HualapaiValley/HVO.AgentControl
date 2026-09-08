@@ -171,6 +171,7 @@ public sealed class SshIntegrationTests
         runtime.StateDirectory = "/home/agent/checkout-verification-state-" + runtime.ManagedServerId;
         var directory = "/home/agent/workspaces/checkout-verification-" + Guid.NewGuid().ToString("N");
         var alias = "/home/agent/checkout-verification-alias-" + Guid.NewGuid().ToString("N");
+        var dependencySource = "/home/agent/workspaces/checkout-dependency-" + Guid.NewGuid().ToString("N");
         const string repository = "https://github.com/example/prepared.git";
         const string branch = "feature/prepared";
         IRuntimeTransport? connection = null;
@@ -209,6 +210,62 @@ public sealed class SshIntegrationTests
             runtime.AllowedRoots = allowedRoots;
             Assert.Equal(0, (await Docker("a", "touch", directory + "/untracked.txt")).ExitCode);
             Assert.Equal("dirty_worktree", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
+            Assert.Equal(0, (await Docker("a", "rm", "-f", directory + "/untracked.txt")).ExitCode);
+
+            var marker = directory + "/configured-command-ran";
+            Assert.Equal(0, (await Docker("a", "sh", "-c", $$"""
+                set -eu
+                cd {{BootstrapScript.Quote(directory)}}
+                printf '#!/bin/sh\ntouch %s\n' {{BootstrapScript.Quote(marker)}} > configured-command
+                chmod 700 configured-command
+                printf 'tracked.txt filter=fixture\n' > .gitattributes
+                git add .gitattributes
+                git commit -m attributes >/dev/null
+                git config core.fsmonitor {{BootstrapScript.Quote(directory + "/configured-command")}}
+                git config filter.fixture.clean {{BootstrapScript.Quote(directory + "/configured-command")}}
+                """)).ExitCode);
+            head = (await Docker("a", "git", "-C", directory, "rev-parse", "HEAD")).Output.Trim();
+            Assert.Equal(PreparedCheckoutStatus.Verified, (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Status);
+            Assert.Equal(0, (await Docker("a", "sh", "-c", "test ! -e " + BootstrapScript.Quote(marker))).ExitCode);
+
+            Assert.Equal(0, (await Docker("a", "sh", "-c", $$"""
+                set -eu
+                cd {{BootstrapScript.Quote(directory)}}
+                git config status.showUntrackedFiles no
+                touch hidden-untracked.txt
+                """)).ExitCode);
+            Assert.Equal("dirty_worktree", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
+            Assert.Equal(0, (await Docker("a", "sh", "-c", "cd " + BootstrapScript.Quote(directory) +
+                " && rm -f hidden-untracked.txt && git config --unset status.showUntrackedFiles")).ExitCode);
+
+            Assert.Equal(0, (await Docker("a", "sh", "-c", "cd " + BootstrapScript.Quote(directory) +
+                " && printf changed >> tracked.txt && git update-index --assume-unchanged tracked.txt")).ExitCode);
+            Assert.Equal("index_flags", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
+            Assert.Equal(0, (await Docker("a", "sh", "-c", "cd " + BootstrapScript.Quote(directory) +
+                " && git update-index --no-assume-unchanged tracked.txt && git checkout -- tracked.txt")).ExitCode);
+            Assert.Equal(0, (await Docker("a", "sh", "-c", "cd " + BootstrapScript.Quote(directory) +
+                " && printf changed >> tracked.txt && git update-index --skip-worktree tracked.txt")).ExitCode);
+            Assert.Equal("index_flags", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
+            Assert.Equal(0, (await Docker("a", "sh", "-c", "cd " + BootstrapScript.Quote(directory) +
+                " && git update-index --no-skip-worktree tracked.txt && git checkout -- tracked.txt")).ExitCode);
+
+            Assert.Equal(0, (await Docker("a", "sh", "-c", $$"""
+                set -eu
+                git init -b main {{BootstrapScript.Quote(dependencySource)}} >/dev/null
+                cd {{BootstrapScript.Quote(dependencySource)}}
+                git config user.name fixture
+                git config user.email fixture@example.invalid
+                printf dependency > dependency.txt
+                git add dependency.txt
+                git commit -m initial >/dev/null
+                cd {{BootstrapScript.Quote(directory)}}
+                git -c protocol.file.allow=always submodule add {{BootstrapScript.Quote(dependencySource)}} dependency >/dev/null
+                git commit -m dependency >/dev/null
+                printf dirty >> dependency/dependency.txt
+                git config submodule.dependency.ignore all
+                """)).ExitCode);
+            head = (await Docker("a", "git", "-C", directory, "rev-parse", "HEAD")).Output.Trim();
+            Assert.Equal("dirty_worktree", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
         }
         finally
         {
@@ -218,7 +275,7 @@ public sealed class SshIntegrationTests
                 await connection.DisposeAsync();
             }
             var cleanup = await Docker("a", "sh", "-c", "rm -rf -- " + BootstrapScript.Quote(directory) + " " +
-                BootstrapScript.Quote(alias) + " " + BootstrapScript.Quote(runtime.StateDirectory));
+                BootstrapScript.Quote(alias) + " " + BootstrapScript.Quote(dependencySource) + " " + BootstrapScript.Quote(runtime.StateDirectory));
             Assert.Equal(0, cleanup.ExitCode);
         }
     }
