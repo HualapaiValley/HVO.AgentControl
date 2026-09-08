@@ -6,10 +6,30 @@ namespace HVO.AgentControl.Infrastructure;
 
 public sealed partial class ControlStore
 {
-    public Task<bool> RecoverActiveCoordination(string detail) => Write(async db =>
+    // Each run owns its transaction and recovery deadline. A malformed checkpoint must
+    // neither roll back another workgroup's progress nor prevent its next tick.
+    private Task<string[]> ActiveCoordinationIds() => Read(db => db.CoordinationRuns.AsNoTracking()
+        .Where(x => x.State == "Ready" || x.State == "Waiting" || x.State == "Deciding" || x.State == "Recovering")
+        .OrderBy(x => x.LastDecisionAt).ThenBy(x => x.CreatedAt).ThenBy(x => x.Id)
+        .Select(x => x.Id).ToArrayAsync());
+
+    public async Task<bool> RecoverActiveCoordination(string detail)
     {
-        var run = await db.CoordinationRuns.FirstOrDefaultAsync(x => x.State == "Ready" || x.State == "Waiting" || x.State == "Deciding" || x.State == "Recovering");
-        if (run is null) return false;
+        var changed = false;
+        List<Exception> failures = [];
+        foreach (var id in await ActiveCoordinationIds())
+        {
+            try { changed |= await RecoverCoordination(id, detail); }
+            catch (Exception ex) { failures.Add(ex); }
+        }
+        if (failures.Count > 0) throw new AggregateException("Coordination recovery could not be persisted for every run.", failures);
+        return changed;
+    }
+
+    private Task<bool> RecoverCoordination(string id, string detail) => Write(async db =>
+    {
+        var run = await db.CoordinationRuns.FindAsync(id);
+        if (run is null || run.State is not ("Ready" or "Waiting" or "Deciding" or "Recovering")) return false;
         ScheduleCoordinationRecovery(db, run, detail);
         return true;
     });
@@ -108,8 +128,10 @@ public sealed partial class ControlStore
                 throw new ControlException("Request ID already belongs to different coordination instructions.");
             return prior;
         }
-        if (await db.CoordinationRuns.AnyAsync(x => x.State != "Completed" && x.State != "Stopped"))
-            throw new ControlException("Finish or stop the current coordination before starting another.");
+        if (await db.CoordinationRuns.AnyAsync(x => x.CoordinatorWorkerId == input.CoordinatorWorkerId && x.State != "Completed" && x.State != "Stopped"))
+            throw new ControlException("Finish or stop this coordinator session's current coordination before starting another.");
+        if (await db.ControlSessions.AnyAsync(x => x.WorkerId == input.CoordinatorWorkerId && x.ScopeKind == "HostOperations"))
+            throw new ControlException("Host operations is reserved for the host. Choose a workgroup control session for development coordination.", 400);
         var ids = input.WorkerIds.Append(input.CoordinatorWorkerId).ToArray();
         var workers = await db.Workers.Where(x => ids.Contains(x.Id) && !x.Archived).ToListAsync();
         if (workers.Count != ids.Length) throw new ControlException("All participants must be available, unarchived workers.");
@@ -170,11 +192,30 @@ public sealed partial class ControlStore
         return run;
     });
 
-    // A complete decision is validated and all its outgoing messages committed in one transaction.
-    public Task<bool> CoordinationTick() => Write(async db =>
+    public async Task<bool> CoordinationTick()
     {
-        var run = await db.CoordinationRuns.FirstOrDefaultAsync(x => x.State == "Ready" || x.State == "Waiting" || x.State == "Deciding" || x.State == "Recovering");
-        if (run is null) return false;
+        var changed = false;
+        List<Exception> failures = [];
+        foreach (var id in await ActiveCoordinationIds())
+        {
+            try { changed |= await CoordinationTick(id); }
+            catch (Exception ex)
+            {
+                try { changed |= await RecoverCoordination(id, "Coordinator scheduling failed (" + ex.GetType().Name + ")."); }
+                catch (Exception recoveryError) { failures.Add(new AggregateException(ex, recoveryError)); }
+            }
+        }
+        // The hosted timer reports storage failures only after every other run got a turn.
+        if (failures.Count > 0) throw new AggregateException("Coordination scheduling recovery could not be persisted.", failures);
+        return changed;
+    }
+
+    // All outgoing messages from one decision commit in one transaction under the
+    // shared write gate. Worker claims check commands from every coordination run.
+    private Task<bool> CoordinationTick(string id) => Write(async db =>
+    {
+        var run = await db.CoordinationRuns.FindAsync(id);
+        if (run is null || run.State is not ("Ready" or "Waiting" or "Deciding" or "Recovering")) return false;
         if (run.State == "Recovering")
         {
             var recovery = ReadRecoveryContext(run).Recovery;

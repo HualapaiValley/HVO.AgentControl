@@ -3,12 +3,10 @@
 ## Development setup
 
 Use the included Dev Container, or install the SDK version specified in
-`global.json`.
-
-```bash
-dotnet restore HVO.AgentControl.slnx
-dotnet run --project src/HVO.AgentControl
-```
+`global.json`. Follow the complete [local setup](README.md#local-setup) before
+starting the application. It initializes the required local owner secret and
+sets the data, secrets, and loopback HTTP configuration without printing the
+secret value.
 
 ## Validation
 
