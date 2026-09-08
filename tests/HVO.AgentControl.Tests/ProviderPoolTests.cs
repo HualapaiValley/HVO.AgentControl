@@ -78,6 +78,26 @@ public sealed class ProviderPoolTests
         return (Task<bool>)method.Invoke(supervisor, [worker.Id, snapshot])!;
     }
 
+    private static NativeSnapshot ErrorSnapshot(WorkerRecord worker, CommandRecord command) => new(
+        JsonSerializer.SerializeToElement(new { }),
+        [
+            JsonSerializer.SerializeToElement(new
+            {
+                info = new { id = command.NativeMessageId, role = "user", sessionID = worker.NativeSessionId, time = new { created = 1L } },
+                parts = Array.Empty<object>()
+            }),
+            JsonSerializer.SerializeToElement(new
+            {
+                info = new
+                {
+                    id = "msg_provider_error", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId,
+                    time = new { created = 2L, completed = 3L },
+                    error = new { name = "APIError", data = new { statusCode = 429, responseBody = "{\"error\":{\"code\":\"insufficient_quota\"}}" } }
+                },
+                parts = Array.Empty<object>()
+            })
+        ], "idle", JsonSerializer.SerializeToElement(new { }), [], []);
+
     [Fact]
     public void NativeRetryParserRequiresStructuredAccountLimitAndDoesNotTreatNextAsReset()
     {
@@ -308,6 +328,7 @@ public sealed class ProviderPoolTests
                 saved.ModelsJson = Json.Write(new List<ModelChoice> { new("openai", "luna", "Luna") });
                 db.Commands.Add(command);
                 db.Add(new ProviderPool { Id = command.ProviderPoolId, ProviderId = "opencode-go", State = "Exhausted" });
+                db.Add(new ProviderFailureReceipt { Id = command.Id + ":native", CommandId = command.Id, PoolId = command.ProviderPoolId, Category = "Exhausted", ObservedAt = ControlStore.Now });
                 return true;
             });
             worker = (await app.Store.Snapshot()).Workers.Single(x => x.Id == worker.Id);
@@ -315,6 +336,9 @@ public sealed class ProviderPoolTests
             var receipt = await app.Store.RecordFallbackRecommendation(input);
             Assert.Equal("provider:opencode-go", receipt.SourcePoolId);
             Assert.Equal("provider:openai", receipt.TargetPoolId);
+            Assert.Equal(command.Id + ":native", receipt.SourceFailureReceiptId);
+            Assert.Equal("Exhausted", receipt.SourceFailureCategory);
+            Assert.Equal(Delivery.Failed, receipt.SourceTerminalState);
             Assert.Equal(receipt.Id, (await app.Store.RecordFallbackRecommendation(input)).Id);
             Assert.Single(await app.Store.ProviderFallbacks(command.Id));
             Assert.Single((await app.Store.Snapshot()).Commands);
@@ -341,6 +365,7 @@ public sealed class ProviderPoolTests
             saved.ModelsJson = Json.Write(new List<ModelChoice> { new("openai", "luna", "Luna"), new("opencode-go", "model", "Original") });
             db.Commands.Add(command);
             db.Add(new ProviderPool { Id = command.ProviderPoolId, ProviderId = "opencode-go", State = "Exhausted" });
+            db.Add(new ProviderFailureReceipt { Id = command.Id + ":native", CommandId = command.Id, PoolId = command.ProviderPoolId, Category = "Exhausted", ObservedAt = ControlStore.Now });
             db.Add(new ProviderPool { Id = "provider:blocked", ProviderId = "blocked", State = "Exhausted" });
             return true;
         });
@@ -354,5 +379,73 @@ public sealed class ProviderPoolTests
         await app.Store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.State = Delivery.Running; return true; });
         await Assert.ThrowsAsync<ControlException>(() => Recommend("openai", "luna"));
         Assert.Empty(await app.Store.ProviderFallbacks(command.Id));
+    }
+
+    [Fact]
+    public async Task ReconciledNativeProviderFailureRetainsProvenanceAcrossRestartAndRetry()
+    {
+        string data, secrets, commandId, receiptId;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var command = Command(worker); command.State = Delivery.Accepted; command.NativeMessageId = "msg_user"; commandId = command.Id;
+            await app.Store.Write(async db =>
+            {
+                var saved = (await db.Workers.FindAsync(worker.Id))!;
+                saved.Stale = false; saved.ModelsJson = Json.Write(new List<ModelChoice> { new("openai", "luna", "Luna") });
+                db.Commands.Add(command);
+                return true;
+            });
+            await Reconcile(app, worker, ErrorSnapshot(worker, command));
+            var failed = (await app.Store.Detail(worker.Id)).Commands.Single();
+            Assert.Equal(Delivery.Failed, failed.State);
+            var failure = Assert.Single(await app.Store.Read(db => db.Set<ProviderFailureReceipt>().Where(x => x.CommandId == command.Id).ToListAsync()));
+            Assert.Equal("Exhausted", failure.Category);
+            var current = (await app.Store.Snapshot()).Workers.Single();
+            receiptId = Guid.NewGuid().ToString();
+            var receipt = await app.Store.RecordFallbackRecommendation(new(receiptId, command.Id, current.Revision, "openai", "luna"));
+            Assert.Equal(failure.Id, receipt.SourceFailureReceiptId);
+            Assert.Equal(Delivery.Failed, receipt.SourceTerminalState);
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var restartedWorker = (await restarted.Store.Snapshot()).Workers.Single();
+        var repeated = await restarted.Store.RecordFallbackRecommendation(new(receiptId, commandId, restartedWorker.Revision, "openai", "luna"));
+        Assert.Equal(receiptId, repeated.Id);
+        Assert.Single(await restarted.Store.ProviderFallbacks(commandId));
+    }
+
+    [Fact]
+    public async Task ReconciledAbortCancelsBothAbortAndInterruptedPrompt()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var prompt = Command(worker); prompt.State = Delivery.Accepted; prompt.NativeMessageId = "msg_user";
+        var abort = new CommandRecord { Id = Guid.NewGuid().ToString(), RuntimeId = worker.RuntimeId, WorkerId = worker.Id, Kind = "Abort", State = Delivery.Accepted };
+        await app.Store.Write(db => { db.Commands.AddRange(prompt, abort); return Task.FromResult(true); });
+        await Reconcile(app, worker, new NativeSnapshot(JsonSerializer.SerializeToElement(new { }), [], "idle", JsonSerializer.SerializeToElement(new { }), [], []));
+        var commands = (await app.Store.Detail(worker.Id)).Commands;
+        Assert.Equal(Delivery.Cancelled, commands.Single(x => x.Id == abort.Id).State);
+        Assert.Equal(Delivery.Cancelled, commands.Single(x => x.Id == prompt.Id).State);
+    }
+
+    [Fact]
+    public async Task FallbackRejectsAProviderHoldRecordedByAnotherCommand()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var source = Command(worker); source.State = Delivery.Failed;
+        var other = Command(worker); other.State = Delivery.Failed;
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Workers.FindAsync(worker.Id))!;
+            saved.Stale = false; saved.Activity = "Idle"; saved.ModelsJson = Json.Write(new List<ModelChoice> { new("openai", "luna", "Luna") });
+            db.Commands.AddRange(source, other);
+            await ControlStore.ObserveProviderFailure(db, saved, other, "native", new("Exhausted", 429, null));
+            return true;
+        });
+        var current = (await app.Store.Snapshot()).Workers.Single();
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.RecordFallbackRecommendation(
+            new(Guid.NewGuid().ToString(), source.Id, current.Revision, "openai", "luna")));
     }
 }

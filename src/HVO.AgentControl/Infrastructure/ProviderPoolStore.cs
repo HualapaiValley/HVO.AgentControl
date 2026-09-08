@@ -37,6 +37,9 @@ public sealed class ProviderFallbackReceipt
     public string ProviderId { get; set; } = "";
     public string ModelId { get; set; } = "";
     public string TargetPoolId { get; set; } = "";
+    public string SourceFailureReceiptId { get; set; } = "";
+    public string SourceFailureCategory { get; set; } = "";
+    public string SourceTerminalState { get; set; } = "";
     public long CreatedAt { get; set; }
 }
 
@@ -130,8 +133,8 @@ public sealed partial class ControlStore
             return prior;
         }
         var source = await db.Commands.FindAsync(input.SourceCommandId) ?? throw new ControlException("Source command not found.", 404);
-        if (source.WorkerId is null || source.State is not (Delivery.Failed or Delivery.Cancelled))
-            throw new ControlException("Reconcile the source command to a terminal failed or cancelled receipt before proposing fallback.");
+        if (source.WorkerId is null || source.State != Delivery.Failed)
+            throw new ControlException("Reconcile the source command to a terminal provider failure before proposing fallback.");
         if (await db.Set<ProviderFallbackReceipt>().FirstOrDefaultAsync(x => x.SourceCommandId == source.Id) is not null)
             throw new ControlException("A fallback recommendation is already recorded for this source command.");
         var worker = await db.Workers.FindAsync(source.WorkerId) ?? throw new ControlException("Source worker not found.", 404);
@@ -145,6 +148,10 @@ public sealed partial class ControlStore
         var sourcePool = await db.Set<ProviderPool>().FindAsync(sourcePoolId);
         if (sourcePool is null || sourcePool.State == "Available")
             throw new ControlException("The source provider pool is not held by a recorded provider failure.");
+        var failure = await db.Set<ProviderFailureReceipt>().Where(x => x.CommandId == source.Id && x.PoolId == sourcePoolId)
+            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Id).FirstOrDefaultAsync();
+        if (failure is null)
+            throw new ControlException("The source command has no recorded provider failure for its held pool.");
         var targetPoolId = "provider:" + input.ProviderId;
         if (targetPoolId == sourcePoolId) throw new ControlException("Fallback must use a different provider pool.");
         var targetPool = await db.Set<ProviderPool>().FindAsync(targetPoolId);
@@ -160,11 +167,25 @@ public sealed partial class ControlStore
             ProviderId = input.ProviderId,
             ModelId = input.ModelId,
             TargetPoolId = targetPoolId,
+            SourceFailureReceiptId = failure.Id,
+            SourceFailureCategory = failure.Category,
+            SourceTerminalState = source.State,
             CreatedAt = Now
         };
         db.Add(receipt);
         Event(db, "ProviderFallbackRecommended", worker.RuntimeId, worker.Id, source.Id,
-            new { receipt.Id, receipt.SourceCommandId, receipt.SourcePoolId, receipt.ProviderId, receipt.ModelId, receipt.TargetPoolId }, provenance: "advisor");
+            new
+            {
+                receipt.Id,
+                receipt.SourceCommandId,
+                receipt.SourcePoolId,
+                receipt.SourceFailureReceiptId,
+                receipt.SourceFailureCategory,
+                receipt.SourceTerminalState,
+                receipt.ProviderId,
+                receipt.ModelId,
+                receipt.TargetPoolId
+            }, provenance: "advisor");
         return receipt;
     });
 

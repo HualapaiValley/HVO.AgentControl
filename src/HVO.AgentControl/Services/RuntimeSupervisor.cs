@@ -487,7 +487,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         foreach (var command in commands)
         {
             if (command.Kind == "Abort" && activity == "Idle" && command.State == Delivery.Accepted)
-            { command.State = Delivery.Finished; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
+            { command.State = Delivery.Cancelled; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
             if (command.Kind != "Prompt") continue;
             if (nativeRetry is not null)
             {
@@ -497,7 +497,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             }
             if (abortObserved && command.State is Delivery.Accepted or Delivery.Running)
             {
-                command.State = Delivery.Finished; command.Detail = "Cancellation requested and native idle observed. Review tool effects; subprocess termination is not guaranteed.";
+                command.State = Delivery.Cancelled; command.Detail = "Cancellation requested and native idle observed. Review tool effects; subprocess termination is not guaranteed.";
                 command.UpdatedAt = ControlStore.Now; worker.Outcome = "Cancelled";
                 if (await db.Assignments.FindAsync(command.Id) is { } cancelled) cancelled.Outcome = "Cancelled";
                 ControlStore.Event(db, "CancellationObserved", worker.RuntimeId, workerId, command.Id); changed = true;
@@ -523,10 +523,11 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             { worker.CapabilityReport = progress; worker.CapabilityReportedAt = ControlStore.Now; }
             if (activity == "Idle" && ended) command.ResultJson = Json.Write(new { messages = assistants });
             if (activity == "Idle" && ended) await ControlStore.ObserveProviderCompletion(db, command, !failed && progress.Length > 0);
-            var state = activity == "Idle" && ended ? Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
+            var state = activity == "Idle" && ended ? failed ? Delivery.Failed : Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
-            command.Detail = state == Delivery.Finished ? "Native turn ended. Assignment outcome requires evidence and owner review." : "Native caller message identity found in retained history.";
+            command.Detail = state == Delivery.Failed ? "Native provider error ended the turn." :
+                state == Delivery.Finished ? "Native turn ended. Assignment outcome requires evidence and owner review." : "Native caller message identity found in retained history.";
             worker.Outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
             if (await db.Assignments.FindAsync(command.Id) is { } assignment) assignment.Outcome = worker.Outcome;
             ControlStore.Event(db, "CommandReconciled", worker.RuntimeId, workerId, command.Id, new { state }); changed = true;
