@@ -8,6 +8,24 @@ namespace HVO.AgentControl.Tests;
 public sealed class TerminalTests
 {
     [Fact]
+    public async Task ImportFailureResetsStatusAndAllowsSuccessfulRetry()
+    {
+        var js = new FailingImportRuntime();
+        var terminal = CreateTerminal(js);
+
+        await Invoke(terminal, "Open");
+
+        Assert.False(Get<bool>(terminal, "connected"));
+        Assert.Equal("Unable to open terminal. Check runtime SSH access and sign-in.", Get<string>(terminal, "status"));
+
+        await Invoke(terminal, "Open");
+
+        Assert.True(Get<bool>(terminal, "connected"));
+        Assert.Equal("Connecting…", Get<string>(terminal, "status"));
+        Assert.Equal(1, js.Module.OpenCount);
+    }
+
+    [Fact]
     public async Task CloseBeforeImportCompletesDisposesStaleModuleWithoutOpening()
     {
         var js = new DelayedImportRuntime();
@@ -83,6 +101,8 @@ public sealed class TerminalTests
 
     private static IJSObjectReference? GetModule(Terminal terminal) => (IJSObjectReference?)typeof(Terminal).GetField("module", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(terminal);
 
+    private static TValue Get<TValue>(Terminal terminal, string name) => (TValue)typeof(Terminal).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(terminal)!;
+
     private sealed class DelayedImportRuntime : IJSRuntime
     {
         private readonly List<TaskCompletionSource<IJSObjectReference>> imports = [];
@@ -108,6 +128,26 @@ public sealed class TerminalTests
             var module = new FakeModule();
             imports[index].SetResult(module);
             return module;
+        }
+    }
+
+    private sealed class FailingImportRuntime : IJSRuntime
+    {
+        public FakeModule Module { get; } = new();
+        private bool failed;
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object?[]? args) => InvokeAsync<TValue>(identifier, CancellationToken.None, args);
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object?[]? args)
+        {
+            Assert.Equal("import", identifier);
+            if (!failed)
+            {
+                failed = true;
+                return ValueTask.FromException<TValue>(new JSException("import failed"));
+            }
+
+            return ValueTask.FromResult((TValue)(object)Module);
         }
     }
 
