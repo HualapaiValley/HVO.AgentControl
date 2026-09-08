@@ -87,6 +87,74 @@ public sealed class PersistenceTests
         Assert.Throws<InvalidOperationException>(() => new ReplicaLock(Path.Combine(app.DataPath, "duplicate")));
     }
 
+    [Fact]
+    public async Task UnchangedRemoteRootAliasAllowsProfileEditButChangedRootOrHostIsRejected()
+    {
+        await using var app = new TestApp();
+        var profile = Profile();
+        profile.AllowedRoots = "/home/agent/workspaces/.";
+        var runtime = await app.Store.SaveRuntime(profile);
+        await app.Store.Write(db =>
+        {
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_canonical_root",
+                Directory = "/home/agent/workspaces/a",
+                Name = "Canonical worker"
+            });
+            return Task.FromResult(true);
+        });
+
+        runtime.Name = "Renamed runtime";
+        runtime = await app.Store.SaveRuntime(runtime);
+        Assert.Equal("Renamed runtime", runtime.Name);
+
+        var changedRoot = Json.Read<RuntimeRecord>(Json.Write(runtime));
+        changedRoot.AllowedRoots = "/home/agent/workspaces/b";
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.SaveRuntime(changedRoot));
+
+        var changedHost = Json.Read<RuntimeRecord>(Json.Write(runtime));
+        changedHost.Host = "127.0.0.2";
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.SaveRuntime(changedHost));
+
+        var changedHostKey = Json.Read<RuntimeRecord>(Json.Write(runtime));
+        changedHostKey.HostKeySha256 = "SHA256:" + new string('B', 43);
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.SaveRuntime(changedHostKey));
+    }
+
+    [Fact]
+    public async Task RuntimeApiPreservesUnchangedRemoteSymlinkAliasButRejectsChangedRoot()
+    {
+        await using var app = new TestApp();
+        var profile = Profile();
+        profile.AllowedRoots = "/home/agent/workspace-link";
+        var runtime = await app.Store.SaveRuntime(profile);
+        await app.Store.Write(db =>
+        {
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_symlink_root",
+                Directory = "/home/agent/workspaces/a",
+                Name = "Canonical worker"
+            });
+            return Task.FromResult(true);
+        });
+        using var owner = await app.SignIn();
+
+        runtime.Name = "API rename";
+        var saved = await owner.PostAsJsonAsync("/api/v1/runtimes", runtime);
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        runtime = (await saved.Content.ReadFromJsonAsync<RuntimeRecord>())!;
+        Assert.Equal("API rename", runtime.Name);
+
+        runtime.AllowedRoots = "/home/agent/workspaces/b";
+        Assert.Equal(HttpStatusCode.Conflict, (await owner.PostAsJsonAsync("/api/v1/runtimes", runtime)).StatusCode);
+    }
+
     internal static RuntimeRecord Profile() => new()
     {
         Name = "Test",
