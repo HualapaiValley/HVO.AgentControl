@@ -1,3 +1,4 @@
+using System.Net;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Xunit;
@@ -6,6 +7,24 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class TranscriptPaginationTests
 {
+    [Fact]
+    public async Task HistoryRejectsCursorIdWithoutTimestampButKeepsTimestampCompatibility()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(db =>
+        {
+            db.Messages.Add(new TranscriptMessage { WorkerId = worker.Id, NativeId = "message", NativeCreatedAt = 10 });
+            return Task.FromResult(true);
+        });
+
+        var error = await Assert.ThrowsAsync<ControlException>(() => app.Store.Detail(worker.Id, beforeId: "message"));
+        Assert.Equal(400, error.Status);
+        Assert.Single((await app.Store.Detail(worker.Id, before: 11)).Messages);
+        using var owner = await app.SignIn();
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.GetAsync($"/api/v1/workers/{worker.Id}/history?beforeId=message")).StatusCode);
+    }
+
     [Fact]
     public async Task HistoryCursorRetainsTimestampTiesAcrossPagesWithoutRepeatingMessages()
     {
