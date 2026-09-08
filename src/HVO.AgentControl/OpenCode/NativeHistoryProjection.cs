@@ -7,6 +7,7 @@ public static class NativeHistoryProjection
 {
     public const int DefaultWireLimit = 128_000_000;
     public const int DefaultProjectionLimit = 16_000_000;
+    private const string OmissionReceiptProperty = "$hvoNativeHistoryOmission";
 
     public static async Task<JsonElement> ReadAsync(Stream source, int wireLimit = DefaultWireLimit,
         int projectionLimit = DefaultProjectionLimit, CancellationToken cancellationToken = default)
@@ -99,7 +100,10 @@ public static class NativeHistoryProjection
                 if (containers.Count == 0 || containers[^1].Kind == ContainerKind.Array)
                     throw new InvalidDataException("OpenCode history contains a property outside an object.");
                 var property = reader.GetString() ?? throw new InvalidDataException("OpenCode history contains a null property name.");
-                containers[^1].Property = property;
+                var container = containers[^1];
+                container.Property = property;
+                if (container.Kind == ContainerKind.Info && property == OmissionReceiptProperty)
+                    container.OmissionReceiptPropertySeen = true;
                 if (suppressedDepth == 0) writer.WritePropertyName(property);
                 return;
             }
@@ -109,9 +113,7 @@ public static class NativeHistoryProjection
             if (omit)
             {
                 var message = parent!.Message!;
-                if (string.IsNullOrEmpty(message.Id) || string.IsNullOrEmpty(message.SessionId))
-                    throw new InvalidDataException("OpenCode user summary diffs appeared before their native message locator.");
-                WriteOmission(message);
+                WriteOmission();
                 message.OmittedDiffs = true;
                 parent.Property = null;
                 if (reader.TokenType is JsonTokenType.StartArray or JsonTokenType.StartObject)
@@ -148,12 +150,12 @@ public static class NativeHistoryProjection
                     StartContainer(ContainerKind.Object, parent);
                     break;
                 case JsonTokenType.EndArray:
-                    writer.WriteEndArray();
                     EndContainer(ContainerKind.Array);
+                    writer.WriteEndArray();
                     break;
                 case JsonTokenType.EndObject:
-                    writer.WriteEndObject();
                     EndContainer(ContainerKind.Object);
+                    writer.WriteEndObject();
                     break;
                 case JsonTokenType.String:
                     CaptureMessageMetadata(parent, ref reader);
@@ -225,8 +227,16 @@ public static class NativeHistoryProjection
             if (tokenKind == ContainerKind.Array && ended.Kind is not (ContainerKind.Array or ContainerKind.RootArray) ||
                 tokenKind == ContainerKind.Object && ended.Kind is ContainerKind.Array or ContainerKind.RootArray)
                 throw new InvalidDataException("OpenCode history contains mismatched containers.");
-            if (ended.Kind == ContainerKind.Info && ended.Message?.OmittedDiffs == true && ended.Message.Role != "user")
-                throw new InvalidDataException("OpenCode summary diffs cannot be omitted without a user role.");
+            if (ended.Kind == ContainerKind.Info && ended.Message?.OmittedDiffs == true)
+            {
+                if (ended.Message.Role != "user")
+                    throw new InvalidDataException("OpenCode summary diffs cannot be omitted without a user role.");
+                if (string.IsNullOrEmpty(ended.Message.Id) || string.IsNullOrEmpty(ended.Message.SessionId))
+                    throw new InvalidDataException("OpenCode user summary diffs do not have a native message locator.");
+                if (ended.OmissionReceiptPropertySeen)
+                    throw new InvalidDataException("OpenCode user message conflicts with the reserved history omission receipt.");
+                WriteOmissionReceipt(ended.Message);
+            }
             containers.RemoveAt(containers.Count - 1);
             if (ended.Kind == ContainerKind.RootArray) rootCompleted = true;
         }
@@ -255,16 +265,26 @@ public static class NativeHistoryProjection
             parent?.Kind == ContainerKind.Summary && parent.Property == "diffs" &&
             parent.Message?.Role is null or "user";
 
-        private void WriteOmission(Message message)
+        private void WriteOmission()
         {
             writer.WriteStartObject();
             writer.WriteString("$hvo", "omitted-native-user-summary-diffs");
             writer.WriteBoolean("omitted", true);
             writer.WriteStartObject("recovery");
             writer.WriteString("kind", "native-message");
+            writer.WriteString("scope", "enclosing-info");
+            writer.WriteString("receipt", OmissionReceiptProperty);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        private void WriteOmissionReceipt(Message message)
+        {
+            writer.WriteStartObject(OmissionReceiptProperty);
+            writer.WriteString("$hvo", "native-message-recovery");
+            writer.WriteString("kind", "native-message");
             writer.WriteString("sessionID", message.SessionId);
             writer.WriteString("messageID", message.Id);
-            writer.WriteEndObject();
             writer.WriteEndObject();
         }
 
@@ -282,6 +302,7 @@ public static class NativeHistoryProjection
             public ContainerKind Kind { get; } = kind;
             public Message? Message { get; } = message;
             public string? Property { get; set; }
+            public bool OmissionReceiptPropertySeen { get; set; }
         }
 
         private sealed class Message

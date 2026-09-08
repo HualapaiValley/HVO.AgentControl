@@ -34,8 +34,12 @@ public sealed class NativeHistoryProjectionTests
         Assert.True(omission.GetProperty("omitted").GetBoolean());
         Assert.Equal("omitted-native-user-summary-diffs", omission.GetProperty("$hvo").GetString());
         Assert.Equal("native-message", omission.GetProperty("recovery").GetProperty("kind").GetString());
-        Assert.Equal("ses_live", omission.GetProperty("recovery").GetProperty("sessionID").GetString());
-        Assert.Equal("msg_caller", omission.GetProperty("recovery").GetProperty("messageID").GetString());
+        Assert.Equal("enclosing-info", omission.GetProperty("recovery").GetProperty("scope").GetString());
+        Assert.Equal("$hvoNativeHistoryOmission", omission.GetProperty("recovery").GetProperty("receipt").GetString());
+        var receipt = caller.GetProperty("info").GetProperty("$hvoNativeHistoryOmission");
+        Assert.Equal("native-message-recovery", receipt.GetProperty("$hvo").GetString());
+        Assert.Equal("ses_live", receipt.GetProperty("sessionID").GetString());
+        Assert.Equal("msg_caller", receipt.GetProperty("messageID").GetString());
 
         var assistant = messages[1];
         var info = assistant.GetProperty("info");
@@ -55,7 +59,7 @@ public sealed class NativeHistoryProjectionTests
     public async Task EscapedValuesAndUserRoleAfterSummarySurviveFragmentedReads()
     {
         const string json = """
-            [{"info":{"id":"msg_\u0031","sessionID":"ses_\u0031","summary":{"note":"line\n\"quoted\" café 🚀","diffs":[{"before":"old\\path","after":"new\tpath"}]},"future-name":"future-value","r\u006fle":"user"},"parts":[{"type":"text","text":"A\u0026B"}]}]
+            [{"info":{"summary":{"note":"line\n\"quoted\" café 🚀","diffs":[{"before":"old\\path","after":"new\tpath"}]},"future-name":"future-value","r\u006fle":"user","sessionID":"ses_\u0031","id":"msg_\u0031"},"parts":[{"type":"text","text":"A\u0026B"}]}]
             """;
         await using var stream = new FragmentStream(Encoding.UTF8.GetBytes(json), 1);
 
@@ -66,6 +70,8 @@ public sealed class NativeHistoryProjectionTests
         Assert.Equal("line\n\"quoted\" café 🚀", info.GetProperty("summary").GetProperty("note").GetString());
         Assert.True(info.GetProperty("summary").GetProperty("diffs").GetProperty("omitted").GetBoolean());
         Assert.Equal("future-value", info.GetProperty("future-name").GetString());
+        Assert.Equal("ses_1", info.GetProperty("$hvoNativeHistoryOmission").GetProperty("sessionID").GetString());
+        Assert.Equal("msg_1", info.GetProperty("$hvoNativeHistoryOmission").GetProperty("messageID").GetString());
         Assert.Equal("A&B", projected[0].GetProperty("parts")[0].GetProperty("text").GetString());
     }
 
@@ -79,10 +85,22 @@ public sealed class NativeHistoryProjectionTests
         Assert.Equal("one", preserved[0].GetProperty("info").GetProperty("summary").GetProperty("diffs")[0].GetProperty("before").GetString());
 
         const string unknownRole = """
-            [{"info":{"id":"msg_a","sessionID":"ses_a","summary":{"diffs":[1]},"role":"assistant"},"parts":[]}]
+            [{"info":{"summary":{"diffs":[1]},"id":"msg_a","sessionID":"ses_a","role":"assistant"},"parts":[]}]
             """;
         await Assert.ThrowsAsync<InvalidDataException>(() => NativeHistoryProjection.ReadAsync(
             new MemoryStream(Encoding.UTF8.GetBytes(unknownRole)), 10_000, 10_000));
+
+        const string missingLocator = """
+            [{"info":{"summary":{"diffs":[1]},"role":"user"},"parts":[]}]
+            """;
+        await Assert.ThrowsAsync<InvalidDataException>(() => NativeHistoryProjection.ReadAsync(
+            new MemoryStream(Encoding.UTF8.GetBytes(missingLocator)), 10_000, 10_000));
+
+        const string receiptCollision = """
+            [{"info":{"summary":{"diffs":[1]},"id":"msg_a","sessionID":"ses_a","role":"user","$hvoNativeHistoryOmission":{"native":true}},"parts":[]}]
+            """;
+        await Assert.ThrowsAsync<InvalidDataException>(() => NativeHistoryProjection.ReadAsync(
+            new MemoryStream(Encoding.UTF8.GetBytes(receiptCollision)), 10_000, 10_000));
     }
 
     [Fact]
