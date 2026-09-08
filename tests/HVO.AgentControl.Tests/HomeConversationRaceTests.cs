@@ -134,7 +134,10 @@ public sealed class HomeConversationRaceTests
         {
             foreach (var id in new[] { "a", "Z", "Y", "X" }) db.Messages.Add(new TranscriptMessage
             {
-                WorkerId = worker.Id, NativeId = id, Role = "user", NativeCreatedAt = 42,
+                WorkerId = worker.Id,
+                NativeId = id,
+                Role = "user",
+                NativeCreatedAt = 42,
                 Json = "{\"info\":{},\"parts\":[{\"type\":\"text\",\"text\":\"message\"}]}"
             });
             return Task.FromResult(true);
