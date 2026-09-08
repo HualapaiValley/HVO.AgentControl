@@ -129,6 +129,69 @@ public sealed class LocalDevContainerRunnerTests
         Assert.NotNull(result.Observed);
     }
 
+    [Fact]
+    public async Task DockerBuildOptionsCannotReadUnapprovedHostPaths()
+    {
+        using var fixture = new Fixture();
+        var config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(fixture.ConfigPath))!;
+        config.Remove("image");
+        config["build"] = JsonSerializer.SerializeToElement(new { dockerfile = "Dockerfile", context = ".", options = new[] { "--secret=id=unapproved,src=/unapproved-host-input" } });
+        File.WriteAllText(fixture.ConfigPath, JsonSerializer.Serialize(config));
+        File.WriteAllText(Path.Combine(fixture.Workspace.Directory, "Dockerfile"), "FROM scratch\n");
+        fixture.Process.Tree = SnapshotTree(fixture.Workspace.Directory);
+        var workspace = fixture.Workspace with { ConfigurationSha256 = LocalDevContainerRunner.Hash(File.ReadAllBytes(fixture.ConfigPath)) };
+        var authority = fixture.Authority with { Workspaces = fixture.Authority.Workspaces.SetItem(workspace.Id, workspace) };
+        var result = await fixture.Runner(authority).Provision(fixture.Request);
+        Assert.Equal("docker_build_options_not_authorized", result.Code);
+        Assert.False(result.EffectStarted); Assert.Equal(0, fixture.Process.UpCalls); Assert.Equal(0, fixture.Process.ReadConfigurationCalls);
+    }
+
+    [Theory]
+    [InlineData(false, "dockerFile")]
+    [InlineData(true, "dockerFile")]
+    [InlineData(true, "context")]
+    public async Task LegacyDockerPathsCannotOverrideTheValidatedImageOrNestedBuild(bool build, string legacyField)
+    {
+        using var fixture = new Fixture();
+        var config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(fixture.ConfigPath))!;
+        if (build)
+        {
+            config.Remove("image");
+            config["build"] = JsonSerializer.SerializeToElement(new { dockerfile = "Dockerfile", context = "." });
+            File.WriteAllText(Path.Combine(fixture.Workspace.Directory, "Dockerfile"), "FROM scratch\n");
+        }
+        config[legacyField] = JsonSerializer.SerializeToElement("/outside-approved-workspace");
+        File.WriteAllText(fixture.ConfigPath, JsonSerializer.Serialize(config));
+        var workspace = fixture.Workspace with { ConfigurationSha256 = LocalDevContainerRunner.Hash(File.ReadAllBytes(fixture.ConfigPath)) };
+        var authority = fixture.Authority with { Workspaces = fixture.Authority.Workspaces.SetItem(workspace.Id, workspace) };
+        var result = await fixture.Runner(authority).Provision(fixture.Request);
+        Assert.Equal("unsupported_configuration_capability_" + legacyField, result.Code);
+        Assert.False(result.EffectStarted); Assert.Equal(0, fixture.Process.UpCalls); Assert.Equal(0, fixture.Process.ReadConfigurationCalls);
+    }
+
+    [Theory]
+    [InlineData("cacheFrom", true)]
+    [InlineData("futureBuildInput", true)]
+    [InlineData("appPort", false)]
+    [InlineData("futureHostInput", false)]
+    public async Task UnreviewedProfileFieldsCannotIntroduceHostInputs(string field, bool build)
+    {
+        using var fixture = new Fixture();
+        var config = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(fixture.ConfigPath))!;
+        if (build)
+        {
+            config.Remove("image");
+            config["build"] = JsonSerializer.SerializeToElement(new Dictionary<string, object> { ["dockerfile"] = "Dockerfile", ["context"] = ".", [field] = "type=local,src=/unapproved-host-cache" });
+        }
+        else config[field] = JsonSerializer.SerializeToElement("/unapproved-host-input");
+        File.WriteAllText(fixture.ConfigPath, JsonSerializer.Serialize(config));
+        var workspace = fixture.Workspace with { ConfigurationSha256 = LocalDevContainerRunner.Hash(File.ReadAllBytes(fixture.ConfigPath)) };
+        var authority = fixture.Authority with { Workspaces = fixture.Authority.Workspaces.SetItem(workspace.Id, workspace) };
+        var result = await fixture.Runner(authority).Provision(fixture.Request);
+        Assert.Equal((build ? "unsupported_build_field_" : "unsupported_configuration_field_") + field, result.Code);
+        Assert.False(result.EffectStarted); Assert.Equal(0, fixture.Process.UpCalls); Assert.Equal(0, fixture.Process.ReadConfigurationCalls);
+    }
+
     [Theory]
     [InlineData("merged-privileged")]
     [InlineData("merged-capability")]
@@ -138,6 +201,9 @@ public sealed class LocalDevContainerRunnerTests
     [InlineData("merged-run-args")]
     [InlineData("merged-missing")]
     [InlineData("merged-invalid")]
+    [InlineData("resolved-remote-feature")]
+    [InlineData("resolved-outside-feature")]
+    [InlineData("resolved-invalid-feature")]
     public async Task SafeRawConfigurationCannotAuthorizeUnsafeOrMissingEffectiveConfiguration(string mode)
     {
         using var fixture = new Fixture(); fixture.Process.Mode = mode;
@@ -315,7 +381,7 @@ public sealed class LocalDevContainerRunnerTests
         public int Calls, UpCalls, ExecCalls, RemoveCalls, Owners;
         public string Mode = "";
         public string Tree = "";
-        public int OwnershipQueries, InspectCalls;
+        public int OwnershipQueries, InspectCalls, ReadConfigurationCalls;
         public ProvisionIntent Intent = default!;
         public Task<ProvisionProcessResult> Run(ProvisionProcessRequest request, Action<string>? progress, CancellationToken token)
         {
@@ -340,6 +406,7 @@ public sealed class LocalDevContainerRunnerTests
             if (args[1] == "--version") return Success(LocalDevContainerRunner.CliVersion);
             if (args[1] == "read-configuration")
             {
+                ReadConfigurationCalls++;
                 var merged = new Dictionary<string, object?> { ["remoteUser"] = "vscode", ["workspaceFolder"] = "/workspaces/project", ["workspaceMount"] = "source=" + Intent.Workspace.Directory + ",target=/workspaces/project,type=bind" };
                 if (Mode == "merged-privileged") merged["privileged"] = true;
                 if (Mode == "merged-capability") merged["capAdd"] = new[] { "SYS_PTRACE" };
@@ -348,6 +415,13 @@ public sealed class LocalDevContainerRunnerTests
                 if (Mode == "merged-user") merged["remoteUser"] = "root";
                 if (Mode == "merged-run-args") merged["runArgs"] = new[] { "--network=host" };
                 if (Mode == "merged-missing") return Json(new { configuration = new { remoteUser = "vscode" } });
+                if (Mode.StartsWith("resolved-", StringComparison.Ordinal))
+                    return Json(new
+                    {
+                        configuration = new { remoteUser = "vscode" },
+                        mergedConfiguration = merged,
+                        featuresConfiguration = new { featureSets = Mode == "resolved-invalid-feature" ? (object)"invalid" : new[] { new { sourceInformation = new { type = Mode == "resolved-remote-feature" ? "oci" : "file-path", resolvedFilePath = Path.GetDirectoryName(Intent.Workspace.Directory) } } } }
+                    });
                 return Json(new { configuration = new { remoteUser = "vscode" }, mergedConfiguration = Mode == "merged-invalid" ? (object)"invalid" : merged });
             }
             if (args[1] == "up")

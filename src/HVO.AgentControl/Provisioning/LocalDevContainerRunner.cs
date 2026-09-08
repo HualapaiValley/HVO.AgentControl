@@ -14,6 +14,15 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
     public const string CliSha256 = "22b5b3a7345608f552db2f1af589ca06c7274d116778d00aa67cbfe1e1cafc65";
     private const int JsonLimit = 262144;
     private static readonly JsonDocumentOptions ConfigJson = new() { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true, MaxDepth = 64 };
+    // This is a deliberately smaller, reviewed authority profile than the complete
+    // Dev Container schema. New raw fields cannot silently expand host authority.
+    private static readonly ImmutableHashSet<string> AllowedConfigurationFields = ImmutableHashSet.Create(StringComparer.Ordinal,
+        "name", "image", "build", "features", "containerUser", "remoteUser", "updateRemoteUserUID", "userEnvProbe",
+        "overrideCommand", "shutdownAction", "workspaceFolder", "workspaceMount", "runArgs", "init", "privileged",
+        "capAdd", "securityOpt", "mounts", "containerEnv", "remoteEnv", "onCreateCommand", "updateContentCommand",
+        "postCreateCommand", "postStartCommand", "postAttachCommand");
+    private static readonly ImmutableHashSet<string> AllowedBuildFields = ImmutableHashSet.Create(StringComparer.Ordinal,
+        "dockerfile", "context", "args", "target", "options");
 
     internal Func<string, CancellationToken, Task<string>> ReadCliHash { get; init; } = async (path, token) =>
     { await using var stream = File.OpenRead(path); return Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, token)); };
@@ -84,6 +93,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             if (!context.Configuration.Value.TryGetProperty("mergedConfiguration", out var effective) || effective.ValueKind != JsonValueKind.Object)
                 throw new ProvisionFault("Unsupported", "missing_effective_configuration");
             ValidateConfigurationPolicy(intent, effective, resolved: true);
+            ValidateResolvedFeatureSources(intent, config, context.Configuration.Value);
             // A configuration may be changed by another process while resolution runs.
             await VerifySource(intent, token);
             await VerifyCreationInputs(intent, token);
@@ -267,9 +277,19 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
     private static void ValidateSupportedConfig(ProvisionIntent intent, JsonElement config)
     {
         ValidateConfigurationPolicy(intent, config, resolved: false);
+        foreach (var property in config.EnumerateObject())
+            if (!AllowedConfigurationFields.Contains(property.Name)) throw new ProvisionFault("Unsupported", "unsupported_configuration_field_" + property.Name);
         var configDirectory = Path.GetDirectoryName(ConfigPath(intent))!;
         if (config.TryGetProperty("build", out var build))
         {
+            if (config.TryGetProperty("image", out _)) throw new ProvisionFault("Unsupported", "ambiguous_image_and_build_configuration");
+            if (build.ValueKind != JsonValueKind.Object) throw new ProvisionFault("Unsupported", "invalid_build_configuration");
+            // CLI 0.89.0 spreads build.options directly into Docker build argv.
+            // --secret/--ssh/extra contexts can read host paths outside this grant.
+            if (build.TryGetProperty("options", out var options) && (options.ValueKind != JsonValueKind.Array || options.GetArrayLength() != 0))
+                throw new ProvisionFault("Unsupported", "docker_build_options_not_authorized");
+            foreach (var property in build.EnumerateObject())
+                if (!AllowedBuildFields.Contains(property.Name)) throw new ProvisionFault("Unsupported", "unsupported_build_field_" + property.Name);
             foreach (var key in new[] { "context", "dockerfile" })
             {
                 var path = Text(build, key);
@@ -295,7 +315,10 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
         // Reviewed Dockerfile/image configurations only in this slice. Host hooks,
         // external binds, Compose and elevated Docker capabilities need a separate
         // explicit authority model, rather than inheriting the host's privileges.
-        foreach (var key in new[] { "dockerComposeFile", "initializeCommand" })
+        // The pinned CLI gives legacy top-level dockerFile/context precedence over
+        // nested build paths. Reject that alternate form instead of validating a
+        // different path from the one the CLI will consume.
+        foreach (var key in new[] { "dockerComposeFile", "initializeCommand", "dockerFile", "context" })
             if (config.TryGetProperty(key, out _)) throw new ProvisionFault("Unsupported", "unsupported_configuration_capability_" + key);
         foreach (var key in new[] { "mounts", "capAdd", "securityOpt" })
             if (config.TryGetProperty(key, out var list) && (list.ValueKind != JsonValueKind.Array || list.GetArrayLength() != 0))
@@ -308,6 +331,25 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
         if (config.TryGetProperty("runArgs", out var arguments) && (arguments.ValueKind != JsonValueKind.Array ||
             arguments.EnumerateArray().Any(x => x.ValueKind != JsonValueKind.String || !ResourceArgument().IsMatch(x.GetString()!))))
             throw new ProvisionFault("Unsupported", "unsupported_docker_run_arguments");
+    }
+
+    private static void ValidateResolvedFeatureSources(ProvisionIntent intent, JsonElement raw, JsonElement resolution)
+    {
+        var expected = raw.TryGetProperty("features", out var features) && features.EnumerateObject().Any();
+        if (!resolution.TryGetProperty("featuresConfiguration", out var resolved) || resolved.ValueKind == JsonValueKind.Null)
+        {
+            if (expected) throw new ProvisionFault("Unsupported", "resolved_feature_sources_missing");
+            return;
+        }
+        if (resolved.ValueKind != JsonValueKind.Object || !resolved.TryGetProperty("featureSets", out var sets) || sets.ValueKind != JsonValueKind.Array || expected && sets.GetArrayLength() == 0)
+            throw new ProvisionFault("Unsupported", "invalid_resolved_feature_sources");
+        foreach (var set in sets.EnumerateArray())
+        {
+            if (set.ValueKind != JsonValueKind.Object || !set.TryGetProperty("sourceInformation", out var source) ||
+                Text(source, "type") != "file-path" || Text(source, "resolvedFilePath") is not { } path)
+                throw new ProvisionFault("Unsupported", "only_source_pinned_local_features_supported");
+            if (!Within(CanonicalPath(path, true), intent.Workspace.Directory)) throw new ProvisionFault("Unsupported", "resolved_feature_outside_workspace");
+        }
     }
 
     private async Task<ProvisionContainerObservation?> ObserveOwners(ProvisionIntent intent, CancellationToken token)
