@@ -14,6 +14,7 @@ public partial class Home
     private IJSObjectReference? module;
     private WorkerDetail? detail;
     private string? selectedId, appliedWorkerId, promptRequestId;
+    private string outcomeCommandId = "";
     private bool includeGuidance;
     private int progressMinutes = 5;
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
@@ -39,6 +40,8 @@ public partial class Home
             detail = null; error = "This worker is unavailable. Choose another agent conversation."; return;
         }
         detail = await Store.Detail(selectedId);
+        var settled = detail.Commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled).ToList();
+        if (!settled.Any(x => x.Id == outcomeCommandId)) outcomeCommandId = settled.OrderByDescending(x => x.CreatedAt).FirstOrDefault()?.Id ?? "";
     }
     private void SelectConversation(ChangeEventArgs args)
     {
@@ -61,7 +64,10 @@ public partial class Home
         notice = "A progress inquiry is queued; current observed state remains visible above.";
     });
     private Task Abort() => Execute(async () => { await Store.Abort(selectedId!, Guid.NewGuid().ToString()); notice = "Cancellation request recorded. Watch delivery and native state for the result."; });
-    private Task RecordOutcome() => Execute(async () => { await Store.SetOutcome(selectedId!, new(outcome, evidence)); evidence = ""; });
+    private Task RecordOutcome() => Execute(async () =>
+    {
+        await Store.SetOutcome(selectedId!, new(outcomeCommandId, detail!.Worker.Revision, outcome, evidence)); evidence = "";
+    });
     private string ReplyId(PendingRequest request)
     {
         if (replyIds.TryGetValue(request.Id, out var prior) && detail?.Commands.Any(x => x.Id == prior && x.State == Delivery.Cancelled) == true)

@@ -341,7 +341,7 @@ public sealed record PromptInput(string Id, string Text, long ExpectedRevision, 
 public sealed record ReplyInput(string Id, string RequestId, string? Permission, string[][]? Answers, bool Reject = false);
 public sealed record QueueEdit(string Action);
 public sealed record InspectWorkspaceInput(string Id, string RuntimeId, string Directory);
-public sealed record OutcomeInput(string Outcome, string Evidence);
+public sealed record OutcomeInput(string CommandId, long ExpectedRevision, string Outcome, string Evidence);
 public sealed record ControlSnapshot(long Sequence, List<RuntimeRecord> Runtimes, List<WorkerRecord> Workers,
     List<CommandRecord> Commands, List<PendingRequest> Requests);
 public sealed record WorkerDetail(WorkerRecord Worker, List<TranscriptMessage> Messages, List<CommandRecord> Commands,
