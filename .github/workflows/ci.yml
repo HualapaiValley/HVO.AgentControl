@@ -11,6 +11,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  control-sidecar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test isolated OpenCode sidecar lifecycle without provider credentials
+        run: python3 tests/control_sidecar_smoke.py
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -380,6 +380,10 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                 default: throw new ControlException("Unsupported command.");
             }
         }
+        catch (OperationCanceledException) when (command.Kind == "Reply" && !mutationStarted && token.IsCancellationRequested)
+        {
+            await store.RecordUnsentReplyPreflightFailure(command.Id, "Backend stopped during read-only native preflight.");
+        }
         catch (OperationCanceledException) when (command.Kind == "Prompt" && !mutationStarted && token.IsCancellationRequested)
         {
             // Shutdown interrupted only read-only checks; no native submission needs reconciliation.
@@ -394,9 +398,15 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             });
         }
         catch (NativeRejectedException ex) when (ex.Status is >= 400 and < 500)
-        { await Complete(command.Id, Delivery.Failed, SafeError(ex)); }
+        {
+            if (command.Kind == "Reply" && !mutationStarted && await store.RecordUnsentReplyPreflightFailure(command.Id, SafeError(ex))) return;
+            await Complete(command.Id, Delivery.Failed, SafeError(ex));
+        }
         catch (Exception ex)
-        { await Complete(command.Id, mutationStarted ? Delivery.Unknown : Delivery.Failed, SafeError(ex)); }
+        {
+            if (command.Kind == "Reply" && !mutationStarted && await store.RecordUnsentReplyPreflightFailure(command.Id, SafeError(ex))) return;
+            await Complete(command.Id, mutationStarted ? Delivery.Unknown : Delivery.Failed, SafeError(ex));
+        }
     }
 
     private Task<bool> CreationProgress(string id, string detail) => store.Write(async db =>
