@@ -70,6 +70,8 @@ Keep current routes compatible while introducing new resources, and publish a ro
 
 Browser cookie authentication retains CSRF protection. Headless clients require a designed scoped authentication mechanism and rotation/revocation rather than copied owner cookies; do not claim this already exists. Project/host/operation permissions apply equally to UI and automation. MCP tools are bounded wrappers over the same service contracts, not arbitrary Docker or database access. Add endpoint-level authorization, idempotency, concurrency and restart tests for every capability.
 
+The first #43 operation slice implements authenticated create/list/detail/cancel/reconcile under `/api/v1/provisioning/operations`, plus a durable runner attempt/effect ledger. Its accepted HTTP 202 state remains `AwaitingHostAuthority`; there is no registered executor or #6 capacity authority. See [Provisioning operations API](PROVISIONING_OPERATIONS_API.md). This partial contract does not satisfy the cold-creation or fleet-transition gates below.
+
 ## 6. Automated acceptance before fleet transition
 
 #43 owns the real UI/API lifecycle implementation and disposable end-to-end automation; #13 supplies the broader recovery acceptance matrix. Build tests alongside each slice. A test requiring unavailable fixtures reports a skip/blocker rather than success.

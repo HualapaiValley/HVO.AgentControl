@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Text.Json;
+using HVO.AgentControl.Core;
+using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Provisioning;
 using Xunit;
 
@@ -338,6 +340,43 @@ public sealed class LocalDevContainerRunnerTests
         Assert.True(interrupted.Started); Assert.True(interrupted.Interrupted);
     }
 
+    [Fact]
+    public async Task DbLedgerDrivesRunnerOnceAndReconstructedRunnerOnlyObservesTheCommittedEffect()
+    {
+        using var fixture = new Fixture(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"));
+        var capture = new CapturingLedger();
+        Assert.Equal("captured_intent", (await fixture.RunnerWithLedger(capture).Provision(fixture.Request)).Code);
+        var intent = Assert.IsType<ProvisionIntent>(capture.Intent);
+        string data;
+        string secrets;
+        await using (var app = new TestApp())
+        {
+            var host = await app.Store.CreateHost(new(Guid.NewGuid().ToString("N"), fixture.Authority.HostId, "Fixture host", "PhysicalMachine"));
+            var project = await app.Store.CreateProject(new(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), "Fixture source", "https://github.com/example/fixture"));
+            var runtime = await app.Store.SaveRuntime(PersistenceTests.Profile());
+            var environment = await app.Store.ConfigureRuntimeEnvironment(runtime.Id, new(Guid.NewGuid().ToString("N"), 0, runtime.Revision,
+                host.Id, RuntimeEnvironmentKind.ManagedDevcontainer, project.Id, fixture.Workspace.ConfigurationPath));
+            var input = new CreateProvisionOperationInput(fixture.Request.OperationId, host.Id, host.Revision, runtime.Id, environment.RuntimeRevision,
+                environment.Revision, project.Id, project.Revision, fixture.Workspace.Id, fixture.Workspace.SourceRevision,
+                fixture.Workspace.ConfigurationPath, fixture.Workspace.ConfigurationSha256, 2000, 2L * 1024 * 1024 * 1024,
+                1000, 1024L * 1024 * 1024);
+            var operation = await app.Store.CreateProvisionOperation(input);
+            await app.Store.ApproveProvisionAuthority(operation.Id, intent);
+            await app.Store.ApproveProvisionCapacity(operation.Id,
+                new("fixture-capacity", 1, ControlStore.Now + 60000, 2000, 2L * 1024 * 1024 * 1024, 1000, 1024L * 1024 * 1024));
+            Assert.Equal("VerifiedEnvironment", (await fixture.RunnerWithLedger(new DbProvisionAttemptLedger(app.Store)).Provision(fixture.Request)).State);
+            Assert.Equal(1, fixture.Process.UpCalls);
+            data = app.DataPath;
+            secrets = app.SecretPath;
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var replay = await fixture.RunnerWithLedger(new DbProvisionAttemptLedger(restarted.Store)).Provision(fixture.Request);
+        Assert.Equal("Observed", replay.State);
+        Assert.False(replay.EffectStarted);
+        Assert.Equal(1, fixture.Process.UpCalls);
+    }
+
     private static string SnapshotTree(string directory) => string.Concat(Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal).Select(path =>
     {
         var content = File.ReadAllBytes(path);
@@ -351,11 +390,11 @@ public sealed class LocalDevContainerRunnerTests
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "hvo-cli-unit-" + Guid.NewGuid().ToString("N"));
         public ApprovedProvisionWorkspace Workspace { get; }
         public ProvisionerHostAuthority Authority { get; }
-        public HostProvisionRequest Request { get; } = new(Guid.NewGuid().ToString("D"), "workspace");
+        public HostProvisionRequest Request { get; }
         public FakeProcess Process { get; }
         public IProvisionAttemptLedger Ledger { get; }
         public string ConfigPath => Path.Combine(Workspace.Directory, "devcontainer.json");
-        public Fixture()
+        public Fixture(string hostId = "fixture", string workspaceId = "workspace")
         {
             Directory.CreateDirectory(Root);
             var workspace = Path.Combine(Root, "workspace"); Directory.CreateDirectory(workspace);
@@ -363,17 +402,30 @@ public sealed class LocalDevContainerRunnerTests
             foreach (var file in new[] { "node", "cli.js", "docker", "git", "socket" }) File.WriteAllText(Path.Combine(tools, file), "synthetic fixture");
             var config = Path.Combine(workspace, "devcontainer.json");
             File.WriteAllText(config, "{\"image\":\"fixture@sha256:" + new string('a', 64) + "\",\"remoteUser\":\"vscode\",\"workspaceFolder\":\"/workspaces/project\",\"workspaceMount\":\"source=${localWorkspaceFolder},target=/workspaces/project,type=bind\"}");
-            Workspace = new("workspace", workspace, "https://example.invalid/fixture.git", new string('b', 40), "devcontainer.json", LocalDevContainerRunner.Hash(File.ReadAllBytes(config)), "vscode", "/workspaces/project", [new("dotnet", ["dotnet", "--version"], "10.0.400")]);
-            Authority = new("fixture", 1, "LocalLinux", Root, tools, Path.Combine(tools, "node"), Path.Combine(tools, "cli.js"), Path.Combine(tools, "docker"), Path.Combine(tools, "git"), Path.Combine(tools, "socket"), "engine", ImmutableDictionary<string, ApprovedProvisionWorkspace>.Empty.Add(Workspace.Id, Workspace));
+            Workspace = new(workspaceId, workspace, "https://github.com/example/fixture", new string('b', 40), "devcontainer.json", LocalDevContainerRunner.Hash(File.ReadAllBytes(config)), "vscode", "/workspaces/project", [new("dotnet", ["dotnet", "--version"], "10.0.400")]);
+            Authority = new(hostId, 1, "LocalLinux", Root, tools, Path.Combine(tools, "node"), Path.Combine(tools, "cli.js"), Path.Combine(tools, "docker"), Path.Combine(tools, "git"), Path.Combine(tools, "socket"), "engine", ImmutableDictionary<string, ApprovedProvisionWorkspace>.Empty.Add(Workspace.Id, Workspace));
+            Request = new(Guid.NewGuid().ToString("D"), Workspace.Id);
             Process = new FakeProcess { Tree = SnapshotTree(workspace) };
             Ledger = new ObservingLedger(new FixtureFileLedger(Path.Combine(Root, "ledger")), intent => Process.Intent = intent);
         }
         public LocalDevContainerRunner Runner(ProvisionerHostAuthority? authority = null) => new(authority ?? Authority, Ledger, Process) { ReadCliHash = (_, _) => Task.FromResult(LocalDevContainerRunner.CliSha256) };
+        public LocalDevContainerRunner RunnerWithLedger(IProvisionAttemptLedger ledger) => new(Authority,
+            new ObservingLedger(ledger, intent => Process.Intent = intent), Process)
+        { ReadCliHash = (_, _) => Task.FromResult(LocalDevContainerRunner.CliSha256) };
         public void Dispose() => Directory.Delete(Root, true);
     }
     private sealed class ObservingLedger(IProvisionAttemptLedger inner, Action<ProvisionIntent> observe) : IProvisionAttemptLedger
     {
         public Task<IProvisionAttempt> Acquire(ProvisionIntent intent, ProvisionAction action, CancellationToken token) { observe(intent); return inner.Acquire(intent, action, token); }
+    }
+    private sealed class CapturingLedger : IProvisionAttemptLedger
+    {
+        public ProvisionIntent? Intent { get; private set; }
+        public Task<IProvisionAttempt> Acquire(ProvisionIntent intent, ProvisionAction action, CancellationToken token)
+        {
+            Intent = intent;
+            throw new ProvisionAdmissionException("captured_intent");
+        }
     }
     private sealed class FakeProcess : IProvisionProcessRunner
     {
