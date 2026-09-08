@@ -42,7 +42,7 @@ public partial class Home
         }
         try
         {
-            var loaded = await Store.Detail(current.WorkerId!);
+            var loaded = await ReadDetail(current.WorkerId!);
             if (selection.IsCurrent(current)) detail = loaded;
         }
         catch when (!selection.IsCurrent(current)) { }
@@ -112,7 +112,7 @@ public partial class Home
         var selected = selection.Capture(current.Worker.Id);
         var before = olderMessages.Concat(current.Messages).Select(x => (long?)x.NativeCreatedAt).Min();
         WorkerDetail history;
-        try { history = await Store.Detail(current.Worker.Id, before); }
+        try { history = await ReadDetail(current.Worker.Id, before); }
         catch when (!selection.IsCurrent(selected)) { return; }
         if (!selection.IsCurrent(selected)) return;
         olderMessages.AddRange(history.Messages.Where(x => olderMessages.All(y => y.NativeId != x.NativeId)));
@@ -124,6 +124,7 @@ public partial class Home
         if (current is null || current.Worker.Id != selectedId) throw new ControlException("The selected conversation changed. Wait for its details before taking an action.");
         return current;
     }
+    protected virtual Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => Store.Detail(workerId, before);
     private static string Timestamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToString("MMM d HH:mm:ss 'UTC'");
     private static string Pretty(string json)
     {
