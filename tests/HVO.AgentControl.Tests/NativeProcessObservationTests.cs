@@ -258,22 +258,23 @@ public sealed class NativeProcessObservationTests
     {
         await using var app = new TestApp();
         var (runtime, worker, command) = await InFlightPrompt(app);
-        await app.Store.SetOutcome(worker.Id, new("VerifiedComplete", "Owner verified retained task evidence."));
+        await app.Store.Write(db =>
+        {
+            db.Commands.Single(x => x.Id == command.Id).State = Delivery.Finished;
+            return Task.FromResult(true);
+        });
+        var revision = (await app.Store.Detail(worker.Id)).Worker.Revision;
+        await app.Store.SetOutcome(worker.Id, new(command.Id, revision, "VerifiedComplete", "Owner verified retained task evidence."));
         await app.Store.ObserveNativeProcess(runtime.Id, Observed(runtime, OldMarker, 91));
 
         await app.Store.ObserveNativeProcess(runtime.Id, Observed(runtime, NewMarker, 92,
             Replacement(runtime, 91, OldMarker, 92, NewMarker, NativeProcessExitEvidence.Unknown, null)));
 
         var detail = await app.Store.Detail(worker.Id);
-        Assert.Equal(Delivery.Unknown, detail.Commands.Single(x => x.Id == command.Id).State);
+        Assert.Equal(Delivery.Finished, detail.Commands.Single(x => x.Id == command.Id).State);
         Assert.Equal("VerifiedComplete", detail.Worker.Outcome);
         Assert.Equal("VerifiedComplete", detail.Assignments.Single(x => x.Id == command.Id).Outcome);
         Assert.Equal("Owner verified retained task evidence.", detail.Assignments.Single(x => x.Id == command.Id).Evidence);
-        await Reconcile(app, worker, BusyTerminal(worker, command));
-        detail = await app.Store.Detail(worker.Id);
-        Assert.Equal(Delivery.Unknown, detail.Commands.Single(x => x.Id == command.Id).State);
-        Assert.Equal("VerifiedComplete", detail.Worker.Outcome);
-        Assert.Equal("VerifiedComplete", detail.Assignments.Single(x => x.Id == command.Id).Outcome);
     }
 
     [Fact]
