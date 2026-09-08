@@ -112,9 +112,18 @@ public sealed partial class CoordinationTests
         var held = (await restarted.Store.Coordinations()).Single();
         Assert.True(Json.Read<CoordinatorContext>(held.InputJson).NativeFailure!.Held);
         await restarted.Store.PromptCoordination(runId, new(Guid.NewGuid().ToString(), held.Revision, "Please continue"));
-        Assert.False(await restarted.Store.CoordinationTick()); // A text follow-up does not fix the rejected request.
+        Assert.True(await restarted.Store.CoordinationTick()); // Restore the held explanation after the follow-up.
         held = (await restarted.Store.Coordinations()).Single();
+        Assert.Equal("Waiting", held.State);
+        Assert.Contains("Coordinator held", held.Detail);
         await restarted.Store.ControlCoordination(runId, new(held.Revision, "pause"));
+        var unchangedPause = (await restarted.Store.Coordinations()).Single();
+        await restarted.Store.ControlCoordination(runId, new(unchangedPause.Revision, "resume"));
+        Assert.True(await restarted.Store.CoordinationTick());
+        var unchangedResume = (await restarted.Store.Coordinations()).Single();
+        Assert.Equal("Waiting", unchangedResume.State);
+        Assert.Contains("Coordinator held", unchangedResume.Detail);
+        await restarted.Store.ControlCoordination(runId, new(unchangedResume.Revision, "pause"));
         await ChangeNativeDecisionRoute(restarted.Store, coordinatorId);
         Assert.False(await restarted.Store.CoordinationTick());
         await restarted.Store.CoordinationSupervisionTick(ControlStore.Now + 60000);

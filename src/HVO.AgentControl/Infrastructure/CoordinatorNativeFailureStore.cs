@@ -71,34 +71,45 @@ public sealed partial class ControlStore
             poolId, pool?.Revision, failure.HasText, failure.HasTools, PreviousCommandId: context.NativeFailure?.CommandId);
         run.InputJson = Json.Write(context with { NativeFailure = checkpoint, Repair = null, Recovery = null });
         run.State = "Waiting"; run.Revision++;
-        run.Detail = $"Coordinator held after native {failure.Category}" + (failure.Status is { } status ? $" (HTTP {status})" : "") +
-            ". No routing actions were applied. " +
-            (failure.HasTools ? "Tool evidence requires review; stop this run and start a reviewed recovery after checking effects. " :
-             checkpoint.ProviderId.Length == 0 || checkpoint.ModelId.Length == 0 ? "Effective request routing is unavailable; stop this run and start a reviewed recovery. " :
-             "Select a verified available coordinator route or recover its provider access. Automatic fallback dispatch is not configured. ") +
-            "Worker monitoring continues; the failed turn will not be replayed.";
+        run.Detail = NativeDecisionHoldDetail(checkpoint);
         Event(db, "CoordinatorNativeFailureHeld", command.RuntimeId, command.WorkerId, command.Id,
             new { run.Id, failure = checkpoint }, provenance: "service", nativeId: failure.AssistantId);
     }
 
+    private static string NativeDecisionHoldDetail(CoordinatorNativeFailure failure) =>
+        $"Coordinator held after native {failure.Category}" + (failure.Status is { } status ? $" (HTTP {status})" : "") +
+            ". No routing actions were applied. " +
+            (failure.HasTools ? "Tool evidence requires review; stop this run and start a reviewed recovery after checking effects. " :
+             failure.ProviderId.Length == 0 || failure.ModelId.Length == 0 ? "Effective request routing is unavailable; stop this run and start a reviewed recovery. " :
+             "Select a verified available coordinator route or recover its provider access. Automatic fallback dispatch is not configured. ") +
+            "Worker monitoring continues; the failed turn will not be replayed.";
+
+    private static bool RetainNativeDecisionHold(CoordinationRun run, CoordinatorNativeFailure held)
+    {
+        var detail = NativeDecisionHoldDetail(held);
+        if (run.State == "Waiting" && run.Detail == detail) return false;
+        run.State = "Waiting"; run.Detail = detail; run.Revision++;
+        return true;
+    }
+
     private static async Task<bool> ReleaseNativeDecisionHold(ControlDb db, CoordinationRun run, CoordinatorNativeFailure held)
     {
-        if (held.HasTools) return false;
+        if (held.HasTools) return RetainNativeDecisionHold(run, held);
         var coordinator = await db.Workers.FindAsync(run.CoordinatorWorkerId);
         if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator || coordinator.Stale ||
             coordinator.Activity != "Idle" || coordinator.LastObservedAt is null || coordinator.LastObservedAt < Now - 15000 ||
             await db.Commands.AnyAsync(x => x.WorkerId == coordinator.Id && (x.State == Delivery.Queued || x.State == Delivery.Dispatching ||
-                x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown))) return false;
+                x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown))) return RetainNativeDecisionHold(run, held);
         // Missing legacy effective-model evidence cannot authorize an automatic new attempt.
-        if (held.ProviderId.Length == 0 || held.ModelId.Length == 0) return false;
+        if (held.ProviderId.Length == 0 || held.ModelId.Length == 0) return RetainNativeDecisionHold(run, held);
         var changedRoute = coordinator.ProviderId != held.ProviderId || coordinator.ModelId != held.ModelId ||
             coordinator.Agent != held.Agent || coordinator.Variant != held.Variant;
         var pool = await db.Set<ProviderPool>().FindAsync("provider:" + coordinator.ProviderId);
         var recoveredProvider = held.Category is "AuthenticationRequired" or "Exhausted" or "Throttled" or "Unavailable" &&
             pool is { State: "Available" } && pool.Id == held.ProviderPoolId && held.ProviderPoolRevision is { } revision && pool.Revision > revision;
-        if (!changedRoute && !recoveredProvider || pool is not null && pool.State != "Available") return false;
+        if (!changedRoute && !recoveredProvider || pool is not null && pool.State != "Available") return RetainNativeDecisionHold(run, held);
         try { ValidateModelOptions(Json.Read<List<ModelChoice>>(coordinator.ModelsJson), coordinator.ProviderId, coordinator.ModelId, coordinator.Agent, coordinator.Variant); }
-        catch (Exception ex) when (ex is ControlException or JsonException or InvalidOperationException) { return false; }
+        catch (Exception ex) when (ex is ControlException or JsonException or InvalidOperationException) { return RetainNativeDecisionHold(run, held); }
         var context = ReadRecoveryContext(run);
         run.InputJson = Json.Write(context with { NativeFailure = held with { Held = false }, Repair = null, Recovery = null });
         run.DecisionCommandId = null; run.LastObservation = ""; run.State = "Ready"; run.Revision++;
