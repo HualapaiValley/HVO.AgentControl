@@ -15,6 +15,7 @@ public sealed record DevContainerCliEvidence(
     string ConfigurationProjectId,
     string DevcontainerPath,
     string CliVersion,
+    string IntentDigest,
     IReadOnlyDictionary<string, string> Labels);
 
 public sealed record DevContainerCliObservation(
@@ -29,4 +30,5 @@ public sealed record DevContainerCliOperationResult(
     DevContainerCliEvidence? Requested,
     DevContainerCliEvidence? Resolved,
     DevContainerCliObservation? Observed,
+    string? IntentDigest,
     string Output);
