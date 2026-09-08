@@ -137,6 +137,43 @@ public sealed class AssignmentCapabilitiesTests
     }
 
     [Fact]
+    public async Task EventRetentionBoundsCoalescedAliasesAndPreservesRecentReceiptAfterRestart()
+    {
+        string data, secrets, workerId, firstId, recentAliasId;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var worker = await PersistenceTests.SeedWorker(app.Store); workerId = worker.Id;
+            var first = await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString())); firstId = first.Id;
+            var aliases = Enumerable.Range(0, 3).Select(_ => Guid.NewGuid().ToString()).ToArray(); recentAliasId = aliases[^1];
+            foreach (var alias in aliases) Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, new(alias))).Id);
+            await app.Store.Write(async db =>
+            {
+                (await db.Commands.FindAsync(first.Id))!.State = Delivery.Finished;
+                for (var index = 0; index < 110; index++) ControlStore.Event(db, "RetentionFixture", payload: new { index });
+                return true;
+            });
+            var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions { EventRetention = 2 }), NullLogger<RuntimeSupervisor>.Instance);
+            var retain = typeof(RuntimeSupervisor).GetMethod("Retain", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            await (Task<bool>)retain.Invoke(supervisor, null)!;
+
+            var retainedAliases = await app.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced")
+                .OrderBy(x => x.Sequence).Select(x => x.CommandId).ToListAsync());
+            Assert.Equal(aliases[1..], retainedAliases);
+            Assert.DoesNotContain(await app.Store.Read(db => db.Events.Where(x => x.Type == "RetentionFixture").ToListAsync()),
+                x => x.Payload.Contains("\"index\":0", StringComparison.Ordinal));
+            Assert.NotNull(await app.Store.Read(async db => await db.Commands.FindAsync(first.Id)));
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var replayed = await restarted.Store.DiscoverCapabilities(workerId, new(recentAliasId));
+
+        Assert.Equal(firstId, replayed.Id);
+        Assert.Equal(Delivery.Finished, replayed.State);
+        Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+    }
+
+    [Fact]
     public async Task CoordinatorRoleRejectsOrdinaryTasksAndEitherKindOfInvalidParticipant()
     {
         await using var app = new TestApp(); var coordinator = await PersistenceTests.SeedWorker(app.Store);
