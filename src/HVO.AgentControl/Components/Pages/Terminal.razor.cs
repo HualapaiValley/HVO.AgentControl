@@ -13,6 +13,8 @@ public partial class Terminal
     private ElementReference host;
     private IJSObjectReference? module;
     private DotNetObjectReference<Terminal>? self;
+    private int opening;
+    private bool disposed;
     protected override async Task OnInitializedAsync()
     {
         runtimes = (await Store.Snapshot()).Runtimes;
@@ -20,23 +22,43 @@ public partial class Terminal
     }
     private async Task Open()
     {
+        var operation = ++opening;
         try
         {
-            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Terminal.razor.js");
+            connected = true; status = "Loading terminal assets…";
+            var imported = module is null;
+            var loaded = module ?? await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Terminal.razor.js");
+            if (disposed || operation != opening)
+            {
+                if (imported) await loaded.DisposeAsync();
+                return;
+            }
+            module = loaded;
             self ??= DotNetObjectReference.Create(this);
-            connected = true; status = "Connecting…";
+            status = "Connecting…";
             await module.InvokeVoidAsync("open", host, runtimeId, self);
         }
-        catch (JSException) { connected = false; status = "Unable to open terminal. Check runtime SSH access and sign-in."; }
+        catch (JSException)
+        {
+            if (!disposed && operation == opening)
+            {
+                connected = false;
+                status = "Unable to open terminal. Check runtime SSH access and sign-in.";
+            }
+        }
     }
     [JSInvokable] public Task TerminalState(bool active, string message) => InvokeAsync(() => { connected = active; status = message; StateHasChanged(); });
-    private async Task Close() { if (module is not null) await module.InvokeVoidAsync("close"); connected = false; status = "Terminal closed."; }
+    private async Task Close() { opening++; if (module is not null) await module.InvokeVoidAsync("close"); connected = false; status = "Terminal closed."; }
     public async ValueTask DisposeAsync()
     {
-        if (module is not null)
+        disposed = true; opening++;
+        var loaded = module;
+        module = null;
+        if (loaded is not null)
         {
-            try { await module.InvokeVoidAsync("close"); await module.DisposeAsync(); } catch (JSDisconnectedException) { }
+            try { await loaded.InvokeVoidAsync("close"); await loaded.DisposeAsync(); } catch (JSDisconnectedException) { }
         }
         self?.Dispose();
+        self = null;
     }
 }
