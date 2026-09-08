@@ -17,6 +17,8 @@
             <div @key="pool.Id">
                 <h3>@pool.ProviderId · @pool.State</h3>
                 <p>Remaining allowance: unknown</p>
+                @if (pool.RecoveryOwnershipUnknown) { <p>Recovery ownership needs reconciliation. Verifying access cannot release this hold.</p> }
+                @if (pool.RecoveryCommandId.Length > 0) { <p>Reserved recovery command: <code>@pool.RecoveryCommandId</code>. Other requests wait for its settlement.</p> }
                 <p class="meta">Affected workers: @string.Join(", ", (snapshot?.Workers ?? []).Where(x => x.ProviderId == pool.ProviderId && !x.Archived).Select(x => x.Name))</p>
                 @if (pool.RetryAt is { } retry) { <p>Retry no earlier than @DateTimeOffset.FromUnixTimeMilliseconds(retry).ToString("u")</p> }
                 @if (pool.State != "Available")
@@ -28,7 +30,7 @@
         @if (pools.Any(x => x.State != "Available"))
         {
             <label><input type="checkbox" @bind="recoveryVerified" /> I verified provider access and available allowance</label>
-            <p class="meta">Resuming permits queued instructions. It does not replay failed tasks or purchase additional access.</p>
+            <p class="meta">Resuming verifies access only. Outstanding recovery reservations still block other requests; failed tasks are not replayed and no additional access is purchased.</p>
         }
     </section>
     <section class="panel" aria-label="OpenCode Go key">

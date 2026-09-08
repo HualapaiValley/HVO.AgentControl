@@ -7,7 +7,8 @@ namespace HVO.AgentControl.Infrastructure;
 public sealed partial class ControlStore
 {
     private sealed record NativeDecisionFailure(string Category, int? Status, long? RetryAt,
-        string? AssistantId, string? SessionId, bool HasText, bool HasTools);
+        string? AssistantId, string? SessionId, bool HasText, bool HasTools,
+        string? ActualProviderId, string? ActualModelId, bool AutomaticCompaction);
 
     // ResultJson is already caller-scoped by native reconciliation. Do not scan other
     // session messages, infer ownership from text, or salvage actions from failed turns.
@@ -44,8 +45,10 @@ public sealed partial class ControlStore
                     "MessageOutputLengthError" => "OutputLimit",
                     _ => "NativeError"
                 });
+                var automaticCompaction = info.TryGetProperty("summary", out var summary) && summary.ValueKind == JsonValueKind.True;
                 failure = new(category, providerFailure?.Status ?? status, providerFailure?.RetryAt,
-                    BoundNativeId(NativeText(info, "id")), BoundNativeId(NativeText(info, "sessionID")), false, false);
+                    BoundNativeId(NativeText(info, "id")), BoundNativeId(NativeText(info, "sessionID")), false, false,
+                    NativeRoute(info, "providerID", "providerID"), NativeRoute(info, "modelID", "id"), automaticCompaction);
             }
             return failure is null ? null : failure with { HasText = hasText, HasTools = hasTools };
         }
@@ -58,6 +61,17 @@ public sealed partial class ControlStore
 
     private static string? BoundNativeId(string? value) => value is { Length: > 200 } ? null : value;
 
+    private static string? NativeRoute(JsonElement info, string directName, string nestedName)
+    {
+        var direct = BoundRoute(NativeText(info, directName));
+        var nested = info.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.Object
+            ? BoundRoute(NativeText(model, nestedName)) : null;
+        return direct is not null && nested is not null && direct != nested ? null : direct ?? nested;
+    }
+
+    private static string? BoundRoute(string? value) => value is { Length: > 0 and <= 200 } &&
+        !string.IsNullOrWhiteSpace(value) && value.All(x => !char.IsControl(x)) ? value : null;
+
     private static async Task HoldNativeDecision(ControlDb db, CoordinationRun run, CommandRecord command,
         CoordinatorContext context, NativeDecisionFailure failure)
     {
@@ -68,7 +82,9 @@ public sealed partial class ControlStore
         var pool = await db.Set<ProviderPool>().FindAsync(poolId);
         var checkpoint = new CoordinatorNativeFailure(command.Id, command.NativeMessageId, failure.SessionId, failure.AssistantId,
             failure.Category, failure.Status, failure.RetryAt, request.ProviderId ?? "", request.ModelId ?? "", request.Agent ?? "", request.Variant ?? "",
-            poolId, pool?.Revision, failure.HasText, failure.HasTools, PreviousCommandId: context.NativeFailure?.CommandId);
+            poolId, pool?.Revision, failure.HasText, failure.HasTools, PreviousCommandId: context.NativeFailure?.CommandId,
+            ActualProviderId: failure.ActualProviderId, ActualModelId: failure.ActualModelId,
+            AutomaticCompaction: failure.AutomaticCompaction);
         run.InputJson = Json.Write(context with { NativeFailure = checkpoint, Repair = null, Recovery = null });
         run.State = "Waiting"; run.Revision++;
         run.Detail = NativeDecisionHoldDetail(checkpoint);
@@ -79,7 +95,8 @@ public sealed partial class ControlStore
     private static string NativeDecisionHoldDetail(CoordinatorNativeFailure failure) =>
         $"Coordinator held after native {failure.Category}" + (failure.Status is { } status ? $" (HTTP {status})" : "") +
             ". No routing actions were applied. " +
-            (failure.HasTools ? "Tool evidence requires review; stop this run and start a reviewed recovery after checking effects. " :
+            (failure.AutomaticCompaction ? "Automatic compaction failed; use an explicit reviewed session recovery because changing the caller route does not prove the compaction route recovered. " :
+             failure.HasTools ? "Tool evidence requires review; stop this run and start a reviewed recovery after checking effects. " :
              failure.ProviderId.Length == 0 || failure.ModelId.Length == 0 ? "Effective request routing is unavailable; stop this run and start a reviewed recovery. " :
              "Select a verified available coordinator route or recover its provider access. Automatic fallback dispatch is not configured. ") +
             "Worker monitoring continues; the failed turn will not be replayed.";
@@ -94,7 +111,7 @@ public sealed partial class ControlStore
 
     private static async Task<bool> ReleaseNativeDecisionHold(ControlDb db, CoordinationRun run, CoordinatorNativeFailure held)
     {
-        if (held.HasTools) return RetainNativeDecisionHold(run, held);
+        if (held.HasTools || held.AutomaticCompaction) return RetainNativeDecisionHold(run, held);
         var coordinator = await db.Workers.FindAsync(run.CoordinatorWorkerId);
         if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator || coordinator.Stale ||
             coordinator.Activity != "Idle" || coordinator.LastObservedAt is null || coordinator.LastObservedAt < Now - 15000 ||

@@ -1,4 +1,6 @@
 using System.Text.Json.Serialization;
+using HVO.AgentControl.Core;
+using HVO.AgentControl.Infrastructure;
 
 namespace HVO.AgentControl.GitHub;
 
@@ -10,6 +12,8 @@ public sealed class GitHubAccess
     [JsonIgnore] public string PrivateKeyReference { get; set; } = "";
     public string RepositoriesJson { get; set; } = "[]";
     public string State { get; set; } = "Pending";
+    public string CredentialState { get; set; } = GitHubCredentialState.Pending;
+    [JsonIgnore] public string CredentialConfigurationFingerprint { get; set; } = "";
     public string Detail { get; set; } = "";
     public long? ExpiresAt { get; set; }
     public long Revision { get; set; }
@@ -18,13 +22,26 @@ public sealed class GitHubAccess
     public string CommitStatusesPermission { get; set; } = GitHubPermissionState.Unknown;
     public string ActionsPermission { get; set; } = GitHubPermissionState.Unknown;
     public long? PermissionsVerifiedAt { get; set; }
-    public string ExactCiInspectionState => new[] { ChecksPermission, CommitStatusesPermission } switch
-    {
-        var permissions when permissions.Any(x => x == GitHubPermissionState.Denied) => "PermissionDenied",
-        var permissions when permissions.Any(x => x != GitHubPermissionState.Granted) => "Unknown",
-        _ when State == "Ready" => "Ready",
-        _ => "CredentialUnavailable"
-    };
+    [JsonIgnore] public int EnvironmentPolicyVersion { get; set; }
+    [JsonIgnore] public string EnvironmentPolicyFingerprint { get; set; } = "";
+    [JsonIgnore] public int? EnvironmentProcessId { get; set; }
+    [JsonIgnore] public string EnvironmentProcessIncarnation { get; set; } = "";
+    [JsonIgnore] public long? EnvironmentVerifiedAt { get; set; }
+    public string ExactCiInspectionState => CiInspectionState(ControlStore.Now);
+
+    public string CiInspectionState(long now, RuntimeRecord? runtime = null, NativeProcessObservationEvidence? native = null) =>
+        new[] { ChecksPermission, CommitStatusesPermission } switch
+        {
+            var permissions when permissions.Any(x => x == GitHubPermissionState.Denied) => "PermissionDenied",
+            var permissions when permissions.Any(x => x != GitHubPermissionState.Granted) => "Unknown",
+            _ when State == "Ready" && GitHubProcessEnvironment.HasCurrentEvidence(this, now, runtime, native) => "Ready",
+            _ => "CredentialUnavailable"
+        };
+}
+
+public static class GitHubCredentialState
+{
+    public const string Pending = "Pending", Delivered = "Delivered", Unknown = "Unknown";
 }
 
 public static class GitHubPermissionState

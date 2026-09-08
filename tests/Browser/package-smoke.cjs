@@ -55,6 +55,30 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     if (process.env.HVO_CONTROL_SERVICE_FIXTURE === '1') {
       await require('./control-services-smoke.cjs')({ page, context, base, expect });
     }
+    if (process.env.HVO_GITHUB_READINESS_FIXTURE === '1') {
+      await page.goto(base + '/github');
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      const grantHeading = page.getByRole('heading', { name: 'GitHub readiness fixture MigrationRequired', exact: true });
+      const grant = grantHeading.locator('..');
+      await expect(grantHeading).toBeVisible();
+      await expect(grant).toContainText("The current credential is stored in AgentControl's managed GitHub CLI directory");
+      await expect(grant).toContainText('Drain work before restarting');
+      await expect(grant).toContainText('owner-controlled stop action');
+      const access = (await (await context.request.get(base + '/api/v1/github/access')).json()).find(x => x.id === 'github-readiness-runtime');
+      expect(access.credentialState).toBe('Delivered');
+      expect(access.exactCiInspectionState).toBe('CredentialUnavailable');
+      expect(access.environmentPolicyVersion).toBeUndefined();
+      expect(access.environmentPolicyFingerprint).toBeUndefined();
+      expect(access.environmentProcessId).toBeUndefined();
+      expect(access.environmentProcessIncarnation).toBeUndefined();
+      expect(access.environmentVerifiedAt).toBeUndefined();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.reload();
+      await expect(grant).toContainText('Drain work before restarting');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      await page.setViewportSize({ width: 1280, height: 900 });
+    }
     if (process.env.HVO_CONVERSATION_RACE_FIXTURE === '1') {
       const workerA = 'conversation-race-a';
       const workerB = 'conversation-race-b';
@@ -123,14 +147,22 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await expect(pools).toContainText('Remaining subscription allowance is unknown');
     if (process.env.HVO_PROVIDER_POOL_FIXTURE === '1') {
       await expect(pools).toContainText('fixture-provider · Exhausted');
+      await expect(pools).toContainText('fixture-reserved-request');
       const resume = pools.getByRole('button', { name: 'Resume fixture-provider dispatch', exact: true });
       await expect(resume).toBeDisabled();
       await pools.getByRole('checkbox').check();
       await resume.click();
       await expect(pools).toContainText('fixture-provider · Available');
+      await expect(pools).toContainText('Other requests wait for its settlement');
+      const access = (await (await context.request.get(base + '/api/v1/providers/pools')).json()).find(x => x.id === 'provider:fixture-provider');
+      expect(access.recoveryCommandId).toBe('fixture-reserved-request');
       await page.reload();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(pools).toContainText('fixture-provider · Available');
+      await expect(pools).toContainText('fixture-reserved-request');
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(pools).toContainText('Other requests wait for its settlement');
+      await page.setViewportSize({ width: 1280, height: 900 });
     }
     const keyPanel = page.getByRole('region', { name: 'OpenCode Go key' });
     await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveAttribute('type', 'password');

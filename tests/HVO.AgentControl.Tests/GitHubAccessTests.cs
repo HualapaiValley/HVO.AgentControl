@@ -6,6 +6,7 @@ using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.GitHub;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Ssh;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -148,6 +149,14 @@ public sealed class GitHubAccessTests
         var access = new GitHubAccess
         {
             State = "Ready",
+            CredentialState = GitHubCredentialState.Delivered,
+            CredentialConfigurationFingerprint = new string('b', 64),
+            ExpiresAt = ControlStore.Now + 3600000,
+            EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion,
+            EnvironmentPolicyFingerprint = new string('a', 64),
+            EnvironmentProcessId = 7,
+            EnvironmentProcessIncarnation = "fixture-incarnation",
+            EnvironmentVerifiedAt = ControlStore.Now,
             ChecksPermission = token.ChecksPermission,
             CommitStatusesPermission = token.CommitStatusesPermission,
             ActionsPermission = token.ActionsPermission
@@ -221,6 +230,45 @@ public sealed class GitHubAccessTests
     public void InvalidRepositoryInputIsRejected(string repository) => Assert.Throws<ControlException>(() => GitHubAppClient.ValidateRepositories([repository]));
 
     [Fact]
+    public void ManagedHostsShapeRejectsUnrelatedAccountsAndHosts()
+    {
+        var credential = new GitHubInstallationToken("fixture-token", Now.AddHours(1), "agentcontrol-test[bot]");
+        var managed = GitHubCredentialDelivery.HostsYaml(credential);
+        Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed, credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed + "enterprise.example.com:\n    user: personal\n", credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token:", "        personal:\n            oauth_token:"), credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: \"different-token\""), credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: fixture-token"), credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: \"fixture-token\" # ambiguous"), credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts("partial", credential.Actor));
+    }
+
+    [Fact]
+    public void ManagedConfigurationReplacementRequiresExactMarkerWhenEitherFileExists()
+    {
+        const string server = "managed-server";
+        Assert.True(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(false, null, server));
+        Assert.True(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, server, server));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(false, server, server));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, null, server));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, "other-server", server));
+    }
+
+    [Fact]
+    public void ManagedGitHubConfigUsesProtectedRuntimeStateAndServerEnvironmentPropagatesExactPath()
+    {
+        var runtime = PersistenceTests.Profile();
+        runtime.StateDirectory = "/home/agent/state-managed";
+        var directory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
+        Assert.Equal("/home/agent/state-managed/gh-config", directory);
+        var environment = BootstrapScript.ServerEnvironment(runtime, "server-password");
+        Assert.Contains("export GH_CONFIG_DIR='/home/agent/state-managed/gh-config'", environment);
+        var invalid = PersistenceTests.Profile();
+        invalid.StateDirectory = "/";
+        Assert.Throws<ControlException>(() => BootstrapScript.ManagedGitHubConfigDirectory(invalid));
+    }
+
+    [Fact]
     public async Task ReusingRegistrationNarrowsScopeAndKeepsIndependentEncryptedCredentials()
     {
         await using var app = new TestApp();
@@ -244,8 +292,13 @@ public sealed class GitHubAccessTests
         Assert.NotEqual(source.PrivateKeyReference, copied.PrivateKeyReference);
         Assert.Equal(secrets.Read(source.PrivateKeyReference), secrets.Read(copied.PrivateKeyReference));
         Assert.Null(copied.ExpiresAt); Assert.Equal("Pending", copied.State);
+        Assert.Equal(GitHubCredentialState.Pending, copied.CredentialState);
         Assert.Equal("CredentialUnavailable", copied.ExactCiInspectionState);
-        copied.State = "Ready";
+        copied.State = "Ready"; copied.EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion;
+        copied.CredentialState = GitHubCredentialState.Delivered; copied.ExpiresAt = ControlStore.Now + 3600000;
+        copied.CredentialConfigurationFingerprint = new string('b', 64);
+        copied.EnvironmentPolicyFingerprint = new string('a', 64); copied.EnvironmentProcessId = 7;
+        copied.EnvironmentProcessIncarnation = "fixture-incarnation"; copied.EnvironmentVerifiedAt = ControlStore.Now;
         Assert.Equal("Ready", copied.ExactCiInspectionState);
         Assert.Equal(Now.ToUnixTimeMilliseconds(), copied.PermissionsVerifiedAt);
         await service.Disable(source.Id, source.Revision, CancellationToken.None);
@@ -257,6 +310,13 @@ public sealed class GitHubAccessTests
         Assert.DoesNotContain("installation-test-secret", response);
         Assert.Contains("checksPermission", response);
         Assert.Contains("exactCiInspectionState", response);
+        Assert.Contains("credentialState", response);
+        Assert.DoesNotContain("credentialConfigurationFingerprint", response);
+        Assert.DoesNotContain("environmentPolicyVersion", response);
+        Assert.DoesNotContain("environmentPolicyFingerprint", response);
+        Assert.DoesNotContain("environmentProcessId", response);
+        Assert.DoesNotContain("environmentProcessIncarnation", response);
+        Assert.DoesNotContain("environmentVerifiedAt", response);
         var events = await app.Store.Read(db => Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToListAsync(db.Events));
         Assert.All(events, e => { Assert.DoesNotContain("PRIVATE KEY", e.Payload); Assert.DoesNotContain("installation-test-secret", e.Payload); });
     }
@@ -295,6 +355,10 @@ public sealed class GitHubAccessTests
         {
             var grant = (await db.GitHubAccess.FindAsync(runtime.Id))!;
             grant.State = "Ready"; grant.ExpiresAt = ControlStore.Now - 1000;
+            grant.CredentialState = GitHubCredentialState.Delivered;
+            grant.EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion;
+            grant.EnvironmentPolicyFingerprint = new string('a', 64); grant.EnvironmentProcessId = 7;
+            grant.EnvironmentProcessIncarnation = "fixture-incarnation"; grant.EnvironmentVerifiedAt = 1;
             return true;
         });
         Assert.Equal("Expired", Assert.Single(await service.List()).State);
@@ -310,8 +374,11 @@ public sealed class GitHubAccessTests
     public async Task DeliveryRotatesOwnedFileAndPreservesPersonalLogin()
     {
         var runtime = SshIntegrationTests.Profile("b", "GitHub delivery", 19998);
+        runtime.StateDirectory = "/home/agent/github-delivery-" + Guid.NewGuid().ToString("N");
         var secrets = new Secrets(Options.Create(new ControlOptions { SecretsDirectory = SshIntegrationTests.FixtureSecrets }));
         var delivery = new GitHubCredentialDelivery(secrets);
+        var factory = new SshRuntimeTransportFactory(secrets);
+        IRuntimeTransport? connection = null;
         async Task<string> Docker(string script)
         {
             var start = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true };
@@ -322,19 +389,34 @@ public sealed class GitHubAccessTests
             Assert.True(process.ExitCode == 0, await error);
             return await output;
         }
-        await Docker("test ! -e /home/agent/.config/gh && printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh");
+        await Docker("rm -rf " + runtime.StateDirectory + " && printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh && mkdir -p /home/agent/.config/gh && printf personal-login > /home/agent/.config/gh/hosts.yml");
         try
         {
+            connection = await factory.Connect(runtime, CancellationToken.None);
+            var managedDirectory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
             await delivery.Deliver(runtime, new("fixture-token-one", Now.AddHours(1)), CancellationToken.None);
-            var first = await Docker("cat /home/agent/.config/gh/hosts.yml; stat -c '%a' /home/agent/.config/gh/hosts.yml");
+            var first = await Docker("cat " + managedDirectory + "/hosts.yml; stat -c '%a' " + managedDirectory + "/hosts.yml");
             Assert.Contains("fixture-token-one", first); Assert.Contains("600", first);
-            await delivery.Deliver(runtime, new("fixture-token-two", Now.AddHours(1)), CancellationToken.None);
-            var second = await Docker("cat /home/agent/.config/gh/hosts.yml");
-            Assert.Contains("fixture-token-two", second); Assert.DoesNotContain("fixture-token-one", second);
-            await Docker("rm /home/agent/.config/gh/.agentcontrol-owner; printf 'personal-login' > /home/agent/.config/gh/hosts.yml");
-            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-replace", Now.AddHours(1)), CancellationToken.None));
             Assert.Equal("personal-login", await Docker("cat /home/agent/.config/gh/hosts.yml"));
+            await delivery.Deliver(runtime, new("fixture-token-two", Now.AddHours(1)), CancellationToken.None);
+            var second = await Docker("cat " + managedDirectory + "/hosts.yml");
+            Assert.Contains("fixture-token-two", second); Assert.DoesNotContain("fixture-token-one", second);
+            await Docker("printf 'enterprise.example.com:\\n    user: personal\\n    oauth_token: sentinel\\n' >> " + managedDirectory + "/hosts.yml");
+            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-drop-unrelated", Now.AddHours(1)), CancellationToken.None));
+            var preserved = await Docker("cat " + managedDirectory + "/hosts.yml");
+            Assert.Contains("enterprise.example.com", preserved); Assert.Contains("sentinel", preserved);
+            await Docker("rm " + managedDirectory + "/.agentcontrol-owner; printf personal-login > " + managedDirectory + "/hosts.yml");
+            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-replace", Now.AddHours(1)), CancellationToken.None));
+            Assert.Equal("personal-login", await Docker("cat " + managedDirectory + "/hosts.yml"));
         }
-        finally { await Docker("rm -f /home/agent/.config/gh/hosts.yml /home/agent/.config/gh/.agentcontrol-owner /usr/local/bin/gh; rmdir /home/agent/.config/gh"); }
+        finally
+        {
+            if (connection is not null)
+            {
+                try { await connection.StopOwnedServer(CancellationToken.None); } catch (Exception) { }
+                await connection.DisposeAsync();
+            }
+            await Docker("rm -rf " + runtime.StateDirectory + " /home/agent/.config/gh /usr/local/bin/gh");
+        }
     }
 }

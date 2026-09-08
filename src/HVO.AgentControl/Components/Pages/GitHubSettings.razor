@@ -4,7 +4,7 @@
 @inherits ControlPage
 
 <PageTitle>AgentControl · GitHub access</PageTitle>
-<div class="shell">
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
     <ControlHeader Title="GitHub access" Description="Give execution runtimes access to selected repositories." />
     @if (error is not null) { <div class="notice error" role="alert">@error</div> }
     @if (notice is not null) { <div class="notice" role="status">@notice</div> }
@@ -33,6 +33,10 @@
             <h2>@RuntimeName(access.Id) <span class="badge">@access.State</span></h2>
             <p>@string.Join(", ", HVO.AgentControl.Core.Json.Read<string[]>(access.RepositoriesJson))</p>
             <p>@access.Detail</p>
+            @if (access.CredentialState == HVO.AgentControl.GitHub.GitHubCredentialState.Delivered)
+            { <p>The current credential is stored in AgentControl's managed GitHub CLI directory. Effective access still requires the readiness state above.</p> }
+            @if (access.State == "MigrationRequired")
+            { <p><strong>Drain work before restarting.</strong> Use the runtime's owner-controlled stop action, then reconnect it so the fresh owned process can inherit and verify the managed environment.</p> }
             @if (access.ExactCiInspectionState == "Ready")
             { <p><strong>Exact CI inspection ready.</strong> Check conclusions still must be queried for the expected PR head revision; missing, unknown or pending checks block a merge.</p> }
             else if (access.ExactCiInspectionState == "PermissionDenied")

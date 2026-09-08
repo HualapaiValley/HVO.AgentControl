@@ -86,19 +86,28 @@ public sealed partial class CoordinationTests
     {
         await using var app = new TestApp();
         var (coordinator, a, _) = await Seed(app.Store);
-        await app.Store.Write(db =>
+        await app.Store.Write(async db =>
         {
+            var runtime = (await db.Runtimes.FindAsync(a.RuntimeId))!;
             db.GitHubAccess.Add(new GitHubAccess
             {
                 Id = a.RuntimeId,
                 State = "Ready",
+                CredentialState = GitHubCredentialState.Delivered,
+                CredentialConfigurationFingerprint = new string('b', 64),
+                ExpiresAt = ControlStore.Now + 3600000,
                 PrivateKeyReference = "never-in-model-context",
                 ChecksPermission = "Denied",
                 CommitStatusesPermission = "Denied",
                 ActionsPermission = "Denied",
-                PermissionsVerifiedAt = ControlStore.Now
+                PermissionsVerifiedAt = ControlStore.Now,
+                EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion,
+                EnvironmentPolicyFingerprint = GitHubProcessEnvironment.Fingerprint(runtime),
+                EnvironmentProcessId = 42,
+                EnvironmentProcessIncarnation = "boot:42",
+                EnvironmentVerifiedAt = ControlStore.Now
             });
-            return Task.FromResult(true);
+            return true;
         });
         var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Inspect CI", [a.Id], ContinuousSupervision: true));
         await app.Store.CoordinationTick();
