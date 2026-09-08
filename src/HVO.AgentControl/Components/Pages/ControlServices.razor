@@ -1,0 +1,111 @@
+@page "/control-services"
+@rendermode InteractiveServer
+@attribute [Microsoft.AspNetCore.Authorization.Authorize]
+@inherits ControlPage
+@using HVO.AgentControl.Core
+
+<PageTitle>AgentControl · Control services</PageTitle>
+<div class="shell" data-interactive="@RendererInfo.IsInteractive.ToString().ToLowerInvariant()">
+  <ControlHeader Title="Control services" Description="Persistent host and workgroup conversations for coordination." />
+  @if (error is not null) { <div class="notice error" role="alert">@error <button class="subtle" @onclick="() => error = null">Dismiss</button></div> }
+  @if (notice is not null) { <div class="notice" role="status">@notice</div> }
+  <div class="section-heading"><h2>Host-owned OpenCode</h2><button disabled="@busy" @onclick="BeginRegistration">Register control service</button></div>
+  @if (registering)
+  {
+    <section class="panel" aria-label="Register control service">
+      <h2>Connect a private sidecar</h2>
+      <p class="meta">Use the sidecar's private HTTP endpoint, persistent instance ID, and a password file reference mounted on AgentHost.</p>
+      <fieldset disabled="@busy">
+        <div class="form-grid">
+          <label>Service name<input maxlength="120" @bind="serviceName" /></label>
+          <label>Private endpoint<input type="url" maxlength="2048" @bind="endpoint" /></label>
+          <label>Expected instance ID<input maxlength="120" @bind="expectedInstance" autocomplete="off" /></label>
+          <label>Password file reference<input maxlength="240" @bind="passwordReference" autocomplete="off" /><small>Reference to the mounted secret file, such as control-password.</small></label>
+        </div>
+        <div class="actions"><button disabled="@(string.IsNullOrWhiteSpace(serviceName) || string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(expectedInstance) || string.IsNullOrWhiteSpace(passwordReference))" @onclick="Register">Verify and register</button><button class="subtle" @onclick="() => registering = false">Cancel</button></div>
+      </fieldset>
+    </section>
+  }
+  @if (snapshot is null) { <p>Loading control services…</p> }
+  else if (services.Count == 0)
+  {
+    <div class="empty">No control service registered. Connect a private OpenCode sidecar to keep host and workgroup conversations available across AgentHost updates.</div>
+  }
+  @foreach (var view in services)
+  {
+    var runtime = view.Connection;
+    var service = view.Service;
+    var login = logins.FirstOrDefault(x => x.RuntimeId == service.Id);
+    var pendingLogin = login?.State is "Starting" or "Waiting";
+    var available = runtime.DesiredConnected && runtime.Transport == "Connected" && runtime.Health == "Healthy";
+    <section class="panel control-service" aria-label="@("Control service " + runtime.Name)" @key="service.Id">
+      <div class="card-heading"><h2>@runtime.Name</h2><span class="badge @(available ? "good" : "")">@(available ? "Connected" : runtime.Transport)</span></div>
+      <p class="endpoint">@service.Endpoint</p>
+      <p class="meta">@runtime.Health · OpenCode @runtime.Version · Observed @Age(service.LastObservedAt)</p>
+      @if (!available) { <p class="notice">@runtime.Diagnostic</p> }
+      <div class="actions">
+        <button class="subtle" disabled="@busy" @onclick='() => ConnectionAction(service.Id, "RefreshState")'>Refresh connection and models</button>
+        <button class="subtle" disabled="@(busy || !runtime.DesiredConnected)" @onclick='() => ConnectionAction(service.Id, "DisconnectRuntime")'>Disconnect host</button>
+        <button disabled="@(busy || !available)" @onclick="() => BeginSession(service.Id)">Add workgroup session</button>
+      </div>
+      @if (creatingServiceId == service.Id)
+      {
+        <section class="session-form" aria-label="New workgroup session">
+          <h3>New workgroup conversation</h3>
+          <p class="meta">Use a stable scope ID for this workgroup. Requests with the same scope and settings reuse its conversation.</p>
+          <fieldset disabled="@busy"><div class="form-grid">
+            <label>Workgroup scope ID<input maxlength="120" @bind="scopeId" /></label>
+            <label>Session name<input maxlength="120" @bind="sessionName" /></label>
+            <label>Model<select @bind="sessionModel" @bind:after="() => sessionVariant = string.Empty"><option value="">Choose a model</option>@foreach (var model in SessionModels) { <option value="@ModelKey(model)">@model.Name · @model.ProviderId/@model.ModelId</option> }</select></label>
+            <label>Reasoning<select @bind="sessionVariant"><option value="">Model default</option>@foreach (var variant in SessionChoice?.Variants ?? []) { <option>@variant</option> }</select></label>
+          </div>
+          @if (SessionModels.Count == 0) { <p class="meta">Connect model access below, then refresh connection and models.</p> }
+          <div class="actions"><button disabled="@(SessionChoice is null || string.IsNullOrWhiteSpace(scopeId) || string.IsNullOrWhiteSpace(sessionName))" @onclick="CreateSession">Create workgroup session</button><button class="subtle" @onclick="() => creatingServiceId = null">Cancel</button></div></fieldset>
+        </section>
+      }
+      <div class="control-sessions">
+        @foreach (var binding in view.Sessions.OrderBy(x => x.ScopeKind).ThenBy(x => x.ScopeId))
+        {
+          var worker = snapshot?.Workers.FirstOrDefault(x => x.Id == binding.WorkerId);
+          var command = creations.GetValueOrDefault(binding.CreationCommandId);
+          <article class="control-session" aria-label="@("Control session " + binding.ScopeId)" @key="binding.Id">
+            <div class="card-heading"><h3>@(worker?.Name ?? binding.ScopeId)</h3><span class="badge @(binding.State == "Ready" ? "good" : "")">@Status(binding, command)</span></div>
+            <p class="meta">@(binding.ScopeKind == "HostOperations" ? "Host operations" : "Workgroup") · @binding.ScopeId</p>
+            @if (worker is not null)
+            {
+              <p>@(string.IsNullOrEmpty(worker.ModelId) ? "Choose a model to enable instructions." : worker.ProviderId + "/" + worker.ModelId + (worker.Variant.Length == 0 ? "" : " · " + worker.Variant))</p>
+              <p class="meta">@HVO.AgentControl.Core.DisplayStatus.Worker(worker)</p>
+              <div class="actions"><a class="button-link subtle" href="@ConversationUrl(worker.Id)">Open conversation</a><button class="subtle" disabled="@busy" @onclick="() => BeginEdit(worker)">Edit session model</button>@if (binding.ScopeKind == "Workgroup") { <a class="button-link subtle" href="/coordination">Coordinate work</a> }</div>
+            }
+            else { <p>@(command?.Detail ?? binding.Detail)</p> }
+            @if (editing?.Id == binding.WorkerId)
+            {
+              <section class="session-form" aria-label="Edit control session">
+                <fieldset disabled="@busy"><div class="form-grid">
+                  <label>Session name<input maxlength="120" @bind="editing.Name" /></label>
+                  <label>Model<select @bind="editModel" @bind:after="EditModelChanged"><option value="">Choose a model</option>@foreach (var model in EditModels) { <option value="@ModelKey(model)">@model.Name · @model.ProviderId/@model.ModelId</option> }</select></label>
+                  <label>Reasoning<select @bind="editing.Variant"><option value="">Model default</option>@foreach (var variant in EditChoice?.Variants ?? []) { <option>@variant</option> }</select></label>
+                </div>
+                <p class="meta">Applies to future instructions. Active and queued instructions keep their settings.</p>
+                <div class="actions"><button disabled="@(EditChoice is null || string.IsNullOrWhiteSpace(editing.Name))" @onclick="SaveEdit">Save session settings</button><button class="subtle" @onclick="() => editing = null">Cancel</button></div></fieldset>
+              </section>
+            }
+            <details><summary>Session receipt</summary><p>Creation: <a href="@("/api/v1/commands/" + Uri.EscapeDataString(binding.CreationCommandId))" target="_blank" rel="noopener">@binding.CreationCommandId</a></p><p>Native conversation: <code>@(binding.NativeSessionId.Length == 0 ? "Pending" : binding.NativeSessionId)</code></p></details>
+          </article>
+        }
+      </div>
+      <details class="service-details"><summary>Model access</summary>
+        <p class="meta">All control sessions on this service share OpenCode's provider registration. <a href="/providers">Manage saved keys and usage limits</a>.</p>
+        <div class="actions"><button class="subtle" disabled="@(busy || !available || keyStatus?.Saved != true)" @onclick="() => ApplyKey(service.Id)">Apply saved Go key</button><button class="subtle" disabled="@(busy || !available || pendingLogin)" @onclick="() => StartLogin(service.Id)">@(pendingLogin ? "Sign-in pending…" : "Sign in with ChatGPT")</button></div>
+        @if (keyStatus?.Deliveries.FirstOrDefault(x => x.RuntimeId == service.Id) is { } delivery) { <p class="meta">Go key revision @delivery.KeyRevision · @delivery.State. Refresh models after successful delivery; access and allowance are checked separately.</p> }
+        @if (login is not null)
+        {
+          <p role="status">@login.State · @login.Detail</p>
+          @if (login.State == "Waiting") { <p><a href="@login.Url" target="_blank" rel="noopener noreferrer">Open ChatGPT device sign-in</a> · Device code: <code>@login.Code</code></p> }
+        }
+        <p class="meta">Pending sign-in tracking survives navigation. After an AgentHost restart, check provider access before starting sign-in again.</p>
+      </details>
+      <details class="service-details"><summary>Service identity and restart</summary><dl><dt>Persistent instance</dt><dd><code>@service.InstanceId</code></dd><dt>Current process identity</dt><dd><code>@service.IncarnationId</code></dd><dt>Process started</dt><dd>@service.StartedAt</dd></dl><p class="meta">OpenCode owns these identities. Reconnecting AgentHost preserves the process; restarting the sidecar changes its process identity.</p></details>
+    </section>
+  }
+</div>

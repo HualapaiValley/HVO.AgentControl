@@ -15,12 +15,13 @@
     @if (selectedId is null)
     {
     <section class="metrics" aria-label="Fleet overview">
-      <div><strong>@snapshot.Runtimes.Count(x => x.Transport == "Connected")<small>/ @snapshot.Runtimes.Count</small></strong><span>Runtimes connected</span></div>
+      <div><strong>@snapshot.Runtimes.Count(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Transport == "Connected")<small>/ @snapshot.Runtimes.Count(x => x.ConnectionKind == RuntimeConnections.Ssh)</small></strong><span>Runtimes connected</span></div>
       <div><strong>@snapshot.Workers.Count(x => x.Role == SessionRoles.Worker && x.Activity is "Active" or "Retrying")</strong><span>Workers active</span></div>
       <div><strong>@snapshot.Requests.Count</strong><span>Need a response</span></div>
       <div><strong>@snapshot.Commands.Count(x => x.State == Delivery.Queued)</strong><span>Instructions queued</span></div>
     </section>
-    @if (snapshot.Runtimes.Any(x => x.Health != "Healthy")) { <p class="notice">Some runtimes are unavailable or reconnecting. <a href="/runtimes">View runtime status</a>.</p> }
+    @if (snapshot.Runtimes.Any(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Health != "Healthy")) { <p class="notice">Some runtimes are unavailable or reconnecting. <a href="/runtimes">View runtime status</a>.</p> }
+    @if (snapshot.Runtimes.Any(x => x.ConnectionKind == RuntimeConnections.ControlHttp && x.Health != "Healthy")) { <p class="notice">The control service is unavailable or reconnecting. <a href="/control-services">View control service status</a>.</p> }
     }
     @if (snapshot.Workers.Count == 0)
     {

@@ -25,14 +25,25 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.getByLabel('Owner password').fill(fs.readFileSync(passwordFile, 'utf8').trim());
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true', { timeout: 15000 });
-    for (const name of ['Runtimes', 'Workers', 'Coordination', 'Overview']) {
-      const navigation = name === 'Runtimes' ? 'Administration' : 'Main navigation';
+    for (const name of ['Runtimes', 'Control services', 'Workers', 'Coordination', 'Overview']) {
+      const navigation = ['Runtimes', 'Control services'].includes(name) ? 'Administration' : 'Main navigation';
       await page.getByRole('navigation', { name: navigation }).getByRole('link', { name, exact: true }).click();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
       await page.reload();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
+      if (name === 'Control services') {
+        await page.getByRole('button', { name: 'Register control service', exact: true }).click();
+        const registration = page.getByRole('region', { name: 'Register control service', exact: true });
+        await expect(registration).toBeVisible();
+        await expect(registration.getByLabel('Private endpoint', { exact: true })).toHaveValue('http://opencode-control:4096');
+        await expect(registration.getByRole('button', { name: 'Verify and register', exact: true })).toBeDisabled();
+        await expect(registration.getByLabel('Password file reference')).toHaveAttribute('autocomplete', 'off');
+        await expect(registration.getByLabel('SSH host', { exact: true })).toHaveCount(0);
+        await registration.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await expect(registration).toHaveCount(0);
+      }
       if (name === 'Runtimes') {
         await page.getByRole('button', { name: 'Add runtime', exact: true }).click();
         const profile = page.getByRole('region', { name: 'Runtime profile' });
@@ -40,6 +51,9 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
         await profile.getByRole('button', { name: 'Cancel', exact: true }).click();
         await expect(profile).toHaveCount(0);
       }
+    }
+    if (process.env.HVO_CONTROL_SERVICE_FIXTURE === '1') {
+      await require('./control-services-smoke.cjs')({ page, context, base, expect });
     }
     if (process.env.HVO_CONVERSATION_RACE_FIXTURE === '1') {
       const workerA = 'conversation-race-a';
@@ -141,7 +155,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("hvo.agentcontrol.sidebar-collapsed"))).toBe("true");
     await page.setViewportSize({ width: 390, height: 844 });
-    for (const route of ['/', '/workers', '/runtimes', '/coordination', '/providers']) {
+    for (const route of ['/', '/workers', '/runtimes', '/control-services', '/coordination', '/providers']) {
       await page.goto(base + route);
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
@@ -150,7 +164,7 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await expect(page.getByRole('navigation', { name: 'Administration' })).toBeVisible();
     await page.getByRole('button', { name: 'Close worker sidebar', exact: true }).click({ position: { x: 382, y: 420 } });
     expect(errors).toEqual([]);
-    console.log('PASS: published application readiness, anonymous API 401, sign-in, interactive navigation/reload on all four pages, runtime form and browser scripts.');
+    console.log('PASS: published application readiness, anonymous API 401, sign-in, interactive navigation/reload on all application pages, runtime form and browser scripts.');
   } finally {
     await browser.close();
   }

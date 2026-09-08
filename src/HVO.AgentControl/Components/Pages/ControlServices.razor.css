@@ -1,0 +1,14 @@
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.control-service { padding: 1rem; }
+.endpoint, code, dd, .control-session p { overflow-wrap: anywhere; }
+.endpoint { margin: .35rem 0; font-family: var(--font-mono, monospace); font-size: .8rem; }
+.control-sessions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: .75rem; margin-top: 1rem; }
+.control-session { min-width: 0; padding: .85rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-hover); }
+.control-session p, .control-session details { font-size: .8rem; }
+.control-session h3 { margin: 0; overflow-wrap: anywhere; }
+.session-form { margin: 1rem 0; padding: .8rem 0; border-block: 1px solid var(--line); }
+.session-form .form-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+.service-details { margin-top: .8rem; font-size: .85rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .35rem .75rem; }
+dd { min-width: 0; margin: 0; }
+@media (max-width: 600px) { dl { grid-template-columns: 1fr; } .control-service { padding: .75rem; } }
