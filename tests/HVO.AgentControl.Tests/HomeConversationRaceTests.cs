@@ -166,7 +166,10 @@ public sealed class HomeConversationRaceTests
             db.Workers.AddRange(a, b);
             for (var index = 1; index <= messages; index++) db.Messages.Add(new TranscriptMessage
             {
-                WorkerId = a.Id, NativeId = $"message-{index:00}", Role = "user", NativeCreatedAt = index,
+                WorkerId = a.Id,
+                NativeId = $"message-{index:00}",
+                Role = "user",
+                NativeCreatedAt = index,
                 Json = "{\"info\":{},\"parts\":[{\"type\":\"text\",\"text\":\"message\"}]}"
             });
             return Task.FromResult(true);
