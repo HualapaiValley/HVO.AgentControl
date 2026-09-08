@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.OpenCode;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -41,6 +42,114 @@ public sealed class ProviderPoolTests
         Payload = Json.Write(new PromptInput(Guid.NewGuid().ToString(), "Do not replay effects", 0, provider, "model")),
         ProviderPoolId = "provider:" + provider
     };
+
+    private static JsonElement RetryStatus(int attempt, string provider, long next) => JsonSerializer.SerializeToElement(new
+    {
+        type = "retry",
+        attempt,
+        message = "five-hour quota reset delay; private URL must not persist",
+        action = new
+        {
+            reason = "account_rate_limit",
+            provider,
+            title = "Account rate limit",
+            message = "free usage exceeded; secret details must not persist",
+            label = "Wait",
+            link = "https://private.example/reset"
+        },
+        next
+    });
+
+    private static NativeSnapshot RetrySnapshot(WorkerRecord worker, CommandRecord command, JsonElement status) => new(
+        JsonSerializer.SerializeToElement(new { time = new { created = 1L } }),
+        [JsonSerializer.SerializeToElement(new
+        {
+            info = new { id = command.NativeMessageId, role = "user", sessionID = worker.NativeSessionId, time = new { created = 1L } },
+            parts = Array.Empty<object>()
+        })],
+        "retry", status, [], []);
+
+    private static Task<bool> Reconcile(TestApp app, WorkerRecord worker, NativeSnapshot snapshot)
+    {
+        var supervisor = new HVO.AgentControl.Services.RuntimeSupervisor(app.Store, null!,
+            Microsoft.Extensions.Options.Options.Create(new ControlOptions()),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<HVO.AgentControl.Services.RuntimeSupervisor>.Instance);
+        var method = supervisor.GetType().GetMethod("Reconcile", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        return (Task<bool>)method.Invoke(supervisor, [worker.Id, snapshot])!;
+    }
+
+    [Fact]
+    public void NativeRetryParserRequiresStructuredAccountLimitAndDoesNotTreatNextAsReset()
+    {
+        var retry = NativeRetryFailure.Parse(RetryStatus(7, "opencode-go", 123456));
+        Assert.NotNull(retry);
+        Assert.Equal(7, retry.Attempt);
+        Assert.Equal("opencode-go", retry.ProviderId);
+        Assert.Equal(123456, retry.Next);
+        Assert.Equal("Exhausted", retry.Failure.Category);
+        Assert.Null(retry.Failure.RetryAt);
+        var genericRetry = JsonSerializer.SerializeToElement(new { type = "retry", attempt = 8, message = "free usage exceeded", next = 123456 });
+        Assert.Null(NativeRetryFailure.Parse(genericRetry));
+    }
+
+    [Fact]
+    public async Task NativeRetryStatusBlocksPinnedPoolOnceAndSurvivesRestartWithoutReplay()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            worker.ProviderId = "openai"; // The prompt override, not the current worker default, owns the pool.
+            var command = Command(worker, "opencode-go");
+            command.NativeMessageId = "msg_retry";
+            command.State = Delivery.Accepted;
+            await app.Store.Write(async db =>
+            {
+                (await db.Workers.FindAsync(worker.Id))!.ProviderId = worker.ProviderId;
+                db.Commands.Add(command);
+                return true;
+            });
+            var snapshot = RetrySnapshot(worker, command, RetryStatus(3, "opencode-go", 987654));
+            await Reconcile(app, worker, snapshot);
+            await Reconcile(app, worker, snapshot);
+            var pool = Assert.Single(await app.Store.ProviderPools());
+            Assert.Equal("provider:opencode-go", pool.Id);
+            Assert.Equal("Exhausted", pool.State);
+            Assert.Null(pool.RetryAt);
+            Assert.Equal(1, pool.ConsecutiveFailures);
+            var receipts = await app.Store.Read(db => db.Set<ProviderFailureReceipt>().ToListAsync());
+            Assert.Single(receipts);
+            Assert.Equal(command.Id + ":retry:3", receipts[0].Id);
+            await app.Store.Write(async db =>
+            {
+                var peer = new WorkerRecord { ProviderId = "opencode-go" };
+                Assert.False(await ControlStore.ProviderDispatchAllowed(db, peer, Command(peer, "opencode-go")));
+                Assert.True(await ControlStore.ProviderDispatchAllowed(db, peer, Command(peer, "openai")));
+                Assert.Equal(Delivery.Running, (await db.Commands.FindAsync(command.Id))!.State);
+                return true;
+            });
+            var events = await app.Store.Read(db => db.Events.ToListAsync());
+            var retryEvent = Assert.Single(events, x => x.Type == "ProviderNativeRetryObserved");
+            using var retryPayload = JsonDocument.Parse(retryEvent.Payload);
+            Assert.Equal(3, retryPayload.RootElement.GetProperty("attempt").GetInt32());
+            Assert.Equal(987654, retryPayload.RootElement.GetProperty("next").GetInt64());
+            Assert.False(retryPayload.RootElement.TryGetProperty("reset", out _));
+            Assert.DoesNotContain("private.example", Json.Write(events));
+            Assert.DoesNotContain("secret details", Json.Write(events));
+            data = app.DataPath;
+            secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var workerAfterRestart = (await restarted.Store.Snapshot()).Workers.Single();
+        var commandAfterRestart = (await restarted.Store.Detail(workerAfterRestart.Id)).Commands.Single();
+        var snapshotAfterRestart = RetrySnapshot(workerAfterRestart, commandAfterRestart, RetryStatus(3, "opencode-go", 987654));
+        await Reconcile(restarted, workerAfterRestart, snapshotAfterRestart);
+        var persistedPool = Assert.Single(await restarted.Store.ProviderPools());
+        Assert.Equal("Exhausted", persistedPool.State);
+        Assert.Equal(1, persistedPool.ConsecutiveFailures);
+        Assert.Single(await restarted.Store.Read(db => db.Set<ProviderFailureReceipt>().ToListAsync()));
+        Assert.Equal(Delivery.Running, (await restarted.Store.Detail(workerAfterRestart.Id)).Commands.Single().State);
+    }
 
     [Fact]
     public async Task SharedFailuresAreDeduplicatedPersistedAndDoNotBlockAnotherProvider()

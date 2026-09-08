@@ -77,6 +77,24 @@ public sealed record ProviderFailure(string Category, int? Status, long? RetryAt
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
 }
 
+public sealed record NativeRetryFailure(int Attempt, string ProviderId, long? Next, ProviderFailure Failure)
+{
+    public static NativeRetryFailure? Parse(JsonElement status)
+    {
+        if (status.ValueKind != JsonValueKind.Object || Text(status, "type") != "retry" ||
+            !status.TryGetProperty("attempt", out var attemptValue) || !attemptValue.TryGetInt32(out var attempt) || attempt < 0 ||
+            !status.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.Object ||
+            Text(action, "reason") != "account_rate_limit") return null;
+        var providerId = Text(action, "provider");
+        if (providerId.Length is 0 or > 200) return null;
+        long? next = status.TryGetProperty("next", out var nextValue) && nextValue.TryGetInt64(out var value) && value >= 0 ? value : null;
+        return new(attempt, providerId, next, new ProviderFailure("Exhausted", null, null));
+    }
+
+    private static string Text(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
+}
+
 public sealed partial class ControlStore
 {
     public Task<List<ProviderPool>> ProviderPools() => Read(db => db.Set<ProviderPool>().AsNoTracking().OrderBy(x => x.Id).ToListAsync());
@@ -113,7 +131,8 @@ public sealed partial class ControlStore
         return false;
     }
 
-    internal static async Task ObserveProviderFailure(ControlDb db, WorkerRecord worker, CommandRecord command, string nativeId, ProviderFailure failure)
+    internal static async Task ObserveProviderFailure(ControlDb db, WorkerRecord worker, CommandRecord command, string nativeId, ProviderFailure failure,
+        NativeRetryFailure? nativeRetry = null)
     {
         var receiptId = command.Id + ":" + nativeId;
         if (await db.Set<ProviderFailureReceipt>().FindAsync(receiptId) is not null) return;
@@ -138,6 +157,9 @@ public sealed partial class ControlStore
         pool.ObservedAt = observed; pool.Revision++; pool.LastCommandId = command.Id;
         db.Add(new ProviderFailureReceipt { Id = receiptId, PoolId = poolId, CommandId = command.Id, Category = failure.Category, Status = failure.Status, ObservedAt = observed, RetryAt = retryAt });
         Event(db, "ProviderPoolBlocked", worker.RuntimeId, worker.Id, command.Id, new { poolId, pool.State, failure.Status, pool.RetryAt });
+        if (nativeRetry is not null)
+            Event(db, "ProviderNativeRetryObserved", worker.RuntimeId, worker.Id, command.Id,
+                new { poolId, nativeRetry.Attempt, nativeRetry.Next }, provenance: "native", nativeId: nativeId);
     }
 
     internal static async Task ObserveProviderCompletion(ControlDb db, CommandRecord command, bool successful)
