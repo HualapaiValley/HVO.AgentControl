@@ -50,10 +50,12 @@ public sealed class SshRuntimeTransportFactory(Secrets secrets) : IRuntimeTransp
             var health = await client.Get("/global/health", cancellationToken);
             if (!health.GetProperty("healthy").GetBoolean() || health.GetProperty("version").GetString() != BootstrapScript.Version)
                 throw new ControlException("The owned OpenCode API is unhealthy or has an incompatible version.");
+            var nativeProcess = NativeProcessProbe.Parse(runtime.ManagedServerId,
+                await Run(ssh, NativeProcessProbe.ReadScript(runtime), cancellationToken, 5), ControlStore.Now);
             await Run(ssh, "printf '0' > " + BootstrapScript.Quote(runtime.StateDirectory + "/restarts"), cancellationToken);
             var installed = (await Run(ssh, "cat " + BootstrapScript.Quote(runtime.StateDirectory + "/executable"), cancellationToken)).Trim();
             ControlStore.ValidatePath(installed);
-            return new SshRuntimeTransport(ssh, forward, client, runtime, result.Trim(), installed);
+            return new SshRuntimeTransport(ssh, forward, client, runtime, result.Trim(), installed, nativeProcess);
         }
         catch { client?.Dispose(); forward?.Dispose(); ssh.Dispose(); throw; }
     }
@@ -110,12 +112,13 @@ public sealed class SshRuntimeTransportFactory(Secrets secrets) : IRuntimeTransp
 }
 
 internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forward, OpenCodeClient api,
-    RuntimeRecord runtime, string platform, string installedExecutable) : IRuntimeTransport
+    RuntimeRecord runtime, string platform, string installedExecutable, NativeProcessObservation nativeProcess) : IRuntimeTransport
 {
     public OpenCodeClient Api { get; } = api;
     public bool Connected => ssh.IsConnected && forward.IsStarted;
     public string Platform { get; } = platform;
     public string InstalledExecutable { get; } = installedExecutable;
+    public NativeProcessObservation NativeProcess { get; } = nativeProcess;
 
     public async Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>
         TelemetryProbe.Parse(await SshRuntimeTransportFactory.Run(ssh, TelemetryProbe.Script, cancellationToken, 5), identity);
