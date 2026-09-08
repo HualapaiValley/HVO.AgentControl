@@ -502,7 +502,7 @@ public sealed partial class ControlStore
         var process = binding is null ? null : await db.ControlServices.Where(x => x.Id == binding.ControlServiceId)
             .Select(x => x.IncarnationId).SingleOrDefaultAsync();
         var began = startedAt ?? Now;
-        return new(command.Id, coordinator.Id, coordinator.Revision, coordinator.RuntimeId, runtime?.Generation ?? -1,
+        return new(command.Id, coordinator.Id, coordinator.SettingsRevision, coordinator.RuntimeId, runtime?.Generation ?? -1,
             coordinator.NativeSessionId, coordinator.Directory, binding?.Id, binding?.Generation, process, command.NativeMessageId,
             DecisionPhase(command, coordinator), began, began, began);
     }
@@ -513,7 +513,7 @@ public sealed partial class ControlStore
         if (run.DecisionCommandId != checkpoint.CommandId || command.Id != checkpoint.CommandId || command.WorkerId != checkpoint.CoordinatorWorkerId)
             return false;
         var coordinator = await db.Workers.FindAsync(checkpoint.CoordinatorWorkerId);
-        if (coordinator is null || coordinator.Revision != checkpoint.CoordinatorRevision || coordinator.RuntimeId != checkpoint.RuntimeId ||
+        if (coordinator is null || coordinator.SettingsRevision != checkpoint.CoordinatorSettingsRevision || coordinator.RuntimeId != checkpoint.RuntimeId ||
             coordinator.NativeSessionId != checkpoint.NativeSessionId || coordinator.Directory != checkpoint.Directory ||
             checkpoint.NativeCallerId != command.NativeMessageId) return false;
         var runtime = await db.Runtimes.FindAsync(checkpoint.RuntimeId);

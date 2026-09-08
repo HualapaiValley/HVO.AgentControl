@@ -1,6 +1,12 @@
+using System.Reflection;
+using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.OpenCode;
+using HVO.AgentControl.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -318,6 +324,112 @@ public sealed partial class CoordinationTests
         Assert.Equal("Deciding", saved.State);
         Assert.Equal(1, (await app.Store.Snapshot()).Commands.Count(x => x.Origin == "coordinator-decision:" + run.Id));
     }
+
+    [Fact]
+    public async Task RuntimeActivityObservationDoesNotInvalidateAnOtherwiseStableDecisionFence()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        await app.Store.CoordinationTick();
+        var commandId = (await app.Store.Coordinations()).Single().DecisionCommandId!;
+        await app.Store.Write(async db =>
+        {
+            var command = (await db.Commands.FindAsync(commandId))!;
+            command.State = Delivery.Accepted; command.NativeMessageId = "caller";
+            return true;
+        });
+        Assert.True(await app.Store.CoordinationTick()); // records the exact native caller before reconciliation.
+        await ReconcileCoordinator(app, coordinator, BusySnapshot(coordinator, "caller"));
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            var context = Json.Read<CoordinatorContext>(saved.InputJson);
+            saved.InputJson = Json.Write(context with
+            {
+                DecisionCheckpoint = context.DecisionCheckpoint! with
+                {
+                    Phase = "Inference",
+                    StartedAt = ControlStore.Now - 14_400_001,
+                    PhaseStartedAt = ControlStore.Now - 7_200_001
+                }
+            });
+            return true;
+        });
+
+        Assert.True(await app.Store.CoordinationTick());
+        var checkpoint = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson).DecisionCheckpoint!;
+        Assert.Contains("cannot prove caller-attributed cancellation", checkpoint.RecoveryHold);
+        Assert.DoesNotContain("fence changed", checkpoint.RecoveryHold);
+    }
+
+    [Fact]
+    public async Task RetiredRecoveryPromptCannotClearActiveAutomaticCompactionPhase()
+    {
+        await using var app = new TestApp();
+        var (coordinator, _, _) = await Seed(app.Store);
+        var active = new CommandRecord
+        {
+            Id = "active",
+            RuntimeId = coordinator.RuntimeId,
+            WorkerId = coordinator.Id,
+            Kind = "Prompt",
+            State = Delivery.Running,
+            NativeMessageId = "caller-active",
+            AcceptedAt = 2,
+            CreatedAt = 2
+        };
+        var retired = new CommandRecord
+        {
+            Id = "retired",
+            RuntimeId = coordinator.RuntimeId,
+            WorkerId = coordinator.Id,
+            Kind = "Prompt",
+            State = Delivery.Cancelled,
+            NativeMessageId = "caller-retired",
+            AcceptedAt = 3,
+            CreatedAt = 3
+        };
+        await app.Store.Write(db =>
+        {
+            db.Commands.AddRange(active, retired);
+            db.Set<ProviderPool>().Add(new ProviderPool { Id = "provider:test", ProviderId = "test", RecoveryCommandId = retired.Id });
+            return Task.FromResult(true);
+        });
+
+        await ReconcileCoordinator(app, coordinator,
+            BusyCompactionSnapshot(coordinator, active.NativeMessageId!, retired.NativeMessageId!));
+
+        Assert.Equal("Automatic compaction in progress.", (await app.Store.Snapshot()).Workers.Single(x => x.Id == coordinator.Id).CurrentAction);
+    }
+
+    private static Task<bool> ReconcileCoordinator(TestApp app, WorkerRecord worker, NativeSnapshot snapshot)
+    {
+        var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions()), NullLogger<RuntimeSupervisor>.Instance);
+        var method = typeof(RuntimeSupervisor).GetMethod("Reconcile", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        return (Task<bool>)method.Invoke(supervisor, [worker.Id, snapshot])!;
+    }
+
+    private static NativeSnapshot BusySnapshot(WorkerRecord worker, string callerId) =>
+        new(JsonSerializer.SerializeToElement(new { }), [NativeUser(callerId, worker.NativeSessionId, 1)], "busy",
+            JsonSerializer.SerializeToElement(new { }), [], []);
+
+    private static NativeSnapshot BusyCompactionSnapshot(WorkerRecord worker, string activeCallerId, string retiredCallerId) =>
+        new(JsonSerializer.SerializeToElement(new { }), [NativeUser(activeCallerId, worker.NativeSessionId, 1),
+            NativeCompaction(worker.NativeSessionId, 2), NativeUser(retiredCallerId, worker.NativeSessionId, 3)], "busy",
+            JsonSerializer.SerializeToElement(new { }), [], []);
+
+    private static JsonElement NativeUser(string id, string sessionId, long created) => JsonSerializer.SerializeToElement(new
+    {
+        info = new { id, role = "user", sessionID = sessionId, time = new { created } },
+        parts = Array.Empty<object>()
+    });
+
+    private static JsonElement NativeCompaction(string sessionId, long created) => JsonSerializer.SerializeToElement(new
+    {
+        info = new { id = "compaction", role = "user", sessionID = sessionId, time = new { created } },
+        parts = new[] { new { type = "compaction", auto = true } }
+    });
 
     [Fact]
     public async Task FormatCorrectionRefreshesObservationAndDispatchesOnlyOnce()
