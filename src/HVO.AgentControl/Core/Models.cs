@@ -180,6 +180,20 @@ public sealed class JournalEvent
     public string Payload { get; set; } = "{}";
 }
 
+// This cursor is deliberately separate from enrollment authority cursors. It records only
+// what a read-only evidence consumer has observed from the durable journal.
+public sealed class EvidenceConsumerCursor
+{
+    [Key] public string ConsumerId { get; set; } = "";
+    public long LastConsumedSequence { get; set; }
+    public bool HistoryGap { get; set; }
+    public long UpdatedAt { get; set; }
+}
+
+public sealed record EvidencePage(long AfterSequence, long NextSequence, long EarliestAvailableSequence,
+    bool Incomplete, bool Truncated, JournalEvent[] Events);
+public sealed record EvidenceConsumeInput(string ConsumerId, int Take = 50);
+
 public sealed class TranscriptMessage
 {
     public long Id { get; set; }

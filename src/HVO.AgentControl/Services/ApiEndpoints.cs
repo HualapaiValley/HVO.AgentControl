@@ -74,6 +74,8 @@ public static class ApiEndpoints
         group.MapPost("/commands/{id}/queue", (string id, QueueEdit input, ControlStore store) => store.EditQueue(id, input.Action));
         group.MapGet("/events", (long? after, string? workerId, ControlStore store) => store.Read(db => db.Events.AsNoTracking()
             .Where(x => x.Sequence > (after ?? 0) && (workerId == null || x.WorkerId == workerId)).OrderBy(x => x.Sequence).Take(200).ToListAsync()));
+        group.MapGet("/evidence", (long? after, int? take, ControlStore store) => store.Evidence(after ?? 0, take ?? 50));
+        group.MapPost("/evidence/consume", (EvidenceConsumeInput input, ControlStore store) => store.ConsumeEvidence(input));
         app.MapHub<ActivityHub>("/hubs/activity").RequireAuthorization();
     }
 }
