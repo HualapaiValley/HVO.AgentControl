@@ -58,9 +58,10 @@ const base = process.env.HVO_BASE_URL || 'http://127.0.0.1:5056';
     await workerCard.getByText('Details & management',{exact:true}).click();
     await expect(workerCard.getByRole('button',{name:'Archive worker',exact:true})).toBeEnabled({timeout:30000});
     await workerCard.getByRole('button',{name:'Delete worker',exact:true}).click();
+    await expect(workerCard).toContainText('Deletion does not abort work or stop remote processes, so detached work may continue while disconnected.');
     await workerCard.getByRole('button',{name:'Confirm delete worker',exact:true}).click();
     await expect(workerCard).toHaveCount(0);
     await page.reload(); await expect(workerCard).toHaveCount(0);
-    console.log('PASS: queued setup survives refresh/navigation; cancelled setup edit/dismiss; failed setup details persist; unused runtime deletion; in-use rejection; idle worker deletion.');
+    console.log('PASS: queued setup survives refresh/navigation; cancelled setup edit/dismiss; failed setup details persist; unused runtime deletion; in-use rejection; worker deletion warning and idle deletion.');
   } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

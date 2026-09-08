@@ -11,11 +11,13 @@ namespace HVO.AgentControl.OpenCode;
 public sealed record AdapterCapabilities(bool CanAbort, bool CanReplyToPermissions, bool CanReplyToQuestions,
     bool CanSupplyMessageId, bool CanSteerActiveTurn = false);
 public sealed record NativeSnapshot(JsonElement Session, JsonElement[] Messages, string Status, JsonElement StatusDetail,
-    JsonElement[] Permissions, JsonElement[] Questions);
+    JsonElement[] Permissions, JsonElement[] Questions, string? IdleToolFailureMessageId = null);
 public sealed class NativeRejectedException(int status) : Exception($"OpenCode rejected the request (HTTP {status}).")
 {
     public int Status { get; } = status;
 }
+public sealed class NativeHistoryObservationException(Exception inner)
+    : IOException("Native conversation history could not be read within the validated observation limits.", inner);
 
 public sealed class OpenCodeClient(HttpClient http) : IDisposable
 {
@@ -115,27 +117,61 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
         return Send(HttpMethod.Post, Scope(route, worker.Directory), body, token);
     }
 
-    public async Task<NativeSnapshot> Snapshot(WorkerRecord worker, int limit, CancellationToken token)
+    public async Task<NativeSnapshot> Snapshot(WorkerRecord worker, int limit, CancellationToken token, bool verifyToolFailureStop = false)
     {
         var sessionPath = $"/session/{Id(worker.NativeSessionId)}";
         var session = await Get(Scope(sessionPath, worker.Directory), token);
         if (session.GetProperty("directory").GetString() != worker.Directory) throw new ControlException("Native session directory changed; dispatch is blocked.");
-        var history = await Get(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token, 16_000_000);
+        var history = await History(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token);
+        var messages = history.EnumerateArray().ToArray();
+        var toolFailure = verifyToolFailureStop ? NativeTurnEvidence.CompletedToolFailureId(messages) : null;
         var statuses = await Get(Scope("/session/status", worker.Directory), token);
         var statusDetail = statuses.TryGetProperty(worker.NativeSessionId, out var item) ? item.Clone() : default;
         var status = statusDetail.ValueKind == JsonValueKind.Object && statusDetail.TryGetProperty("type", out var statusType)
             ? statusType.GetString() ?? "unknown" : "idle";
+        string? idleToolFailureMessageId = null;
+        if (status == "idle" && toolFailure is not null)
+        {
+            // The completed failed step proves this turn started before the idle observation.
+            // Re-read after idle so a continuing turn's later final response cannot be missed.
+            history = await History(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token);
+            messages = history.EnumerateArray().ToArray();
+            idleToolFailureMessageId = toolFailure;
+        }
         var permissions = Capabilities.CanReplyToPermissions ? await Get(Scope("/permission", worker.Directory), token) : default;
         var questions = Capabilities.CanReplyToQuestions ? await Get(Scope("/question", worker.Directory), token) : default;
         using var ancestryDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         ancestryDeadline.CancelAfter(TimeSpan.FromSeconds(5));
         var ownership = new NativeRequestOwnership(worker.NativeSessionId, worker.Directory,
             (id, cancellation) => Get(Scope($"/session/{Id(id)}", worker.Directory), cancellation));
-        return new(session, history.EnumerateArray().ToArray(), status, statusDetail,
-            await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token));
+        return new(session, messages, status, statusDetail,
+            await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token), idleToolFailureMessageId);
     }
 
     public Task<HttpResponseMessage> Subscribe(CancellationToken token) => SubscribeCore(token);
+
+    private async Task<JsonElement> History(string route, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, route);
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            if (!response.IsSuccessStatusCode) throw new NativeRejectedException((int)response.StatusCode);
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+            return await NativeHistoryProjection.ReadAsync(stream, cancellationToken: timeout.Token);
+        }
+        catch (OperationCanceledException ex) when (!token.IsCancellationRequested)
+        {
+            throw new NativeHistoryObservationException(ex);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
+        {
+            throw new NativeHistoryObservationException(ex);
+        }
+    }
+
     private async Task<HttpResponseMessage> SubscribeCore(CancellationToken token)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(20));
