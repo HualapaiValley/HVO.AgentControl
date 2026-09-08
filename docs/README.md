@@ -5,6 +5,7 @@
 - [Current implementation checkpoint](IMPLEMENTATION_STATUS.md): shipped work, active fleet and next implementation slices.
 - [Advanced coordination verification](validation/advanced-coordination-2026-09-07.md): concurrent assignments, soak, managed GitHub publication and supervising interventions.
 - [Observability design](OBSERVABILITY_DESIGN.md): worker status, runtime measurements and durable model-usage requirements.
+- [Trusted host executor and resource API](HOST_RESOURCE_API.md): scoped executor authentication, sequenced evidence, shared physical-host reservations and effect fencing.
 
 - [Worker GitHub access](GITHUB_ACCESS.md): App setup, scoped credential delivery, renewal and live-validation requirements.
 - [Dev Container provisioning](DEVCONTAINER_PROVISIONING.md): executable worker template and planned multi-host lifecycle, tool installation and GitHub credentials.
