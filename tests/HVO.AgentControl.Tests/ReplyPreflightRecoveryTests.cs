@@ -45,6 +45,27 @@ public sealed class ReplyPreflightRecoveryTests
     }
 
     [Theory]
+    [InlineData("permission", HttpStatusCode.Unauthorized)]
+    [InlineData("question", HttpStatusCode.NotFound)]
+    public async Task PreflightHttpRejectionReleasesPendingReplyWithoutPosting(string kind, HttpStatusCode status)
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var request = await AddRequest(app, worker, kind, "http-rejection");
+        var reply = await app.Store.Reply(Input(request));
+        await Claim(app, reply.Id);
+        var handler = new ReplyHandler(preflightStatus: status);
+
+        await Dispatch(app, worker, reply, new Transport(handler), CancellationToken.None);
+
+        Assert.Equal(0, handler.Posts);
+        Assert.Equal(Delivery.Failed, (await app.Store.Detail(worker.Id)).Commands.Single(x => x.Id == reply.Id).State);
+        Assert.Null(await ReplyBinding(app, request.Id));
+        Assert.Equal("Pending", await RequestState(app, request.Id));
+        Assert.NotEqual(reply.Id, (await app.Store.Reply(Input(request) with { Id = Guid.NewGuid().ToString() })).Id);
+    }
+
+    [Theory]
     [InlineData("permission")]
     [InlineData("question")]
     public async Task PostSendFailureRemainsUnknownAndCannotBeRetried(string kind)
@@ -83,6 +104,35 @@ public sealed class ReplyPreflightRecoveryTests
         Assert.Equal(Delivery.Failed, (await app.Store.Detail(worker.Id)).Commands.Single(x => x.Id == reply.Id).State);
         Assert.Null(await ReplyBinding(app, request.Id));
         Assert.NotEqual(reply.Id, (await app.Store.Reply(Input(request) with { Id = Guid.NewGuid().ToString() })).Id);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("rebound")]
+    [InlineData("resolved")]
+    public async Task PreflightRecoveryFinalizesOnlyItsDispatchingCommandWhenRequestChanges(string race)
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var request = await AddRequest(app, worker, "permission", race);
+        var reply = await app.Store.Reply(Input(request));
+        await Claim(app, reply.Id);
+        var replacement = Guid.NewGuid().ToString();
+        await app.Store.Write(async db =>
+        {
+            var current = await db.Requests.FindAsync(request.Id);
+            if (race == "missing") db.Requests.Remove(current!);
+            else if (race == "rebound") current!.ReplyCommandId = replacement;
+            else { current!.State = "NoLongerPending"; current.ReplyCommandId = null; }
+            return true;
+        });
+
+        Assert.True(await app.Store.RecordUnsentReplyPreflightFailure(reply.Id, "synthetic preflight failure"));
+
+        Assert.Equal(Delivery.Failed, (await app.Store.Detail(worker.Id)).Commands.Single(x => x.Id == reply.Id).State);
+        if (race == "missing") return;
+        Assert.Equal(race == "rebound" ? replacement : null, await ReplyBinding(app, request.Id));
+        Assert.Equal(race == "resolved" ? "NoLongerPending" : "Pending", await RequestState(app, request.Id));
     }
 
     private static ReplyInput Input(PendingRequest request) => new(Guid.NewGuid().ToString(), request.Id,
@@ -132,7 +182,7 @@ public sealed class ReplyPreflightRecoveryTests
     }
 
     private sealed class ReplyHandler(bool failPreflight = false, string directory = "/workspace", bool failPost = false,
-        string? nativeKind = null, string? nativeId = null, string? sessionId = null) : HttpMessageHandler
+        string? nativeKind = null, string? nativeId = null, string? sessionId = null, HttpStatusCode? preflightStatus = null) : HttpMessageHandler
     {
         public int Posts { get; private set; }
 
@@ -140,6 +190,7 @@ public sealed class ReplyPreflightRecoveryTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (failPreflight) throw new HttpRequestException("native snapshot unavailable");
+            if (preflightStatus is not null) return Task.FromResult(new HttpResponseMessage(preflightStatus.Value));
             if (request.Method == HttpMethod.Post)
             {
                 Posts++;

@@ -367,7 +367,10 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             });
         }
         catch (NativeRejectedException ex) when (ex.Status is >= 400 and < 500)
-        { await Complete(command.Id, Delivery.Failed, SafeError(ex)); }
+        {
+            if (command.Kind == "Reply" && !mutationStarted && await store.RecordUnsentReplyPreflightFailure(command.Id, SafeError(ex))) return;
+            await Complete(command.Id, Delivery.Failed, SafeError(ex));
+        }
         catch (Exception ex)
         {
             if (command.Kind == "Reply" && !mutationStarted && await store.RecordUnsentReplyPreflightFailure(command.Id, SafeError(ex))) return;

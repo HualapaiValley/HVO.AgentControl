@@ -12,15 +12,16 @@ public sealed partial class ControlStore
         if (command is not { Kind: "Reply", State: Delivery.Dispatching }) return false;
         var input = Json.Read<ReplyInput>(command.Payload);
         var request = await db.Requests.FindAsync(input.RequestId);
-        if (request is null || request.WorkerId != command.WorkerId || request.State != "Pending" || request.ReplyCommandId != command.Id)
-            return false;
         command.State = Delivery.Failed;
-        command.Detail = "Reply was not sent because read-only native preflight failed. The request remains pending and can be answered with a new reply request.";
+        var release = request is not null && request.WorkerId == command.WorkerId && request.State == "Pending" && request.ReplyCommandId == command.Id;
+        command.Detail = release
+            ? "Reply was not sent because read-only native preflight failed. The request remains pending and can be answered with a new reply request."
+            : "Reply was not sent because read-only native preflight failed. The request changed before recovery, so its current reply binding was preserved.";
         command.UpdatedAt = Now;
-        request.ReplyCommandId = null;
+        if (release) request!.ReplyCommandId = null;
         Event(db, "ReplyPreflightFailed", command.RuntimeId, command.WorkerId, command.Id,
-            new { requestId = request.Id, request.Kind, request.NativeId, detail, observedAt = command.UpdatedAt },
-            provenance: "service", nativeId: request.NativeId);
+            new { requestId = input.RequestId, detail, released = release, observedAt = command.UpdatedAt },
+            provenance: "service", nativeId: release ? request!.NativeId : null);
         return true;
     });
 
