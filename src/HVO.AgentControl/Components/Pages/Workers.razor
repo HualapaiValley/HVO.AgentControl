@@ -52,7 +52,7 @@
         <p class="mono">@editing.Directory</p>
         <div class="actions"><button disabled="@busy" @onclick="SaveEdit">Save worker</button><button class="subtle" disabled="@busy" @onclick="RefreshEditModels">Refresh workspace models</button><button class="subtle" @onclick="() => editing = null">Cancel edit</button></div>
         @if (editing.Role == SessionRoles.Coordinator)
-        { <details><summary>Delete coordinator registration</summary><p>Requires idle state and no unfinished coordination. Remote files and native conversation are retained.</p><button class="danger" @onclick="() => DeleteWorker(editing)">Confirm delete coordinator</button></details> }
+        { <details><summary>Delete coordinator registration</summary><p>Requires fresh idle state unless the runtime is explicitly disconnected, plus no unresolved work, active work item ownership or unfinished coordination. Deletion does not abort work or stop remote processes, so detached work may continue while disconnected. Remote files, native conversation and command audit are retained.</p><button class="danger" @onclick="() => DeleteWorker(editing)">Confirm delete coordinator</button></details> }
         @if (editing.Role == SessionRoles.Worker)
         {
           <details><summary>Reserve as a dedicated coordinator</summary><p>This permanently removes this conversation from task workers. Use only a dedicated idle conversation; coordinator execution tools will be disabled.</p><button class="subtle" disabled="@busy" @onclick="ReserveCoordinator">Reserve coordinator role</button></details>
@@ -105,7 +105,7 @@
             else { <button class="subtle" disabled="@(busy || worker.Stale || worker.Activity != "Idle")" @onclick="() => SetArchived(worker, true)">Archive worker</button> }
           </div>
           @if (deletingWorkerId == worker.Id)
-          { <p>Delete @worker.Name from AgentControl? This releases its workspace claim and removes cached conversation data. Remote files, native conversation and command audit are retained.</p><div class="actions"><button class="danger" disabled="@busy" @onclick="() => DeleteWorker(worker)">Confirm delete worker</button><button class="subtle" @onclick="() => deletingWorkerId = null">Keep worker</button></div> }
+          { <p>Delete @worker.Name from AgentControl? This releases its workspace claim and removes cached conversation data. Deletion does not abort work or stop remote processes, so detached work may continue while disconnected. Remote files, native conversation, runtime registration and command audit are retained.</p><div class="actions"><button class="danger" disabled="@busy" @onclick="() => DeleteWorker(worker)">Confirm delete worker</button><button class="subtle" @onclick="() => deletingWorkerId = null">Keep worker</button></div> }
           </details>
         </article>
       }
