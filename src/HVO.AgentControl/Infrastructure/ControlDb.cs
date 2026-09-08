@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Provisioning;
 using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
@@ -37,6 +38,9 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<TaskWorkspaceRecord> TaskWorkspaces => Set<TaskWorkspaceRecord>();
     public DbSet<TaskSessionBindingRecord> TaskSessionBindings => Set<TaskSessionBindingRecord>();
     public DbSet<TaskBindingRecord> TaskBindings => Set<TaskBindingRecord>();
+    public DbSet<ProvisionOperationRecord> ProvisionOperations => Set<ProvisionOperationRecord>();
+    public DbSet<ProvisionAttemptRecord> ProvisionAttempts => Set<ProvisionAttemptRecord>();
+    public DbSet<ProvisionEffectRecord> ProvisionEffects => Set<ProvisionEffectRecord>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -131,5 +135,16 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<TaskBindingRecord>().HasOne<TaskWorkspaceRecord>().WithMany().HasForeignKey(x => x.WorkspaceId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<TaskBindingRecord>().HasOne<TaskSessionBindingRecord>().WithOne().HasForeignKey<TaskSessionBindingRecord>(x => x.TaskBindingId)
             .HasPrincipalKey<TaskBindingRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<ProvisionOperationRecord>().HasKey(x => x.Sequence);
+        model.Entity<ProvisionOperationRecord>().HasIndex(x => x.Id).IsUnique();
+        model.Entity<ProvisionOperationRecord>().HasIndex(x => new { x.HostId, x.State });
+        model.Entity<ProvisionOperationRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<ProvisionAttemptRecord>().HasKey(x => x.OperationId);
+        model.Entity<ProvisionAttemptRecord>().HasIndex(x => new { x.HostId, x.WorkspaceId }).IsUnique();
+        model.Entity<ProvisionAttemptRecord>().HasOne<ProvisionOperationRecord>().WithOne()
+            .HasForeignKey<ProvisionAttemptRecord>(x => x.OperationId).HasPrincipalKey<ProvisionOperationRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<ProvisionEffectRecord>().HasKey(x => new { x.OperationId, x.Effect, x.ResourceId });
+        model.Entity<ProvisionEffectRecord>().HasOne<ProvisionAttemptRecord>().WithMany()
+            .HasForeignKey(x => x.OperationId).OnDelete(DeleteBehavior.Restrict);
     }
 }
