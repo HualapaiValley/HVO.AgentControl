@@ -69,6 +69,41 @@ public sealed class HomeConversationRaceTests
     }
 
     [Fact]
+    public async Task DraftSurvivesLateAbaSelectionAndStillTargetsFinalWorker()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var startedB = Source(); var releaseB = Source();
+        var home = Home(app.Store, async (id, before, beforeId) =>
+        {
+            var loaded = await app.Store.Detail(id, before, beforeId);
+            if (id == b.Id)
+            {
+                startedB.SetResult();
+                await releaseB.Task;
+            }
+            return loaded;
+        });
+
+        await home.Navigate(a.Id);
+        home.SetDraft("draft typed during selection");
+        var pendingB = home.Navigate(b.Id);
+        await startedB.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await home.Navigate(a.Id);
+        releaseB.SetResult();
+        await pendingB;
+
+        Assert.Equal(a.Id, home.Visible!.Worker.Id);
+        Assert.Equal("draft typed during selection", home.Draft);
+        await home.Send("final worker instruction");
+
+        var command = Assert.Single((await app.Store.Detail(a.Id)).Commands);
+        Assert.Equal(a.Id, command.WorkerId);
+        Assert.Equal(a.Revision, Json.Read<PromptInput>(command.Payload).ExpectedRevision);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+    }
+
+    [Fact]
     public async Task DelayedErrorFromFirstAIsRejectedAfterAThenBThenA()
     {
         await using var app = new TestApp();
@@ -278,6 +313,7 @@ public sealed class HomeConversationRaceTests
         public WorkerDetail? Visible => Field<WorkerDetail?>("detail");
         public string? VisibleError => error;
         public string? Notice => Field<string?>("notice");
+        public string Draft => Field<string>("promptText");
         public string? LastBeforeId { get; private set; }
         public IReadOnlyList<TranscriptMessage> Older => Field<List<TranscriptMessage>>("olderMessages");
         public string ReviewedCommandId => Field<string>("outcomeCommandId");
@@ -288,6 +324,7 @@ public sealed class HomeConversationRaceTests
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
+        public void SetDraft(string text) => SetField("promptText", text);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
         {

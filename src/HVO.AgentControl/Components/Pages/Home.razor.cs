@@ -21,6 +21,7 @@ public partial class Home
     private int progressMinutes = 5;
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
     private readonly ConversationSelection selection = new();
+    private readonly Dictionary<string, string> promptDrafts = [];
     private readonly Dictionary<string, string> answers = [];
     private readonly Dictionary<string, HashSet<string>> choices = [];
     private readonly Dictionary<string, string> replyIds = [];
@@ -30,9 +31,12 @@ public partial class Home
     protected override async Task OnParametersSetAsync()
     {
         if (appliedWorkerId == WorkerId) return;
+        if (appliedWorkerId is { Length: > 0 }) promptDrafts[appliedWorkerId] = promptText;
         appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = ""; outcomeExpectedRevision = 0;
-        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; promptRequestId = null;
+        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear();
+        promptText = WorkerId is { Length: > 0 } ? promptDrafts.GetValueOrDefault(WorkerId, "") : "";
+        promptRequestId = null;
         await Refresh();
     }
     protected override async Task SnapshotChanged()
@@ -86,7 +90,8 @@ public partial class Home
         var current = SelectedDetail();
         promptRequestId ??= Guid.NewGuid().ToString();
         var command = await Store.Prompt(current.Worker.Id, new(promptRequestId, promptText, current.Worker.Revision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
-        notice = "Instruction queued. You can leave this page while the worker runs."; promptText = ""; promptRequestId = null;
+        notice = "Instruction queued. You can leave this page while the worker runs.";
+        promptText = ""; promptDrafts.Remove(current.Worker.Id); promptRequestId = null;
     });
     private Task StatusInquiry() => Execute(async () =>
     {
@@ -133,6 +138,11 @@ public partial class Home
     {
         if (!question.Multiple) Choices(id, question.Index).Clear();
         SetAnswer(id, question.Index, text);
+    }
+    private void SetPromptText(string text)
+    {
+        promptText = text;
+        if (selectedId is { Length: > 0 }) promptDrafts[selectedId] = text;
     }
     private Task OlderHistory() => Execute(async () =>
     {
