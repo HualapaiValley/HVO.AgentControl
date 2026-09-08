@@ -116,7 +116,10 @@ public sealed partial class CoordinationTests
         await app.Store.CoordinationTick();
         var action = new Dictionary<string, object?>
         {
-            ["type"] = "send_prompt", ["workerId"] = worker.Id, ["text"] = "Perform the task", ["includeGuidance"] = includeGuidance
+            ["type"] = "send_prompt",
+            ["workerId"] = worker.Id,
+            ["text"] = "Perform the task",
+            ["includeGuidance"] = includeGuidance
         };
         if (!omitProgress) action["progressMinutes"] = progressMinutes;
         run = (await app.Store.Coordinations()).Single();
