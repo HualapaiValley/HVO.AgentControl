@@ -11,6 +11,15 @@ module.exports = async ({ page, context, base, expect }) => {
   const receipt = pending.getByRole('link', { name: 'control-browser-create-browser-workgroup', exact: true });
   const savedReceipt = await (await context.request.get(base + await receipt.getAttribute('href'))).json();
   expect(savedReceipt.state).toBe('DeliveryUnknown');
+  const rejected = service.getByRole('article', { name: 'Control session browser-rejected', exact: true });
+  await rejected.getByRole('button', { name: 'Retry creation', exact: true }).click();
+  await expect(rejected).toContainText('Queued');
+  const retriedServices = await (await context.request.get(base + '/api/v1/control-services')).json();
+  const retried = retriedServices[0].sessions.find(x => x.scopeId === 'browser-rejected');
+  expect(retried.creationCommandId).not.toBe('control-browser-create-browser-rejected');
+  const priorRejected = await (await context.request.get(base + '/api/v1/commands/control-browser-create-browser-rejected')).json();
+  expect(priorRejected.state).toBe('Failed');
+  await expect(pending.getByRole('button', { name: 'Retry creation', exact: true })).toHaveCount(0);
   await expect(service.getByRole('button', { name: 'Add workgroup session', exact: true })).toBeDisabled();
   await expect(service.getByRole('link', { name: 'Open admin terminal', exact: true })).toHaveCount(0);
   await host.getByRole('button', { name: 'Edit session model', exact: true }).click();

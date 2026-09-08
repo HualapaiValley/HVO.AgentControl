@@ -34,10 +34,12 @@ with sqlite3.connect(sys.argv[1]) as db:
     for scope, kind, state, native, target in [
         ("host", "HostOperations", "Ready", "ses_browser_persistent_control", worker),
         ("browser-workgroup", "Workgroup", "Queued", "", "control-browser-pending"),
+        ("browser-rejected", "Workgroup", "Failed", "", "control-browser-failed"),
     ]:
         command = "control-browser-create-" + scope
         insert(db, "Commands", {"Id": command, "RuntimeId": runtime, "Kind": "CreateControlSession",
-                                "State": "Finished" if state == "Ready" else "DeliveryUnknown", "Payload": "{}",
+                                "State": "Finished" if state == "Ready" else "Failed" if state == "Failed" else "DeliveryUnknown",
+                                "Payload": json.dumps({"id": command, "scopeKind": kind, "scopeId": scope, "name": scope}),
                                 "Detail": "Native session creation unconfirmed; reconcile without replay."})
         insert(db, "ControlSessions", {"Id": "control-browser-binding-" + scope, "ControlServiceId": runtime,
                                        "ScopeKind": kind, "ScopeId": scope, "WorkerId": target, "State": state,
