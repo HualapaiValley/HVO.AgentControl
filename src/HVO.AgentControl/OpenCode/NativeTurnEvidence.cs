@@ -42,13 +42,23 @@ public static class NativeTurnEvidence
     {
         var info = message.GetProperty("info");
         if (!info.GetProperty("time").TryGetProperty("completed", out var completed) || completed.ValueKind != JsonValueKind.Number) return false;
-        var parts = message.GetProperty("parts").EnumerateArray().ToArray();
-        if (parts.Any(part => part.GetProperty("type").GetString() == "tool") &&
-            (!info.TryGetProperty("finish", out var finish) || finish.ValueKind != JsonValueKind.String || finish.GetString() is "tool-calls" or null)) return false;
+        // Native cleanup completes failed messages without necessarily setting a finish reason.
         if (info.TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) return true;
-        return parts.All(part => part.GetProperty("type").GetString() != "tool" ||
-            part.TryGetProperty("state", out var state) && state.TryGetProperty("status", out var status) &&
-            status.GetString() is "completed" or "error" or "cancelled");
+        if (info.TryGetProperty("structured", out _)) return true;
+        if (!info.TryGetProperty("finish", out var finish) || finish.ValueKind != JsonValueKind.String ||
+            finish.GetString() is null or "" or "tool-calls" or "unknown") return false;
+        // OpenCode continues ordinary tool calls even when a provider reports "stop".
+        // Only provider-executed calls and cleanup-marked interrupted orphans allow exit.
+        return message.GetProperty("parts").EnumerateArray().All(part =>
+            part.GetProperty("type").GetString() != "tool" || IsSettledTerminalTool(part));
+    }
+
+    private static bool IsSettledTerminalTool(JsonElement part)
+    {
+        if (!part.TryGetProperty("state", out var state) || !state.TryGetProperty("status", out var status) ||
+            status.GetString() is not ("completed" or "error" or "cancelled")) return false;
+        return part.TryGetProperty("metadata", out var metadata) && IsTrue(metadata, "providerExecuted") ||
+            status.GetString() == "error" && state.TryGetProperty("metadata", out var stateMetadata) && IsTrue(stateMetadata, "interrupted");
     }
 
     private static bool IsTrue(JsonElement value, string property) =>

@@ -13,6 +13,65 @@ namespace HVO.AgentControl.Tests;
 public sealed class RuntimeSupervisorReconciliationTests
 {
     [Fact]
+    public async Task ToolBoundaryWithoutFinalMessageStaysActiveAcrossRestartUntilFinalArrives()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var command = await AddPrompt(app, worker);
+            var snapshot = Snapshot(worker, command, FinalAssistant(completed: null, text: ""));
+            await Reconcile(app, worker, snapshot with { Messages = snapshot.Messages[..^1] });
+            var retained = (await app.Store.Detail(worker.Id)).Commands.Single();
+            Assert.Equal(Delivery.Accepted, retained.State);
+            Assert.Equal(command.ResultJson, retained.ResultJson);
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var restartedWorker = (await restarted.Store.Snapshot()).Workers.Single();
+        var restartedCommand = (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single();
+        var boundary = Snapshot(restartedWorker, restartedCommand, FinalAssistant(completed: null, text: ""));
+        await Reconcile(restarted, restartedWorker, boundary with { Messages = boundary.Messages[..^1] });
+        Assert.Equal(Delivery.Accepted, (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single().State);
+        await Reconcile(restarted, restartedWorker, Snapshot(restartedWorker, restartedCommand, FinalAssistant(completed: 4, text: "Final review evidence")));
+        var finished = (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single();
+        Assert.Equal(Delivery.Finished, finished.State);
+        Assert.Contains("Final review evidence", ControlStore.ResponseText(finished.ResultJson!));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("tool-calls")]
+    public async Task CompletedNativeErrorWithToolPartsFinishesDeliveryAndRetainsFailure(string? finish)
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = await AddPrompt(app, worker);
+        var info = new Dictionary<string, object>
+        {
+            ["id"] = "msg_final",
+            ["role"] = "assistant",
+            ["parentID"] = command.NativeMessageId!,
+            ["sessionID"] = worker.NativeSessionId,
+            ["time"] = new { created = 3L, completed = 4L },
+            ["error"] = new { name = "APIError", data = new { message = "Provider failed" } }
+        };
+        if (finish is not null) info["finish"] = finish;
+        var failed = JsonSerializer.SerializeToElement(new
+        {
+            info,
+            parts = new[] { new { type = "tool", tool = "bash", state = new { status = "error", metadata = new { interrupted = true } } } }
+        });
+
+        await Reconcile(app, worker, Snapshot(worker, command, failed));
+        var detail = await app.Store.Detail(worker.Id);
+        Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
+        Assert.Equal("Failed", detail.Worker.Outcome);
+        Assert.Contains("Provider failed", detail.Commands.Single().ResultJson);
+    }
+
+    [Fact]
     public async Task IncompleteLatestAssistantResponseDoesNotFinishBeforeOrAfterRestart()
     {
         string data, secrets;
@@ -48,7 +107,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         var command = await AddPrompt(app, worker);
         var pendingTool = JsonSerializer.SerializeToElement(new
         {
-            info = new { id = "msg_final", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId, time = new { created = 3L, completed = 4L } },
+            info = new { id = "msg_final", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId, time = new { created = 3L, completed = 4L }, finish = "stop" },
             parts = new[] { new { type = "tool", tool = "bash", state = new { status = "running" } } }
         });
 
@@ -105,7 +164,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         JsonSerializer.SerializeToElement(new { }),
         [
             JsonSerializer.SerializeToElement(new { info = new { id = command.NativeMessageId, role = "user", sessionID = worker.NativeSessionId, time = new { created = 1L } }, parts = Array.Empty<object>() }),
-            JsonSerializer.SerializeToElement(new { info = new { id = "msg_tool", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId, time = new { created = 2L, completed = 3L } }, parts = new[] { new { type = "tool", tool = "bash", state = new { status = "completed" } } } }),
+            JsonSerializer.SerializeToElement(new { info = new { id = "msg_tool", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId, time = new { created = 2L, completed = 3L }, finish = "tool-calls" }, parts = new[] { new { type = "tool", tool = "bash", state = new { status = "completed" } } } }),
             final
         ],
         "idle", JsonSerializer.SerializeToElement(new { }), [], []);
@@ -113,7 +172,7 @@ public sealed class RuntimeSupervisorReconciliationTests
     private static JsonElement FinalAssistant(long? completed, string text) => JsonSerializer.SerializeToElement(new
     {
         info = completed.HasValue
-            ? new Dictionary<string, object> { ["id"] = "msg_final", ["role"] = "assistant", ["parentID"] = "msg_user", ["sessionID"] = "ses_fixture", ["time"] = new { created = 3L, completed } }
+            ? new Dictionary<string, object> { ["id"] = "msg_final", ["role"] = "assistant", ["parentID"] = "msg_user", ["sessionID"] = "ses_fixture", ["time"] = new { created = 3L, completed }, ["finish"] = "stop" }
             : new Dictionary<string, object> { ["id"] = "msg_final", ["role"] = "assistant", ["parentID"] = "msg_user", ["sessionID"] = "ses_fixture", ["time"] = new { created = 3L } },
         parts = new[] { new { type = "text", text } }
     });

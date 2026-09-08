@@ -78,7 +78,7 @@ def finish(session_id, message_id, text):
         if request and request['id'] in state[kind]:
             del state[kind][request['id']]
         output = 'Fixture response: ' + text + ' — café 🛰\nTranscript is simulated.'
-        assistant = {'info': {'id': 'msg_' + uuid.uuid4().hex, 'sessionID': session_id, 'parentID': message_id, 'role': 'assistant', 'time': {'created': now(), 'completed': now()}, 'tokens': {'input': 5, 'output': 8}},
+        assistant = {'info': {'id': 'msg_' + uuid.uuid4().hex, 'sessionID': session_id, 'parentID': message_id, 'role': 'assistant', 'finish': 'stop', 'time': {'created': now(), 'completed': now()}, 'tokens': {'input': 5, 'output': 8}},
                      'parts': [{'id': 'prt_' + uuid.uuid4().hex, 'sessionID': session_id, 'messageID': message_id, 'type': 'text', 'text': output}]}
         if '[error]' in text or aborted:
             assistant['info']['error'] = {'name': 'FixtureError' if not aborted else 'MessageAbortedError', 'data': {'message': 'Simulated native error'}}
