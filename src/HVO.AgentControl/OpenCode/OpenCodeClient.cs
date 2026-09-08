@@ -192,23 +192,21 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
 
     public Task<HttpResponseMessage> Subscribe(CancellationToken token) => SubscribeCore(token);
 
-    public async Task WaitForInstanceDisposed(HttpResponseMessage response, string directory, int processId, string incarnation,
-        CancellationToken token)
+    public async Task WaitForInstanceDisposed(HttpResponseMessage response, string directory, CancellationToken token)
     {
         using (response)
         await using (var stream = await response.Content.ReadAsStreamAsync(token))
         {
             await foreach (var item in SseReader.Read(stream, cancellationToken: token))
             {
-                if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("type", out var type) ||
-                    type.GetString() != "server.instance.disposed" || !item.TryGetProperty("properties", out var properties) ||
+                if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("payload", out var payload) ||
+                    payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("type", out var type) ||
+                    type.GetString() != "server.instance.disposed" || !payload.TryGetProperty("properties", out var properties) ||
                     properties.ValueKind != JsonValueKind.Object)
                     continue;
-                if (properties.TryGetProperty("directory", out var eventDirectory) && eventDirectory.GetString() == directory &&
-                    properties.TryGetProperty("processID", out var eventProcessId) && eventProcessId.GetInt32() == processId &&
-                    properties.TryGetProperty("incarnation", out var eventIncarnation) && eventIncarnation.GetString() == incarnation)
+                if (properties.TryGetProperty("directory", out var eventDirectory) && eventDirectory.GetString() == directory)
                     return;
-                throw new InvalidDataException("OpenCode disposal event identity does not match the verified runtime.");
+                throw new InvalidDataException("OpenCode disposal event directory does not match the controlled refresh scope.");
             }
         }
         throw new EndOfStreamException("OpenCode SSE ended before the scoped instance disposal completed.");

@@ -258,7 +258,7 @@ public sealed class ProviderKeyTests
             {
                 var response = new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent("data: {\"type\":\"server.instance.disposed\",\"properties\":{\"directory\":\"/workspace\",\"processID\":7,\"incarnation\":\"fixture-incarnation\"}}\n\n")
+                    Content = new StringContent("data: {\"directory\":\"/workspace\",\"payload\":{\"type\":\"server.instance.disposed\",\"properties\":{\"directory\":\"/workspace\"}}}\n\n")
                 };
                 response.Content.Headers.ContentType = new("text/event-stream");
                 return Task.FromResult(response);

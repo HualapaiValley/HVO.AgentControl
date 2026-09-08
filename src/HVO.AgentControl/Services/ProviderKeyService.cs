@@ -216,9 +216,16 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                     }
                     using var completionDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                     completionDeadline.CancelAfter(TimeSpan.FromSeconds(20));
-                    var completion = await api.Subscribe(completionDeadline.Token);
+                    using var completion = await api.Subscribe(completionDeadline.Token);
                     await api.DisposeInstance(directory, completionDeadline.Token);
-                    await api.WaitForInstanceDisposed(completion, directory, process.ProcessId!.Value, process.Incarnation, completionDeadline.Token);
+                    await api.WaitForInstanceDisposed(completion, directory, completionDeadline.Token);
+                    await transport.ValidateConnection(completionDeadline.Token);
+                    if (!transport.Connected)
+                    {
+                        await Readiness("Unknown", "The verified runtime connection changed while waiting for scoped disposal completion.");
+                        await InstanceReadiness("Unknown", "The verified runtime connection changed while waiting for scoped disposal completion.");
+                        return;
+                    }
                     await api.Models(directory, cancellation);
                 }
                 await Readiness("RefreshCompleted", "Scoped native provider caches were refreshed after fresh idle evidence; model access is not yet tested.");
