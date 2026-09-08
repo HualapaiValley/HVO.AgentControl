@@ -69,8 +69,14 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.getByRole('button',{name:'Expand worker sidebar'}).click();
     await expect(page.getByRole('complementary',{name:'Worker navigation'})).not.toHaveClass(/is-collapsed/);
    await page.getByRole('button',{name:'Close worker sidebar'}).click({position:{x:382,y:420}});
-  await page.goto(base+'/?worker='+worker.id); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
-  expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
+    await page.goto(base+'/?worker='+worker.id); await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
+   const alternative=snapshot.workers.find(w=>w.id!==worker.id&&!w.archived);
+   if(alternative) {
+    await page.getByLabel('Agent conversation').selectOption(alternative.id);
+    await expect(page).toHaveURL(new RegExp('worker='+encodeURIComponent(alternative.id)));
+    await expect(page.getByRole('region',{name:'Worker conversation'}).getByRole('heading',{name:alternative.name,exact:true})).toBeVisible();
+   }
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
   await page.screenshot({path:path.join(artifacts,'ui-conversation-mobile.png'),fullPage:true});
   const after=await (await context.request.get(base+'/api/v1/snapshot')).json();
   expect(after.workers.find(w=>w.id===worker.id).nativeSessionId).toBe(worker.nativeSessionId);
