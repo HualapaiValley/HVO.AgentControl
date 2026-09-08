@@ -252,6 +252,62 @@ public sealed class HostResourceTests
     }
 
     [Fact]
+    public async Task FreshObservedBuildLanePreventsAdmissionAndEffectAfterLanesReachZero()
+    {
+        await using var app = new TestApp();
+        var executor = await Enroll(app);
+        var policy = await Policy(app, executor);
+        var firstEvidence = await app.Store.SubmitHostResourceObservation(executor.Principal,
+            Observation(executor, 1) with { BuildSlots = 1 });
+        var first = await app.Store.AcquireHostResourceReservation(Reservation(executor, policy, firstEvidence));
+
+        var secondEvidence = await app.Store.SubmitHostResourceObservation(executor.Principal,
+            Observation(executor, 2) with { BuildSlots = 1 });
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcquireHostResourceReservation(
+            Reservation(executor, policy, secondEvidence)));
+
+        var effectEvidence = await app.Store.SubmitHostResourceObservation(executor.Principal,
+            Observation(executor, 3, firstEvidence.WorkspaceId) with { BuildSlots = 0 });
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.BeginHostResourceEffect(executor.Principal, first.Id,
+            new(first.Revision, first.IntentDigest, effectEvidence.Id)));
+        Assert.Equal(HostReservationState.Held,
+            Assert.Single(await app.Store.HostResourceReservations(executor.PhysicalHostId)).State);
+    }
+
+    [Fact]
+    public async Task WorkspaceAndDockerRolesShareOnePhysicalFilesystemBudget()
+    {
+        await using var app = new TestApp();
+        var executor = await Enroll(app);
+        var policy = await Policy(app, executor);
+        var runtimeFilesystem = Digest("shared-filesystem");
+        var runtimeEvidence = await app.Store.SubmitHostResourceObservation(executor.Principal,
+            Observation(executor, 1) with
+            {
+                WorkspaceFilesystemId = runtimeFilesystem,
+                WorkspaceAvailableBytes = 2 * GiB
+            });
+        var runtime = Reservation(executor, policy, runtimeEvidence) with
+        {
+            Kind = "Runtime",
+            BuildSlots = 0,
+            DiskBytes = GiB
+        };
+        await app.Store.AcquireHostResourceReservation(runtime);
+
+        var buildEvidence = await app.Store.SubmitHostResourceObservation(executor.Principal,
+            Observation(executor, 2, Id()) with
+            {
+                WorkspaceFilesystemId = Digest("separate-workspace-filesystem"),
+                DockerFilesystemId = runtimeFilesystem,
+                WorkspaceAvailableBytes = 2 * GiB,
+                DockerAvailableBytes = 2 * GiB
+            });
+        var build = Reservation(executor, policy, buildEvidence) with { DiskBytes = GiB };
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.AcquireHostResourceReservation(build));
+    }
+
+    [Fact]
     public async Task MissingDockerAuthorityBlocksBuildButNotRuntimeAdmission()
     {
         await using var app = new TestApp();

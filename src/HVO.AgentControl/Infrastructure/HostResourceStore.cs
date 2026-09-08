@@ -647,18 +647,30 @@ public sealed partial class ControlStore
             Required(observation.AvailableCpuMillis, "available CPU") - policy.ControllerReserveCpuMillis);
         RequireWithin("fresh physical memory headroom", memoryBytes, held.Sum(x => x.MemoryBytes),
             Required(observation.AvailableMemoryBytes, "available memory") - policy.ControllerReserveMemoryBytes);
-        var sameFilesystem = held.Where(x => x.WorkspaceFilesystemId == observation.WorkspaceFilesystemId).Sum(x => x.DiskBytes);
+        var sameFilesystem = held.Where(x => SharesFilesystem(x, observation)).Sum(x => x.DiskBytes);
         RequireWithin("fresh workspace disk headroom", diskBytes, sameFilesystem,
             Required(observation.WorkspaceAvailableBytes, "workspace disk") - policy.ControllerReserveDiskBytes);
+        RequireWithin("fresh observed build lane", buildSlots, held.Sum(x => x.BuildSlots),
+            Required(observation.BuildSlots, "build lane"));
         if (kind == "Build")
         {
-            var dockerReserved = held.Where(x => x.DockerFilesystemId == observation.DockerFilesystemId).Sum(x => x.DiskBytes);
+            var dockerReserved = held.Where(x => SharesDockerFilesystem(x, observation)).Sum(x => x.DiskBytes);
             if (observation.DockerAvailable != true || observation.DockerFilesystemId is null)
                 throw new ControlException("Fresh Docker build capacity evidence is unavailable.");
             RequireWithin("fresh Docker disk headroom", diskBytes, dockerReserved,
                 Required(observation.DockerAvailableBytes, "Docker disk") - policy.ControllerReserveDiskBytes);
         }
     }
+
+    private static bool SharesFilesystem(HostResourceReservation reservation, HostResourceObservation observation) =>
+        reservation.WorkspaceFilesystemId == observation.WorkspaceFilesystemId ||
+        reservation.DockerFilesystemId is not null && reservation.DockerFilesystemId == observation.WorkspaceFilesystemId ||
+        observation.DockerFilesystemId is not null && reservation.WorkspaceFilesystemId == observation.DockerFilesystemId ||
+        observation.DockerFilesystemId is not null && reservation.DockerFilesystemId == observation.DockerFilesystemId;
+
+    private static bool SharesDockerFilesystem(HostResourceReservation reservation, HostResourceObservation observation) =>
+        observation.DockerFilesystemId is not null &&
+        (reservation.WorkspaceFilesystemId == observation.DockerFilesystemId || reservation.DockerFilesystemId == observation.DockerFilesystemId);
 
     private static async Task<T> MutateHostResource<T>(ControlDb db, string requestId, string action, string resourceId,
         object request, Func<Task<T>> mutate)
