@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Provisioning;
 using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
@@ -18,6 +19,12 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<HostResourceReservation> HostResourceReservations => Set<HostResourceReservation>();
     public DbSet<HostResourceMutationReceipt> HostResourceMutations => Set<HostResourceMutationReceipt>();
     public DbSet<HVO.AgentControl.GitHub.GitHubAccess> GitHubAccess => Set<HVO.AgentControl.GitHub.GitHubAccess>();
+    public DbSet<GitHubMergePolicy> GitHubMergePolicies => Set<GitHubMergePolicy>();
+    public DbSet<GitHubReviewReceipt> GitHubReviewReceipts => Set<GitHubReviewReceipt>();
+    public DbSet<GitHubMergeIntent> GitHubMergeIntents => Set<GitHubMergeIntent>();
+    public DbSet<GitHubCheckObservation> GitHubCheckObservations => Set<GitHubCheckObservation>();
+    public DbSet<GitHubMergeAttempt> GitHubMergeAttempts => Set<GitHubMergeAttempt>();
+    public DbSet<GitHubMergeLease> GitHubMergeLeases => Set<GitHubMergeLease>();
     public DbSet<CoordinationRun> CoordinationRuns => Set<CoordinationRun>();
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
     public DbSet<WorkerRecord> Workers => Set<WorkerRecord>();
@@ -42,6 +49,9 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<TaskWorkspaceRecord> TaskWorkspaces => Set<TaskWorkspaceRecord>();
     public DbSet<TaskSessionBindingRecord> TaskSessionBindings => Set<TaskSessionBindingRecord>();
     public DbSet<TaskBindingRecord> TaskBindings => Set<TaskBindingRecord>();
+    public DbSet<ProvisionOperationRecord> ProvisionOperations => Set<ProvisionOperationRecord>();
+    public DbSet<ProvisionAttemptRecord> ProvisionAttempts => Set<ProvisionAttemptRecord>();
+    public DbSet<ProvisionEffectRecord> ProvisionEffects => Set<ProvisionEffectRecord>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -104,6 +114,17 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<HVO.AgentControl.Services.ProviderCredential>();
         model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<HVO.AgentControl.Services.ProviderReadinessReceipt>();
+        model.Entity<GitHubMergePolicy>().HasKey(x => new { x.Id, x.Revision });
+        model.Entity<GitHubMergePolicy>().Property(x => x.Repository).UseCollation("NOCASE");
+        model.Entity<GitHubMergePolicy>().HasIndex(x => new { x.Repository, x.BaseBranch, x.Revision }).IsUnique();
+        model.Entity<GitHubReviewReceipt>().Property(x => x.Repository).UseCollation("NOCASE");
+        model.Entity<GitHubReviewReceipt>().HasIndex(x => new { x.Repository, x.PullRequestNumber, x.HeadSha, x.ReviewerWorkerId }).IsUnique();
+        model.Entity<GitHubMergeIntent>().Property(x => x.Repository).UseCollation("NOCASE");
+        model.Entity<GitHubMergeIntent>().HasIndex(x => new { x.Repository, x.PullRequestNumber, x.ExpectedHeadSha }).IsUnique();
+        model.Entity<GitHubCheckObservation>().HasIndex(x => new { x.Repository, x.PullRequestNumber, x.HeadSha, x.ObservedAt });
+        model.Entity<GitHubMergeAttempt>().HasIndex(x => new { x.IntentId, x.State }).IsUnique();
+        model.Entity<GitHubMergeLease>().Property(x => x.Repository).UseCollation("NOCASE");
+        model.Entity<GitHubMergeLease>().HasIndex(x => new { x.Repository, x.BaseBranch }).IsUnique();
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
         model.Entity<RuntimeRecord>().Property(x => x.ConnectionKind).HasDefaultValue(RuntimeConnections.Ssh);
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.ManagedServerId, x.NativeSessionId }).IsUnique();
@@ -165,5 +186,17 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<TaskBindingRecord>().HasOne<TaskWorkspaceRecord>().WithMany().HasForeignKey(x => x.WorkspaceId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<TaskBindingRecord>().HasOne<TaskSessionBindingRecord>().WithOne().HasForeignKey<TaskSessionBindingRecord>(x => x.TaskBindingId)
             .HasPrincipalKey<TaskBindingRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<ProvisionOperationRecord>().HasKey(x => x.Sequence);
+        model.Entity<ProvisionOperationRecord>().HasIndex(x => x.Id).IsUnique();
+        model.Entity<ProvisionOperationRecord>().HasIndex(x => new { x.HostId, x.State });
+        model.Entity<ProvisionOperationRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<ProvisionAttemptRecord>().HasKey(x => x.OperationId);
+        model.Entity<ProvisionAttemptRecord>().HasIndex(x => new { x.HostId, x.WorkspaceIdentity }).IsUnique();
+        model.Entity<ProvisionAttemptRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<ProvisionAttemptRecord>().HasOne<ProvisionOperationRecord>().WithOne()
+            .HasForeignKey<ProvisionAttemptRecord>(x => x.OperationId).HasPrincipalKey<ProvisionOperationRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<ProvisionEffectRecord>().HasKey(x => new { x.OperationId, x.Effect });
+        model.Entity<ProvisionEffectRecord>().HasOne<ProvisionAttemptRecord>().WithMany()
+            .HasForeignKey(x => x.OperationId).OnDelete(DeleteBehavior.Restrict);
     }
 }

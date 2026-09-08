@@ -24,7 +24,7 @@ Freshness is checked against both the executor's bounded `collectedTo` and the c
 
 Reservations are atomic under the controller's single-replica write gate and account all `Held`, `EffectCommitted` and `Unknown` records by physical-host identity, including aliases/devcontainers. They fence canonical workspaces, ports and explicit shared resources with durable filtered unique indexes. Configured limits and fresh observed headroom are both enforced. Filesystem reservations are compared only with matching filesystem identities; builds additionally require matching Docker filesystem evidence and a build lane.
 
-`operationId` and `intentDigest` bind a reservation to the caller's durable operation intent without exposing executable arguments or host authority. The current owner API is the authority that requests admission. The open provisioning-ledger integration must pass its already-approved operation identity and digest into this seam; this slice does not invent a provisioning operation or claim that a Docker effect occurred.
+`operationId` and `intentDigest` bind a reservation to the caller's durable operation intent without exposing executable arguments or host authority. The current owner API is the authority that requests admission. The provisioning ledger introduced by #171 must pass its already-approved operation identity and digest into this seam; this independent slice does not yet connect those records or claim that a Docker effect occurred.
 
 ## Effect and release fencing
 

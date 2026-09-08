@@ -41,7 +41,8 @@ public sealed class GitHubCredentialSupervisor(ControlStore store, Secrets secre
                             else
                             {
                                 credential = await github.Issue(current.AppId, current.InstallationId, secrets.Read(current.PrivateKeyReference), Json.Read<string[]>(current.RepositoriesJson), deadline.Token);
-                                environment = await delivery.Deliver(runtime, credential, deadline.Token);
+                                environment = await delivery.Deliver(runtime, credential, deadline.Token,
+                                    current.CredentialConfigurationFingerprint);
                             }
                             await SaveEnvironment(grant, runtime, environment, credential, credential is not null);
                         }

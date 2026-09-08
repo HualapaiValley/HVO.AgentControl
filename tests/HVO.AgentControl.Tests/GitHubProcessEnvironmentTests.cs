@@ -323,6 +323,115 @@ public sealed class GitHubProcessEnvironmentTests
         }
     }
 
+    private sealed class GitHubCliSshFactAttribute : FactAttribute
+    {
+        public GitHubCliSshFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable("HVO_SSH_FIXTURES") != "1" ||
+                Environment.GetEnvironmentVariable("HVO_GITHUB_CLI_TESTS") != "1")
+                Skip = "Start disposable SSH fixtures and set HVO_SSH_FIXTURES=1 and HVO_GITHUB_CLI_TESTS=1 with GitHub CLI installed.";
+        }
+    }
+
+    [GitHubCliSshFact]
+    public async Task InstalledCliRewritesAllowTwoSshRenewalsWithoutRestartAndRejectCredentialChanges()
+    {
+        const string actor = "agentcontrol-test[bot]";
+        var runtime = SshIntegrationTests.Profile("a", "GitHub CLI renewal", Random.Shared.Next(41000, 50000));
+        runtime.StateDirectory = "/home/agent/github-cli-renewal-" + Guid.NewGuid().ToString("N");
+        var secrets = new Secrets(Options.Create(new ControlOptions { SecretsDirectory = SshIntegrationTests.FixtureSecrets }));
+        var factory = new SshRuntimeTransportFactory(secrets);
+        var delivery = new GitHubCredentialDelivery(secrets);
+        var managed = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
+        var hostsPath = managed + "/hosts.yml";
+        IRuntimeTransport? active = null;
+        var installed = false;
+        var stopped = false;
+        try
+        {
+            // Copy the installed CLI only into the disposable fixture. No inherited
+            // credentials, personal config, network route or provider is needed.
+            await Docker("root", "test", "!", "-e", "/usr/local/bin/gh");
+            var cli = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+                .Select(path => Path.Combine(path, "gh")).First(File.Exists);
+            var copy = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var argument in new[] { "cp", cli, "hvo-agentcontrol-fixture-a:/usr/local/bin/gh" }) copy.ArgumentList.Add(argument);
+            using (var process = Process.Start(copy)!)
+            {
+                var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync();
+                Assert.True(process.ExitCode == 0, await error + await output);
+            }
+            installed = true;
+            await Docker("root", "chmod", "755", "/usr/local/bin/gh");
+            active = await factory.Connect(runtime, CancellationToken.None);
+            await Docker("agent", "mkdir", "-p", runtime.StateDirectory + "/cli-home");
+            GitHubProcessEnvironmentEvidence? first = null;
+            string? fingerprint = null;
+            var canonical = "";
+            for (var renewal = 0; renewal < 3; renewal++)
+            {
+                var credential = new GitHubInstallationToken("ghs_DISPOSABLE_SSH_RENEWAL_" + renewal,
+                    DateTimeOffset.UtcNow.AddHours(1), actor);
+                canonical = GitHubCredentialDelivery.HostsYaml(credential);
+                var delivered = await delivery.Deliver(runtime, credential, CancellationToken.None, fingerprint);
+                Assert.Equal(GitHubProcessEnvironment.Ready, delivered.Status);
+                first ??= delivered;
+                Assert.Equal(first.ProcessId, delivered.ProcessId);
+                Assert.Equal(first.ProcessIncarnation, delivered.ProcessIncarnation);
+                fingerprint = delivered.CredentialConfigurationFingerprint;
+                var value = await Cli("auth", "token", "--hostname", "github.com");
+                Assert.True(value.Trim() == credential.Value, "Disposable CLI token read did not match delivery.");
+                await Cli("auth", "setup-git", "--hostname", "github.com");
+                var rewritten = await Docker("agent", "cat", hostsPath);
+                Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(rewritten, actor));
+                Assert.Equal(fingerprint, GitHubProcessEnvironment.CredentialFingerprint(rewritten));
+                var rechecked = await delivery.VerifyEnvironment(runtime, fingerprint, CancellationToken.None);
+                Assert.Equal(GitHubProcessEnvironment.Ready, rechecked.Status);
+                Assert.Equal(first.ProcessId, rechecked.ProcessId);
+                Assert.Equal(first.ProcessIncarnation, rechecked.ProcessIncarnation);
+            }
+
+            var invalid = new[]
+            {
+                GitHubCredentialDelivery.HostsYaml(new("ghs_DIFFERENT_BUT_CONSISTENT_TOKEN", DateTimeOffset.UtcNow.AddHours(1), actor)),
+                canonical.Replace("            oauth_token: ", "            oauth_token: different-", StringComparison.Ordinal),
+                canonical + "enterprise.example.com:\n    user: personal\n",
+                canonical.Replace("    users:\n", "    users:\n        personal:\n            oauth_token: personal\n", StringComparison.Ordinal),
+                ""
+            };
+            foreach (var changed in invalid)
+            {
+                await DockerWrite(hostsPath, changed);
+                var rejected = await delivery.VerifyEnvironment(runtime, fingerprint!, CancellationToken.None);
+                Assert.Equal(GitHubProcessEnvironment.CredentialMismatch, rejected.Status);
+                await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime,
+                    new("ghs_MUST_NOT_OVERWRITE", DateTimeOffset.UtcNow.AddHours(1), actor), CancellationToken.None, fingerprint));
+                Assert.True(changed == await Docker("agent", "cat", hostsPath), "Rejected configuration was modified.");
+            }
+        }
+        finally
+        {
+            if (active is not null)
+            {
+                try { await active.StopOwnedServer(CancellationToken.None); stopped = true; }
+                finally { await active.DisposeAsync(); }
+            }
+            // Preserve native ownership evidence if stopping the fixture failed.
+            if (stopped) await Docker("root", "rm", "-rf", runtime.StateDirectory);
+            if (installed) await Docker("root", "rm", "/usr/local/bin/gh");
+        }
+
+        Task<string> Cli(params string[] arguments) => Docker("agent", new[]
+        {
+            "env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + runtime.StateDirectory + "/cli-home",
+            "GH_CONFIG_DIR=" + managed, "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1",
+            "GIT_CONFIG_GLOBAL=" + runtime.StateDirectory + "/cli-home/gitconfig", "GIT_CONFIG_NOSYSTEM=1",
+            "HTTP_PROXY=http://127.0.0.1:1", "HTTPS_PROXY=http://127.0.0.1:1", "ALL_PROXY=http://127.0.0.1:1",
+            "gh"
+        }.Concat(arguments).ToArray());
+    }
+
     private static async Task<string> Docker(string user, params string[] arguments)
     {
         var start = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true };

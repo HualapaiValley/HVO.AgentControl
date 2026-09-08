@@ -5,6 +5,7 @@ using System.Threading.RateLimiting;
 using HVO.AgentControl.Components;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Provisioning;
 using HVO.AgentControl.Services;
 using HVO.AgentControl.Ssh;
 using Microsoft.AspNetCore.Antiforgery;
@@ -35,6 +36,7 @@ builder.Services.AddSingleton<Secrets>();
 builder.Services.AddSingleton(_ => new HVO.AgentControl.GitHub.GitHubAppClient(
     new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) }, TimeProvider.System));
 builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubAccessService>();
+builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubMergeService>();
 builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubCredentialDelivery>();
 builder.Services.AddHostedService<HVO.AgentControl.GitHub.GitHubCredentialSupervisor>();
 builder.Services.AddDataProtection().PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.DataDirectory, "keys"))).SetApplicationName("HVO.AgentControl");
@@ -84,6 +86,7 @@ builder.Services.AddRateLimiter(options =>
 });
 builder.Services.AddDbContextFactory<ControlDb>(options => options.UseSqlite($"Data Source={Path.Combine(settings.DataDirectory, "agentcontrol.db")};Default Timeout=10"));
 builder.Services.AddSingleton<ControlStore>();
+builder.Services.AddSingleton<IProvisionAttemptLedger, DbProvisionAttemptLedger>();
 builder.Services.AddSingleton<IDevContainerCliOperationAdapter, DevContainerCliOperationAdapter>();
 builder.Services.AddSingleton<RuntimeVerificationService>();
 builder.Services.AddSingleton<ProviderLoginService>();

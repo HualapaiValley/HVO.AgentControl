@@ -238,7 +238,7 @@ public sealed class GitHubAccessTests
         Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed + "enterprise.example.com:\n    user: personal\n", credential.Actor));
         Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token:", "        personal:\n            oauth_token:"), credential.Actor));
         Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: \"different-token\""), credential.Actor));
-        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: fixture-token"), credential.Actor));
+        Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: fixture-token"), credential.Actor));
         Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token: \"fixture-token\"", "            oauth_token: \"fixture-token\" # ambiguous"), credential.Actor));
         Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts("partial", credential.Actor));
     }

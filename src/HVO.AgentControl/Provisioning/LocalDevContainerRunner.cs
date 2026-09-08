@@ -119,6 +119,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             return context.Result("VerifiedEnvironment", "cli_hooks_and_environment_observed_enrollment_not_performed");
         }
         catch (ProvisionIntentConflictException) { return context.Result("Failed", "operation_intent_conflict"); }
+        catch (ProvisionAdmissionException error) { return context.Result("Unsupported", error.Code); }
         catch (ProvisionFault error) { return context.Result(error.State, error.Code); }
         catch (OperationCanceledException) { return context.Result(context.EffectStarted ? "Unknown" : "Failed", context.EffectStarted ? "cancelled_reconcile_required" : "cancelled_before_effect"); }
         catch (Exception error) when (error is KeyNotFoundException or JsonException) { return context.Result("Unknown", "malformed_external_evidence"); }
