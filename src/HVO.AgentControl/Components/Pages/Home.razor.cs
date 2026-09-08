@@ -139,10 +139,10 @@ public partial class Home
         if (!question.Multiple) Choices(id, question.Index).Clear();
         SetAnswer(id, question.Index, text);
     }
-    private void SetPromptText(string text)
+    private void SetPromptText(string renderedWorkerId, string text)
     {
-        promptText = text;
-        if (selectedId is { Length: > 0 }) promptDrafts[selectedId] = text;
+        promptDrafts[renderedWorkerId] = text;
+        if (selectedId == renderedWorkerId && detail?.Worker.Id == renderedWorkerId) promptText = text;
     }
     private Task OlderHistory() => Execute(async () =>
     {

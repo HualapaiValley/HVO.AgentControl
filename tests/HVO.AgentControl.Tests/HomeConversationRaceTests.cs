@@ -104,6 +104,46 @@ public sealed class HomeConversationRaceTests
     }
 
     [Fact]
+    public async Task StaleRenderedComposerInputStaysWithRenderedWorkerDuringDelayedNavigation()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var startedB = Source(); var releaseB = Source();
+        var home = Home(app.Store, async (id, before, beforeId) =>
+        {
+            var loaded = await app.Store.Detail(id, before, beforeId);
+            if (id == b.Id)
+            {
+                startedB.SetResult();
+                await releaseB.Task;
+            }
+            return loaded;
+        });
+
+        await home.Navigate(a.Id);
+        var pendingB = home.Navigate(b.Id);
+        await startedB.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        home.SetRenderedDraft(a.Id, "draft-from-rendered-A-25x");
+        releaseB.SetResult();
+        await pendingB;
+
+        Assert.Equal(string.Empty, home.Draft);
+        await home.Navigate(a.Id);
+        Assert.Equal("draft-from-rendered-A-25x", home.Draft);
+        await home.Navigate(b.Id);
+        Assert.Equal(string.Empty, home.Draft);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+
+        await home.Navigate(a.Id);
+        await home.Send("final A instruction");
+        var command = Assert.Single((await app.Store.Detail(a.Id)).Commands);
+        Assert.Equal(a.Id, command.WorkerId);
+        Assert.Equal(a.Revision, Json.Read<PromptInput>(command.Payload).ExpectedRevision);
+        Assert.DoesNotContain((await app.Store.Detail(b.Id)).Commands, x =>
+            x.Kind == "Prompt" && Json.Read<PromptInput>(x.Payload).Text == "draft-from-rendered-A-25x");
+    }
+
+    [Fact]
     public async Task DelayedErrorFromFirstAIsRejectedAfterAThenBThenA()
     {
         await using var app = new TestApp();
@@ -325,6 +365,7 @@ public sealed class HomeConversationRaceTests
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
         public void SetDraft(string text) => SetField("promptText", text);
+        public void SetRenderedDraft(string workerId, string text) => Invoke("SetPromptText", workerId, text);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
         {
@@ -344,6 +385,7 @@ public sealed class HomeConversationRaceTests
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;
         private void SetField(string name, object value) => typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, value);
         private Task Invoke(string name) => (Task)typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, null)!;
+        private void Invoke(string name, params object[] args) => typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, args);
     }
 
     private sealed class Authenticated : AuthenticationStateProvider
