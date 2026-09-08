@@ -154,7 +154,19 @@ public sealed partial class ControlStore
         }
         run.Revision++;
         run.Detail = "Coordination " + run.State.ToLowerInvariant() + ". Already dispatched worker instructions remain independent.";
-        Event(db, "CoordinationChanged", payload: new { run.Id, run.State }, provenance: "user");
+        if (run.State != "Ready" && run.State != "Deciding" && run.State != "Waiting")
+        {
+            var transitionEvent = Event(db, "CoordinationChanged", payload: new { run.Id, run.State }, provenance: "user");
+            await db.SaveChangesAsync();
+            var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.CoordinationRunId == run.Id && x.Enabled);
+            if (schedule is not null)
+                await PublishMilestoneInternal(db, schedule, run, run.State, Now, transitionEvent);
+        }
+        else
+        {
+            Event(db, "CoordinationChanged", payload: new { run.Id, run.State }, provenance: "user");
+        }
         return run;
     });
 
@@ -247,7 +259,12 @@ public sealed partial class ControlStore
             // In supervision mode the model can finish a planning pass, not stop the C# supervisor.
             run.DecisionCommandId = null; run.State = decision.Complete && !run.ContinuousSupervision ? "Completed" : "Waiting";
             run.Detail = decision.Summary; run.Revision++;
-            Event(db, "CoordinatorDecisionApplied", payload: new { run.Id, run.Round, decision, receipt }, provenance: "coordinator");
+            var transitionEvent = Event(db, "CoordinatorDecisionApplied", payload: new { run.Id, run.Round, decision, receipt }, provenance: "coordinator");
+            await db.SaveChangesAsync();
+            var schedule = await db.OperatorUpdateSchedules.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.CoordinationRunId == run.Id && x.Enabled);
+            if (schedule is not null)
+                await PublishMilestoneInternal(db, schedule, run, run.State == "Completed" ? "Completed" : "DecisionApplied", Now, transitionEvent);
             return true;
         }
         if (!run.ContinuousSupervision && run.Round >= run.MaxRounds) { PauseCoordination(run, "Coordinator turn budget exhausted. Review and renew this coordination to continue with its existing assignments and receipts."); return true; }
