@@ -87,6 +87,8 @@ Use **Inspect workspace models** before creation if provider configuration is re
 
 Native OpenCode data uses XDG paths, normally `~/.local/share/opencode/opencode.db`, with config under `~/.config/opencode`, state under `~/.local/state/opencode` and logs beneath its data directory. Preserve the runtime user's data/config/state plus workspaces and the AgentControl bootstrap directory when containerizing a worker. Per-user processes/worktrees are not security sandboxes.
 
+See [retention and evaluation evidence](RETENTION_AND_EVALUATION.md) for archive/restore requirements, training-example coverage, proposed retention defaults and native context limits. The [September 8 audit](validation/retention-audit-2026-09-08.md) records measured storage and verified backup compression. Automatic retention is still pending; context compaction does not remove durable native history.
+
 ## Delivery and outcome recovery
 
 Each application request has a UUID and immutable routing/content. Retrying that UUID returns the same command; changing its contents with the same UUID is rejected. A single transactional claim precedes dispatch. Never wrap native mutations in a generic HTTP retry handler.
