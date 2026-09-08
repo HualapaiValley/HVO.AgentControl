@@ -209,6 +209,14 @@ public sealed partial class ControlStore
 
     internal static async Task<bool> ProviderDispatchAllowed(ControlDb db, WorkerRecord worker, CommandRecord command)
     {
+        var providerId = PoolId(worker, command)["provider:".Length..];
+        var readiness = await db.Set<HVO.AgentControl.Services.ProviderReadinessReceipt>()
+            .FindAsync(providerId + ":" + worker.RuntimeId);
+        if (readiness is not null && readiness.State is not ("Ready" or "RefreshCompleted"))
+        {
+            command.Detail = "Waiting for provider readiness refresh: " + readiness.State + ". " + readiness.Detail;
+            return false;
+        }
         var poolId = command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : PoolId(worker, command);
         var pool = await db.Set<ProviderPool>().FindAsync(poolId);
         if (pool is null) return true;

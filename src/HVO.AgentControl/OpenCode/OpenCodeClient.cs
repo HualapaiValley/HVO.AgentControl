@@ -95,6 +95,11 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     }
 
     public Task<JsonElement> Sessions(string directory, CancellationToken token) => Get(Scope("/session", directory), token);
+    public Task<JsonElement> SessionStatuses(string directory, CancellationToken token) => Get(Scope("/session/status", directory), token);
+    // OpenCode retains providers in an instance cache. Scope disposal to the verified
+    // workspace so saved conversations and the server process remain untouched.
+    public Task<JsonElement> DisposeInstance(string directory, CancellationToken token) =>
+        Send(HttpMethod.Post, Scope("/instance/dispose", directory), new { }, token);
     public Task<JsonElement> SetProviderKey(string providerId, string key, CancellationToken token) =>
         Send(HttpMethod.Put, $"/auth/{Id(providerId)}", new { type = "api", key }, token);
     public Task<JsonElement> ProviderAuthMethods(string directory, CancellationToken token) => Get(Scope("/provider/auth", directory), token);

@@ -24,10 +24,21 @@ public sealed class ProviderKeyDelivery
     public long UpdatedAt { get; set; }
 }
 
+public sealed class ProviderReadinessReceipt
+{
+    public string Id { get; set; } = "";
+    public string RuntimeId { get; set; } = "";
+    public string ProviderId { get; set; } = "";
+    public long KeyRevision { get; set; }
+    public string State { get; set; } = "RefreshRequired";
+    public string Detail { get; set; } = "Credential delivery has not refreshed native provider state.";
+    public long UpdatedAt { get; set; }
+}
+
 public sealed record SaveProviderKey(string Key, long ExpectedRevision);
 public sealed record ApplyProviderKey(long ExpectedRevision);
 public sealed record ProviderKeyStatus(string ProviderId, bool Saved, long Revision, long? UpdatedAt,
-    List<ProviderKeyDelivery> Deliveries);
+    List<ProviderKeyDelivery> Deliveries, List<ProviderReadinessReceipt> Readiness);
 
 // Only metadata enters the database or event journal. The existing vault encrypts the key.
 public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRuntimeTransportFactory transports)
@@ -39,7 +50,8 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
     {
         var key = await db.Set<ProviderCredential>().FindAsync(ProviderId);
         return new ProviderKeyStatus(ProviderId, key is not null, key?.Revision ?? 0, key?.UpdatedAt,
-            await db.Set<ProviderKeyDelivery>().AsNoTracking().Where(x => x.ProviderId == ProviderId).ToListAsync());
+            await db.Set<ProviderKeyDelivery>().AsNoTracking().Where(x => x.ProviderId == ProviderId).ToListAsync(),
+            await db.Set<ProviderReadinessReceipt>().AsNoTracking().Where(x => x.ProviderId == ProviderId).ToListAsync());
     });
 
     public async Task<ProviderKeyStatus> Save(SaveProviderKey input)
@@ -56,6 +68,13 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 var reference = secrets.StoreEncrypted(input.Key.Trim());
                 if (key is null) { key = new() { Id = ProviderId }; db.Add(key); }
                 key.SecretReference = reference; key.Revision++; key.UpdatedAt = ControlStore.Now;
+                foreach (var readiness in await db.Set<ProviderReadinessReceipt>().Where(x => x.ProviderId == ProviderId).ToListAsync())
+                {
+                    readiness.KeyRevision = key.Revision;
+                    readiness.State = "RefreshRequired";
+                    readiness.Detail = "Saved credentials changed; native provider state must be refreshed.";
+                    readiness.UpdatedAt = ControlStore.Now;
+                }
                 ControlStore.Event(db, "ProviderKeySaved", payload: new { ProviderId, key.Revision }, provenance: "user");
                 return true;
             });
@@ -80,6 +99,7 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
             // Persist before sending. A host restart or lost response leaves honest uncertainty.
             var deliveryId = ProviderId + ":" + runtimeId;
             await Receipt("Unconfirmed");
+            await Readiness("RefreshRequired", "Credential delivery is pending; native provider state was not refreshed.");
             var sent = false;
             try
             {
@@ -90,11 +110,22 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 sent = true;
                 var result = await transport.Api.SetProviderKey(ProviderId, key, deadline.Token);
                 await Receipt(result.ValueKind == System.Text.Json.JsonValueKind.True ? "StoredOnRuntime" : "Unconfirmed");
+                if (result.ValueKind != System.Text.Json.JsonValueKind.True)
+                {
+                    await Readiness("Unknown", "Credential delivery was not confirmed; native provider state was not changed.");
+                }
+                else
+                {
+                    await Refresh(transport.Api, runtimeId, deadline.Token);
+                }
             }
             catch (Exception)
             {
                 // Never expose provider responses, transport exceptions or request bodies here.
                 await Receipt(sent ? "Unconfirmed" : "FailedBeforeSend");
+                await Readiness(sent ? "Unknown" : "RefreshRequired", sent
+                    ? "Credential delivery or native refresh outcome is unknown."
+                    : "Credential delivery did not start; native provider state was not refreshed.");
             }
             return await Status();
 
@@ -106,6 +137,47 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 ControlStore.Event(db, "ProviderKeyDeliveryChanged", runtimeId, payload: new { ProviderId, revision, state }, provenance: "user");
                 return true;
             });
+
+            Task<bool> Readiness(string state, string detail) => store.Write(async db =>
+            {
+                var id = ProviderId + ":" + runtimeId;
+                var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync(id);
+                if (receipt is null) { receipt = new() { Id = id, RuntimeId = runtimeId, ProviderId = ProviderId }; db.Add(receipt); }
+                receipt.KeyRevision = revision; receipt.State = state; receipt.Detail = detail; receipt.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "ProviderReadinessChanged", runtimeId, payload: new { ProviderId, revision, state }, provenance: "user");
+                return true;
+            });
+
+            async Task Refresh(OpenCode.OpenCodeClient api, string id, CancellationToken cancellation)
+            {
+                var directories = await store.Read(async db => await db.Workers.Where(x => x.RuntimeId == id && !x.Archived)
+                    .Select(x => x.Directory).Distinct().ToListAsync());
+                if (directories.Count == 0)
+                {
+                    await Readiness("RefreshCompleted", "No managed workspace has cached provider state; model access is not yet tested.");
+                    return;
+                }
+                await Readiness("Refreshing", "Waiting for fresh idle evidence before scoped native refresh.");
+                foreach (var directory in directories)
+                {
+                    var sessions = await api.Sessions(directory, cancellation);
+                    var statuses = await api.SessionStatuses(directory, cancellation);
+                    if (sessions.ValueKind != System.Text.Json.JsonValueKind.Array || statuses.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                        sessions.EnumerateArray().Any(session => !session.TryGetProperty("id", out var sessionId) || sessionId.ValueKind != System.Text.Json.JsonValueKind.String ||
+                            !statuses.TryGetProperty(sessionId.GetString()!, out var status) || status.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                            !status.TryGetProperty("type", out var type) || type.GetString() != "idle"))
+                    {
+                        await Readiness("RefreshRequired", "A managed or child native session is active or cannot be observed; no instance was disposed.");
+                        return;
+                    }
+                }
+                foreach (var directory in directories)
+                {
+                    await api.DisposeInstance(directory, cancellation);
+                    await api.Models(directory, cancellation);
+                }
+                await Readiness("RefreshCompleted", "Scoped native provider caches were refreshed after fresh idle evidence; model access is not yet tested.");
+            }
         }
         finally { gate.Release(); }
     }
