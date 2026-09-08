@@ -54,10 +54,13 @@ public sealed partial class CoordinationTests
         await FinishDecision(app.Store, run.Id, new("No current work", [], true));
         await app.Store.CoordinationTick();
         Assert.Equal("Waiting", (await app.Store.Coordinations()).Single().State);
+        Assert.True(await app.Store.CoordinationTick()); // one bounded service review of unused capacity
+        await FinishDecision(app.Store, run.Id, new("Full authorized scope assessed; no work", [], true));
+        await app.Store.CoordinationTick();
         Assert.False(await app.Store.CoordinationTick());
         await IdleDeadlineDue(app.Store, run.Id);
         await app.Store.CoordinationTick();
-        Assert.Equal(2, (await app.Store.Coordinations()).Single().Round);
+        Assert.Equal(3, (await app.Store.Coordinations()).Single().Round);
     }
 
     [Fact]
@@ -94,12 +97,15 @@ public sealed partial class CoordinationTests
         await app.Store.CoordinationTick();
         await FinishDecision(app.Store, run.Id, new("B is available; A is working", []));
         await app.Store.CoordinationTick();
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("No independent authorized task currently", []));
+        await app.Store.CoordinationTick();
         Assert.False(await app.Store.CoordinationTick());
         await Finish(app.Store, priorWork.Id, "Earlier task finished");
         await ObserveIdle(app.Store);
         await app.Store.CoordinationTick();
         var saved = (await app.Store.Coordinations()).Single();
-        Assert.Equal(2, saved.Round);
+        Assert.Equal(3, saved.Round);
         var context = Json.Read<CoordinatorContext>(saved.InputJson);
         Assert.Contains(a.Id, context.AvailableWorkerIds!);
         Assert.Contains("slot opened", context.ReassessmentReason);

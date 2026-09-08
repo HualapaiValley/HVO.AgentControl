@@ -209,6 +209,52 @@ public sealed record CreateWorkItemInput(string Id, string? IssueNumber, string 
 public sealed record TransitionWorkItemInput(string Id, long ExpectedRevision, string WorkerId, string State, string? PhaseName = null, string? Evidence = null);
 public sealed record AdvancePhaseInput(string WorkItemId, string WorkerId, string FromPhase, string ToPhase, string? Evidence = null);
 
+public static class EnrollmentState
+{
+    public const string Active = "Active", Suspended = "Suspended", Revoked = "Revoked";
+}
+
+public sealed class ParticipantEnrollment
+{
+    [Key] public string Id { get; set; } = "";
+    public string AdapterType { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string State { get; set; } = EnrollmentState.Active;
+    public int AuthorityGeneration { get; set; }
+    public long EnrolledAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long LastSeenAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long Revision { get; set; }
+}
+
+public sealed class CommandAuthority
+{
+    [Key] public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string CommandId { get; set; } = "";
+    public string EnrollmentId { get; set; } = "";
+    public int AuthorityGeneration { get; set; }
+    public int Attempt { get; set; } = 1;
+    public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long? AcknowledgedAt { get; set; }
+    public string? AcknowledgementData { get; set; }
+}
+
+public sealed class EvidenceCursor
+{
+    [Key] public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string EnrollmentId { get; set; } = "";
+    public string CursorName { get; set; } = "";
+    public string CursorValue { get; set; } = "";
+    public long LastConsumedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    public long? LastAcknowledgedAt { get; set; }
+}
+
+public sealed record CreateEnrollmentInput(string Id, string AdapterType, string DisplayName);
+public sealed record AdvanceAuthorityInput(string EnrollmentId, int ExpectedGeneration);
+public sealed record BindCommandAuthorityInput(string CommandId, string EnrollmentId, int Attempt);
+public sealed record AcknowledgeCommandInput(string CommandId, string EnrollmentId, int AuthorityGeneration, int Attempt, string? AcknowledgementData = null);
+public sealed record AdvanceCursorInput(string EnrollmentId, string CursorName, string CursorValue);
+public sealed record ValidateCommandAuthorityInput(string CommandId, string EnrollmentId, int AuthorityGeneration, int Attempt);
+
 public sealed class JournalEvent
 {
     [Key] public long Sequence { get; set; }
@@ -312,9 +358,13 @@ public sealed record DecisionReceipt(string Summary, int Round, string DecisionC
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
 public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
+public sealed record IdlePlanningReview(string ObservationKey, string TriggerCommandId, long RequestedAt);
+public sealed record CoordinatorGitHubAccess(string RuntimeId, string CiInspectionState,
+    string ChecksPermission, string CommitStatusesPermission, string ActionsPermission, long? ObservedAt);
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
-    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null);
+    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null,
+    IdlePlanningReview? IdleReview = null, CoordinatorGitHubAccess[]? GitHubAccess = null, string? PlanningObservationKey = null);
 
 public sealed class OperatorUpdateSchedule
 {

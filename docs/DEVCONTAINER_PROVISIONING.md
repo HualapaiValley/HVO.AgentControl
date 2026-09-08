@@ -4,6 +4,8 @@ Owner requirements, 2026-09-07. The worker template below is executable now; aut
 
 Tracking: [project/task sessions #42](https://github.com/RoySalisbury/HVO.AgentControl/issues/42), [multi-host provisioning #43](https://github.com/RoySalisbury/HVO.AgentControl/issues/43), [worker GitHub publication #44](https://github.com/RoySalisbury/HVO.AgentControl/issues/44).
 
+The [managed project and worker conventions](PROVISIONING_CONVENTIONS.md) define workgroup/project identity, host paths, effective config/user verification, ownership labels, endpoint allocation, cache scopes and lifecycle acceptance for these implementations.
+
 ## Environment contract
 
 Use `devcontainer.json` and the official Dev Container CLI for builds, Features, lifecycle commands, startup and execution. Do not create a competing environment-definition format. Honor the repository's `.devcontainer/devcontainer.json` (or explicitly selected repository configuration), including its Features, lifecycle commands, container/remote user and workspace. Do not silently substitute a worker template because it is smaller. When no repository configuration exists, the planned default is a broad Codespaces-style tool image; the lightweight execution template is an explicit alternative. Record the resolved configuration path, source revision, configuration digest, CLI version and resulting image/container identities. Resolve configuration paths explicitly: CLI `--config` paths are relative to the launch directory, not implicitly to `--workspace-folder`. When selecting a central template, record its revision separately from the project checkout revision.

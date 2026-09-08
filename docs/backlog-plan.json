@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-07.3",
+  "version": "2026-09-07.5",
   "repository": "RoySalisbury/HVO.AgentControl",
   "items": [
     {
@@ -250,7 +250,7 @@
       ],
       "reason": "Fresh repo task sessions require durable ownership and reservation.",
       "nextSlice": "Project identity and task-owned worktree/session preparation",
-      "auditedUpdatedAt": "2026-09-07T18:30:39Z",
+      "auditedUpdatedAt": "2026-09-07T20:54:48Z",
       "reviewedPulls": []
     },
     {
@@ -330,7 +330,7 @@
       "dependsOn": [],
       "reason": "ChatGPT website flow shipped PR55; provider readiness and additional methods remain.",
       "nextSlice": "Durable provider readiness and supported-method discovery; no OAuth cloning",
-      "auditedUpdatedAt": "2026-09-07T18:30:46Z",
+      "auditedUpdatedAt": "2026-09-07T19:36:04Z",
       "reviewedPulls": [
         {
           "headRefOid": "97248fe6c345f2f56a58f8ea53e0b478b2f6e98e",
@@ -348,7 +348,7 @@
       ],
       "reason": "PR77 merged; actual task directories and child environment context remain.",
       "nextSlice": "Integrate task-owned scratch/tool inventory into child prompts",
-      "auditedUpdatedAt": "2026-09-07T18:30:47Z",
+      "auditedUpdatedAt": "2026-09-07T21:13:26Z",
       "reviewedPulls": [
         {
           "headRefOid": "086eb2884323e5d125c7232689f353817cb65b40",
@@ -397,7 +397,7 @@
       ],
       "reason": "Task models PR57 and reasoning PR76 merged; durable model/risk routing policy remains.",
       "nextSlice": "Persist model routing decisions and risk floors on work items",
-      "auditedUpdatedAt": "2026-09-07T18:30:52Z",
+      "auditedUpdatedAt": "2026-09-07T21:13:28Z",
       "reviewedPulls": [
         {
           "headRefOid": "4c265b30cd6e81d13406b735d6cc014342a81309",
@@ -437,7 +437,7 @@
       "dependsOn": [],
       "reason": "Explicit owner priority: sluggish chat UI; Astra xhigh already assigned.",
       "nextSlice": "Finish active chat/performance implementation; preserve approvals and drafts",
-      "auditedUpdatedAt": "2026-09-07T18:30:55Z",
+      "auditedUpdatedAt": "2026-09-07T20:54:47Z",
       "reviewedPulls": []
     },
     {
@@ -447,7 +447,27 @@
       "dependsOn": [],
       "reason": "Owner requested dependency-aware periodic backlog triage.",
       "nextSlice": "Root executable audit and canonical operating plan; durable scheduler follows",
-      "auditedUpdatedAt": "2026-09-07T18:31:40Z",
+      "auditedUpdatedAt": "2026-09-07T20:44:41Z",
+      "reviewedPulls": []
+    },
+    {
+      "issue": 82,
+      "priority": 2,
+      "disposition": "needs-triage",
+      "dependsOn": [],
+      "reason": "Inspect before assignment",
+      "nextSlice": "",
+      "auditedUpdatedAt": "2026-09-07T20:16:57Z",
+      "reviewedPulls": []
+    },
+    {
+      "issue": 84,
+      "priority": 2,
+      "disposition": "needs-triage",
+      "dependsOn": [],
+      "reason": "Inspect before assignment",
+      "nextSlice": "",
+      "auditedUpdatedAt": "2026-09-07T19:35:14Z",
       "reviewedPulls": []
     }
   ]

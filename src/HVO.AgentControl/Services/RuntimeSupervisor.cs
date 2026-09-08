@@ -482,12 +482,19 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         if (worker.Activity != activity) { worker.Activity = activity; worker.Revision++; changed = true; }
         worker.Stale = false; worker.LastObservedAt = ControlStore.Now;
         var commands = await db.Commands.Where(x => x.WorkerId == workerId && (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running)).ToListAsync();
+        var nativeRetry = NativeRetryFailure.Parse(snapshot.StatusDetail);
         var abortObserved = activity == "Idle" && commands.Any(x => x.Kind == "Abort" && x.State == Delivery.Accepted);
         foreach (var command in commands)
         {
             if (command.Kind == "Abort" && activity == "Idle" && command.State == Delivery.Accepted)
             { command.State = Delivery.Finished; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
             if (command.Kind != "Prompt") continue;
+            if (nativeRetry is not null)
+            {
+                var poolId = command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : ControlStore.PoolId(worker, command);
+                if (poolId == "provider:" + nativeRetry.ProviderId)
+                    await ControlStore.ObserveProviderFailure(db, worker, command, "retry:" + nativeRetry.Attempt, nativeRetry.Failure, nativeRetry);
+            }
             if (abortObserved && command.State is Delivery.Accepted or Delivery.Running)
             {
                 command.State = Delivery.Finished; command.Detail = "Cancellation requested and native idle observed. Review tool effects; subprocess termination is not guaranteed.";

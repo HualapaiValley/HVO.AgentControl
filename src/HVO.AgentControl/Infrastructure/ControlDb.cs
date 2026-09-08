@@ -19,6 +19,9 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
     public DbSet<WorkItemPhase> WorkItemPhases => Set<WorkItemPhase>();
+    public DbSet<ParticipantEnrollment> Enrollments => Set<ParticipantEnrollment>();
+    public DbSet<CommandAuthority> CommandAuthorities => Set<CommandAuthority>();
+    public DbSet<EvidenceCursor> EvidenceCursors => Set<EvidenceCursor>();
     public DbSet<RuntimeTelemetryHistoryRecord> TelemetryHistory => Set<RuntimeTelemetryHistoryRecord>();
     public DbSet<OperatorUpdateSchedule> OperatorUpdateSchedules => Set<OperatorUpdateSchedule>();
     public DbSet<OperatorStatusUpdate> OperatorStatusUpdates => Set<OperatorStatusUpdate>();
@@ -46,6 +49,11 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
             .HasFilter("State NOT IN ('Released', 'Abandoned')");
         model.Entity<WorkItem>().HasIndex(x => x.OwnerWorkerId);
         model.Entity<WorkItemPhase>().HasIndex(x => new { x.WorkItemId, x.Name }).IsUnique();
+        model.Entity<ParticipantEnrollment>().HasIndex(x => x.AdapterType);
+        model.Entity<ParticipantEnrollment>().HasIndex(x => x.State);
+        model.Entity<CommandAuthority>().HasIndex(x => x.CommandId).IsUnique();
+        model.Entity<CommandAuthority>().HasIndex(x => x.EnrollmentId);
+        model.Entity<EvidenceCursor>().HasIndex(x => new { x.EnrollmentId, x.CursorName }).IsUnique();
         model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);
         model.Entity<RuntimeTelemetryHistoryRecord>().HasIndex(x => new { x.RuntimeId, x.ObservedAt, x.Sequence });
         model.Entity<OperatorUpdateSchedule>().HasIndex(x => x.CoordinationRunId).IsUnique();
