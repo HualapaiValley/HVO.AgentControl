@@ -342,6 +342,15 @@ public sealed record PromptInput(string Id, string Text, long ExpectedRevision, 
 public sealed record ReplyInput(string Id, string RequestId, string? Permission, string[][]? Answers, bool Reject = false);
 public sealed record QueueEdit(string Action);
 public sealed record InspectWorkspaceInput(string Id, string RuntimeId, string Directory);
+public static class PreparedCheckoutStatus
+{
+    public const string Verified = "Verified", Rejected = "Rejected", Unsupported = "Unsupported";
+}
+public sealed record VerifyPreparedCheckoutInput(string Id, string RuntimeId, long ExpectedRuntimeRevision,
+    string Directory, string Repository, string Branch, string Head);
+public sealed record PreparedCheckoutVerification(string Status, string Code, string Detail,
+    string RequestedDirectory, string? CanonicalDirectory, string? Repository, string? Branch,
+    string? Head, bool? Clean, long ObservedAt);
 public sealed record OutcomeInput(string CommandId, long ExpectedRevision, string Outcome, string Evidence);
 public sealed record ControlSnapshot(long Sequence, List<RuntimeRecord> Runtimes, List<WorkerRecord> Workers,
     List<CommandRecord> Commands, List<PendingRequest> Requests);

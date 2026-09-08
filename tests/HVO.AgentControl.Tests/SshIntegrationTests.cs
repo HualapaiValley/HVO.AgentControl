@@ -162,6 +162,67 @@ public sealed class SshIntegrationTests
         });
     }
 
+    [SshFact]
+    public async Task PreparedCheckoutVerificationRejectsChangedIdentityAndCanonicalAliases()
+    {
+        var secrets = new Secrets(Options.Create(new ControlOptions { SecretsDirectory = FixtureSecrets }));
+        var factory = new SshRuntimeTransportFactory(secrets);
+        var runtime = Profile("a", "Prepared checkout verification", Random.Shared.Next(10000, 20000));
+        runtime.StateDirectory = "/home/agent/checkout-verification-state-" + runtime.ManagedServerId;
+        var directory = "/home/agent/workspaces/checkout-verification-" + Guid.NewGuid().ToString("N");
+        var alias = "/home/agent/checkout-verification-alias-" + Guid.NewGuid().ToString("N");
+        const string repository = "https://github.com/example/prepared.git";
+        const string branch = "feature/prepared";
+        IRuntimeTransport? connection = null;
+        try
+        {
+            var setup = await Docker("a", "sh", "-c", $$"""
+                set -eu
+                mkdir -p -- {{BootstrapScript.Quote(directory)}}
+                cd {{BootstrapScript.Quote(directory)}}
+                git init -b {{BootstrapScript.Quote(branch)}} >/dev/null
+                git config user.name fixture
+                git config user.email fixture@example.invalid
+                printf content > tracked.txt
+                git add tracked.txt
+                git commit -m initial >/dev/null
+                git remote add origin {{BootstrapScript.Quote(repository)}}
+                ln -s {{BootstrapScript.Quote(directory)}} {{BootstrapScript.Quote(alias)}}
+                """);
+            Assert.Equal(0, setup.ExitCode);
+            var head = (await Docker("a", "git", "-C", directory, "rev-parse", "HEAD")).Output.Trim();
+            connection = await factory.Connect(runtime, CancellationToken.None);
+            VerifyPreparedCheckoutInput Input(string? path = null) => new(Guid.NewGuid().ToString("N"), runtime.Id, runtime.Revision,
+                path ?? directory, repository, branch, head);
+
+            Assert.Equal(PreparedCheckoutStatus.Verified, (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Status);
+            Assert.Equal("origin_mismatch", (await connection.VerifyPreparedCheckout(runtime,
+                Input() with { Repository = "https://github.com/example/wrong.git" }, CancellationToken.None)).Code);
+            Assert.Equal("branch_mismatch", (await connection.VerifyPreparedCheckout(runtime,
+                Input() with { Branch = "feature/wrong" }, CancellationToken.None)).Code);
+            Assert.Equal("head_mismatch", (await connection.VerifyPreparedCheckout(runtime,
+                Input() with { Head = new string('0', 40) }, CancellationToken.None)).Code);
+            Assert.Equal("noncanonical_directory", (await connection.VerifyPreparedCheckout(runtime, Input(alias), CancellationToken.None)).Code);
+            var allowedRoots = runtime.AllowedRoots;
+            runtime.AllowedRoots = "/home/agent/workspaces/a";
+            Assert.Equal("outside_allowed_root", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
+            runtime.AllowedRoots = allowedRoots;
+            Assert.Equal(0, (await Docker("a", "touch", directory + "/untracked.txt")).ExitCode);
+            Assert.Equal("dirty_worktree", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
+        }
+        finally
+        {
+            if (connection is not null)
+            {
+                try { await connection.StopOwnedServer(CancellationToken.None); } catch (Exception) { }
+                await connection.DisposeAsync();
+            }
+            var cleanup = await Docker("a", "sh", "-c", "rm -rf -- " + BootstrapScript.Quote(directory) + " " +
+                BootstrapScript.Quote(alias) + " " + BootstrapScript.Quote(runtime.StateDirectory));
+            Assert.Equal(0, cleanup.ExitCode);
+        }
+    }
+
     private static async Task<(int ExitCode, string Output)> Docker(string target, params string[] args)
     {
         var start = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true };

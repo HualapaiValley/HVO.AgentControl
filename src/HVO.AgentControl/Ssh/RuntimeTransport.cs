@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
 using HVO.AgentControl.Telemetry;
 
@@ -25,6 +26,10 @@ public interface IRuntimeTransport : IAsyncDisposable
     Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>
         Task.FromResult<RuntimeTelemetrySample?>(null);
     Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken);
+    Task<PreparedCheckoutVerification> VerifyPreparedCheckout(RuntimeRecord runtime, VerifyPreparedCheckoutInput input,
+        CancellationToken cancellationToken) => Task.FromResult(new PreparedCheckoutVerification(
+            PreparedCheckoutStatus.Unsupported, "unsupported_transport", "This runtime transport cannot verify prepared checkouts.",
+            input.Directory, null, null, null, null, null, ControlStore.Now));
     Task StopOwnedServer(CancellationToken cancellationToken);
     Task StopOwnedServer(OwnedNativeProcess expected, CancellationToken cancellationToken) => StopOwnedServer(cancellationToken);
 }

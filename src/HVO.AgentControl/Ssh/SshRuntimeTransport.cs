@@ -177,6 +177,59 @@ internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forw
         return new WorkspaceIdentity(directory, branchName.TrimEnd('\n'));
     }
 
+    public async Task<PreparedCheckoutVerification> VerifyPreparedCheckout(RuntimeRecord profile, VerifyPreparedCheckoutInput input,
+        CancellationToken cancellationToken)
+    {
+        static PreparedCheckoutVerification Rejected(VerifyPreparedCheckoutInput request, string code, string detail,
+            string? canonical = null) => new(PreparedCheckoutStatus.Rejected, code, detail, request.Directory,
+                canonical, null, null, null, null, ControlStore.Now);
+
+        async Task<string?> Canonical(string path)
+        {
+            try
+            {
+                var value = await SshRuntimeTransportFactory.Run(ssh,
+                    "cd " + BootstrapScript.Quote(path) + " 2>/dev/null && pwd -P", cancellationToken);
+                value = value.TrimEnd('\r', '\n');
+                return value.Length is > 0 and <= 2000 && !value.Any(char.IsControl) ? value : null;
+            }
+            catch (ControlException) { return null; }
+        }
+
+        var directory = await Canonical(input.Directory);
+        if (directory is null) return Rejected(input, "directory_unavailable", "The prepared checkout directory is unavailable or could not be canonicalized.");
+        if (directory != input.Directory) return Rejected(input, "noncanonical_directory", "Use the exact physical checkout directory returned by pwd -P.", directory);
+        var roots = new List<string>();
+        foreach (var root in ControlStore.Roots(profile))
+            if (await Canonical(root) is { } canonicalRoot) roots.Add(canonicalRoot);
+        if (!roots.Any(x => ControlStore.IsWithin(directory, x)))
+            return Rejected(input, "outside_allowed_root", "The canonical checkout directory is outside the runtime allowed roots.", directory);
+
+        var code = (await SshRuntimeTransportFactory.Run(ssh, $$"""
+            export GIT_OPTIONAL_LOCKS=0
+            cd {{BootstrapScript.Quote(directory)}} || exit 1
+            test "$(git rev-parse --show-toplevel 2>/dev/null)" = {{BootstrapScript.Quote(directory)}} || { printf 'not_repository_root'; exit 0; }
+            test "$(git remote get-url origin 2>/dev/null)" = {{BootstrapScript.Quote(input.Repository)}} || { printf 'origin_mismatch'; exit 0; }
+            test "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" = {{BootstrapScript.Quote(input.Branch)}} || { printf 'branch_mismatch'; exit 0; }
+            test "$(git rev-parse HEAD 2>/dev/null)" = {{BootstrapScript.Quote(input.Head)}} || { printf 'head_mismatch'; exit 0; }
+            status=$(git status --porcelain 2>/dev/null) || { printf 'status_unavailable'; exit 0; }
+            test -z "$status" || { printf 'dirty_worktree'; exit 0; }
+            printf 'verified'
+            """, cancellationToken)).TrimEnd('\r', '\n');
+        return code switch
+        {
+            "verified" => new(PreparedCheckoutStatus.Verified, "verified", "Prepared checkout matches the exact requested repository, branch, HEAD and clean state.",
+                input.Directory, directory, input.Repository, input.Branch, input.Head, true, ControlStore.Now),
+            "not_repository_root" => Rejected(input, code, "The prepared directory is not the exact Git worktree root.", directory),
+            "origin_mismatch" => Rejected(input, code, "The checkout origin does not match the expected repository.", directory),
+            "branch_mismatch" => Rejected(input, code, "The checkout branch does not match the expected branch.", directory),
+            "head_mismatch" => Rejected(input, code, "The checkout HEAD does not match the expected commit.", directory),
+            "dirty_worktree" => Rejected(input, code, "The checkout has tracked, staged, or untracked changes.", directory),
+            "status_unavailable" => Rejected(input, code, "The checkout clean state could not be verified.", directory),
+            _ => Rejected(input, "invalid_probe_result", "The checkout verification probe returned an invalid bounded result.", directory)
+        };
+    }
+
     public async Task StopOwnedServer(CancellationToken cancellationToken)
     {
         await SshRuntimeTransportFactory.Run(ssh, $$"""

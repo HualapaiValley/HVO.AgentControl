@@ -321,6 +321,31 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                         ControlStore.Event(db, "WorkspaceInspected", runtime.Id, commandId: command.Id); return true;
                     });
                     break;
+                case "VerifyPreparedCheckout":
+                    var verificationInput = Json.Read<VerifyPreparedCheckoutInput>(command.Payload);
+                    var currentRuntimeRevision = await store.Read(db => db.Runtimes.Where(x => x.Id == runtime.Id)
+                        .Select(x => (long?)x.Revision).SingleOrDefaultAsync(token));
+                    var verification = currentRuntimeRevision == verificationInput.ExpectedRuntimeRevision
+                        ? await transport.VerifyPreparedCheckout(runtime, verificationInput, token)
+                        : new PreparedCheckoutVerification(PreparedCheckoutStatus.Rejected, "runtime_changed",
+                            "Runtime changed after this verification was requested; no checkout evidence was read.", verificationInput.Directory,
+                            null, null, null, null, null, ControlStore.Now);
+                    await store.Write(async db =>
+                    {
+                        var record = (await db.Commands.FindAsync(command.Id))!;
+                        var persisted = await db.Runtimes.Where(x => x.Id == runtime.Id).Select(x => (long?)x.Revision).SingleOrDefaultAsync(token)
+                            == verificationInput.ExpectedRuntimeRevision ? verification
+                            : new PreparedCheckoutVerification(PreparedCheckoutStatus.Rejected, "runtime_changed",
+                                "Runtime changed while checkout evidence was being read; discard the observation and request a fresh verification.",
+                                verificationInput.Directory, null, null, null, null, null, ControlStore.Now);
+                        record.ResultJson = Json.Write(persisted); record.State = Delivery.Finished;
+                        record.Detail = persisted.Detail; record.UpdatedAt = ControlStore.Now;
+                        ControlStore.Event(db, persisted.Status == PreparedCheckoutStatus.Verified
+                            ? "PreparedCheckoutVerified" : "PreparedCheckoutVerificationRejected", runtime.Id, commandId: command.Id,
+                            payload: new { persisted.Status, persisted.Code, persisted.CanonicalDirectory, persisted.ObservedAt }, provenance: "service");
+                        return true;
+                    });
+                    break;
                 case "CreateControlSession":
                     var binding = await store.Read(db => db.ControlSessions.AsNoTracking().SingleAsync(x => x.CreationCommandId == command.Id, token));
                     var controlModels = await api.Models(ControlStore.ControlDirectory, token);

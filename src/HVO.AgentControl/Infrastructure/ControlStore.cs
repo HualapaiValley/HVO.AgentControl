@@ -280,6 +280,36 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         return await Record(db, input.Id, input.RuntimeId, null, "InspectWorkspace", Json.Write(input));
     });
 
+    public Task<CommandRecord> VerifyPreparedCheckout(VerifyPreparedCheckoutInput input) => Write(async db =>
+    {
+        if (string.IsNullOrEmpty(input.Directory) || input.Directory.Any(char.IsControl))
+            throw new ControlException("Prepared checkout directory must be an exact bounded path without control characters.", 400);
+        ValidatePath(input.Directory);
+        if (input.ExpectedRuntimeRevision < 1) throw new ControlException("Use the current positive runtime revision.", 400);
+        if (string.IsNullOrWhiteSpace(input.Repository) || input.Repository.Length > 500 || input.Repository.Any(char.IsControl))
+            throw new ControlException("Expected repository origin is required, bounded to 500 characters, and cannot contain control characters.", 400);
+        if (string.IsNullOrWhiteSpace(input.Branch) || input.Branch.Length > 240 || input.Branch.Any(char.IsControl))
+            throw new ControlException("Expected branch is required, bounded to 240 characters, and cannot contain control characters.", 400);
+        if (input.Head is null || input.Head.Length is not (40 or 64) || input.Head.Any(x => !char.IsAsciiHexDigit(x) || char.IsAsciiLetterUpper(x)))
+            throw new ControlException("Expected HEAD must be an exact lowercase 40- or 64-character commit identity.", 400);
+        var payload = Json.Write(input);
+        if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, input.RuntimeId, null, "VerifyPreparedCheckout", payload);
+        var runtime = await db.Runtimes.FindAsync(input.RuntimeId) ?? throw new ControlException("Runtime not found.", 404);
+        if (runtime.Revision != input.ExpectedRuntimeRevision) throw new ControlException("Runtime changed; refresh before verifying the checkout.");
+        var command = await Record(db, input.Id, input.RuntimeId, null, "VerifyPreparedCheckout", payload);
+        var environment = await db.RuntimeEnvironments.FindAsync(runtime.Id);
+        if (runtime.ConnectionKind != RuntimeConnections.Ssh || environment?.Kind != RuntimeEnvironmentKind.ExistingMachine)
+        {
+            var result = new PreparedCheckoutVerification(PreparedCheckoutStatus.Unsupported, "unsupported_runtime_environment",
+                "Prepared checkout verification is limited to configured ExistingMachine SSH runtimes.", input.Directory,
+                null, null, null, null, null, Now);
+            command.ResultJson = Json.Write(result); command.State = Delivery.Finished; command.Detail = result.Detail; command.UpdatedAt = Now;
+            Event(db, "PreparedCheckoutVerificationUnsupported", runtime.Id, commandId: command.Id,
+                payload: new { result.Code, input.ExpectedRuntimeRevision }, provenance: "service");
+        }
+        return command;
+    });
+
     public Task<CommandRecord> Prompt(string workerId, PromptInput input) => Write(db => EnqueuePrompt(db, workerId, input));
 
     private async Task<CommandRecord> EnqueuePrompt(ControlDb db, string workerId, PromptInput input, string origin = "owner")
@@ -461,7 +491,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         foreach (var worker in await db.Workers.ToListAsync()) { worker.Stale = true; worker.HistoryGap = true; }
         foreach (var command in await db.Commands.Where(x => x.State == Delivery.Dispatching).ToListAsync())
         {
-            command.State = command.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" ? Delivery.Queued : Delivery.Unknown;
+            command.State = command.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" or "VerifyPreparedCheckout" ? Delivery.Queued : Delivery.Unknown;
             command.Detail = "Backend restarted during dispatch; reconcile native evidence before any further mutation.";
         }
         Event(db, "BackendStarted");
