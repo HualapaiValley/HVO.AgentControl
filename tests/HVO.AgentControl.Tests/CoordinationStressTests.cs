@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.GitHub;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -48,6 +49,67 @@ public sealed class CoordinationStressTests
             "provider", "model");
         Assert.Equal((await app.Store.CreateWorker(create)).Id, (await app.Store.CreateWorker(create)).Id);
         await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateWorker(create with { Name = "Different" }));
+    }
+
+    [Fact]
+    public async Task PromptReplayNormalizesOnlyTheNewAbsentOptionalMergeScope()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var id = Guid.NewGuid().ToString();
+        var input = new PromptInput(id, "legacy durable instruction", 0);
+        var legacyPayload = Json.Write(new
+        {
+            input.Id,
+            input.Text,
+            input.ExpectedRevision,
+            input.ProviderId,
+            input.ModelId,
+            input.StatusInquiry,
+            input.Agent,
+            input.Variant,
+            input.IncludeGuidance,
+            input.ProgressMinutes
+        });
+        await app.Store.Write(db =>
+        {
+            db.Commands.Add(new CommandRecord
+            {
+                Id = id,
+                RuntimeId = worker.RuntimeId,
+                WorkerId = worker.Id,
+                Kind = "Prompt",
+                Payload = legacyPayload
+            });
+            return Task.FromResult(true);
+        });
+
+        Assert.Equal(id, (await app.Store.Prompt(worker.Id, input)).Id);
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(worker.Id,
+            input with
+            {
+                GitHubMergeScope = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Reviewer,
+                "Owner/Repo", 12, new string('a', 40))
+            }));
+    }
+
+    [Fact]
+    public async Task CoordinatorDispatchRetainsTypedGitHubMergeScopeWithoutElevatingOrdinaryPrompts()
+    {
+        await using var app = new TestApp();
+        var (coordinator, workers) = await Seed(app.Store, 1);
+        var scope = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Reviewer, "Owner/Repo", 12, new string('a', 40));
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id,
+            "Assign the exact review task.", [workers[0].Id]));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Review",
+            [new CoordinatorAction("send_prompt", workers[0].Id, "Review the exact head.", GitHubMergeScope: scope)]));
+
+        await app.Store.CoordinationTick();
+
+        var command = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
+        Assert.Equal(scope, Json.Read<PromptInput>(command.Payload).GitHubMergeScope);
+        Assert.Contains("AgentControl retained GitHub merge task scope", command.ExecutionPayload);
     }
 
     [Fact]

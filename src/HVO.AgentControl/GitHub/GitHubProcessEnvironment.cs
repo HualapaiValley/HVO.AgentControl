@@ -41,7 +41,8 @@ internal static class GitHubProcessEnvironment
         Unsupported = "Unsupported", Unavailable = "Unavailable";
 
     public static string CredentialFingerprint(string contents) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contents))).ToLowerInvariant();
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            ManagedGitHubHosts.TryCanonicalize(contents, null, out var canonical) ? canonical : contents))).ToLowerInvariant();
 
     public static string Fingerprint(RuntimeRecord runtime)
     {
@@ -126,9 +127,9 @@ internal static class GitHubProcessEnvironment
               printf 'GITHUB_ENVIRONMENT\tUnavailable\tLinux\t%s\t%s\n' "$pid" "$marker"
               exit 0
             fi
-            command -v sha256sum >/dev/null || { printf 'GITHUB_ENVIRONMENT\tUnavailable\tLinux\t%s\t%s\n' "$pid" "$marker"; exit 0; }
+            command -v sha256sum >/dev/null && command -v awk >/dev/null && command -v wc >/dev/null || { printf 'GITHUB_ENVIRONMENT\tUnavailable\tLinux\t%s\t%s\n' "$pid" "$marker"; exit 0; }
             configuration_fingerprint() {
-              output=$(sha256sum < "$config/hosts.yml") || return 33
+              output=$({{ManagedGitHubHosts.FingerprintNormalizationScript}} | sha256sum) || return 33
               set -- $output
               test "$#" = 2 && test "$2" = - || return 33
               case "$1" in *[!0-9a-f]*|'') return 33;; esac

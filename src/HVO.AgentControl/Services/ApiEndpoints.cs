@@ -42,6 +42,13 @@ public static class ApiEndpoints
             HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Disable(id, input.ExpectedRevision, token));
         group.MapPost("/runtimes/{id}/github", (string id, HVO.AgentControl.GitHub.ConfigureGitHubAccess input,
             HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Configure(id, input, token));
+        group.MapGet("/github/merge-policies", (HVO.AgentControl.GitHub.GitHubMergeService github) => github.ListPolicies());
+        group.MapPost("/github/merge-policies", (ConfigureGitHubMergePolicyInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.ConfigurePolicy(input));
+        group.MapPost("/github/review-receipts", (RecordGitHubReviewInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.RecordReview(input));
+        group.MapGet("/github/merge-intents", (HVO.AgentControl.GitHub.GitHubMergeService github) => github.ListIntents());
+        group.MapPost("/github/merge-intents", (CreateGitHubMergeIntentInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.CreateIntent(input));
+        group.MapPost("/github/merge-intents/{id}/observe", (string id, HVO.AgentControl.GitHub.GitHubMergeService github) => github.Observe(id));
+        group.MapPost("/github/merge-intents/{id}/merge", (string id, ExecuteGitHubMergeInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.Merge(id, input));
         group.MapGet("/coordinations", (ControlStore store) => store.Coordinations());
         group.MapPost("/coordinations", (StartCoordinationInput input, ControlStore store) => store.StartCoordination(input));
         group.MapPost("/coordinations/{id}/control", (string id, CoordinationControlInput input, ControlStore store) => store.ControlCoordination(id, input));
@@ -64,6 +71,8 @@ public static class ApiEndpoints
         group.MapPost("/runtimes/verified-connect", (VerifiedRuntimeInput input, RuntimeVerificationService verification) => verification.SaveAndConnect(input));
         group.MapPost("/runtimes/{id}/connect", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "EnsureServer", input.Id));
         group.MapPost("/runtimes/{id}/refresh", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "RefreshState", input.Id));
+        group.MapPost("/runtimes/{id}/native-process/reinspect", (string id, ReinspectNativeProcessInput input, ControlStore store) =>
+            store.ReinspectNativeProcess(id, input));
         group.MapPost("/runtimes/{id}/disconnect", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "DisconnectRuntime", input.Id));
         group.MapPost("/runtimes/{id}/stop", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "StopManagedServer", input.Id));
         group.MapPost("/workers", (CreateWorkerInput input, ControlStore store) => store.CreateWorker(input));
