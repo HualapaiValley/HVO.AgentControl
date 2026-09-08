@@ -26,6 +26,54 @@ public sealed class TaskBindingTests
     }
 
     [Fact]
+    public async Task ControlHttpRuntimeRejectsWorkerSlotThroughOwnerApiWithoutMutationReceipt()
+    {
+        await using var app = new TestApp();
+        var runtimeId = Id();
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(new RuntimeRecord { Id = runtimeId, ConnectionKind = RuntimeConnections.ControlHttp, Name = "control" });
+            return Task.FromResult(true);
+        });
+        using var owner = await app.SignIn();
+
+        var response = await owner.PostAsJsonAsync("/api/v1/worker-slots", new
+        {
+            requestId = Id(),
+            id = Id(),
+            runtimeId,
+            name = "invalid-slot"
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(0, await app.Store.Read(db => db.WorkerSlots.CountAsync()));
+        Assert.Equal(0, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+    }
+
+    [Fact]
+    public async Task ControlHttpRuntimeRejectsTaskBindingThroughOwnerApiWithoutBindingReceipt()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.ControlHttp.git", "feature/control-http");
+        await app.Store.Write(async db =>
+        {
+            (await db.Runtimes.FindAsync(setup.Runtime.Id))!.ConnectionKind = RuntimeConnections.ControlHttp;
+            return true;
+        });
+        using var owner = await app.SignIn();
+        var input = NewBinding(setup, "control-http-task", "control-http-workspace");
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
+
+        var response = await owner.PostAsJsonAsync("/api/v1/task-bindings", input);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(0, await app.Store.Read(db => db.TaskBindings.CountAsync()));
+        Assert.Equal(0, await app.Store.Read(db => db.TaskWorkspaces.CountAsync()));
+        Assert.Equal(0, await app.Store.Read(db => db.TaskSessionBindings.CountAsync()));
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+    }
+
+    [Fact]
     public async Task BindingCreatesFreshCrossRepositoryWorkspaceAndUnboundSession()
     {
         await using var app = new TestApp();
@@ -97,6 +145,57 @@ public sealed class TaskBindingTests
         var binding = await app.Store.CreateTaskBinding(right);
         Assert.Equal(TaskSessionBindingState.Bound, binding.Session.State);
         Assert.Equal(setup.LegacyWorker.NativeSessionId, binding.Session.NativeSessionId);
+    }
+
+    [Fact]
+    public async Task BoundCompatibilityWorkerCannotBeArchivedUntilBindingIsReleased()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.ArchiveBound.git", "feature/archive-bound");
+        var binding = await app.Store.CreateTaskBinding(NewBinding(setup, "archive-bound", "archive-bound") with
+        {
+            LegacyWorkerId = setup.LegacyWorker.Id,
+            NativeSessionId = setup.LegacyWorker.NativeSessionId,
+            Directory = setup.LegacyWorker.Directory
+        });
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(setup.LegacyWorker.Id))!;
+            worker.Activity = "Idle"; worker.Stale = false; worker.LastObservedAt = ControlStore.Now;
+            return true;
+        });
+
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.ArchiveWorker(setup.LegacyWorker.Id,
+            new(Id(), setup.LegacyWorker.SettingsRevision, true)));
+        Assert.False((await app.Store.Detail(setup.LegacyWorker.Id)).Worker.Archived);
+
+        await app.Store.ReleaseTaskBinding(binding.Binding.Id, new(Id(), binding.Binding.Revision));
+        var archived = await app.Store.ArchiveWorker(setup.LegacyWorker.Id,
+            new(Id(), setup.LegacyWorker.SettingsRevision, true));
+        Assert.True(archived.Archived);
+    }
+
+    [Fact]
+    public async Task ArchivedSlotCannotRestoreAfterItsRuntimeIsDeletedEvenAfterRestart()
+    {
+        string data, secrets;
+        WorkerSlotRecord archived;
+        await using (var app = new TestApp())
+        {
+            var runtimeCommand = await app.Store.SaveRuntimeForSetup(PersistenceTests.Profile(), Id());
+            var runtime = await app.Store.Read(db => db.Runtimes.SingleAsync(x => x.Id == runtimeCommand.ResultId));
+            var slot = await app.Store.CreateWorkerSlot(new(Id(), Id(), runtime.Id, "retained-slot"));
+            archived = await app.Store.ArchiveWorkerSlot(slot.Id, new(Id(), slot.Revision, true));
+            await app.Store.DeleteRuntime(runtime.Id, new(Id(), runtime.Revision));
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var error = await Assert.ThrowsAsync<InventoryException>(() => restarted.Store.ArchiveWorkerSlot(
+            archived.Id, new(Id(), archived.Revision, false)));
+        Assert.Equal("runtime_unavailable", error.Code);
+        Assert.True((await restarted.Store.WorkerSlot(archived.Id)).Archived);
+        Assert.Equal(0, await restarted.Store.Read(db => db.Runtimes.CountAsync()));
     }
 
     [Fact]

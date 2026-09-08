@@ -13,6 +13,7 @@ public sealed partial class ControlStore
         try
         {
             var runtime = await Read(async db => await db.Runtimes.FindAsync(id)) ?? throw new ControlException("Runtime not found.", 404);
+            RequireDevelopmentRuntime(runtime);
             activeTerminals[id] = activeTerminals.GetValueOrDefault(id) + 1;
             return runtime;
         }
@@ -30,6 +31,7 @@ public sealed partial class ControlStore
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, id, null, "DeleteRuntime", payload);
         var runtime = await db.Runtimes.FindAsync(id) ?? throw new ControlException("Runtime not found.", 404);
+        RequireDevelopmentRuntime(runtime);
         if (runtime.Revision != input.ExpectedRevision) throw new ControlException("Runtime changed; refresh before deleting.");
         if (await db.GitHubAccess.AnyAsync(x => x.Id == id && x.State != "Disabled"))
             throw new ControlException("Disable GitHub credential renewal before deleting this runtime.");
@@ -53,6 +55,7 @@ public sealed partial class ControlStore
         if (await db.Commands.FindAsync(input.Id) is { } prior)
         { if (prior.WorkerId != id) throw new ControlException("Request ID belongs to another worker."); return Same(prior, prior.RuntimeId, id, "DeleteWorker", payload); }
         var worker = await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404);
+        if (await db.ControlSessions.AnyAsync(x => x.WorkerId == id)) throw new ControlException("This host-owned control session retains its scope and history. Disconnect its control service to suspend it.");
         if (worker.SettingsRevision != input.ExpectedRevision) throw new ControlException("Worker settings changed; refresh before deleting.");
         var runtimeIsExplicitlyDisconnected = await db.Runtimes.AnyAsync(x =>
             x.Id == worker.RuntimeId && !x.DesiredConnected && x.Transport == "Disconnected");

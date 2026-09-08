@@ -18,6 +18,8 @@ public sealed partial class ControlStore
     public Task<WorkerRecord> UpdateWorker(string id, UpdateWorkerInput input) => Write(async db =>
     {
         var worker = await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404);
+        if (await db.ControlSessions.SingleOrDefaultAsync(x => x.WorkerId == id) is { } binding && input.Project != binding.ScopeId)
+            throw new ControlException("A control session scope cannot be changed through worker settings.");
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior)
         { _ = Same(prior, worker.RuntimeId, id, "UpdateWorker", payload); return worker; }
@@ -50,6 +52,7 @@ public sealed partial class ControlStore
     public Task<WorkerRecord> ArchiveWorker(string id, WorkerArchiveInput input) => Write(async db =>
     {
         var worker = await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404);
+        if (await db.ControlSessions.AnyAsync(x => x.WorkerId == id)) throw new ControlException("Host-owned control sessions retain their scope. Disconnect the control service to suspend it.");
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior)
         { _ = Same(prior, worker.RuntimeId, id, "ArchiveWorker", payload); return worker; }
@@ -63,6 +66,7 @@ public sealed partial class ControlStore
             if (await db.Commands.AnyAsync(x => x.WorkerId == id && (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)) ||
                 await db.Requests.AnyAsync(x => x.WorkerId == id && (x.State == "Pending" || x.State == "ReplyUnknown")))
                 throw new ControlException("Resolve queued work, uncertain delivery, and pending requests before archiving.");
+            await TaskBindingLifecycleGuards.RequireWorkerArchiveAllowed(db, id);
         }
         worker.Archived = input.Archived; worker.SettingsRevision++; worker.Revision++;
         var command = await Record(db, input.Id, worker.RuntimeId, id, "ArchiveWorker", payload);

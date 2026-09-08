@@ -31,6 +31,7 @@ public sealed partial class ControlStore
         return await MutateBinding(db, input.RequestId, "WorkerSlot", id, "Create", new { id, runtimeId, name, role, provider, model }, async () =>
         {
             var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new InventoryException("not_found", "Runtime not found.", 404);
+            RequireDevelopmentRuntime(runtime);
             if (await db.WorkerSlots.AnyAsync(x => x.Id == id)) throw Conflict("identity_exists", "Worker slot identity already exists.");
             if (await db.WorkerSlots.AnyAsync(x => x.RuntimeId == runtimeId && x.Name == name)) throw Conflict("identity_exists", "A worker slot with this name already exists on the runtime.");
             var environment = await db.RuntimeEnvironments.FindAsync(runtimeId);
@@ -109,6 +110,7 @@ public sealed partial class ControlStore
             var project = await db.Projects.SingleOrDefaultAsync(x => x.Id == projectId) ?? throw new InventoryException("not_found", "Project not found.", 404);
             var slot = await db.WorkerSlots.SingleOrDefaultAsync(x => x.Id == slotId) ?? throw new InventoryException("not_found", "Worker slot not found.", 404);
             var runtime = await db.Runtimes.FindAsync(slot.RuntimeId) ?? throw new InventoryException("not_found", "Runtime not found.", 404);
+            RequireDevelopmentRuntime(runtime);
             var environment = await db.RuntimeEnvironments.FindAsync(runtime.Id) ?? throw Conflict("runtime_environment_required", "Configure the runtime environment before creating a task binding.");
             if (project.Archived) throw Conflict("resource_archived", "The project is archived.");
             if (workItem.State is WorkItemState.Released or WorkItemState.Abandoned) throw Conflict("work_item_closed", "The work item is no longer active.");
@@ -215,6 +217,12 @@ public sealed partial class ControlStore
             if (slot.Revision != input.ExpectedRevision) throw Conflict("revision_conflict", "Worker slot changed; refresh before archiving it.");
             if (input.Archived && await db.TaskBindings.AnyAsync(x => x.WorkerSlotId == slot.Id && x.State == TaskBindingState.Active))
                 throw Conflict("resource_in_use", "Release the active task binding before archiving this worker slot.");
+            if (!input.Archived)
+            {
+                var runtime = await db.Runtimes.FindAsync(slot.RuntimeId);
+                if (runtime is null) throw Conflict("runtime_unavailable", "Restore requires an existing development runtime parent.");
+                RequireDevelopmentRuntime(runtime);
+            }
             slot.Archived = input.Archived; slot.Revision++; slot.UpdatedAt = Now;
             Event(db, "WorkerSlotArchived", slot.RuntimeId, payload: new { slot.Id, slot.Archived }, provenance: "user");
             return slot;

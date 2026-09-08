@@ -12,13 +12,13 @@
   @if (snapshot is null) { <p>Loading saved state…</p> }
   else
   {
-    <div class="section-heading"><h2>Workers <span class="count">@snapshot.Workers.Count(x => x.Role == SessionRoles.Worker)</span></h2><button disabled="@(!snapshot.Runtimes.Any(x => x.Transport == "Connected"))" @onclick="NewWorker">New worker</button></div>
+    <div class="section-heading"><h2>Workers <span class="count">@snapshot.Workers.Count(x => x.Role == SessionRoles.Worker)</span></h2><button disabled="@(!snapshot.Runtimes.Any(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Transport == "Connected"))" @onclick="NewWorker">New worker</button></div>
     @if (creatingWorker)
     {
       <section class="panel" aria-label="New worker">
         <h3>Set up a worker</h3><p class="muted">Choose its host, workspace and model. Each worker keeps its own conversation.</p>
         <div class="form-grid">
-          <label>Runtime<select @bind="newRuntimeId"><option value="">Choose a runtime</option>@foreach (var runtime in snapshot.Runtimes.Where(x => x.Transport == "Connected")) { <option value="@runtime.Id">@runtime.Name</option> }</select></label>
+          <label>Runtime<select @bind="newRuntimeId"><option value="">Choose a runtime</option>@foreach (var runtime in snapshot.Runtimes.Where(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Transport == "Connected")) { <option value="@runtime.Id">@runtime.Name</option> }</select></label>
           <label>Session role<select @bind="newRole"><option>Worker</option><option>Coordinator</option></select></label>
           <label>Worker name<input @bind="newWorkerName" /></label><label>Project<input @bind="newProject" /></label><label>Remote workspace directory<input @bind="newDirectory" /></label>
           <label class="wide">Provider / model<select @bind="newModel"><option value="">Choose an available model</option>@foreach (var model in Models(newRuntimeId)) { <option value="@(model.ProviderId + "/" + model.ModelId)">@model.ProviderId / @model.Name</option> }</select></label>
@@ -61,8 +61,8 @@
     }
     <p class="meta">Coordinator sessions are managed on <a href="/coordination">Coordination</a>.</p>
     <label class="check"><input type="checkbox" @bind="showArchived" /> Show archived workers</label>
-    <div class="filters"><label>Runtime<select @bind="runtimeFilter"><option value="">All runtimes</option>@foreach (var runtime in snapshot.Runtimes) { <option value="@runtime.Id">@runtime.Name</option> }</select></label><label>Activity<select @bind="activityFilter"><option value="">All activity</option><option>Active</option><option>Waiting</option><option>Error</option><option value="Idle">Ready</option></select></label><label>Project<input @bind="projectFilter" placeholder="Filter projects" /></label></div>
-    @if (snapshot.Runtimes.Count == 0) { <p class="notice">Start by <a href="/runtimes">adding a runtime</a>, then create a worker in its workspace.</p> }
+    <div class="filters"><label>Runtime<select @bind="runtimeFilter"><option value="">All runtimes</option>@foreach (var runtime in snapshot.Runtimes.Where(x => x.ConnectionKind == RuntimeConnections.Ssh)) { <option value="@runtime.Id">@runtime.Name</option> }</select></label><label>Activity<select @bind="activityFilter"><option value="">All activity</option><option>Active</option><option>Waiting</option><option>Error</option><option value="Idle">Ready</option></select></label><label>Project<input @bind="projectFilter" placeholder="Filter projects" /></label></div>
+    @if (!snapshot.Runtimes.Any(x => x.ConnectionKind == RuntimeConnections.Ssh)) { <p class="notice">Start by <a href="/runtimes">adding a runtime</a>, then create a worker in its workspace.</p> }
     <section class="worker-inventory" aria-label="Worker inventory">
       @foreach (var command in CreationCards.Where(x => !PastSetup(x)))
       {

@@ -177,6 +177,24 @@ internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forw
             """, cancellationToken);
     }
 
+    public async Task StopOwnedServer(OwnedNativeProcess expected, CancellationToken cancellationToken)
+    {
+        if (expected.ManagedServerId != runtime.ManagedServerId || expected.ProcessId < 1 || !NativeProcessProbe.ValidMarker(expected.Incarnation))
+            throw new ControlException("Stop requires a valid owned native-process identity.");
+        await SshRuntimeTransportFactory.Run(ssh, $$"""
+            test "$(cat {{BootstrapScript.Quote(runtime.StateDirectory + "/owner")}})" = {{BootstrapScript.Quote(runtime.ManagedServerId + ":" + runtime.ApiPort)}} &&
+            test "$(tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} show-option -v -t managed @hvo-owner)" = {{BootstrapScript.Quote(runtime.ManagedServerId)}} &&
+            pid=$(tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} display-message -p -t managed '#{pane_pid}') &&
+            test "$pid" = {{BootstrapScript.Quote(expected.ProcessId.ToString())}} &&
+            test -r "/proc/$pid/stat" && test -r /proc/sys/kernel/random/boot_id &&
+            stat=$(cat "/proc/$pid/stat") && rest=${stat##*) } && index=1 && start='' &&
+            for field in $rest; do [ "$index" = 20 ] && start=$field; index=$((index+1)); done &&
+            boot=$(cat /proc/sys/kernel/random/boot_id) &&
+            test "$boot:$start" = {{BootstrapScript.Quote(expected.Incarnation)}} &&
+            tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} kill-session -t managed
+            """, cancellationToken);
+    }
+
     public ValueTask DisposeAsync()
     {
         Api.Dispose(); forward.Dispose(); ssh.Dispose();

@@ -23,5 +23,6 @@ public static class TaskBindingApiEndpoints
     {
         try { return Results.Ok(await operation()); }
         catch (InventoryException ex) { return Results.Json(new { error = ex.Message, code = ex.Code }, statusCode: ex.Status); }
+        catch (ControlException ex) { return Results.Json(new { error = ex.Message }, statusCode: ex.Status); }
     }
 }

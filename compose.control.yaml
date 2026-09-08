@@ -1,0 +1,49 @@
+# Independent, opt-in control service. See docs/CONTROL_SIDECAR.md before use.
+# Register its direct HTTP endpoint on the host's Control services page.
+name: hvo-agentcontrol-control
+
+services:
+  opencode-control:
+    image: hvo-agentcontrol-opencode:1.18.29
+    build:
+      context: docker/opencode-control
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1.0
+    # Initial configurable guardrail, not a certified multi-session capacity estimate.
+    mem_limit: ${CONTROL_OPENCODE_MEMORY_LIMIT:-2g}
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    volumes:
+      - opencode-state:/var/lib/opencode
+    secrets:
+      - source: opencode-server-password
+        target: opencode-server-password
+    networks: [control]
+    # Container-network visibility only; deliberately no host port publication.
+    expose: ["4096"]
+    labels:
+      com.hvo.agentcontrol.role: opencode-control
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  opencode-server-password:
+    file: ${CONTROL_OPENCODE_PASSWORD_FILE:?Set CONTROL_OPENCODE_PASSWORD_FILE to an existing file readable by UID 1000}
+
+volumes:
+  opencode-state:
+
+networks:
+  control:
+    driver: bridge
+    # A private user-defined bridge without published ports retains provider egress.
+    # internal: true would also block access to remote model providers.

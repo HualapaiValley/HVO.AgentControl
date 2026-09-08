@@ -17,4 +17,10 @@ internal static class TaskBindingLifecycleGuards
         if (await db.TaskSessionBindings.AnyAsync(x => x.LegacyWorkerId == workerId && x.State == TaskSessionBindingState.Bound))
             throw new ControlException("Release the active task session binding before deleting this legacy worker.", 409);
     }
+
+    public static async Task RequireWorkerArchiveAllowed(ControlDb db, string workerId)
+    {
+        if (await db.TaskSessionBindings.AnyAsync(x => x.LegacyWorkerId == workerId && x.State == TaskSessionBindingState.Bound))
+            throw new ControlException("Release the active task session binding before archiving this legacy worker.", 409);
+    }
 }

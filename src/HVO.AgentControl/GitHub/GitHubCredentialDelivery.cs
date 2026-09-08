@@ -10,6 +10,7 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
 {
     public async Task Deliver(RuntimeRecord runtime, GitHubInstallationToken credential, CancellationToken token)
     {
+        if (runtime.ConnectionKind != RuntimeConnections.Ssh) throw new ControlException("Control services do not use SSH credential delivery.");
         using var privateKey = runtime.Authentication == "privateKey" ? new PrivateKeyFile(
             new MemoryStream(Encoding.UTF8.GetBytes(secrets.Read(runtime.CredentialReference))),
             runtime.PassphraseReference is { Length: > 0 } phrase ? secrets.Read(phrase) : null) : null;
