@@ -41,10 +41,13 @@ public static class ApiEndpoints
             HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Disable(id, input.ExpectedRevision, token));
         group.MapPost("/runtimes/{id}/github", (string id, HVO.AgentControl.GitHub.ConfigureGitHubAccess input,
             HVO.AgentControl.GitHub.GitHubAccessService github, CancellationToken token) => github.Configure(id, input, token));
+        group.MapGet("/github/merge-policies", (HVO.AgentControl.GitHub.GitHubMergeService github) => github.ListPolicies());
+        group.MapPost("/github/merge-policies", (ConfigureGitHubMergePolicyInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.ConfigurePolicy(input));
+        group.MapPost("/github/review-receipts", (RecordGitHubReviewInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.RecordReview(input));
         group.MapGet("/github/merge-intents", (HVO.AgentControl.GitHub.GitHubMergeService github) => github.ListIntents());
-        group.MapPost("/github/merge-intents", (HVO.AgentControl.Core.CreateGitHubMergeIntentInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.CreateIntent(input));
+        group.MapPost("/github/merge-intents", (CreateGitHubMergeIntentInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.CreateIntent(input));
         group.MapPost("/github/merge-intents/{id}/observe", (string id, HVO.AgentControl.GitHub.GitHubMergeService github) => github.Observe(id));
-        group.MapPost("/github/merge-intents/{id}/merge", (string id, HVO.AgentControl.Core.ExecuteGitHubMergeInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.Merge(id, input));
+        group.MapPost("/github/merge-intents/{id}/merge", (string id, ExecuteGitHubMergeInput input, HVO.AgentControl.GitHub.GitHubMergeService github) => github.Merge(id, input));
         group.MapGet("/coordinations", (ControlStore store) => store.Coordinations());
         group.MapPost("/coordinations", (StartCoordinationInput input, ControlStore store) => store.StartCoordination(input));
         group.MapPost("/coordinations/{id}/control", (string id, CoordinationControlInput input, ControlStore store) => store.ControlCoordination(id, input));

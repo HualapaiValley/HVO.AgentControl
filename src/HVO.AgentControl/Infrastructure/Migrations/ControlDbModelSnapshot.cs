@@ -431,11 +431,11 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ApprovedReviewersJson")
+                    b.Property<string>("AuthorIdentity")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("AuthorIdentity")
+                    b.Property<string>("BaseBranch")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
@@ -447,6 +447,9 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("Complete")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("Detail")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -455,7 +458,17 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("IntentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MergeCommitSha")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("Mergeable")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Merged")
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("ObservedAt")
@@ -469,6 +482,10 @@ namespace HVO.AgentControl.Infrastructure
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReviewsJson")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
@@ -490,15 +507,66 @@ namespace HVO.AgentControl.Infrastructure
                     b.ToTable("GitHubCheckObservations");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.GitHubMergeAttempt", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("BaseBranch")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CompletedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HeadSha")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IntentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MergeCommitSha")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObservationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReceiptJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("StartedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IntentId", "State")
+                        .IsUnique();
+
+                    b.ToTable("GitHubMergeAttempts");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.GitHubMergeIntent", b =>
                 {
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
 
-                    b.Property<long?>("AttemptedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("AuthorWorkerId")
+                    b.Property<string>("BaseBranch")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
@@ -520,6 +588,13 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<string>("ObservationId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("PolicyId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("PolicyRevision")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("PullRequestNumber")
                         .HasColumnType("INTEGER");
 
@@ -529,7 +604,8 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.Property<string>("Repository")
                         .IsRequired()
-                        .HasColumnType("TEXT");
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
 
                     b.Property<long>("RequestedAt")
                         .HasColumnType("INTEGER");
@@ -538,15 +614,7 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ReviewedHeadSha")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ReviewerIdentity")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ReviewerWorkerId")
+                    b.Property<string>("ReviewReceiptId")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
@@ -563,6 +631,126 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique();
 
                     b.ToTable("GitHubMergeIntents");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.GitHubMergeLease", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AcquiredAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BaseBranch")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IntentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Repository", "BaseBranch")
+                        .IsUnique();
+
+                    b.ToTable("GitHubMergeLeases");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.GitHubMergePolicy", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BaseBranch")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("RequiredChecksJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id", "Revision");
+
+                    b.HasIndex("Repository", "BaseBranch", "Revision")
+                        .IsUnique();
+
+                    b.ToTable("GitHubMergePolicies");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.GitHubReviewReceipt", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AuthorCommandId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AuthorWorkerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EvidenceJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("GitHubReviewId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("GitHubReviewerIdentity")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HeadSha")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PullRequestNumber")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RecordedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Repository")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("ReviewCommandId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReviewerWorkerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Repository", "PullRequestNumber", "HeadSha", "ReviewerWorkerId")
+                        .IsUnique();
+
+                    b.ToTable("GitHubReviewReceipts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.HostRecord", b =>
