@@ -95,6 +95,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             ControlStore.Event(db, "BootstrapStarted", id); return true;
                         });
                         transport = await transports.Connect(runtime, token);
+                        await store.ObserveNativeProcess(id, transport.NativeProcess ??
+                            NativeProcessObservation.Unsupported(runtime.ManagedServerId, ControlStore.Now, "TransportUnsupported"));
                         lastHealth = 0;
                         var capabilities = await transport.ProbeCapabilities(ControlStore.Roots(runtime)[0], token);
                         var version = await transport.Api.Verify(token);
@@ -537,14 +539,28 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             { worker.CapabilityReport = progress; worker.CapabilityReportedAt = ControlStore.Now; }
             if (activity == "Idle" && ended) command.ResultJson = Json.Write(new { messages = assistants });
             if (activity == "Idle" && ended) await ControlStore.ObserveProviderCompletion(db, command, !failed && progress.Length > 0);
+            var assignment = await db.Assignments.FindAsync(command.Id);
+            var interrupted = command.Detail == ControlStore.NativeProcessInterruptedDetail;
+            var preserveRecordedOutcome = assignment is not null && ControlStore.IsRecordedTerminalOutcome(assignment.Outcome) && worker.Outcome == assignment.Outcome;
+            if (interrupted && !(activity == "Idle" && ended))
+            {
+                if (!preserveRecordedOutcome) worker.Outcome = "Interrupted";
+                worker.CurrentAction = "Native process was replaced before terminal response evidence. Explicit linked recovery is required; the original prompt was not replayed.";
+                if (command.State != Delivery.Unknown)
+                {
+                    command.State = Delivery.Unknown; command.UpdatedAt = ControlStore.Now; changed = true;
+                }
+                continue;
+            }
             var state = activity == "Idle" && ended ? Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
             command.Detail = state == Delivery.Finished
                 ? stoppedToolFailure ? "Native idle and a refreshed failed tool step confirm the turn stopped. Task completion remains unverified." : "Native turn ended. Assignment outcome requires evidence and owner review."
                 : "Native caller message identity found in retained history.";
-            worker.Outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
-            if (await db.Assignments.FindAsync(command.Id) is { } assignment) assignment.Outcome = worker.Outcome;
+            var outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
+            if (!interrupted || !preserveRecordedOutcome) worker.Outcome = outcome;
+            if (assignment is not null && (!interrupted || !ControlStore.IsRecordedTerminalOutcome(assignment.Outcome))) assignment.Outcome = outcome;
             ControlStore.Event(db, "CommandReconciled", worker.RuntimeId, workerId, command.Id, new { state }); changed = true;
         }
         // Keep bounded current transcript pages; authoritative older conversation data stays remote.
@@ -637,7 +653,14 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
     private Task<bool> Retain() => store.Write(async db =>
     {
         var threshold = await db.Events.OrderByDescending(x => x.Sequence).Skip(options.Value.EventRetention).Select(x => (long?)x.Sequence).FirstOrDefaultAsync();
-        if (threshold is not null) await db.Events.Where(x => x.Sequence <= threshold).ExecuteDeleteAsync();
+        if (threshold is not null)
+        {
+            // Confirmed replacements are durable provenance; only the current baseline is needed per runtime.
+            var currentProcessObservations = db.Events.Where(x => x.Type == "NativeProcessObserved")
+                .GroupBy(x => x.RuntimeId).Select(x => x.Max(y => y.Sequence));
+            await db.Events.Where(x => x.Sequence <= threshold && x.Type != "NativeProcessReplaced" &&
+                !currentProcessObservations.Contains(x.Sequence)).ExecuteDeleteAsync();
+        }
         return true;
     });
     public static string SafeError(Exception exception) => exception switch

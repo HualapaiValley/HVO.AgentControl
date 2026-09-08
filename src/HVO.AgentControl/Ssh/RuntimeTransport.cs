@@ -15,6 +15,7 @@ public interface IRuntimeTransport : IAsyncDisposable
     bool Connected { get; }
     string Platform { get; }
     string InstalledExecutable => "";
+    NativeProcessObservation? NativeProcess => null;
     Task<CapabilitySnapshot> ProbeCapabilities(string directory, CancellationToken cancellationToken) =>
         Task.FromResult(CapabilityProbe.Parse("probe\tunsupported", directory));
     Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>
