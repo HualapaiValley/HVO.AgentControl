@@ -13,6 +13,8 @@ public partial class Terminal
     private ElementReference host;
     private IJSObjectReference? module;
     private DotNetObjectReference<Terminal>? self;
+    private int opening;
+    private bool disposed;
     protected override async Task OnInitializedAsync()
     {
         runtimes = (await Store.Snapshot()).Runtimes;
@@ -20,10 +22,18 @@ public partial class Terminal
     }
     private async Task Open()
     {
+        var operation = ++opening;
         try
         {
             connected = true; status = "Loading terminal assets…";
-            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Terminal.razor.js");
+            var imported = module is null;
+            var loaded = module ?? await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Terminal.razor.js");
+            if (disposed || operation != opening)
+            {
+                if (imported) await loaded.DisposeAsync();
+                return;
+            }
+            module = loaded;
             self ??= DotNetObjectReference.Create(this);
             status = "Connecting…";
             await module.InvokeVoidAsync("open", host, runtimeId, self);
@@ -31,9 +41,10 @@ public partial class Terminal
         catch (JSException) { connected = false; status = "Unable to open terminal. Check runtime SSH access and sign-in."; }
     }
     [JSInvokable] public Task TerminalState(bool active, string message) => InvokeAsync(() => { connected = active; status = message; StateHasChanged(); });
-    private async Task Close() { if (module is not null) await module.InvokeVoidAsync("close"); connected = false; status = "Terminal closed."; }
+    private async Task Close() { opening++; if (module is not null) await module.InvokeVoidAsync("close"); connected = false; status = "Terminal closed."; }
     public async ValueTask DisposeAsync()
     {
+        disposed = true; opening++;
         if (module is not null)
         {
             try { await module.InvokeVoidAsync("close"); await module.DisposeAsync(); } catch (JSDisconnectedException) { }
