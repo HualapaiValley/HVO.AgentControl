@@ -66,17 +66,32 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
     public static bool IsExclusivelyManagedHosts(string hosts, string actor)
     {
         var actorYaml = JsonSerializer.Serialize(actor);
-        var lines = hosts.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        return lines.Length == 7 &&
-            lines[0] == "github.com:" &&
-            lines[1] == "    user: " + actorYaml &&
-            lines[2].StartsWith("    oauth_token: ", StringComparison.Ordinal) &&
-            lines[2].Length > "    oauth_token: ".Length &&
-            lines[3] == "    git_protocol: https" &&
-            lines[4] == "    users:" &&
-            lines[5] == "        " + actorYaml + ":" &&
-            lines[6].StartsWith("            oauth_token: ", StringComparison.Ordinal) &&
-            lines[6].Length > "            oauth_token: ".Length;
+        var lines = hosts.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        if (hosts.Contains('\r') || lines.Length != 8 || lines[7].Length != 0 ||
+            lines[0] != "github.com:" ||
+            lines[1] != "    user: " + actorYaml ||
+            lines[3] != "    git_protocol: https" ||
+            lines[4] != "    users:" ||
+            lines[5] != "        " + actorYaml + ":") return false;
+
+        const string primaryPrefix = "    oauth_token: ";
+        const string userPrefix = "            oauth_token: ";
+        if (!lines[2].StartsWith(primaryPrefix, StringComparison.Ordinal) ||
+            !lines[6].StartsWith(userPrefix, StringComparison.Ordinal)) return false;
+        var primary = lines[2][primaryPrefix.Length..];
+        var user = lines[6][userPrefix.Length..];
+        return JsonScalarIsCanonical(primary) && primary == user;
+    }
+
+    private static bool JsonScalarIsCanonical(string value)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(value);
+            return document.RootElement.ValueKind == JsonValueKind.String &&
+                JsonSerializer.Serialize(document.RootElement.GetString()) == value;
+        }
+        catch (JsonException) { return false; }
     }
 
     private static void Write(SftpClient sftp, string path, string text)
