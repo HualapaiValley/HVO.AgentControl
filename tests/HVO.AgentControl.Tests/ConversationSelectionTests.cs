@@ -63,4 +63,16 @@ public sealed class ConversationSelectionTests
 
         Assert.False(selection.IsCurrent(pending));
     }
+
+    [Fact]
+    public void SameWorkerRefreshDoesNotInvalidatePendingHistory()
+    {
+        var selection = new ConversationSelection();
+        var history = selection.Change("worker-a");
+
+        var refresh = selection.Capture("worker-a");
+
+        Assert.True(selection.IsCurrent(history));
+        Assert.True(selection.IsCurrent(refresh));
+    }
 }

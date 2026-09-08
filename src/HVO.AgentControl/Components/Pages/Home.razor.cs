@@ -35,7 +35,7 @@ public partial class Home
     {
         selectedId ??= WorkerId;
         if (selectedId is null) return;
-        var current = selection.Change(selectedId);
+        var current = selection.Capture(selectedId);
         if (!snapshot!.Workers.Any(x => x.Id == current.WorkerId))
         {
             detail = null; error = "This worker is unavailable. Choose another agent conversation."; return;
@@ -109,7 +109,7 @@ public partial class Home
     private Task OlderHistory() => Execute(async () =>
     {
         var current = SelectedDetail();
-        var selected = selection.Change(current.Worker.Id);
+        var selected = selection.Capture(current.Worker.Id);
         var before = olderMessages.Concat(current.Messages).Select(x => (long?)x.NativeCreatedAt).Min();
         WorkerDetail history;
         try { history = await Store.Detail(current.Worker.Id, before); }
