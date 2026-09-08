@@ -134,10 +134,11 @@ public sealed partial class ControlStore
                 if (string.IsNullOrWhiteSpace(input.LegacyWorkerId) || nativeSession.Length == 0)
                     throw Validation("A legacy session binding requires both the legacy worker ID and exact native session ID.");
                 legacyWorker = await db.Workers.FindAsync(input.LegacyWorkerId) ?? throw new InventoryException("not_found", "Legacy worker not found.", 404);
-                if (legacyWorker.Role != SessionRoles.Worker || legacyWorker.RuntimeId != runtime.Id ||
+                if (legacyWorker.Role != SessionRoles.Worker || legacyWorker.Project != project.Name ||
+                    workItem.OwnerWorkerId != legacyWorker.Id || legacyWorker.RuntimeId != runtime.Id ||
                     legacyWorker.ManagedServerId != runtime.ManagedServerId || legacyWorker.NativeSessionId != nativeSession ||
                     legacyWorker.Directory != directory || legacyWorker.Branch != branch)
-                    throw Conflict("legacy_session_mismatch", "The supplied native session is not the exact session recorded for the legacy worker.");
+                    throw Conflict("legacy_session_mismatch", "The supplied legacy worker is not the exact project and task session association.");
                 if (await db.TaskSessionBindings.AnyAsync(x => x.WorkerSlotId == slot.Id && x.NativeSessionId == nativeSession))
                     throw Conflict("session_in_use", "The native session is already explicitly bound to another task.");
             }

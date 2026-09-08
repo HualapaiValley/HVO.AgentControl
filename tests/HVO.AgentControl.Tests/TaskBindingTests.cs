@@ -100,6 +100,61 @@ public sealed class TaskBindingTests
     }
 
     [Fact]
+    public async Task LegacySessionFailsClosedForWrongProjectTaskOrUnknownAssociation()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.Identity.git", "feature/identity");
+        var input = NewBinding(setup, "identity-task", "identity-workspace") with
+        {
+            LegacyWorkerId = setup.LegacyWorker.Id,
+            NativeSessionId = setup.LegacyWorker.NativeSessionId,
+            Directory = setup.LegacyWorker.Directory
+        };
+
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(setup.LegacyWorker.Id))!.Project = "another-project"; return true; });
+        var wrongProject = await Assert.ThrowsAsync<InventoryException>(() => app.Store.CreateTaskBinding(input));
+        Assert.Equal("legacy_session_mismatch", wrongProject.Code);
+
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(setup.LegacyWorker.Id))!;
+            worker.Project = setup.Project.Name;
+            (await db.WorkItems.FindAsync(setup.Work.Id))!.OwnerWorkerId = Id();
+            return true;
+        });
+        var wrongTask = await Assert.ThrowsAsync<InventoryException>(() => app.Store.CreateTaskBinding(input with { RequestId = Id(), Id = Id(), WorkspaceId = Id(), SessionBindingId = Id() }));
+        Assert.Equal("legacy_session_mismatch", wrongTask.Code);
+
+        await app.Store.Write(async db => { (await db.WorkItems.FindAsync(setup.Work.Id))!.OwnerWorkerId = ""; return true; });
+        var unknownAssociation = await Assert.ThrowsAsync<InventoryException>(() => app.Store.CreateTaskBinding(input with { RequestId = Id(), Id = Id(), WorkspaceId = Id(), SessionBindingId = Id() }));
+        Assert.Equal("legacy_session_mismatch", unknownAssociation.Code);
+    }
+
+    [Fact]
+    public async Task TaskBindingApiRequiresMatchingLegacyProjectAndTaskBeforeBinding()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.ApiIdentity.git", "feature/api-identity");
+        using var client = await app.SignIn();
+        var input = NewBinding(setup, "api-identity-task", "api-identity-workspace") with
+        {
+            LegacyWorkerId = setup.LegacyWorker.Id,
+            NativeSessionId = setup.LegacyWorker.NativeSessionId,
+            Directory = setup.LegacyWorker.Directory
+        };
+
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(setup.LegacyWorker.Id))!.Project = "wrong-project"; return true; });
+        var rejected = await client.PostAsJsonAsync("/api/v1/task-bindings", input);
+        Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
+
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(setup.LegacyWorker.Id))!.Project = setup.Project.Name; return true; });
+        var accepted = await client.PostAsJsonAsync("/api/v1/task-bindings", input with { RequestId = Id() });
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var binding = await accepted.Content.ReadFromJsonAsync<TaskBindingView>();
+        Assert.Equal(TaskSessionBindingState.Bound, binding!.Session.State);
+    }
+
+    [Fact]
     public async Task PaginationUsesReturnedSequenceCursorWithoutBoundaryTie()
     {
         await using var app = new TestApp();
@@ -154,7 +209,7 @@ public sealed class TaskBindingTests
         var host = await app.Store.CreateHost(new(Id(), Id(), "host"));
         await app.Store.ConfigureRuntimeEnvironment(runtime.Id, new(Id(), 0, runtime.Revision, host.Id, RuntimeEnvironmentKind.ExistingMachine));
         var project = await app.Store.CreateProject(new(Id(), Id(), "project", repository));
-        var worker = new WorkerRecord { Id = Id(), RuntimeId = runtime.Id, ManagedServerId = runtime.ManagedServerId, NativeSessionId = "native-" + Id(), Directory = "/work/legacy", Branch = branch };
+        var worker = new WorkerRecord { Id = Id(), RuntimeId = runtime.Id, ManagedServerId = runtime.ManagedServerId, NativeSessionId = "native-" + Id(), Project = project.Name, Directory = "/work/legacy", Branch = branch };
         await app.Store.Write(async db => { db.Workers.Add(worker); return true; });
         var work = await app.Store.CreateWorkItem(new("work-" + Id(), null, "task", branch, project.RepositoryUrl, worker.Id));
         var slot = await app.Store.CreateWorkerSlot(new(Id(), Id(), runtime.Id, "slot-" + Id()));
