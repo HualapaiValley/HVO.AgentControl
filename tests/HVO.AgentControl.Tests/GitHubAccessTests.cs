@@ -221,6 +221,17 @@ public sealed class GitHubAccessTests
     public void InvalidRepositoryInputIsRejected(string repository) => Assert.Throws<ControlException>(() => GitHubAppClient.ValidateRepositories([repository]));
 
     [Fact]
+    public void ManagedHostsShapeRejectsUnrelatedAccountsAndHosts()
+    {
+        var credential = new GitHubInstallationToken("fixture-token", Now.AddHours(1), "agentcontrol-test[bot]");
+        var managed = GitHubCredentialDelivery.HostsYaml(credential);
+        Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed, credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed + "enterprise.example.com:\n    user: personal\n", credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(managed.Replace("            oauth_token:", "        personal:\n            oauth_token:"), credential.Actor));
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts("partial", credential.Actor));
+    }
+
+    [Fact]
     public async Task ReusingRegistrationNarrowsScopeAndKeepsIndependentEncryptedCredentials()
     {
         await using var app = new TestApp();
@@ -331,6 +342,10 @@ public sealed class GitHubAccessTests
             await delivery.Deliver(runtime, new("fixture-token-two", Now.AddHours(1)), CancellationToken.None);
             var second = await Docker("cat /home/agent/.config/gh/hosts.yml");
             Assert.Contains("fixture-token-two", second); Assert.DoesNotContain("fixture-token-one", second);
+            await Docker("printf 'enterprise.example.com:\\n    user: personal\\n    oauth_token: sentinel\\n' >> /home/agent/.config/gh/hosts.yml");
+            await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-drop-unrelated", Now.AddHours(1)), CancellationToken.None));
+            var preserved = await Docker("cat /home/agent/.config/gh/hosts.yml");
+            Assert.Contains("enterprise.example.com", preserved); Assert.Contains("sentinel", preserved);
             await Docker("rm /home/agent/.config/gh/.agentcontrol-owner; printf 'personal-login' > /home/agent/.config/gh/hosts.yml");
             await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-replace", Now.AddHours(1)), CancellationToken.None));
             Assert.Equal("personal-login", await Docker("cat /home/agent/.config/gh/hosts.yml"));

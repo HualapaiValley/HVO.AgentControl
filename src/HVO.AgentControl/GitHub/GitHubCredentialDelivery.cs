@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Ssh;
@@ -39,6 +40,15 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
         using var sftp = new SftpClient(connection);
         SshRuntimeTransportFactory.AttachHostKey(sftp, runtime.HostKeySha256);
         await sftp.ConnectAsync(token);
+        var hostsPath = directory + "/hosts.yml";
+        if (sftp.Exists(hostsPath))
+        {
+            using var existing = new MemoryStream();
+            sftp.DownloadFile(hostsPath, existing);
+            var hosts = Encoding.UTF8.GetString(existing.ToArray());
+            if (!IsExclusivelyManagedHosts(hosts, credential.Actor))
+                throw new ControlException("Existing GitHub configuration contains accounts or hosts outside AgentControl; refusing replacement.");
+        }
         Write(sftp, directory + "/.agentcontrol-owner", runtime.ManagedServerId);
         // JSON strings are valid YAML scalars. Credentials travel over SFTP, never shell arguments.
         Write(sftp, directory + "/hosts.yml", HostsYaml(credential));
@@ -51,6 +61,22 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
         // Supply the bot identity and both legacy/current token locations. Otherwise gh's
         // multi-account migration calls /user, which installation tokens cannot satisfy.
         return $"github.com:\n    user: {actor}\n    oauth_token: {value}\n    git_protocol: https\n    users:\n        {actor}:\n            oauth_token: {value}\n";
+    }
+
+    public static bool IsExclusivelyManagedHosts(string hosts, string actor)
+    {
+        var actorYaml = JsonSerializer.Serialize(actor);
+        var lines = hosts.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return lines.Length == 7 &&
+            lines[0] == "github.com:" &&
+            lines[1] == "    user: " + actorYaml &&
+            lines[2].StartsWith("    oauth_token: ", StringComparison.Ordinal) &&
+            lines[2].Length > "    oauth_token: ".Length &&
+            lines[3] == "    git_protocol: https" &&
+            lines[4] == "    users:" &&
+            lines[5] == "        " + actorYaml + ":" &&
+            lines[6].StartsWith("            oauth_token: ", StringComparison.Ordinal) &&
+            lines[6].Length > "            oauth_token: ".Length;
     }
 
     private static void Write(SftpClient sftp, string path, string text)
