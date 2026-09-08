@@ -17,6 +17,9 @@ public interface IRuntimeTransport : IAsyncDisposable
     Task ValidateConnection(CancellationToken cancellationToken) => Task.CompletedTask;
     string InstalledExecutable => "";
     NativeProcessObservation? NativeProcess => null;
+    // Unsupported transports fail closed; Connected and cached NativeProcess are
+    // deliberately not substitutes for a fresh incarnation observation.
+    Task<RuntimeProcessIdentity?> ProbeProcessIdentity(CancellationToken cancellationToken) => Task.FromResult<RuntimeProcessIdentity?>(null);
     Task<CapabilitySnapshot> ProbeCapabilities(string directory, CancellationToken cancellationToken) =>
         Task.FromResult(CapabilityProbe.Parse("probe\tunsupported", directory));
     Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>

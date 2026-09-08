@@ -9,6 +9,8 @@ using HVO.AgentControl.OpenCode;
 using HVO.AgentControl.Services;
 using HVO.AgentControl.Ssh;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -16,6 +18,282 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class ControlServiceTests
 {
+    [Fact]
+    public async Task MigrationKeepsLegacyBindingsCurrentWithGenerationZeroTitle()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "hvo-control-generation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var options = new DbContextOptionsBuilder<ControlDb>().UseSqlite($"Data Source={Path.Combine(directory, "control.db")}").Options;
+            await using var db = new ControlDb(options);
+            var migration = db.Database.GetMigrations().Single(x => x.EndsWith("ControlSessionGenerations", StringComparison.Ordinal));
+            var previous = db.Database.GetMigrations().TakeWhile(x => x != migration).Last();
+            var migrator = db.GetService<IMigrator>();
+            await migrator.MigrateAsync(previous);
+            await db.Database.OpenConnectionAsync();
+            await db.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys=OFF");
+            const string id = "legacy-control-binding";
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO ControlSessions (Id,ControlServiceId,ScopeKind,ScopeId,WorkerId,NativeSessionId,CreationCommandId,State,Detail,Revision) VALUES ({0},{1},{2},{3},{4},{5},{6},{7},{8},{9})",
+                id, "legacy-service", "Workgroup", "legacy-scope", "legacy-worker", "ses_legacy", "legacy-command", "Ready", "Retained", 7L);
+            await migrator.MigrateAsync();
+            var binding = await db.ControlSessions.AsNoTracking().SingleAsync();
+            Assert.Equal(0, binding.Generation); Assert.True(binding.IsCurrent); Assert.Null(binding.PredecessorId);
+            Assert.Equal("agentcontrol-control:" + id, binding.Title); Assert.Equal(7, binding.Revision);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Theory]
+    [InlineData("CreateControlSession")]
+    [InlineData("ControlSessionDiscovery")]
+    public async Task LegacyCreatePayloadWithoutAgentReplaysExactlyAfterRestart(string receiptKind)
+    {
+        await using var native = new NativeControlFixture();
+        string data, secrets, serviceId, bindingId;
+        var input = new CreateControlSessionInput(Guid.NewGuid().ToString(), "Workgroup", "repo-a", "Repo A", "opencode", "big-pickle");
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            using var owner = await app.SignIn();
+            var service = await Register(app, owner, native); serviceId = service.Id;
+            var binding = await app.Store.CreateControlSession(service.Id, input with { Id = Guid.NewGuid().ToString() }); bindingId = binding.Id;
+            var legacyPayload = Json.Write(new { input.Id, input.ScopeKind, input.ScopeId, input.Name, input.ProviderId, input.ModelId, input.Variant });
+            await app.Store.Write(db =>
+            {
+                db.Commands.Add(new CommandRecord
+                {
+                    Id = input.Id,
+                    RuntimeId = service.Id,
+                    Kind = receiptKind,
+                    State = Delivery.Finished,
+                    Payload = legacyPayload,
+                    ResultId = binding.Id
+                });
+                return Task.FromResult(true);
+            });
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var replay = await restarted.Store.CreateControlSession(serviceId, input);
+        Assert.Equal(bindingId, replay.Id);
+        await Assert.ThrowsAsync<ControlException>(() => restarted.Store.CreateControlSession(serviceId, input with { Name = "Changed" }));
+        Assert.Single(await restarted.Store.Read(db => db.Commands.Where(x => x.Id == input.Id).ToListAsync()));
+    }
+
+    [Fact]
+    public async Task SuccessorRenewalSurvivesLostResponseAndCutoverKeepsLineageIsolated()
+    {
+        await using var native = new NativeControlFixture();
+        string data, secrets, serviceId, predecessorId, predecessorWorkerId, predecessorNativeId, successorId, developerId, runId, taskId, requestId;
+        RenewControlSessionInput renewal;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            using var owner = await app.SignIn();
+            var service = await Register(app, owner, native); serviceId = service.Id;
+            var created = await app.Store.CreateControlSession(service.Id,
+                new(Guid.NewGuid().ToString(), "Workgroup", "repo-a", "Repo A", "opencode", "big-pickle"));
+            await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == created.WorkerId && !x.Stale && x.Activity == "Idle")), "Predecessor observed");
+            var predecessor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == created.Id);
+            predecessorId = predecessor.Id; predecessorWorkerId = predecessor.WorkerId; predecessorNativeId = predecessor.NativeSessionId;
+            Assert.Equal(0, predecessor.Generation); Assert.True(predecessor.IsCurrent); Assert.Null(predecessor.PredecessorId);
+            Assert.Equal("agentcontrol-control:" + predecessor.Id, predecessor.Title);
+
+            var developer = await PersistenceTests.SeedWorker(app.Store); developerId = developer.Id;
+            var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), predecessor.WorkerId, "Keep the original run", [developer.Id]));
+            run = await app.Store.ControlCoordination(run.Id, new(run.Revision, "pause")); runId = run.Id;
+            taskId = Guid.NewGuid().ToString(); requestId = Guid.NewGuid().ToString();
+            await app.Store.Write(db =>
+            {
+                db.Messages.Add(new TranscriptMessage { WorkerId = predecessor.WorkerId, NativeId = "msg_predecessor", Role = "assistant", Json = "{}", NativeCreatedAt = 1 });
+                db.Requests.Add(new PendingRequest { Id = requestId, WorkerId = predecessor.WorkerId, NativeId = "per_predecessor", Kind = "permission", State = "Pending" });
+                db.Commands.Add(new CommandRecord { Id = taskId, RuntimeId = developer.RuntimeId, WorkerId = developer.Id, Kind = "Prompt", State = Delivery.Running, Origin = "coordinator:" + run.Id });
+                db.Assignments.Add(new AssignmentRecord { Id = taskId, WorkerId = developer.Id, Prompt = "Retained assignment", Outcome = "Running", Evidence = "receipt-kept" });
+                return Task.FromResult(true);
+            });
+
+            using var anonymous = app.CreateClient(new() { AllowAutoRedirect = false });
+            renewal = new(Guid.NewGuid().ToString(), predecessor.Revision);
+            Assert.Equal(HttpStatusCode.Unauthorized,
+                (await anonymous.PostAsJsonAsync($"/api/v1/control-services/{service.Id}/sessions/{predecessor.Id}/renew", renewal)).StatusCode);
+            using (var missingCsrf = await app.SignIn())
+            {
+                missingCsrf.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+                Assert.Equal(HttpStatusCode.BadRequest,
+                    (await missingCsrf.PostAsJsonAsync($"/api/v1/control-services/{service.Id}/sessions/{predecessor.Id}/renew", renewal)).StatusCode);
+            }
+
+            native.LoseCreationResponse = true; native.HideSessions = true;
+            var response = await owner.PostAsJsonAsync($"/api/v1/control-services/{service.Id}/sessions/{predecessor.Id}/renew", renewal);
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+            var result = (await response.Content.ReadFromJsonAsync<ControlSessionRenewalResult>())!;
+            successorId = result.Successor.Id;
+            Assert.Equal(renewal.Id, result.Receipt.Id); Assert.Equal(Delivery.Finished, result.Receipt.State);
+            Assert.Equal(successorId, result.Receipt.SuccessorId);
+            Assert.Equal(1, result.Successor.Generation); Assert.Equal(predecessor.Id, result.Successor.PredecessorId);
+            Assert.False(result.Successor.IsCurrent); Assert.NotEqual(predecessor.WorkerId, result.Successor.WorkerId);
+            Assert.Equal("agentcontrol-control:" + result.Successor.Id + ":g1", result.Successor.Title);
+            var publicSuccessor = (await owner.GetFromJsonAsync<List<ControlServiceView>>("/api/v1/control-services"))!
+                .Single().Sessions.Single(x => x.Id == successorId);
+            Assert.Equal(1, publicSuccessor.Generation); Assert.False(publicSuccessor.IsCurrent); Assert.Equal(predecessor.Id, publicSuccessor.PredecessorId);
+            await TestApp.Wait(async () => await app.Store.Read(async db => (await db.Commands.FindAsync(result.Successor.CreationCommandId))!.State == Delivery.Unknown), "Successor create response lost");
+            Assert.Equal(3, native.CreationPosts); Assert.Equal(3, native.CreateCalls);
+
+            var ordinary = await app.Store.CreateControlSession(service.Id,
+                new(Guid.NewGuid().ToString(), "Workgroup", "repo-a", "Repo A", "opencode", "big-pickle"));
+            Assert.Equal(predecessor.Id, ordinary.Id);
+            var changedReplay = await owner.PostAsJsonAsync($"/api/v1/control-services/{service.Id}/sessions/{predecessor.Id}/renew", renewal with { ExpectedRevision = renewal.ExpectedRevision + 1 });
+            Assert.Equal(HttpStatusCode.Conflict, changedReplay.StatusCode);
+        }
+
+        await using (var restarted = new TestApp(data, secrets))
+        {
+            using var owner = await restarted.SignIn();
+            await TestApp.Wait(async () =>
+            {
+                var connection = (await restarted.Store.ControlServices()).Single().Connection;
+                return connection.DesiredConnected && connection.Transport == "Connected" && connection.Health == "Healthy";
+            }, "Control service reconnected");
+            await Task.Delay(400);
+            Assert.Equal(3, native.CreationPosts); Assert.Equal(3, native.CreateCalls);
+            native.HideSessions = false;
+            await TestApp.Wait(async () => (await restarted.Store.ControlServices()).Single().Sessions.Single(x => x.Id == successorId).State == "Ready", "Successor discovered");
+            var response = await owner.PostAsJsonAsync($"/api/v1/control-services/{serviceId}/sessions/{predecessorId}/renew", renewal);
+            response.EnsureSuccessStatusCode();
+            Assert.Equal(successorId, (await response.Content.ReadFromJsonAsync<ControlSessionRenewalResult>())!.Successor.Id);
+            Assert.Equal(3, native.CreationPosts); Assert.Equal(3, native.CreateCalls);
+
+            var run = (await restarted.Store.Coordinations()).Single(x => x.Id == runId);
+            var successor = (await restarted.Store.ControlServices()).Single().Sessions.Single(x => x.Id == successorId);
+            await restarted.Store.Write(async db =>
+            {
+                var predecessorWorker = (await db.Workers.FindAsync(predecessorWorkerId))!;
+                var successorWorker = (await db.Workers.FindAsync(successor.WorkerId))!;
+                predecessorWorker.Stale = false; predecessorWorker.Activity = "Idle"; predecessorWorker.LastObservedAt = ControlStore.Now;
+                successorWorker.Stale = false; successorWorker.Activity = "Idle"; successorWorker.LastObservedAt = ControlStore.Now;
+                var request = (await db.Requests.FindAsync(requestId))!; request.State = "Pending"; request.ReplyCommandId = null;
+                return true;
+            });
+            response = await owner.PostAsJsonAsync($"/api/v1/coordinations/{run.Id}/control-session",
+                new MigrateControlSessionInput(Guid.NewGuid().ToString(), run.Revision, successor.Id));
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            await restarted.Store.Write(async db => { (await db.Requests.FindAsync(requestId))!.State = "Answered"; return true; });
+            run = (await restarted.Store.Coordinations()).Single(x => x.Id == runId);
+            response = await owner.PostAsJsonAsync($"/api/v1/coordinations/{run.Id}/control-session",
+                new MigrateControlSessionInput(Guid.NewGuid().ToString(), run.Revision, successor.Id));
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+
+            var migrated = (await restarted.Store.Coordinations()).Single(x => x.Id == runId);
+            Assert.Equal("Paused", migrated.State); Assert.Equal(successor.WorkerId, migrated.CoordinatorWorkerId);
+            Assert.Equal(0, migrated.Round); Assert.Equal(Delivery.Running, await restarted.Store.Read(async db => (await db.Commands.FindAsync(taskId))!.State));
+            var assignment = await restarted.Store.Read(async db => (await db.Assignments.FindAsync(taskId))!);
+            Assert.Equal(developerId, assignment.WorkerId); Assert.Equal("receipt-kept", assignment.Evidence);
+            var sessions = (await restarted.Store.ControlServices()).Single().Sessions.Where(x => x.ScopeId == "repo-a").ToArray();
+            Assert.Single(sessions, x => x.IsCurrent && x.Id == successor.Id);
+            Assert.Single(sessions, x => !x.IsCurrent && x.Id == predecessorId);
+            var predecessorWorker = await restarted.Store.Read(async db => (await db.Workers.FindAsync(predecessorWorkerId))!);
+            var successorWorker = await restarted.Store.Read(async db => (await db.Workers.FindAsync(successor.WorkerId))!);
+            Assert.True(predecessorWorker.Archived); Assert.False(successorWorker.Archived);
+            Assert.Equal(predecessorNativeId, predecessorWorker.NativeSessionId);
+            Assert.Single(await restarted.Store.Read(db => db.Messages.Where(x => x.WorkerId == predecessorWorkerId).ToListAsync()));
+            Assert.Empty(await restarted.Store.Read(db => db.Messages.Where(x => x.WorkerId == successor.WorkerId).ToListAsync()));
+            Assert.Single(await restarted.Store.Read(db => db.Requests.Where(x => x.WorkerId == predecessorWorkerId).ToListAsync()));
+            Assert.Empty(await restarted.Store.Read(db => db.Requests.Where(x => x.WorkerId == successor.WorkerId).ToListAsync()));
+            var ordinary = await restarted.Store.CreateControlSession(serviceId,
+                new(Guid.NewGuid().ToString(), "Workgroup", "repo-a", "Repo A", "opencode", "big-pickle"));
+            Assert.Equal(successor.Id, ordinary.Id);
+            Assert.Single(await restarted.Store.Read(db => db.Events.Where(x => x.Type == "ControlSessionRenewalRequested").ToListAsync()));
+            Assert.Single(await restarted.Store.Read(db => db.Events.Where(x => x.Type == "CoordinationControlSessionMigrated").ToListAsync()));
+            Assert.Equal(developerId, await restarted.Store.Read(async db => (await db.Commands.FindAsync(taskId))!.WorkerId));
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentRenewalsCreateOneDerivedSuccessorAndRejectTheOther()
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var predecessor = await app.Store.CreateControlSession(service.Id,
+            new(Guid.NewGuid().ToString(), "Workgroup", "repo-a", "Repo A", "opencode", "big-pickle"));
+        await TestApp.Wait(async () => (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == predecessor.Id).State == "Ready", "Predecessor ready");
+        predecessor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == predecessor.Id);
+        var attempts = new[] { new RenewControlSessionInput(Guid.NewGuid().ToString(), predecessor.Revision), new(Guid.NewGuid().ToString(), predecessor.Revision) };
+        var outcomes = await Task.WhenAll(attempts.Select(async input =>
+        {
+            try { return (Result: await app.Store.RenewControlSession(service.Id, predecessor.Id, input), Error: (ControlException?)null); }
+            catch (ControlException error) { return (Result: (ControlSessionRenewalResult?)null, Error: error); }
+        }));
+        Assert.Single(outcomes, x => x.Result is not null); Assert.Single(outcomes, x => x.Error is not null);
+        Assert.Single(await app.Store.Read(db => db.ControlSessions.Where(x => x.PredecessorId == predecessor.Id).ToListAsync()));
+        Assert.Single(await app.Store.Read(db => db.Commands.Where(x => x.Kind == "RenewControlSession").ToListAsync()));
+    }
+
+    [Fact]
+    public async Task GenerationCutoverRequiresFreshIdleSessionsAndResolvedDeliveryAndRequests()
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var predecessor = await app.Store.CreateControlSession(service.Id,
+            new(Guid.NewGuid().ToString(), "Workgroup", "repo-a", "Repo A", "opencode", "big-pickle"));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == predecessor.WorkerId && !x.Stale && x.Activity == "Idle")), "Predecessor observed");
+        predecessor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == predecessor.Id);
+        var developer = await PersistenceTests.SeedWorker(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), predecessor.WorkerId, "Keep the run paused", [developer.Id]));
+        run = await app.Store.ControlCoordination(run.Id, new(run.Revision, "pause"));
+        var renewal = await app.Store.RenewControlSession(service.Id, predecessor.Id, new(Guid.NewGuid().ToString(), predecessor.Revision));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == renewal.Successor.WorkerId)), "Successor bound");
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+
+        async Task Reset()
+        {
+            await app.Store.Write(async db =>
+            {
+                var runtime = (await db.Runtimes.FindAsync(service.Id))!;
+                runtime.DesiredConnected = true; runtime.Transport = "Connected"; runtime.Health = "Healthy";
+                foreach (var workerId in new[] { predecessor.WorkerId, renewal.Successor.WorkerId })
+                {
+                    var worker = (await db.Workers.FindAsync(workerId))!;
+                    worker.Stale = false; worker.Activity = "Idle"; worker.LastObservedAt = ControlStore.Now;
+                }
+                foreach (var command in await db.Commands.Where(x => x.WorkerId == renewal.Successor.WorkerId && x.Kind == "Prompt").ToListAsync())
+                    command.State = Delivery.Finished;
+                foreach (var request in await db.Requests.Where(x => x.WorkerId == renewal.Successor.WorkerId).ToListAsync())
+                    request.State = "Answered";
+                return true;
+            });
+        }
+        Task Cutover() => app.Store.MigrateControlSession(run.Id,
+            new(Guid.NewGuid().ToString(), run.Revision, renewal.Successor.Id));
+
+        await Reset();
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(predecessor.WorkerId))!.Stale = true; return true; });
+        await Assert.ThrowsAsync<ControlException>(Cutover);
+        await Reset();
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(renewal.Successor.WorkerId))!.Activity = "Active"; return true; });
+        await Assert.ThrowsAsync<ControlException>(Cutover);
+        await Reset();
+        await app.Store.Write(db =>
+        {
+            db.Commands.Add(new CommandRecord { Id = Guid.NewGuid().ToString(), RuntimeId = service.Id, WorkerId = renewal.Successor.WorkerId, Kind = "Prompt", State = Delivery.Unknown });
+            return Task.FromResult(true);
+        });
+        await Assert.ThrowsAsync<ControlException>(Cutover);
+        await Reset();
+        await app.Store.Write(db =>
+        {
+            db.Requests.Add(new PendingRequest { WorkerId = renewal.Successor.WorkerId, NativeId = "q_successor", Kind = "question", State = "ReplyUnknown" });
+            return Task.FromResult(true);
+        });
+        await Assert.ThrowsAsync<ControlException>(Cutover);
+        Assert.Equal(predecessor.WorkerId, (await app.Store.Coordinations()).Single(x => x.Id == run.Id).CoordinatorWorkerId);
+        Assert.True((await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == predecessor.Id).IsCurrent);
+    }
+
     [Theory]
     [InlineData("version")]
     [InlineData("health")]
@@ -180,7 +458,12 @@ public sealed class ControlServiceTests
         await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == target.WorkerId && !x.Stale && x.Activity == "Idle")), "Target observed");
         var old = await PersistenceTests.SeedWorker(app.Store);
         var developer = new WorkerRecord { RuntimeId = old.RuntimeId, NativeSessionId = "ses_developer", Directory = "/repo", Name = "Developer" };
-        await app.Store.Write(async db => { (await db.Workers.FindAsync(old.Id))!.Role = SessionRoles.Coordinator; db.Workers.Add(developer); return true; });
+        await app.Store.Write(async db =>
+        {
+            var coordinator = (await db.Workers.FindAsync(old.Id))!;
+            coordinator.Role = SessionRoles.Coordinator; coordinator.Stale = false; coordinator.Activity = "Idle"; coordinator.LastObservedAt = ControlStore.Now;
+            db.Workers.Add(developer); return true;
+        });
         var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), old.Id, "Retain assignments", [developer.Id]));
         run = await app.Store.ControlCoordination(run.Id, new(run.Revision, "pause"));
         var decisionId = Guid.NewGuid().ToString(); var taskId = Guid.NewGuid().ToString();

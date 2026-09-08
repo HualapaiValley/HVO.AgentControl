@@ -96,6 +96,11 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     }
 
     public Task<JsonElement> Sessions(string directory, CancellationToken token) => Get(Scope("/session", directory), token);
+    public Task<JsonElement> SessionStatuses(string directory, CancellationToken token) => Get(Scope("/session/status", directory), token);
+    // OpenCode retains providers in an instance cache. Scope disposal to the verified
+    // workspace so saved conversations and the server process remain untouched.
+    public Task<JsonElement> DisposeInstance(string directory, CancellationToken token) =>
+        Send(HttpMethod.Post, Scope("/instance/dispose", directory), new { }, token);
     public Task<JsonElement> SetProviderKey(string providerId, string key, CancellationToken token) =>
         Send(HttpMethod.Put, $"/auth/{Id(providerId)}", new { type = "api", key }, token);
     public Task<JsonElement> ProviderAuthMethods(string directory, CancellationToken token) => Get(Scope("/provider/auth", directory), token);
@@ -186,6 +191,28 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     }
 
     public Task<HttpResponseMessage> Subscribe(CancellationToken token) => SubscribeCore(token);
+
+    public async Task WaitForInstanceDisposed(HttpResponseMessage response, string directory, CancellationToken token)
+    {
+        using (response)
+        await using (var stream = await response.Content.ReadAsStreamAsync(token))
+        {
+            await foreach (var item in SseReader.Read(stream, cancellationToken: token))
+            {
+                if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("payload", out var payload) ||
+                    payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("type", out var type) ||
+                    type.GetString() != "server.instance.disposed" || !payload.TryGetProperty("properties", out var properties) ||
+                    properties.ValueKind != JsonValueKind.Object)
+                    continue;
+                if (item.TryGetProperty("directory", out var envelopeDirectory) && envelopeDirectory.ValueKind == JsonValueKind.String &&
+                    envelopeDirectory.GetString() == directory && properties.TryGetProperty("directory", out var eventDirectory) &&
+                    eventDirectory.ValueKind == JsonValueKind.String && eventDirectory.GetString() == directory)
+                    return;
+                throw new InvalidDataException("OpenCode disposal event directory does not match the controlled refresh scope.");
+            }
+        }
+        throw new EndOfStreamException("OpenCode SSE ended before the scoped instance disposal completed.");
+    }
 
     private async Task<JsonElement> History(string route, CancellationToken token)
     {

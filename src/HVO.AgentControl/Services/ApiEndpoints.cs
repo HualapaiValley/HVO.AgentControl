@@ -24,10 +24,12 @@ public static class ApiEndpoints
         group.MapPost("/control-services", (RegisterControlServiceInput input, ControlServiceRegistration registration, CancellationToken token) => registration.Register(input, token));
         group.MapPost("/control-services/{id}/sessions", (string id, CreateControlSessionInput input, ControlStore store) => store.CreateControlSession(id, input));
         group.MapPost("/control-services/{id}/sessions/{sessionId}/retry", (string id, string sessionId, RetryControlSessionInput input, ControlStore store) => store.RetryControlSession(id, sessionId, input));
+        group.MapPost("/control-services/{id}/sessions/{sessionId}/renew", (string id, string sessionId, RenewControlSessionInput input, ControlStore store) => store.RenewControlSession(id, sessionId, input));
         group.MapPost("/coordinations/{id}/control-session", (string id, MigrateControlSessionInput input, ControlStore store) => store.MigrateControlSession(id, input));
         group.MapGet("/providers/opencode-go/key", (ProviderKeyService keys) => keys.Status());
         group.MapPost("/providers/opencode-go/key", (SaveProviderKey input, ProviderKeyService keys) => keys.Save(input));
         group.MapPost("/runtimes/{id}/providers/opencode-go", (string id, ApplyProviderKey input, ProviderKeyService keys, CancellationToken token) => keys.Apply(id, input, token));
+        group.MapPost("/runtimes/{id}/providers/opencode-go/ready", (string id, AttestProviderReady input, ProviderKeyService keys) => keys.AttestReady(id, input));
         group.MapGet("/providers/pools", (ControlStore store) => store.ProviderPools());
         group.MapPost("/providers/pools/{id}/resume", (string id, ResumeProviderPool input, ControlStore store) => store.ResumePool(id, input));
         group.MapGet("/providers/fallbacks/{sourceCommandId}", (string sourceCommandId, ControlStore store) => store.ProviderFallbacks(sourceCommandId));

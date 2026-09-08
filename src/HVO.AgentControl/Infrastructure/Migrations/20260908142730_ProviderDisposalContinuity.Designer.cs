@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260908142730_ProviderDisposalContinuity")]
+    partial class ProviderDisposalContinuity
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -218,18 +221,8 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<int>("Generation")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("IsCurrent")
-                        .HasColumnType("INTEGER")
-                        .HasDefaultValue(true);
-
                     b.Property<string>("NativeSessionId")
                         .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("PredecessorId")
                         .HasColumnType("TEXT");
 
                     b.Property<long>("Revision")
@@ -255,18 +248,10 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("ControlServiceId");
 
-                    b.HasIndex("PredecessorId")
-                        .IsUnique()
-                        .HasFilter("PredecessorId IS NOT NULL");
-
                     b.HasIndex("WorkerId")
                         .IsUnique();
 
                     b.HasIndex("ScopeKind", "ScopeId")
-                        .IsUnique()
-                        .HasFilter("IsCurrent = 1");
-
-                    b.HasIndex("ScopeKind", "ScopeId", "Generation")
                         .IsUnique();
 
                     b.ToTable("ControlSessions");

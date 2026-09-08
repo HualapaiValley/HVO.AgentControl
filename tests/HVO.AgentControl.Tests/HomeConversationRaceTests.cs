@@ -188,6 +188,62 @@ public sealed class HomeConversationRaceTests
     }
 
     private static TestHome Home(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read) => new(store, read);
+    [Fact]
+    public async Task BackgroundRefreshCannotReplacePinnedOutcomeRevision()
+    {
+        await using var app = new TestApp();
+        var (a, _) = await SeedWorkers(app.Store);
+        var command = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Review this assignment", a.Revision));
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.State = Delivery.Finished; return true; });
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+
+        await home.Navigate(a.Id);
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(a.Id))!.Revision++; return true; });
+        await home.BackgroundRefresh();
+        await home.Record("VerifiedComplete", "Evidence from the stale review form.");
+
+        Assert.NotNull(home.VisibleError);
+        var detail = await app.Store.Detail(a.Id);
+        Assert.Equal("Assigned", detail.Assignments.Single(x => x.Id == command.Id).Outcome);
+        Assert.Equal("Unassigned", detail.Worker.Outcome);
+    }
+
+    [Fact]
+    public async Task BackgroundRefreshClearsReviewWhenReviewedAssignmentLeavesDetailWindow()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await SeedWorkers(app.Store);
+        var reviewed = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Review this assignment", worker.Revision));
+        await app.Store.Write(async db =>
+        {
+            var original = (await db.Commands.FindAsync(reviewed.Id))!;
+            original.State = Delivery.Finished;
+            for (var index = 1; index <= 100; index++)
+                db.Commands.Add(new CommandRecord
+                {
+                    Id = $"newer-{index}",
+                    WorkerId = worker.Id,
+                    RuntimeId = worker.RuntimeId,
+                    Kind = "Prompt",
+                    State = Delivery.Finished,
+                    CreatedAt = original.CreatedAt + index,
+                    QueueOrder = original.QueueOrder + index,
+                    Payload = "{}"
+                });
+            return true;
+        });
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+
+        await home.Navigate(worker.Id);
+        home.SetReview(reviewed.Id, worker.Revision, "Failed", "Evidence for the reviewed assignment.");
+        await home.BackgroundRefresh();
+
+        Assert.Empty(home.ReviewedCommandId);
+        Assert.Equal("ReportedComplete", home.ReviewOutcome);
+        Assert.Empty(home.ReviewEvidence);
+        Assert.Equal(0, home.ReviewExpectedRevision);
+    }
+
     private static TaskCompletionSource Source() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private static async Task<(WorkerRecord A, WorkerRecord B)> SeedWorkers(ControlStore store, int messages = 0)
@@ -224,6 +280,10 @@ public sealed class HomeConversationRaceTests
         public string? Notice => Field<string?>("notice");
         public string? LastBeforeId { get; private set; }
         public IReadOnlyList<TranscriptMessage> Older => Field<List<TranscriptMessage>>("olderMessages");
+        public string ReviewedCommandId => Field<string>("outcomeCommandId");
+        public string ReviewOutcome => Field<string>("outcome");
+        public string ReviewEvidence => Field<string>("evidence");
+        public long ReviewExpectedRevision => Field<long>("outcomeExpectedRevision");
         public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
@@ -233,6 +293,15 @@ public sealed class HomeConversationRaceTests
         {
             LastBeforeId = beforeId;
             return read(workerId, before, beforeId);
+        }
+        public Task Record(string outcome, string evidence)
+        {
+            SetField("outcome", outcome); SetField("evidence", evidence); return Invoke("RecordOutcome");
+        }
+        public void SetReview(string commandId, long expectedRevision, string outcome, string evidence)
+        {
+            SetField("outcomeCommandId", commandId); SetField("outcomeExpectedRevision", expectedRevision);
+            SetField("outcome", outcome); SetField("evidence", evidence);
         }
 
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;
