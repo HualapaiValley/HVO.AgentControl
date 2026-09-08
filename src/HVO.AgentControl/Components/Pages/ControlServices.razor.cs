@@ -63,6 +63,12 @@ public partial class ControlServices
         notice = "Workgroup conversation requested. Its creation status is saved and survives navigation or refresh.";
     });
 
+    private Task RetrySession(ControlSessionBinding binding) => Execute(async () =>
+    {
+        await Store.RetryControlSession(binding.ControlServiceId, binding.Id, new(Guid.NewGuid().ToString(), binding.Revision));
+        notice = "Creation retry recorded. The previous attempt remains in the audit history.";
+    });
+
     private void BeginEdit(WorkerRecord worker)
     {
         editing = Json.Read<WorkerRecord>(Json.Write(worker));

@@ -77,7 +77,12 @@
               <p class="meta">@HVO.AgentControl.Core.DisplayStatus.Worker(worker)</p>
               <div class="actions"><a class="button-link subtle" href="@ConversationUrl(worker.Id)">Open conversation</a><button class="subtle" disabled="@busy" @onclick="() => BeginEdit(worker)">Edit session model</button>@if (binding.ScopeKind == "Workgroup") { <a class="button-link subtle" href="/coordination">Coordinate work</a> }</div>
             }
-            else { <p>@(command?.Detail ?? binding.Detail)</p> }
+            else
+            {
+              <p>@(command?.Detail ?? binding.Detail)</p>
+              @if (command?.State == Delivery.Failed || command is { State: Delivery.Cancelled, Attempts: 0 })
+              { <button class="subtle" disabled="@busy" @onclick="() => RetrySession(binding)">Retry creation</button> }
+            }
             @if (editing?.Id == binding.WorkerId)
             {
               <section class="session-form" aria-label="Edit control session">
