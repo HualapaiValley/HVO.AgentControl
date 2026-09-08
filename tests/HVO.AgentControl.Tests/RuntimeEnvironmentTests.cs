@@ -130,10 +130,22 @@ public sealed class RuntimeEnvironmentTests
         var setup = await ActiveBinding(app);
         using var owner = await app.SignIn();
         var route = $"/api/v1/projects/{setup.Binding.Project.Id}/archive";
+        var before = await app.Store.Project(setup.Binding.Project.Id);
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
 
         var rejected = await owner.PostAsJsonAsync(route, new ArchiveInventoryInput(Id(), setup.Binding.Project.Revision));
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
-        Assert.False((await app.Store.Project(setup.Binding.Project.Id)).Archived);
+        var afterRejected = await app.Store.Project(setup.Binding.Project.Id);
+        Assert.Equal(before.Id, afterRejected.Id);
+        Assert.Equal(before.Revision, afterRejected.Revision);
+        Assert.Equal(before.Archived, afterRejected.Archived);
+        Assert.Equal(before.Name, afterRejected.Name);
+        Assert.Equal(before.RepositoryUrl, afterRejected.RepositoryUrl);
+        Assert.Equal(before.BaseBranch, afterRejected.BaseBranch);
+        Assert.Equal(before.Description, afterRejected.Description);
+        Assert.Equal(before.UpdatedAt, afterRejected.UpdatedAt);
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+        Assert.Equal(TaskBindingState.Active, (await app.Store.TaskBinding(setup.Binding.Binding.Id)).Binding.State);
 
         await app.Store.ReleaseWorkItem(new(setup.Work.Id, setup.Worker.Id));
         await app.Store.ReleaseTaskBinding(setup.Binding.Binding.Id, new(Id(), setup.Binding.Binding.Revision));
