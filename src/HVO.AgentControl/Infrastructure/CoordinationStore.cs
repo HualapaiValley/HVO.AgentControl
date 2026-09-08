@@ -557,8 +557,9 @@ public sealed partial class ControlStore
         var coordinator = await db.Workers.FindAsync(run.CoordinatorWorkerId);
         if (coordinator is null || coordinator.Archived || coordinator.Role != SessionRoles.Coordinator)
             throw new ControlException("Coordinator role is unavailable; no actions sent.");
-        foreach (var action in decision.Actions)
+        for (var actionIndex = 0; actionIndex < decision.Actions.Length; actionIndex++)
         {
+            var action = decision.Actions[actionIndex];
             var observed = context.Workers.FirstOrDefault(x => x.Id == action.WorkerId) ?? throw new ControlException("Coordinator targeted a worker outside this run.");
             var current = await db.Workers.FindAsync(observed.Id) ?? throw new ControlException("Worker no longer exists.");
             if (current.Role != SessionRoles.Worker || current.Archived || current.Revision != observed.Revision) throw new ControlException("Worker changed after the coordinator observation; decision paused without dispatch.");
@@ -576,8 +577,7 @@ public sealed partial class ControlStore
                 if (action.ModelId is not null || action.Variant is not null)
                     ValidateModelOptions(Json.Read<List<ModelChoice>>(current.ModelsJson), action.ProviderId ?? current.ProviderId,
                         action.ModelId ?? current.ModelId, current.Agent, action.Variant ?? "");
-                var guidance = action.IncludeGuidance ?? run.IncludeGuidance;
-                AssignmentGuidance.Validate(guidance, action.ProgressMinutes ?? (guidance ? run.ProgressMinutes : null));
+                ValidateDecisionGuidance(action, run, actionIndex);
                 if (action.GitHubMergeScope is not null)
                     HVO.AgentControl.GitHub.GitHubMergeTaskAuthority.ValidatePromptScope(action.GitHubMergeScope);
                 if (await db.Commands.AnyAsync(x => x.WorkerId == current.Id && (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)) || current.Stale || current.Activity != "Idle")
@@ -597,6 +597,22 @@ public sealed partial class ControlStore
         if (decision.Complete && await db.Commands.AnyAsync(x => x.Origin == "coordinator:" + run.Id &&
             (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)))
             throw new ControlException("Coordinator cannot complete while assigned work is still outstanding.");
+    }
+
+    private static void ValidateDecisionGuidance(CoordinatorAction action, CoordinationRun run, int actionIndex)
+    {
+        var guidance = action.IncludeGuidance ?? run.IncludeGuidance;
+        var progress = action.ProgressMinutes ?? (guidance ? run.ProgressMinutes : null);
+        try { AssignmentGuidance.Validate(guidance, progress); }
+        catch (ControlException)
+        {
+            // Keep the shared validation authoritative; add bounded field-level correction
+            // for the next fresh coordinator context without rewriting the rejected action.
+            var correction = guidance
+                ? "With includeGuidance:true, use an integer from 1–1440, or omit progressMinutes/set it to null to inherit the run interval."
+                : "includeGuidance is false (explicitly or inherited). Omit progressMinutes or set it to null. Set includeGuidance:true only if assignment guidance is intended; then an optional interval must be 1–1440.";
+            throw new ControlException($"actions[{actionIndex}].progressMinutes ({progress}) is invalid. {correction}", 400);
+        }
     }
 
     private static CoordinatorResult CoordinatorEvidence(CommandRecord command)
@@ -747,8 +763,14 @@ public sealed partial class ControlStore
         A model override without variant clears the default reasoning setting, since another model may not support it.
         Never guess variant names. Unsupported selections reject the entire batch without dispatch; ask for verified options.
         Do not put variant on answer_question actions.
-        Optional send_prompt fields include includeGuidance (boolean) and progressMinutes (1–1440); omitted values inherit
-        run defaults. Set includeGuidance:false for simple questions or broadcasts needing no assignment preamble.
+        Optional send_prompt includeGuidance is a boolean; omission or null inherits the run default.
+        If includeGuidance is false, explicitly or inherited, omit progressMinutes or set it to null. Never combine
+        includeGuidance:false with a numeric progressMinutes, even when the run normally requests progress updates.
+        With includeGuidance:true, progressMinutes is optional: use an integer from 1–1440; omission or null inherits
+        the run interval. Set includeGuidance:true when requesting periodic progress and guidance is not known to be enabled.
+        Set includeGuidance:false for simple questions or broadcasts needing no assignment preamble.
+        Valid field pairs are {"includeGuidance":false} and {"includeGuidance":true,"progressMinutes":10}.
+        A conflicting pair rejects the entire batch without sending any actions; correct the named field in a fresh decision.
         For an explicit publication or independent review assignment, githubMergeScope is a typed object with version 1,
         purpose PullRequestMergeAuthority, role Author or Reviewer, and repository owner/name. Reviewer scope requires the
         pullRequestNumber and 40-character exact headSha. Author work may begin before publication with pullRequestNumber 0
