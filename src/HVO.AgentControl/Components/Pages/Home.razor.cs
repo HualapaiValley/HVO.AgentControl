@@ -54,8 +54,18 @@ public partial class Home
             var settled = detail.Commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled).ToList();
             if (!settled.Any(x => x.Id == outcomeCommandId))
             {
-                outcomeCommandId = settled.OrderByDescending(x => x.CreatedAt).FirstOrDefault()?.Id ?? "";
-                outcomeExpectedRevision = detail.Worker.Revision;
+                if (outcomeCommandId.Length > 0)
+                {
+                    outcomeCommandId = "";
+                    outcomeExpectedRevision = 0;
+                    outcome = "ReportedComplete";
+                    evidence = "";
+                }
+                else
+                {
+                    outcomeCommandId = settled.OrderByDescending(x => x.CreatedAt).FirstOrDefault()?.Id ?? "";
+                    outcomeExpectedRevision = detail.Worker.Revision;
+                }
             }
         }
         catch when (!selection.IsCurrent(current)) { }
