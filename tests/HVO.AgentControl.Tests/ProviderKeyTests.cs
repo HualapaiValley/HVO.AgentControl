@@ -108,6 +108,53 @@ public sealed class ProviderKeyTests
         Assert.DoesNotContain(Key, Json.Write(await app.Store.Read(db => db.Events.ToListAsync())));
     }
 
+    [Theory]
+    [InlineData(true, false, "Unknown")]
+    [InlineData(false, true, "Unknown")]
+    public async Task LostOrMismatchedDisposalCompletionRetainsAllProviderHold(bool lostEvent, bool mismatchedDirectory, string expected)
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_root",
+                Directory = "/workspace",
+                ProviderId = ProviderKeyService.ProviderId,
+                ModelId = "go-model",
+                Activity = "Idle",
+                Stale = false
+            });
+            return Task.FromResult(true);
+        });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(new RefreshHandler(false, false, lostEvent, mismatchedDirectory)));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        Assert.Equal(expected, Assert.Single(status.Readiness).State);
+        await Assert.ThrowsAsync<ControlException>(() => service.AttestReady(runtime.Id, new(1, true)));
+    }
+
+    [Fact]
+    public async Task SavingV2WithoutApplyingItRejectsV1ReadinessAttestation()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db => { db.Runtimes.Add(runtime); return Task.FromResult(true); });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new Factory(new Handler(false)));
+        await service.Save(new(Key, 0));
+        await service.Apply(runtime.Id, new(1), CancellationToken.None);
+        await service.Save(new("v2-fixture-key", 1));
+
+        await Assert.ThrowsAsync<ControlException>(() => service.AttestReady(runtime.Id, new(1, true)));
+        Assert.Equal(2, (await service.Status()).Revision);
+    }
+
     [Fact]
     public async Task LostCredentialDeliveryResponseParksReadinessWithoutDisposingInstances()
     {
@@ -229,7 +276,7 @@ public sealed class ProviderKeyTests
         public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
             Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") }), runtime.ManagedServerId));
     }
-    private sealed class RefreshHandler(bool activeSession, bool unlistedActive = false) : HttpMessageHandler
+    private sealed class RefreshHandler(bool activeSession, bool unlistedActive = false, bool lostEvent = false, bool mismatchedDirectory = false) : HttpMessageHandler
     {
         public int AuthCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -256,9 +303,11 @@ public sealed class ProviderKeyTests
             }
             if (request.Method == HttpMethod.Get && path == "/global/event")
             {
+                var eventData = lostEvent ? "" : "data: {\"directory\":\"/workspace\",\"payload\":{\"type\":\"server.instance.disposed\",\"properties\":{\"directory\":\"" +
+                    (mismatchedDirectory ? "/other" : "/workspace") + "\"}}}\n\n";
                 var response = new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent("data: {\"directory\":\"/workspace\",\"payload\":{\"type\":\"server.instance.disposed\",\"properties\":{\"directory\":\"/workspace\"}}}\n\n")
+                    Content = new StringContent(eventData)
                 };
                 response.Content.Headers.ContentType = new("text/event-stream");
                 return Task.FromResult(response);
