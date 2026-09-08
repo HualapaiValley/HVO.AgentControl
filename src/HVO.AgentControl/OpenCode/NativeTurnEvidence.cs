@@ -38,6 +38,49 @@ public static class NativeTurnEvidence
         return result.ToArray();
     }
 
+    public static bool IsTerminalAssistantResponse(JsonElement message)
+    {
+        var info = message.GetProperty("info");
+        if (!info.GetProperty("time").TryGetProperty("completed", out var completed) || completed.ValueKind != JsonValueKind.Number) return false;
+        // Native cleanup completes failed messages without necessarily setting a finish reason.
+        if (info.TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) return true;
+        if (info.TryGetProperty("structured", out _)) return true;
+        if (!info.TryGetProperty("finish", out var finish) || finish.ValueKind != JsonValueKind.String ||
+            finish.GetString() is null or "" or "tool-calls" or "unknown") return false;
+        // OpenCode continues ordinary tool calls even when a provider reports "stop".
+        // Only provider-executed calls and cleanup-marked interrupted orphans allow exit.
+        return message.GetProperty("parts").EnumerateArray().All(part =>
+            part.GetProperty("type").GetString() != "tool" || IsSettledTerminalTool(part));
+    }
+
+    public static string? CompletedToolFailureId(JsonElement[] messages)
+    {
+        var latest = messages.OrderBy(x => x.GetProperty("info").GetProperty("time").GetProperty("created").GetInt64())
+            .ThenBy(x => x.GetProperty("info").GetProperty("id").GetString(), StringComparer.Ordinal).LastOrDefault();
+        return latest.ValueKind == JsonValueKind.Object && IsCompletedToolFailure(latest)
+            ? latest.GetProperty("info").GetProperty("id").GetString() : null;
+    }
+
+    public static bool IsCompletedToolFailure(JsonElement message)
+    {
+        var info = message.GetProperty("info");
+        if (info.GetProperty("role").GetString() != "assistant" || IsTrue(info, "summary") ||
+            !info.GetProperty("time").TryGetProperty("completed", out var completed) || completed.ValueKind != JsonValueKind.Number ||
+            IsTerminalAssistantResponse(message)) return false;
+        var tools = message.GetProperty("parts").EnumerateArray().Where(x => x.GetProperty("type").GetString() == "tool").ToArray();
+        return tools.Any(x => x.TryGetProperty("state", out var state) && state.TryGetProperty("status", out var status) && status.GetString() == "error") &&
+            tools.All(x => x.TryGetProperty("state", out var state) && state.TryGetProperty("status", out var status) &&
+                status.GetString() is "completed" or "error" or "cancelled");
+    }
+
+    private static bool IsSettledTerminalTool(JsonElement part)
+    {
+        if (!part.TryGetProperty("state", out var state) || !state.TryGetProperty("status", out var status) ||
+            status.GetString() is not ("completed" or "error" or "cancelled")) return false;
+        return part.TryGetProperty("metadata", out var metadata) && IsTrue(metadata, "providerExecuted") ||
+            status.GetString() == "error" && state.TryGetProperty("metadata", out var stateMetadata) && IsTrue(stateMetadata, "interrupted");
+    }
+
     private static bool IsTrue(JsonElement value, string property) =>
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(property, out var found) && found.ValueKind == JsonValueKind.True;
 }
