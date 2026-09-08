@@ -260,6 +260,52 @@ public sealed class ProviderPoolTests
     }
 
     [Fact]
+    public async Task LateFailureDoesNotReplaceAnUnresolvedRecoveryLease()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+        var recovery = Command(worker, "openai"); recovery.State = Delivery.Running;
+        var late = Command(worker, "openai"); late.State = Delivery.Running;
+        var waiting = Command(worker, "openai");
+        await app.Store.Write(async db =>
+        {
+            db.Commands.AddRange(failed, recovery, late, waiting);
+            await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+            var pool = (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!;
+            pool.RetryAt = ControlStore.Now - 1;
+            Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+            await ControlStore.ObserveProviderFailure(db, worker, late, "late", new("Throttled", 429, null));
+            Assert.Equal(recovery.Id, pool.LastCommandId);
+            Assert.Equal("Recovering", pool.State);
+            Assert.False(await ControlStore.ProviderDispatchAllowed(db, worker, waiting));
+            return true;
+        });
+        Assert.Equal(2, await app.Store.Read(db => db.Set<ProviderFailureReceipt>().CountAsync()));
+    }
+
+    [Fact]
+    public async Task CancellingKnownUnsentRecoverySettlesLeaseWithoutClaimingAvailability()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+        var recovery = Command(worker, "openai");
+        await app.Store.Write(async db =>
+        {
+            db.Commands.AddRange(failed, recovery);
+            await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+            (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!.RetryAt = ControlStore.Now - 1;
+            Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+            return true;
+        });
+        await app.Store.EditQueue(recovery.Id, "cancel");
+        var pool = Assert.Single(await app.Store.ProviderPools());
+        Assert.Equal("RecoveryRequired", pool.State);
+        Assert.Equal(recovery.Id, pool.LastCommandId);
+    }
+
+    [Fact]
     public async Task DispatcherBlocksCoordinatorPromptsButKeepsAbortAvailable()
     {
         await using var app = new TestApp();

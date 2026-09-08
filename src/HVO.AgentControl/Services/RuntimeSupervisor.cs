@@ -577,6 +577,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                 command.State = Delivery.Cancelled; command.Detail = "Cancellation requested and native idle observed. Review tool effects; subprocess termination is not guaranteed.";
                 command.UpdatedAt = ControlStore.Now; worker.Outcome = "Cancelled";
                 if (await db.Assignments.FindAsync(command.Id) is { } cancelled) cancelled.Outcome = "Cancelled";
+                await ControlStore.ObserveProviderCompletion(db, command, false);
                 ControlStore.Event(db, "CancellationObserved", worker.RuntimeId, workerId, command.Id); changed = true;
                 continue;
             }

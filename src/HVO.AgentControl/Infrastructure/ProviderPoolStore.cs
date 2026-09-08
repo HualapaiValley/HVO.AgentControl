@@ -264,16 +264,23 @@ public sealed partial class ControlStore
         }
         var observed = Now;
         pool.ConsecutiveFailures++;
+        var lease = pool.LastCommandId.Length == 0 ? null : await db.Commands.FindAsync(pool.LastCommandId);
+        var liveRecovery = pool.State == "Recovering" && pool.LastCommandId != command.Id && lease is not null &&
+            lease.State is Delivery.Dispatching or Delivery.Accepted or Delivery.Running or Delivery.Unknown;
         // Exhaustion/authentication remain manual holds even if another in-flight
         // request reports a weaker transient failure or later succeeds.
-        if (pool.State is not ("Exhausted" or "AuthenticationRequired"))
+        if (!liveRecovery && pool.State is not ("Exhausted" or "AuthenticationRequired"))
             pool.State = failure.Category;
         var jitter = Random.Shared.Next(1000, 5001);
         var retryAt = failure.Category is "Throttled" or "Unavailable"
             ? Math.Min(DateTimeOffset.MaxValue.ToUnixTimeMilliseconds(), Math.Max(failure.RetryAt ?? observed + 60000, observed + 1000) + jitter) : (long?)null;
-        pool.RetryAt = pool.State is "Exhausted" or "AuthenticationRequired" ? null : Math.Max(pool.RetryAt ?? 0, retryAt ?? 0);
-        if (pool.ConsecutiveFailures >= 3 && pool.State is "Throttled" or "Unavailable") { pool.State = "RecoveryRequired"; pool.RetryAt = null; }
-        pool.ObservedAt = observed; pool.Revision++; pool.LastCommandId = command.Id;
+        if (!liveRecovery)
+        {
+            pool.RetryAt = pool.State is "Exhausted" or "AuthenticationRequired" ? null : Math.Max(pool.RetryAt ?? 0, retryAt ?? 0);
+            if (pool.ConsecutiveFailures >= 3 && pool.State is "Throttled" or "Unavailable") { pool.State = "RecoveryRequired"; pool.RetryAt = null; }
+            pool.LastCommandId = command.Id;
+        }
+        pool.ObservedAt = observed; pool.Revision++;
         db.Add(new ProviderFailureReceipt { Id = receiptId, PoolId = poolId, CommandId = command.Id, Category = failure.Category, Status = failure.Status, ObservedAt = observed, RetryAt = retryAt });
         Event(db, "ProviderPoolBlocked", worker.RuntimeId, worker.Id, command.Id, new { poolId, pool.State, failure.Status, pool.RetryAt });
         if (nativeRetry is not null)
