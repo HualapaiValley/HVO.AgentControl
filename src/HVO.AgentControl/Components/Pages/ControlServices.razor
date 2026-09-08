@@ -42,7 +42,7 @@
       <div class="card-heading"><h2>@runtime.Name</h2><span class="badge @(available ? "good" : "")">@(available ? "Connected" : runtime.Transport)</span></div>
       <p class="endpoint">@service.Endpoint</p>
       <p class="meta">@runtime.Health · OpenCode @runtime.Version · Observed @Age(service.LastObservedAt)</p>
-      @if (!available) { <p class="notice">@runtime.Diagnostic</p> }
+      @if (!available) { <p class="notice">@(string.IsNullOrWhiteSpace(runtime.Diagnostic) ? "Connect the host to observe this control service." : runtime.Diagnostic)</p> }
       <div class="actions">
         <button class="subtle" disabled="@busy" @onclick='() => ConnectionAction(service.Id, "RefreshState")'>Refresh connection and models</button>
         <button class="subtle" disabled="@(busy || !runtime.DesiredConnected)" @onclick='() => ConnectionAction(service.Id, "DisconnectRuntime")'>Disconnect host</button>

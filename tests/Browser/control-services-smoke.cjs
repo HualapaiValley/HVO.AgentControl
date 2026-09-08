@@ -36,9 +36,12 @@ module.exports = async ({ page, context, base, expect }) => {
   await expect(service).toContainText('browser-process-instance');
   await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.locator('.worker-sidebar').evaluate(el => el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Collapse worker sidebar', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('hvo.agentcontrol.sidebar-collapsed'))).toBe('false');
   await page.goto(base + '/');
   await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
   await expect(page.getByRole('link', { name: 'View control service status', exact: true })).toHaveAttribute('href', '/control-services');

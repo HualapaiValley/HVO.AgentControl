@@ -27,7 +27,7 @@
 .status-dot.active { background: #60a5fa; box-shadow: 0 0 0 3px #60a5fa22; }
 .status-dot.attention { background: #fbbf24; box-shadow: 0 0 0 3px #fbbf2422; }
 .sidebar-empty { padding: 1rem .5rem; color: var(--muted); font-size: .78rem; }
-.admin-navigation { display: grid; grid-template-columns: repeat(3, 1fr); gap: .35rem; padding: .8rem; border-top: 1px solid var(--line); background: #050914cc; }
+.admin-navigation { display: grid; grid-template-columns: repeat(2, 1fr); gap: .35rem; padding: .8rem; border-top: 1px solid var(--line); background: #050914cc; }
 .admin-navigation ::deep a { padding: .55rem .2rem; border: 1px solid transparent; border-radius: .55rem; color: var(--muted); text-align: center; text-decoration: none; font-size: .7rem; }
 .admin-navigation ::deep a:hover, .admin-navigation ::deep a.active { border-color: var(--line); background: var(--surface-hover); color: var(--ink); }
 .sidebar-backdrop { display: none; }
