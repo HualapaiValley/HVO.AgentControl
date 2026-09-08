@@ -154,13 +154,17 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
-        using var request = new HttpRequestMessage(HttpMethod.Get, route);
-        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-        if (!response.IsSuccessStatusCode) throw new NativeRejectedException((int)response.StatusCode);
-        await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
         try
         {
+            using var request = new HttpRequestMessage(HttpMethod.Get, route);
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            if (!response.IsSuccessStatusCode) throw new NativeRejectedException((int)response.StatusCode);
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
             return await NativeHistoryProjection.ReadAsync(stream, cancellationToken: timeout.Token);
+        }
+        catch (OperationCanceledException ex) when (!token.IsCancellationRequested)
+        {
+            throw new NativeHistoryObservationException(ex);
         }
         catch (Exception ex) when (ex is JsonException or InvalidDataException)
         {

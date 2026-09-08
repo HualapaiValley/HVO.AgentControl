@@ -17,8 +17,10 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class NativeHistoryIsolationTests
 {
-    [Fact]
-    public async Task InvalidHistoryKeepsTransportAndOtherWorkerHealthyThenRecoversWithoutReplay()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InvalidHistoryKeepsTransportAndOtherWorkerHealthyThenRecoversWithoutReplay(bool historyTimeout)
     {
         await using var app = new TestApp();
         await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
@@ -34,7 +36,7 @@ public sealed class NativeHistoryIsolationTests
             db.Workers.Add(other); db.Commands.AddRange(prompt, refresh);
             return true;
         });
-        var handler = new Handler(worker.Directory, other.Directory);
+        var handler = new Handler(worker.Directory, other.Directory, historyTimeout);
         var factory = new Factory(handler);
         using var supervisor = new RuntimeSupervisor(app.Store, factory, Options.Create(new ControlOptions { PollMilliseconds = 100 }), NullLogger<RuntimeSupervisor>.Instance);
         await supervisor.StartAsync(CancellationToken.None);
@@ -60,6 +62,9 @@ public sealed class NativeHistoryIsolationTests
             Assert.False(recovered.Worker.Stale);
             Assert.Equal("Idle", recovered.Worker.Activity);
             Assert.Equal("", recovered.Worker.CurrentAction);
+            var recoveredRuntime = await app.Store.Read(async db => (await db.Runtimes.FindAsync(worker.RuntimeId))!);
+            Assert.Equal("Healthy", recoveredRuntime.Health);
+            Assert.DoesNotContain("history could not be read", recoveredRuntime.Diagnostic);
             Assert.Equal(worker.NativeSessionId, recovered.Worker.NativeSessionId);
             Assert.Equal(1, recovered.Commands.Single().Attempts);
             Assert.Contains("Verified final", ControlStore.ResponseText(recovered.Commands.Single().ResultJson));
@@ -70,7 +75,19 @@ public sealed class NativeHistoryIsolationTests
         finally { await supervisor.StopAsync(CancellationToken.None); }
     }
 
-    private sealed class Handler(string directory, string otherDirectory) : HttpMessageHandler
+    [Fact]
+    public async Task OwnerCancellationDuringHistoryReadPropagates()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var handler = new Handler("/work", "/other", historyTimeout: true, ownerCancellation: cancellation);
+        using var api = new OpenCodeClient(new HttpClient(handler) { BaseAddress = new("http://native.test") });
+        var worker = new WorkerRecord { NativeSessionId = "ses_bad", Directory = "/work" };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => api.Snapshot(worker, 200, cancellation.Token));
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(1, handler.BadReads);
+    }
+
+    private sealed class Handler(string directory, string otherDirectory, bool historyTimeout = false, CancellationTokenSource? ownerCancellation = null) : HttpMessageHandler
     {
         public volatile bool Recovered;
         public int BadReads;
@@ -93,7 +110,12 @@ public sealed class NativeHistoryIsolationTests
             if (path == "/session/ses_bad/message")
             {
                 Interlocked.Increment(ref BadReads);
-                if (!Recovered) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[") });
+                if (!Recovered)
+                {
+                    ownerCancellation?.Cancel();
+                    if (historyTimeout) throw new OperationCanceledException(cancellationToken);
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[") });
+                }
                 return Reply(new object[]
                 {
                     new { info = new { id = "msg_user", sessionID = "ses_bad", role = "user", time = new { created = 1L } }, parts = Array.Empty<object>() },

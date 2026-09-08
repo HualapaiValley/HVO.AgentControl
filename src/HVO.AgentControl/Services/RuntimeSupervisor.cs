@@ -180,14 +180,15 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             });
                         }
                     }
-                    if (ControlStore.Now - lastHealth > 15000)
+                    if (ControlStore.Now - lastHealth > 15000 || !historyUnavailable && runtime.Diagnostic == HistoryUnavailableDetail)
                     {
                         _ = await transport.Api.Get("/global/health", token);
                         var models = await transport.Api.Models(ControlStore.Roots(runtime)[0], token);
                         await store.Write(async db =>
                         {
                             var record = (await db.Runtimes.FindAsync(id))!;
-                            record.Health = historyUnavailable ? "Degraded" : "Healthy"; record.LastHealthyAt = ControlStore.Now;
+                            record.Health = historyUnavailable ? "Degraded" : "Healthy";
+                            if (!historyUnavailable) record.LastHealthyAt = ControlStore.Now;
                             record.ModelsJson = Json.Write(models); record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
                             record.Diagnostic = historyUnavailable ? HistoryUnavailableDetail : models.Count == 0 ? "Provider setup required in the remote runtime." : "SSH, API and session reconciliation are healthy.";
                             return true;
