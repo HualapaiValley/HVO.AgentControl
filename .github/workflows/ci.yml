@@ -25,7 +25,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
@@ -97,6 +97,9 @@ jobs:
       - name: Setup fixture ownership regressions
         working-directory: tests/Browser
         run: node --test setup-recovery-ownership.test.cjs
+      - name: Onboarding fixture cleanup regressions
+        working-directory: tests/Browser
+        run: node --test onboarding-cleanup.test.cjs
       - name: Publish application
         run: dotnet publish src/HVO.AgentControl --configuration Release --output artifacts/published-ui
       - name: Test published desktop and mobile UI
