@@ -86,7 +86,7 @@
             </article>
           }
           <div class="transcript" role="region" aria-label="Transcript">
-            @foreach (var message in detail.Messages.OrderBy(x => x.NativeCreatedAt))
+            @foreach (var message in detail.Messages.OrderBy(x => x.NativeCreatedAt).ThenBy(x => x.NativeId))
             {
               <article class="message @message.Role" @key="message.NativeId"><div class="message-heading"><strong>@message.Role</strong><time>@Timestamp(message.NativeCreatedAt)</time></div>
                 @foreach (var part in Parts(message))
@@ -99,7 +99,7 @@
             }
             @if (detail.Messages.Count == 0) { <p class="muted">No messages yet. Send the first task below.</p> }
           </div>
-          <details><summary>Earlier retained messages</summary><button class="subtle" @onclick="OlderHistory">Load earlier page</button>@foreach (var message in olderMessages.OrderBy(x => x.NativeCreatedAt)) { <article class="message"><strong>@message.Role · @Timestamp(message.NativeCreatedAt)</strong>@foreach (var part in Parts(message)) { <pre>@part.Text</pre> }</article> }</details>
+          <details><summary>Earlier retained messages</summary><button class="subtle" @onclick="OlderHistory">Load earlier page</button>@foreach (var message in olderMessages.OrderBy(x => x.NativeCreatedAt).ThenBy(x => x.NativeId)) { <article class="message"><strong>@message.Role · @Timestamp(message.NativeCreatedAt)</strong>@foreach (var part in Parts(message)) { <pre>@part.Text</pre> }</article> }</details>
 
           @if (hostOperations) { <p class="notice">This conversation is reserved for host operations. Host action tools are not enabled yet. Manage its connection and model in <a href="/control-services">Control services</a>.</p> }
           else if (detail.Worker.Role == SessionRoles.Coordinator) { <p class="notice">This is a routing-only conversation. Send instructions and follow-ups through <a href="/coordination">Coordination</a>.</p> }

@@ -743,7 +743,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         var threshold = await db.Events.OrderByDescending(x => x.Sequence).Skip(options.Value.EventRetention).Select(x => (long?)x.Sequence).FirstOrDefaultAsync();
         if (threshold is not null)
         {
-            // Confirmed replacements are durable provenance; only the current baseline is needed per runtime.
+            // Confirmed replacements remain durable provenance; aliases follow the global journal window.
             var currentProcessObservations = db.Events.Where(x => x.Type == "NativeProcessObserved")
                 .GroupBy(x => x.RuntimeId).Select(x => x.Max(y => y.Sequence));
             await db.Events.Where(x => x.Sequence <= threshold && x.Type != "NativeProcessReplaced" &&

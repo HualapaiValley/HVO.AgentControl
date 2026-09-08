@@ -411,13 +411,19 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             .Union(db.Commands.AsNoTracking().Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)).ToListAsync(),
         await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync()));
 
-    public Task<WorkerDetail> Detail(string id, long? before = null) => Read(async db => new WorkerDetail(
-        await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404),
-        await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before))
-            .OrderByDescending(x => x.NativeCreatedAt).Take(options.Value.HistoryLimit).ToListAsync(),
-        await db.Commands.Where(x => x.WorkerId == id).OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync(),
-        await db.Requests.Where(x => x.WorkerId == id).ToListAsync(),
-        await db.Assignments.Where(x => x.WorkerId == id).ToListAsync()));
+    public Task<WorkerDetail> Detail(string id, long? before = null, string? beforeId = null)
+    {
+        if (before is null && !string.IsNullOrWhiteSpace(beforeId)) throw new ControlException("Transcript cursor ID requires its timestamp.", 400);
+        if (beforeId is not null && string.IsNullOrWhiteSpace(beforeId)) throw new ControlException("Transcript cursor ID must not be empty.", 400);
+        return Read(async db => new WorkerDetail(
+            await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404),
+            await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before ||
+                beforeId != null && x.NativeCreatedAt == before && x.NativeId.CompareTo(beforeId) < 0))
+                .OrderByDescending(x => x.NativeCreatedAt).ThenByDescending(x => x.NativeId).Take(options.Value.HistoryLimit).ToListAsync(),
+            await db.Commands.Where(x => x.WorkerId == id).OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync(),
+            await db.Requests.Where(x => x.WorkerId == id).ToListAsync(),
+            await db.Assignments.Where(x => x.WorkerId == id).ToListAsync()));
+    }
 
     public Task<bool> SetOutcome(string workerId, OutcomeInput input) => Write(async db =>
     {
