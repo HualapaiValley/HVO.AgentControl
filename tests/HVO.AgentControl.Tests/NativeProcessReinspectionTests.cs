@@ -186,6 +186,10 @@ public sealed class NativeProcessReinspectionTests
         var method = typeof(RuntimeSupervisor).GetMethod("StopStillCurrent", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var current = await (Task<bool>)method.Invoke(supervisor, [stop.Id, Json.Read<RuntimeLifecycleInput>(stop.Payload)])!;
         Assert.False(current);
+        var saved = (await app.Store.Snapshot()).Commands.Single(x => x.Id == stop.Id);
+        Assert.Equal(Delivery.Cancelled, saved.State);
+        Assert.Contains("no stop was sent", saved.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(await Claim(app, ready.Runtime.Id, "StopManagedServer"));
     }
 
     [Fact]

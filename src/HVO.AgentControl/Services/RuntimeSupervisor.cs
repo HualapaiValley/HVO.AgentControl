@@ -840,11 +840,19 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         var observed = await db.Events.AsNoTracking().Where(x => x.RuntimeId == runtime.Id && x.Type == "NativeProcessObserved")
             .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync();
         var evidence = observed is null ? null : Json.Read<NativeProcessObservationEvidence>(observed.Payload);
-        return lifecycle == expected && lifecycle.Revision == runtime.Revision && expected.OwnedProcess is not null &&
+        var current = lifecycle == expected && lifecycle.Revision == runtime.Revision && expected.OwnedProcess is not null &&
             evidence is { State: NativeProcessObservationState.Observed, Freshness: "Fresh", ProcessId: > 0 } &&
             evidence.ManagedServerId == expected.OwnedProcess.ManagedServerId && evidence.ProcessId == expected.OwnedProcess.ProcessId &&
             evidence.Incarnation == expected.OwnedProcess.Incarnation && evidence.ObservedAt == expected.OwnedProcess.ObservedAt &&
             evidence.ObservedAt >= ControlStore.Now - 60000;
+        if (current) return true;
+        // This guard runs immediately before the stop POST, so a dispatching receipt
+        // has not had an effect and can be retired when its ownership proof changes.
+        command.State = Delivery.Cancelled;
+        command.Detail = "Stop was superseded by changed native-process ownership evidence; no stop was sent.";
+        command.UpdatedAt = ControlStore.Now;
+        ControlStore.Event(db, "NativeProcessStopSuperseded", command.RuntimeId, commandId: command.Id);
+        return false;
     });
     private Task<bool> MarkDisconnected(string id, string transport, string diagnostic, string health = "Unknown") => store.Write(async db =>
     {
