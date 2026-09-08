@@ -23,6 +23,7 @@ public partial class Home
     private readonly Dictionary<string, HashSet<string>> choices = [];
     private readonly Dictionary<string, string> replyIds = [];
     private readonly List<TranscriptMessage> olderMessages = [];
+    private readonly AsyncLocal<string?> historyBeforeId = new();
 
     protected override async Task OnParametersSetAsync()
     {
@@ -113,9 +114,14 @@ public partial class Home
     {
         var current = SelectedDetail();
         var selected = selection.Capture(current.Worker.Id);
-        var before = olderMessages.Concat(current.Messages).Select(x => (long?)x.NativeCreatedAt).Min();
+        var cursor = olderMessages.Concat(current.Messages).OrderBy(x => x.NativeCreatedAt).ThenBy(x => x.NativeId, StringComparer.Ordinal).FirstOrDefault();
+        if (cursor is null)
+        {
+            notice = "No earlier messages are stored locally. Native OpenCode history remains on the runtime.";
+            return;
+        }
         WorkerDetail history;
-        try { history = await ReadDetail(current.Worker.Id, before); }
+        try { history = await ReadDetail(current.Worker.Id, cursor.NativeCreatedAt, cursor.NativeId); }
         catch when (!selection.IsCurrent(selected)) { return; }
         if (!selection.IsCurrent(selected)) return;
         olderMessages.AddRange(history.Messages.Where(x => olderMessages.All(y => y.NativeId != x.NativeId)));
@@ -127,7 +133,14 @@ public partial class Home
         if (current is null || current.Worker.Id != selectedId) throw new ControlException("The selected conversation changed. Wait for its details before taking an action.");
         return current;
     }
-    protected virtual Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => Store.Detail(workerId, before);
+    protected virtual Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => Store.Detail(workerId, before, historyBeforeId.Value);
+    protected virtual async Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
+    {
+        var prior = historyBeforeId.Value;
+        historyBeforeId.Value = beforeId;
+        try { return await ReadDetail(workerId, before); }
+        finally { historyBeforeId.Value = prior; }
+    }
     private static string Timestamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToString("MMM d HH:mm:ss 'UTC'");
     private static string Pretty(string json)
     {

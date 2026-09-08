@@ -17,9 +17,9 @@ public sealed class HomeConversationRaceTests
         var (a, b) = await SeedWorkers(app.Store);
         var started = Source(); var release = Source();
         var firstA = true;
-        var home = Home(app.Store, async (id, before) =>
+        var home = Home(app.Store, async (id, before, beforeId) =>
         {
-            var loaded = await app.Store.Detail(id, before);
+            var loaded = await app.Store.Detail(id, before, beforeId);
             if (id == a.Id && before is null && firstA)
             {
                 firstA = false; started.SetResult(); await release.Task;
@@ -27,7 +27,7 @@ public sealed class HomeConversationRaceTests
             return loaded;
         });
 
-        var staleA = home.Navigate(a.Id); await started.Task;
+        var staleA = home.Navigate(a.Id); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await home.Navigate(b.Id); release.SetResult(); await staleA;
 
         Assert.Equal(b.Id, home.Visible!.Worker.Id);
@@ -49,9 +49,9 @@ public sealed class HomeConversationRaceTests
         var (a, b) = await SeedWorkers(app.Store);
         var started = Source(); var release = Source();
         var firstA = true;
-        var home = Home(app.Store, async (id, before) =>
+        var home = Home(app.Store, async (id, before, beforeId) =>
         {
-            var loaded = await app.Store.Detail(id, before);
+            var loaded = await app.Store.Detail(id, before, beforeId);
             if (id == a.Id && before is null && firstA)
             {
                 firstA = false; started.SetResult(); await release.Task;
@@ -59,7 +59,7 @@ public sealed class HomeConversationRaceTests
             return loaded;
         });
 
-        var staleA = home.Navigate(a.Id); await started.Task;
+        var staleA = home.Navigate(a.Id); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await app.Store.Write(async db => { (await db.Workers.FindAsync(a.Id))!.Name = "Final A"; return true; });
         await home.Navigate(b.Id); await home.Navigate(a.Id);
         release.SetResult(); await staleA;
@@ -75,17 +75,17 @@ public sealed class HomeConversationRaceTests
         var (a, b) = await SeedWorkers(app.Store);
         var started = Source(); var release = Source();
         var firstA = true;
-        var home = Home(app.Store, async (id, before) =>
+        var home = Home(app.Store, async (id, before, beforeId) =>
         {
             if (id == a.Id && before is null && firstA)
             {
                 firstA = false; started.SetResult(); await release.Task;
                 throw new InvalidOperationException("delayed stale detail error");
             }
-            return await app.Store.Detail(id, before);
+            return await app.Store.Detail(id, before, beforeId);
         });
 
-        var staleA = home.Navigate(a.Id); await started.Task;
+        var staleA = home.Navigate(a.Id); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await home.Navigate(b.Id); await home.Navigate(a.Id);
         release.SetResult(); await staleA;
 
@@ -99,18 +99,52 @@ public sealed class HomeConversationRaceTests
         await using var app = new TestApp();
         var (a, _) = await SeedWorkers(app.Store, messages: 201);
         var started = Source(); var release = Source();
-        var home = Home(app.Store, async (id, before) =>
+        var home = Home(app.Store, async (id, before, beforeId) =>
         {
-            var loaded = await app.Store.Detail(id, before);
+            var loaded = await app.Store.Detail(id, before, beforeId);
             if (before is not null) { started.SetResult(); await release.Task; }
             return loaded;
         });
         await home.Navigate(a.Id);
 
-        var history = home.LoadOlder(); await started.Task;
+        var history = home.LoadOlder(); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await home.BackgroundRefresh(); release.SetResult(); await history;
 
         Assert.Contains(home.Older, message => message.NativeId == "message-01");
+    }
+
+    [Fact]
+    public async Task EmptyHistoryShowsNoticeWithoutAConnectionError()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await SeedWorkers(app.Store);
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+        await home.Navigate(worker.Id);
+        await home.LoadOlder();
+        Assert.Null(home.VisibleError);
+        Assert.Equal("No earlier messages are stored locally. Native OpenCode history remains on the runtime.", home.Notice);
+    }
+
+    [Fact]
+    public async Task MixedCaseTimestampTiesUseOrdinalCursorOrdering()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await SeedWorkers(app.Store);
+        await app.Store.Write(db =>
+        {
+            foreach (var id in new[] { "a", "Z", "Y", "X" }) db.Messages.Add(new TranscriptMessage
+            {
+                WorkerId = worker.Id,
+                NativeId = id,
+                Role = "user",
+                NativeCreatedAt = 42,
+                Json = "{\"info\":{},\"parts\":[{\"type\":\"text\",\"text\":\"message\"}]}"
+            });
+            return Task.FromResult(true);
+        });
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+        await home.Navigate(worker.Id); await home.LoadOlder();
+        Assert.Equal("X", home.LastBeforeId);
     }
 
     [Fact]
@@ -119,15 +153,15 @@ public sealed class HomeConversationRaceTests
         await using var app = new TestApp();
         var (a, b) = await SeedWorkers(app.Store, messages: 201);
         var started = Source(); var release = Source();
-        var home = Home(app.Store, async (id, before) =>
+        var home = Home(app.Store, async (id, before, beforeId) =>
         {
-            var loaded = await app.Store.Detail(id, before);
+            var loaded = await app.Store.Detail(id, before, beforeId);
             if (id == a.Id && before is not null) { started.SetResult(); await release.Task; }
             return loaded;
         });
         await home.Navigate(a.Id);
 
-        var history = home.LoadOlder(); await started.Task;
+        var history = home.LoadOlder(); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await home.Navigate(b.Id); await home.Navigate(a.Id);
         release.SetResult(); await history;
 
@@ -141,19 +175,19 @@ public sealed class HomeConversationRaceTests
         await using var app = new TestApp();
         var (a, _) = await SeedWorkers(app.Store);
         var started = Source(); var release = Source();
-        var home = Home(app.Store, async (id, before) =>
+        var home = Home(app.Store, async (id, before, beforeId) =>
         {
-            var loaded = await app.Store.Detail(id, before);
+            var loaded = await app.Store.Detail(id, before, beforeId);
             started.SetResult(); await release.Task; return loaded;
         });
 
-        var pending = home.Navigate(a.Id); await started.Task;
+        var pending = home.Navigate(a.Id); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await home.DisposeAsync(); release.SetResult(); await pending;
 
         Assert.Null(home.Visible);
     }
 
-    private static TestHome Home(ControlStore store, Func<string, long?, Task<WorkerDetail>> read) => new(store, read);
+    private static TestHome Home(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read) => new(store, read);
     private static TaskCompletionSource Source() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private static async Task<(WorkerRecord A, WorkerRecord B)> SeedWorkers(ControlStore store, int messages = 0)
@@ -179,21 +213,27 @@ public sealed class HomeConversationRaceTests
 
     private sealed class TestHome : Home
     {
-        private readonly Func<string, long?, Task<WorkerDetail>> read;
-
-        public TestHome(ControlStore store, Func<string, long?, Task<WorkerDetail>> read)
+        private readonly Func<string, long?, string?, Task<WorkerDetail>> read;
+        public TestHome(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read)
         {
             Store = store; Authentication = new Authenticated(); this.read = read;
         }
 
         public WorkerDetail? Visible => Field<WorkerDetail?>("detail");
         public string? VisibleError => error;
+        public string? Notice => Field<string?>("notice");
+        public string? LastBeforeId { get; private set; }
         public IReadOnlyList<TranscriptMessage> Older => Field<List<TranscriptMessage>>("olderMessages");
         public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
-        protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before);
+        protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
+        protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
+        {
+            LastBeforeId = beforeId;
+            return read(workerId, before, beforeId);
+        }
 
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;
         private void SetField(string name, object value) => typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, value);
