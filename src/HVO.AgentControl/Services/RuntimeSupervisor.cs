@@ -719,13 +719,10 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         var threshold = await db.Events.OrderByDescending(x => x.Sequence).Skip(options.Value.EventRetention).Select(x => (long?)x.Sequence).FirstOrDefaultAsync();
         if (threshold is not null)
         {
-            // Confirmed replacements remain durable provenance; keep only a bounded recent alias receipt set.
+            // Confirmed replacements remain durable provenance; aliases follow the global journal window.
             var currentProcessObservations = db.Events.Where(x => x.Type == "NativeProcessObserved")
                 .GroupBy(x => x.RuntimeId).Select(x => x.Max(y => y.Sequence));
-            var recentCapabilityAliases = db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced")
-                .OrderByDescending(x => x.Sequence).Take(options.Value.EventRetention).Select(x => x.Sequence);
             await db.Events.Where(x => x.Sequence <= threshold && x.Type != "NativeProcessReplaced" &&
-                (x.Type != "CapabilityInquiryCoalesced" || !recentCapabilityAliases.Contains(x.Sequence)) &&
                 !currentProcessObservations.Contains(x.Sequence)).ExecuteDeleteAsync();
         }
         return true;
