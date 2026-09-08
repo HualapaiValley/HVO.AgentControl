@@ -2,6 +2,8 @@
 
 Owner-approved design defaults, 2026-09-07. These define the configuration contract for #42/#43/#98; they are not a claim that automatic provisioning or multiple project coordinators are already implemented. Use [project workspaces](PROJECT_WORKSPACES.md), [Dev Container provisioning](DEVCONTAINER_PROVISIONING.md) and [coordination supervision](COORDINATION_SUPERVISION.md) for the lifecycle and control boundaries.
 
+The [2026-09-08 execution environment milestone](EXECUTION_ENVIRONMENT_PLAN.md) refines these defaults: separate host, runtime/environment, worker and task-session identities; one worker and one active task per managed devcontainer; versioned REST for all capabilities; creation/recovery tests before live fleet migration. Its contract takes precedence over earlier examples.
+
 ## Identity and grouping
 
 | Record | Initial value or rule | Meaning |
@@ -10,7 +12,8 @@ Owner-approved design defaults, 2026-09-07. These define the configuration contr
 | Project | Display name `HVO.AgentControl`; provider `github`; repository `RoySalisbury/HVO.AgentControl`; immutable UUID | Repository-qualified task, policy and evidence namespace. Register the owner-selected second repository separately. |
 | Project adviser | `HVO.AgentControl planner`, role `Coordinator` | Optional dedicated OpenCode planning conversation. It does not occupy a development slot or implement tasks. |
 | Worker | `HVO worker <short-id>`, immutable UUID | Reusable execution slot, eligible for any task its runtime can support. Do not encode permanent reviewer/developer roles in its name. |
-| Runtime | Immutable UUID plus observed endpoint identity | SSH execution environment and native server. Multiple slots on one runtime require shared capacity accounting. |
+| Host | Immutable UUID plus verified machine/provisioner identity | Shared physical capacity and optional Docker access; not a repository or worker slot. |
+| Runtime | Immutable UUID, host binding and observed environment/endpoint identity | Existing-machine or managed-devcontainer environment. Initial transport is SSH; one slot per devcontainer by default. Multiple slots require explicit policy and shared capacity accounting. |
 | Task | UUID plus project ID and repository-qualified issue/PR reference | One durable assignment through implementation, review and handoff. `#123` alone cannot identify cross-project work. |
 | Task session | UUID, task ID, worker ID, native session ID and canonical directory | Fresh for a new task/project; preserved when recovering the same task. Keep previous bindings and history. |
 | Provisioning request | UUID, request payload digest and intended worker/runtime IDs | Idempotent lifecycle identity, allocated before remote effects. Identical retries return the existing request. |
@@ -63,7 +66,7 @@ Persist requested, resolved and observed values separately so the UI can explain
 - Workgroup/project/task/request IDs, selected host, reservations and policy revision.
 - Repository remote and source SHA, task branch/worktree, host workspace and native/container directory.
 - Dev Container config source/path/digest, CLI version, Features and lifecycle outcomes, image/container IDs, user/UID/GID and architecture.
-- Project SDK from `global.json`, git/gh, SSH/tmux/OpenCode and selected optional tools. Docker capability requires a working declared integration, not merely a Docker executable.
+- Project SDK from `global.json`, git/gh, OpenCode and transport/supervisor-specific prerequisites (SSH/tmux for the initial adapter), plus selected optional tools. Docker capability requires a working declared integration, not merely a Docker executable.
 - Scoped GitHub grant and provider readiness references; keep secrets out of prompts, build arguments, images, receipts and source files.
 - Native session identity, environment verification time and actual task completion evidence.
 

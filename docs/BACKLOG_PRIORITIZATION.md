@@ -1,6 +1,6 @@
 # Backlog triage and assignment order
 
-Owner direction, 2026-09-07; implementation tracker #78. This supersedes older “next work” lists in checkpoint documents. Repository: `RoySalisbury/HVO.AgentControl`.
+Owner direction, updated 2026-09-08; implementation tracker #78. This supersedes older “next work” lists in checkpoint documents. Repository: `RoySalisbury/HVO.AgentControl`.
 
 ## Current operating rule
 
@@ -8,45 +8,35 @@ Finish or review active work before starting another overlapping implementation.
 
 Root's initial audit compared every open issue body with merged PRs, current PRs, implementation status, provider/telemetry contracts and live coordinator receipts. Most old open issues are **partially implemented**, not forgotten complete work. #53 is the design parent of #75, not a duplicate. #1 is a beta epic. No issue was closed solely because a similar PR exists.
 
-## Initial audit and dependency order
+## Current owner priority and dependency order
 
-`docs/backlog-plan.json` is the machine-readable plan. “Depends on” describes the remaining delivery scope; an independently useful preparatory slice may be split into its own explicitly bounded issue instead of pretending the whole blocked feature is ready.
+The [execution environment milestone](EXECUTION_ENVIRONMENT_PLAN.md) supersedes earlier chat/provider-first ordering. Finish current PR104 and already commissioned audit108 work without duplicate assignments or model changes. A concrete production-breaking defect may interrupt the sequence; record the reason. New unrelated UI, provider catalog and transport expansion follows this milestone.
 
-| Issue | Priority / disposition | Delivered evidence and next scope | Hard prerequisites |
-|---|---|---|---|
-| #75 / #53 | P0 active / design parent | Chat UI/performance owner priority; Astra xhigh owns #75 | none |
-| #78 | P0 active | Root owns executable audit and this plan; durable periodic scheduler remains | none |
-| #34 | P1 correction/review | Usage parsing PR56; PR72 ledger needs backfill correction and fresh review | none for current PR |
-| #69 | P1 remaining scope blocked | Task models PR57 and reasoning PR76 merged; durable routing/risk policy remains | #5 |
-| #65 | P2 remaining scope blocked | Child visibility PR60 and vanished replies PR77 merged; primed tools and actual task directories remain | #42 |
-| #35 | P2 remaining scope needs triage | Snapshot calculations PR64, history PR73 and periodic Linux sampler PR79 merged; validate deployment, then scope macOS/v1 | none |
-| #5 | P1 ready, first foundation | Missing work-item/phase ownership despite existing command IDs; add atomic claim/restart contract | none |
-| #4 | P1 ready | Existing stable sessions/commands are not the full enrollment/authority-generation contract | none |
-| #7 | P1 ready | PR21/38/41 bound summaries; durable per-consumer cursors/exact retrieval still missing | none |
-| #6 | P1 blocked | Shared endpoint reservations and safe release need task ownership | #5 |
-| #8 | P1 blocked | Prose review receipts exist; durable exact-head independent verdicts still missing | #5 |
-| #42 | P1 blocked | Workers remain directory-bound; fresh task/project sessions are missing | #5, #6 |
-| #44 | P1 blocked remaining scope | App delivery/renewal PR46/59 and CI permissions PR74 work; durable publication intents do not | #5, #8 |
-| #70 | P1 blocked remaining scope | CI permissions PR74 merged; merge intent/gates/serialization/reconciliation remain | #8, #44 |
-| #43 | P2 blocked full lifecycle | Official CLI templates PR45/48 verified; automatic create/drain/retire and cache policy remain | #5, #6, #42 |
-| #66 | P2 blocked archive foundation | Operational retention is bounded, not a training archive | #5; usage/telemetry enrichment is a soft dependency |
-| #3 | P2 ready follow-up | PR62/71 schedules/outbox shipped; material milestones, active-set baselines and retention remain | none |
-| #54 | P2 ready follow-up | ChatGPT website sign-in PR55 shipped; later owner comment adds other methods, durable readiness and managed credentials | none |
-| #10 | P2 needs acceptance audit | PR39/51/71 current status shipped; coordinate remaining UI scope with #75 | do not duplicate #75 |
-| #13 | P2 needs evidence audit | PR25/36/63/71 and native exercises cover many scenarios; map all acceptance to evidence before closure | none |
-| #24 | P2 needs scope audit | PR49/52 bounded recovery shipped; native schema/free-model proof remains, not parser recovery again | verified provider availability for native proof |
-| #9 | P3 blocked expansion | Additional harness support is distinct from selecting models inside OpenCode | #4 |
-| #67 | P3 blocked expansion | External issue-comment intake must wait for task/capacity/publication lifecycle | #42, #43, #44 |
-| #1 | epic | Maintain its checklist as child acceptance is actually satisfied | children |
+`docs/backlog-plan.json` is the machine-readable plan. Dependencies describe the explicit remaining slice, not every acceptance item in partially shipped parent issues. #4/#5/#7 already have enrollment, ownership and evidence foundations; do not assign their original implementation again. Inspect live source and split a bounded prerequisite when broad issue closure would incorrectly block ready work.
 
-This order promotes #5 because it directly unlocks several older/newer requirements. It does not block safe PR review behind future prerequisites for the issue's broader scope. PR merge, deployment, and full issue acceptance are separately recorded states.
+| Order / scope | Priority | Next delivery and prerequisite |
+| --- | --- | --- |
+| #121 configuration foundation | P0 | Separate host, runtime/environment, worker, project, workspace and task-session identities; additive persistence and REST contracts with legacy compatibility. Root prepares the contract, then implementation follows independent review. |
+| #6 capacity; remaining #4/#5 integration | P0 / P1 | Reuse shipped authority/ownership, reserve shared host and environment resources, account for builds and conditional multiworker support. New environment integration follows #121. |
+| #42 task workspaces/sessions | P0 | Fresh project-qualified sessions, owned preparation and separate writable workspaces; follows #121/#6. |
+| #43 provisioning and lifecycle | P0 | Existing-machine/devcontainer selection, official CLI, durable REST/UI operation cards and real creation/restart/drain/retirement tests; follows #121/#6/#42. |
+| #98 multi-project acceptance | P0 epic | Run two registered projects against shared capacities and compatible isolated environments; follows the above, not a standalone giant assignment. |
+| #43 fleet transition | Acceptance gate | Canary through the new flow, prove recovery/retained work, drain and migrate legacy workers one at a time. No bulk live migration from this planning change. |
+| #35 / #120 | P1 supporting reliability | Effective memory/pressure observations and interrupted-native recovery support admission/lifecycle. Confirmed incidents can be repaired independently in a bounded slice. |
+| #7 / #8 / #44 / #70 | P1 remaining integration | Existing evidence and GitHub access support bounded planning, exact reviews and durable publication/merge intents; do not rebuild shipped primitives. |
+| #75 / #53, #34, #54 / #84, #69, #78 | Retained backlog | Preserve working UI/provider/usage/routing/triage behavior; re-audit remaining scope and implement when milestone dependencies or a concrete incident require it. |
+| #108 | Existing audit | Preserve completed A/B artifacts and current C/D work. Synthesize actual coverage and prioritize verified defects without duplicate implementation. |
+
+Default managed development uses one worker/one active task per devcontainer and many capacity-accounted containers per Docker host. Existing physical/VM runtimes can have multiple isolated slots. New tasks use fresh sessions/workspaces; compatible environments may be reused sequentially. Checkpoints add optional recovery and do not replace isolation or block provisioning. Every new capability includes versioned REST, authorization, idempotency, bounded progress and API/integration tests.
+
+The report is a read-only, point-in-time readiness assessment. Active ownership, changed issue/PR evidence and deployment status must be checked immediately before assignment. Do not treat issue closure as proof of deployment or a P0 label as permission to skip prerequisites.
 
 ## Executable read-only audit
 
 Run from an authenticated checkout:
 
 ```bash
-python3 scripts/prioritize-backlog.py --active 34 75 78 > /tmp/backlog-report.json
+python3 scripts/prioritize-backlog.py --active 82 108 121 > /tmp/backlog-report.json
 python3 tests/test_backlog_priority.py
 ```
 
