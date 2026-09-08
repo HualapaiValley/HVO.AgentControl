@@ -206,14 +206,43 @@ internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forw
             return Rejected(input, "outside_allowed_root", "The canonical checkout directory is outside the runtime allowed roots.", directory);
 
         var code = (await SshRuntimeTransportFactory.Run(ssh, $$"""
-            export GIT_OPTIONAL_LOCKS=0
             cd {{BootstrapScript.Quote(directory)}} || exit 1
-            test "$(git rev-parse --show-toplevel 2>/dev/null)" = {{BootstrapScript.Quote(directory)}} || { printf 'not_repository_root'; exit 0; }
-            test "$(git remote get-url origin 2>/dev/null)" = {{BootstrapScript.Quote(input.Repository)}} || { printf 'origin_mismatch'; exit 0; }
-            test "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" = {{BootstrapScript.Quote(input.Branch)}} || { printf 'branch_mismatch'; exit 0; }
-            test "$(git rev-parse HEAD 2>/dev/null)" = {{BootstrapScript.Quote(input.Head)}} || { printf 'head_mismatch'; exit 0; }
-            status=$(git status --porcelain 2>/dev/null) || { printf 'status_unavailable'; exit 0; }
+            # Do not let repository attributes or fsmonitor execute configuration-controlled programs.
+            git_read() {
+              GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+                git -c core.fsmonitor=false -c core.attributesfile=/dev/null "$@"
+            }
+            snapshot() {
+              top=$(git_read rev-parse --show-toplevel 2>/dev/null) || return 1
+              origin=$(git_read remote get-url origin 2>/dev/null) || return 1
+              branch=$(git_read symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+              head=$(git_read rev-parse HEAD 2>/dev/null) || return 1
+            }
+            snapshot || { printf 'snapshot_unavailable'; exit 0; }
+            test "$top" = {{BootstrapScript.Quote(directory)}} || { printf 'not_repository_root'; exit 0; }
+            test "$origin" = {{BootstrapScript.Quote(input.Repository)}} || { printf 'origin_mismatch'; exit 0; }
+            test "$branch" = {{BootstrapScript.Quote(input.Branch)}} || { printf 'branch_mismatch'; exit 0; }
+            test "$head" = {{BootstrapScript.Quote(input.Head)}} || { printf 'head_mismatch'; exit 0; }
+            pre_top=$top; pre_origin=$origin; pre_branch=$branch; pre_head=$head
+            # Status may run configured clean/process filters when it refreshes the index. Reject the
+            # checkout rather than executing repository-selected programs during a verification read.
+            filters=$(git_read config --get-regexp '^filter\..*\.(clean|process)$' 2>/dev/null)
+            filter_status=$?
+            test $filter_status -eq 0 && { printf 'filter_configured'; exit 0; }
+            test $filter_status -eq 1 || { printf 'filter_evidence_unavailable'; exit 0; }
+            # Lowercase entries are assume-unchanged; S is skip-worktree. Either hides content from status.
+            index=$(git_read ls-files -v 2>/dev/null)
+            index_status=$?
+            test $index_status -eq 0 || { printf 'index_evidence_unavailable'; exit 0; }
+            printf '%s\n' "$index" | grep -Eq '^[a-zS] ' && { printf 'index_flags'; exit 0; }
+            status=$(git_read status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null) || { printf 'status_unavailable'; exit 0; }
             test -z "$status" || { printf 'dirty_worktree'; exit 0; }
+            snapshot || { printf 'snapshot_unavailable'; exit 0; }
+            test "$top" = "$pre_top" && test "$origin" = "$pre_origin" && test "$branch" = "$pre_branch" && test "$head" = "$pre_head" || { printf 'snapshot_changed'; exit 0; }
+            test "$top" = {{BootstrapScript.Quote(directory)}} || { printf 'not_repository_root'; exit 0; }
+            test "$origin" = {{BootstrapScript.Quote(input.Repository)}} || { printf 'origin_mismatch'; exit 0; }
+            test "$branch" = {{BootstrapScript.Quote(input.Branch)}} || { printf 'branch_mismatch'; exit 0; }
+            test "$head" = {{BootstrapScript.Quote(input.Head)}} || { printf 'head_mismatch'; exit 0; }
             printf 'verified'
             """, cancellationToken)).TrimEnd('\r', '\n');
         return code switch
@@ -224,8 +253,11 @@ internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forw
             "origin_mismatch" => Rejected(input, code, "The checkout origin does not match the expected repository.", directory),
             "branch_mismatch" => Rejected(input, code, "The checkout branch does not match the expected branch.", directory),
             "head_mismatch" => Rejected(input, code, "The checkout HEAD does not match the expected commit.", directory),
+            "index_flags" => Rejected(input, code, "The checkout index has assume-unchanged or skip-worktree entries that can hide changes.", directory),
+            "filter_configured" => Rejected(input, code, "The checkout configures clean or process filters, so clean state cannot be read without executing repository-controlled programs.", directory),
+            "snapshot_changed" => Rejected(input, code, "Checkout identity changed while clean state was being verified.", directory),
             "dirty_worktree" => Rejected(input, code, "The checkout has tracked, staged, or untracked changes.", directory),
-            "status_unavailable" => Rejected(input, code, "The checkout clean state could not be verified.", directory),
+            "status_unavailable" or "snapshot_unavailable" or "index_evidence_unavailable" or "filter_evidence_unavailable" => Rejected(input, code, "The checkout identity or clean state could not be verified.", directory),
             _ => Rejected(input, "invalid_probe_result", "The checkout verification probe returned an invalid bounded result.", directory)
         };
     }

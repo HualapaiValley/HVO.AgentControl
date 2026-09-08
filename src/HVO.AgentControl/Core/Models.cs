@@ -23,6 +23,11 @@ public sealed class ControlOptions
     public int HistoryLimit { get; set; } = 200;
     public int PollMilliseconds { get; set; } = 750;
     public int CoordinationIdleReassessmentMinutes { get; set; } = 5;
+    public int CoordinatorQueueWaitBudgetMinutes { get; set; } = 15;
+    public int CoordinatorInferenceBudgetMinutes { get; set; } = 120;
+    public int CoordinatorNativeRetryBudgetMinutes { get; set; } = 30;
+    public int CoordinatorCompactionBudgetMinutes { get; set; } = 120;
+    public int CoordinatorDecisionTotalBudgetMinutes { get; set; } = 240;
     public int MaxPromptCharacters { get; set; } = 64000;
     public int MaxCommandRecords { get; set; } = 10000;
     public int MaxRuntimes { get; set; } = 32;
@@ -129,7 +134,7 @@ public sealed class CommandRecord
     public string Kind { get; set; } = "";
     public string Payload { get; set; } = "{}";
     public string State { get; set; } = Delivery.Queued;
-    public string ExecutionPayload { get; set; } = "";
+    [JsonIgnore] public string ExecutionPayload { get; set; } = "";
     public string ProviderPoolId { get; set; } = "";
     public string ProgressText { get; set; } = "";
     public long? LastProgressAt { get; set; }
@@ -154,6 +159,8 @@ public sealed class AssignmentRecord
     public string TemplateVersion { get; set; } = "manual-v1";
     public string Outcome { get; set; } = "Assigned";
     public string Evidence { get; set; } = "";
+    public string GitHubAuthorityJson { get; set; } = "{}";
+    public string GitHubAuthorProvenanceJson { get; set; } = "{}";
 }
 
 public sealed class WorkspaceClaim
@@ -341,7 +348,8 @@ public sealed record VerifiedRuntimeInput(RuntimeRecord Profile, string Verifica
 public sealed record CreateWorkerInput(string Id, string RuntimeId, string Name, string Project, string Directory,
     string ProviderId, string ModelId, string? Repository = null, string? Branch = null, string? BaseRef = null, string Role = SessionRoles.Worker, bool DiscoverCapabilities = false);
 public sealed record PromptInput(string Id, string Text, long ExpectedRevision, string? ProviderId = null,
-    string? ModelId = null, bool StatusInquiry = false, string? Agent = null, string? Variant = null, bool IncludeGuidance = false, int? ProgressMinutes = null);
+    string? ModelId = null, bool StatusInquiry = false, string? Agent = null, string? Variant = null, bool IncludeGuidance = false,
+    int? ProgressMinutes = null, GitHubMergeTaskScope? GitHubMergeScope = null);
 public sealed record ReplyInput(string Id, string RequestId, string? Permission, string[][]? Answers, bool Reject = false);
 public sealed record QueueEdit(string Action);
 public sealed record InspectWorkspaceInput(string Id, string RuntimeId, string Directory);
@@ -354,7 +362,8 @@ public sealed record VerifyPreparedCheckoutInput(string Id, string RuntimeId, lo
 public sealed record PreparedCheckoutVerification(string Status, string Code, string Detail,
     string RequestedDirectory, string? CanonicalDirectory, string? Repository, string? Branch,
     string? Head, bool? Clean, long ObservedAt);
-public sealed record OutcomeInput(string CommandId, long ExpectedRevision, string Outcome, string Evidence);
+public sealed record OutcomeInput(string CommandId, long ExpectedRevision, string Outcome, string Evidence,
+    GitHubMergeTaskResult? GitHubMergeResult = null);
 public sealed record ControlSnapshot(long Sequence, List<RuntimeRecord> Runtimes, List<WorkerRecord> Workers,
     List<CommandRecord> Commands, List<PendingRequest> Requests);
 public sealed record WorkerDetail(WorkerRecord Worker, List<TranscriptMessage> Messages, List<CommandRecord> Commands,
@@ -392,7 +401,9 @@ public sealed record CoordinationControlInput(long ExpectedRevision, string Acti
 public sealed record CoordinationPromptInput(string Id, long ExpectedRevision, string Text);
 public sealed record CoordinationRenewalInput(string Id, long ExpectedRevision, int AdditionalRounds, string Instruction, bool ContinuousSupervision = false);
 public sealed record CoordinatorDecision(string Summary, CoordinatorAction[] Actions, bool Complete = false);
-public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null, string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null, string? ModelId = null, string? Variant = null);
+public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null,
+    string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null,
+    string? ModelId = null, string? Variant = null, GitHubMergeTaskScope? GitHubMergeScope = null);
 public sealed record CoordinatorResult(string Id, string WorkerId, string State, string Detail, string ProgressText,
     long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted, string Origin = "");
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);
@@ -400,6 +411,10 @@ public sealed record DecisionReceipt(string Summary, int Round, string DecisionC
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
 public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
+public sealed record CoordinatorDecisionCheckpoint(string CommandId, string CoordinatorWorkerId, long CoordinatorSettingsRevision,
+    string RuntimeId, int RuntimeGeneration, string NativeSessionId, string Directory, string? ControlSessionId,
+    int? ControlSessionGeneration, string? ControlProcessIncarnation, string? NativeCallerId, string Phase,
+    long StartedAt, long PhaseStartedAt, long LastEvidenceAt, string? RecoveryIntentId = null, string? RecoveryHold = null);
 public sealed record CoordinatorNativeFailure(string CommandId, string? CallerId, string? SessionId, string? AssistantId,
     string Category, int? Status, long? RetryAt, string ProviderId, string ModelId, string Agent, string Variant,
     string ProviderPoolId, long? ProviderPoolRevision, bool HasText, bool HasTools, bool Held = true,
@@ -412,7 +427,7 @@ public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Worke
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
     CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null,
     IdlePlanningReview? IdleReview = null, CoordinatorGitHubAccess[]? GitHubAccess = null, string? PlanningObservationKey = null,
-    CoordinatorNativeFailure? NativeFailure = null);
+    CoordinatorNativeFailure? NativeFailure = null, CoordinatorDecisionCheckpoint? DecisionCheckpoint = null);
 
 public sealed class OperatorUpdateSchedule
 {

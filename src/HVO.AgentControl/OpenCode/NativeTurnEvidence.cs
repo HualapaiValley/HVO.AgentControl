@@ -48,6 +48,32 @@ public static class NativeTurnEvidence
         return result.ToArray();
     }
 
+    public static bool IsAutomaticCompactionInProgress(JsonElement[] messages, string? callerId, string expectedSessionId)
+    {
+        if (string.IsNullOrEmpty(callerId) || string.IsNullOrEmpty(expectedSessionId)) return false;
+        var ordered = messages.OrderBy(x => x.GetProperty("info").GetProperty("time").GetProperty("created").GetInt64())
+            .ThenBy(x => x.GetProperty("info").GetProperty("id").GetString(), StringComparer.Ordinal).ToArray();
+        var start = Array.FindIndex(ordered, x => x.GetProperty("info").GetProperty("id").GetString() == callerId);
+        if (start < 0) return false;
+        var caller = ordered[start].GetProperty("info");
+        if (caller.GetProperty("role").GetString() != "user" || BoundedText(caller, "sessionID") != expectedSessionId) return false;
+        var compacting = false;
+        foreach (var message in ordered.Skip(start + 1))
+        {
+            var info = message.GetProperty("info");
+            if (BoundedText(info, "sessionID") != expectedSessionId) continue;
+            if (info.GetProperty("role").GetString() != "user") continue;
+            var parts = message.GetProperty("parts").EnumerateArray().ToArray();
+            if (parts.Length > 0 && parts.All(x => x.GetProperty("type").GetString() == "compaction" && IsTrue(x, "auto")))
+            { compacting = true; continue; }
+            if (compacting && parts.Length > 0 && parts.All(x => x.GetProperty("type").GetString() == "text" &&
+                IsTrue(x, "synthetic") && x.TryGetProperty("metadata", out var metadata) && IsTrue(metadata, "compaction_continue")))
+            { compacting = false; continue; }
+            break;
+        }
+        return compacting;
+    }
+
     public static AutomaticCompactionFailure? CompletedAutomaticCompactionFailure(JsonElement[] messages, string? callerId,
         string expectedSessionId)
     {
