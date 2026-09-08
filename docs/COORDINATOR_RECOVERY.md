@@ -4,6 +4,8 @@ Malformed coordinator output must not terminate the coordinator or require a new
 
 A definitively failed coordinator turn or a rejected action batch also enters delayed recovery. Every batch is still validated before mutation. Re-observation can resolve a stale recipient revision or busy worker; invalid permissions or unlisted targets never become authorized because they are retried. Recovery reasons are included in the next coordinator context. No arbitrary JSON fragment is extracted from surrounding prose.
 
+For `send_prompt`, `includeGuidance:false` requires `progressMinutes` to be omitted or null. This also applies when guidance is disabled by an inherited run default. With guidance enabled, an explicit interval must be an integer from 1–1440; an omitted/null interval inherits the run interval. For example, use `{"includeGuidance":false}` for a simple question, or `{"includeGuidance":true,"progressMinutes":10}` for a guided task with periodic updates. Conflicting fields reject the entire batch. Recovery identifies the action index, field and usable correction in its bounded reason, then requests a new decision with fresh worker revisions. It does not silently remove a progress request, enable guidance, or dispatch the valid subset of a rejected batch.
+
 ## Durable fallback
 
 The existing persisted coordination input contains optional `repair` and `recovery` objects. They retain the rejected command ID, correction count, recovery attempt, reason and retry deadline. Old inputs without these fields remain compatible. Journal events link rejected decisions, replacement commands, scheduled recovery and elapsed deadlines. A valid applied decision clears consecutive recovery state.
