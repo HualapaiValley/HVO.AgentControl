@@ -56,7 +56,7 @@ public static class TelemetryParser
         var canonical = ParseNonNegativeLong(facts, "memoryLimitBytes");
         if (canonical is not null) return canonical;
         if (platform != PlatformLinux) return null;
-        if (facts.ContainsKey("memoryLimitV2"))
+        if (facts.TryGetValue("memoryLimitV2", out var rawV2) && !Unavailable(rawV2))
             return ParseNonNegativeLong(facts, "memoryLimitV2") is { } v2 && v2 < CgroupV1UnlimitedMemoryThreshold ? v2 : null;
         var v1 = ParseNonNegativeLong(facts, "memoryLimitV1");
         return v1 is { } limit && limit < CgroupV1UnlimitedMemoryThreshold ? limit : null;
@@ -68,7 +68,7 @@ public static class TelemetryParser
         if (canonical is not null) return canonical > 0 ? canonical : null;
         if (platform != PlatformLinux) return null;
 
-        if (facts.TryGetValue("cpuQuotaV2", out var cpuMax) && cpuMax is not null)
+        if (facts.TryGetValue("cpuQuotaV2", out var cpuMax) && !Unavailable(cpuMax))
         {
             var tokens = cpuMax.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (tokens.Length == 2 && tokens[0] != "max")
@@ -89,6 +89,9 @@ public static class TelemetryParser
         if (quotaUs is { } q && periodUs is { } p && q > 0 && p > 0) return q / (double)p;
         return null;
     }
+
+    private static bool Unavailable(string? value) => string.IsNullOrWhiteSpace(value) ||
+        string.Equals(value.Trim(), "unknown", StringComparison.OrdinalIgnoreCase);
 
     private static string ParsePlatform(IReadOnlyDictionary<string, string> facts)
     {

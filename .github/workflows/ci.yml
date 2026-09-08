@@ -97,6 +97,9 @@ jobs:
       - name: Setup fixture ownership regressions
         working-directory: tests/Browser
         run: node --test setup-recovery-ownership.test.cjs
+      - name: Terminal target selection regression
+        working-directory: tests/Browser
+        run: node terminal-target-selection.test.cjs
       - name: Onboarding fixture cleanup regressions
         working-directory: tests/Browser
         run: node --test onboarding-cleanup.test.cjs
