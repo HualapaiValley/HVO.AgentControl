@@ -231,6 +231,28 @@ public sealed class GitHubMergeTests
     }
 
     [Fact]
+    public async Task RepositoryCaseAliasCannotEvadeContributorExclusion()
+    {
+        await using var fixture = await Fixture.Create(seedIntent: false);
+        await fixture.App.Store.Write(async db =>
+        {
+            var assignment = await db.Assignments.SingleAsync(x => x.Id == "review-command");
+            var authority = Fixture.Authority("review-command", "reviewer", GitHubMergeTaskKinds.Author);
+            assignment.GitHubAuthorProvenanceJson = Json.Write(authority with
+            {
+                Scope = authority.Scope with { Repository = Fixture.Repository.ToLowerInvariant() }
+            });
+            return true;
+        });
+
+        var error = await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
+            "case-alias-review", Fixture.Repository, 12, Fixture.Head, "author", "reviewer",
+            "author-command", "review-command", 1, "reviewer-gh")));
+
+        Assert.Contains("author-role evidence", error.Message);
+    }
+
+    [Fact]
     public async Task ContributorToEarlierHeadCannotReviewCorrectedHeadOfSamePullRequest()
     {
         await using var fixture = await Fixture.Create(seedIntent: false);
@@ -425,13 +447,17 @@ public sealed class GitHubMergeTests
     }
 
     [Fact]
-    public async Task SeparateServiceInstancesSerializeByRepositoryTargetBranch()
+    public async Task SeparateServiceInstancesSerializeRepositoryCaseAliasesByTargetBranch()
     {
         await using var fixture = await Fixture.Create();
         await fixture.App.Store.Write(db =>
         {
-            db.GitHubReviewReceipts.Add(Fixture.Receipt("receipt-2", 13));
-            db.GitHubMergeIntents.Add(Fixture.Intent("intent-2", "receipt-2", 13));
+            var receipt = Fixture.Receipt("receipt-2", 13);
+            receipt.Repository = Fixture.Repository.ToLowerInvariant();
+            var intent = Fixture.Intent("intent-2", "receipt-2", 13);
+            intent.Repository = Fixture.Repository.ToLowerInvariant();
+            db.GitHubReviewReceipts.Add(receipt);
+            db.GitHubMergeIntents.Add(intent);
             return Task.FromResult(true);
         });
         fixture.Remote.HoldMerge = true;
@@ -467,6 +493,37 @@ public sealed class GitHubMergeTests
         fixture.Remote.ReleaseMerge.TrySetResult();
         await first;
         Assert.Equal(1, fixture.Remote.MergeCalls);
+    }
+
+    [Fact]
+    public async Task StaleNoAttemptReadReleasesItsExactUnusedLeaseAfterPeerRejection()
+    {
+        await using var fixture = await Fixture.Create();
+        var factory = new PauseBeforeAcquireFactory(fixture.App.Services.GetRequiredService<IDbContextFactory<ControlDb>>());
+        var secrets = fixture.App.Services.GetRequiredService<Secrets>();
+        var staleStore = new ControlStore(factory,
+            fixture.App.Services.GetRequiredService<IOptions<ControlOptions>>(), secrets);
+        var staleService = new GitHubMergeService(staleStore, secrets, fixture.Client);
+        var staleCall = staleService.Merge("intent", new("intent", 0));
+        await factory.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        try
+        {
+            fixture.Remote.MergeStatus = HttpStatusCode.Conflict;
+            var rejected = await fixture.Service.Merge("intent", new("intent", 0));
+            Assert.Equal("Blocked", rejected.State);
+            Assert.False(await fixture.App.Store.Read(db => db.GitHubMergeLeases.AnyAsync()));
+        }
+        finally
+        {
+            factory.Release.TrySetResult();
+        }
+
+        var replayed = await staleCall.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("Blocked", replayed.State);
+        Assert.Equal(1, fixture.Remote.MergeCalls);
+        Assert.Equal(new[] { "Attempted", "Rejected" }, await AttemptStates(fixture.App.Store));
+        Assert.False(await fixture.App.Store.Read(db => db.GitHubMergeLeases.AnyAsync()));
     }
 
     [Fact]
@@ -588,6 +645,23 @@ public sealed class GitHubMergeTests
 
     private static Task<string[]> AttemptStates(ControlStore store) => store.Read(async db =>
         await db.GitHubMergeAttempts.OrderBy(x => x.State).Select(x => x.State).ToArrayAsync());
+
+    private sealed class PauseBeforeAcquireFactory(IDbContextFactory<ControlDb> inner) : IDbContextFactory<ControlDb>
+    {
+        private int calls;
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ControlDb CreateDbContext() => inner.CreateDbContext();
+        public async Task<ControlDb> CreateDbContextAsync(CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref calls) == 3)
+            {
+                Entered.TrySetResult();
+                await Release.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+            return await inner.CreateDbContextAsync(cancellationToken);
+        }
+    }
 
     private sealed class Fixture : IAsyncDisposable
     {

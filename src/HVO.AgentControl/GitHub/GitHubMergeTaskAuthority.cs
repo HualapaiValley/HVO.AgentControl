@@ -12,6 +12,7 @@ public static class GitHubMergeTaskAuthority
         if (scope is null || scope.Version != GitHubMergeTaskKinds.Version || scope.Purpose != GitHubMergeTaskKinds.Purpose ||
             scope.Role is not (GitHubMergeTaskKinds.Author or GitHubMergeTaskKinds.Reviewer) ||
             !Regex.IsMatch(scope.Repository ?? "", "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$") ||
+            scope.HeadSha is null ||
             scope.Role == GitHubMergeTaskKinds.Reviewer && !IsExact(scope) ||
             scope.Role == GitHubMergeTaskKinds.Author && !IsExact(scope) &&
                 (scope.PullRequestNumber < 0 || !string.IsNullOrEmpty(scope.HeadSha)))
@@ -63,7 +64,7 @@ public static class GitHubMergeTaskAuthority
             throw new ControlException("Retained typed GitHub merge authority is unavailable.");
         }
         ValidateExactScope(authority.Scope);
-        if (authority.Version != GitHubMergeTaskKinds.Version || authority.Scope != expected ||
+        if (authority.Version != GitHubMergeTaskKinds.Version || !SameScope(authority.Scope, expected) ||
             prompt.GitHubMergeScope is null || !PromptCovers(prompt.GitHubMergeScope, expected) ||
             authority.Verdict != Verdict(expected.Role) ||
             authority.WorkerId != workerId || authority.CommandId != command.Id ||
@@ -81,7 +82,7 @@ public static class GitHubMergeTaskAuthority
             var authority = Json.Read<GitHubMergeOutcomeAuthority>(assignment.GitHubAuthorProvenanceJson);
             return authority.Version == GitHubMergeTaskKinds.Version && authority.WorkerId == workerId &&
                 authority.CommandId == assignment.Id && authority.Scope.Role == GitHubMergeTaskKinds.Author &&
-                authority.Scope.Purpose == GitHubMergeTaskKinds.Purpose && authority.Scope.Repository == repository &&
+                authority.Scope.Purpose == GitHubMergeTaskKinds.Purpose && SameRepository(authority.Scope.Repository, repository) &&
                 authority.Scope.PullRequestNumber == pullRequestNumber &&
                 authority.Verdict == GitHubMergeTaskKinds.PublishedExactHead;
         }
@@ -93,11 +94,33 @@ public static class GitHubMergeTaskAuthority
 
     public static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
+    public static bool SameRepository(string left, string right) =>
+        string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    public static bool SameHead(string left, string right) =>
+        string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    public static bool SameScope(GitHubMergeTaskScope left, GitHubMergeTaskScope right) =>
+        left.Version == right.Version && left.Purpose == right.Purpose && left.Role == right.Role &&
+        SameRepository(left.Repository, right.Repository) && left.PullRequestNumber == right.PullRequestNumber &&
+        SameHead(left.HeadSha, right.HeadSha);
+
+    public static bool SamePublication(GitHubMergeOutcomeAuthority retained, GitHubMergeOutcomeAuthority current) =>
+        retained.Version == GitHubMergeTaskKinds.Version && current.Version == GitHubMergeTaskKinds.Version &&
+        retained.Scope.Version == GitHubMergeTaskKinds.Version && current.Scope.Version == GitHubMergeTaskKinds.Version &&
+        retained.Scope.Purpose == GitHubMergeTaskKinds.Purpose && current.Scope.Purpose == GitHubMergeTaskKinds.Purpose &&
+        retained.Scope.Role == GitHubMergeTaskKinds.Author && current.Scope.Role == GitHubMergeTaskKinds.Author &&
+        retained.Verdict == GitHubMergeTaskKinds.PublishedExactHead && current.Verdict == GitHubMergeTaskKinds.PublishedExactHead &&
+        retained.WorkerId == current.WorkerId && retained.CommandId == current.CommandId &&
+        SameRepository(retained.Scope.Repository, current.Scope.Repository) &&
+        retained.Scope.PullRequestNumber == current.Scope.PullRequestNumber;
+
     private static string ResultIdentity(CommandRecord command) => command.ResultId ?? command.NativeMessageId ?? "";
 
     private static bool PromptCovers(GitHubMergeTaskScope prompt, GitHubMergeTaskScope exact) =>
         prompt.Version == exact.Version && prompt.Purpose == exact.Purpose && prompt.Role == exact.Role &&
-        prompt.Repository == exact.Repository && (prompt.PullRequestNumber == exact.PullRequestNumber && prompt.HeadSha == exact.HeadSha ||
+        SameRepository(prompt.Repository, exact.Repository) &&
+        (prompt.PullRequestNumber == exact.PullRequestNumber && SameHead(prompt.HeadSha, exact.HeadSha) ||
             prompt.Role == GitHubMergeTaskKinds.Author && string.IsNullOrEmpty(prompt.HeadSha) &&
             (prompt.PullRequestNumber == 0 || prompt.PullRequestNumber == exact.PullRequestNumber));
 

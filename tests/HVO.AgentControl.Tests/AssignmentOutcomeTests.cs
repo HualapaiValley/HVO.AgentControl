@@ -157,6 +157,56 @@ public sealed class AssignmentOutcomeTests
     }
 
     [Fact]
+    public async Task AuthorTaskCannotMovePublicationToAnotherPullRequest()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var admission = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Author, "Owner/Repo", 0, "");
+        var first = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Author, "Owner/Repo", 13, new string('a', 40));
+        var laterHead = first with { HeadSha = new string('b', 40) };
+        var otherPullRequest = first with { PullRequestNumber = 12, HeadSha = new string('c', 40) };
+        var command = Prompt(worker, Delivery.Finished, "author-binding");
+        command.Payload = Json.Write(new PromptInput(command.Id, "Implement and publish the change", 0,
+            GitHubMergeScope: admission));
+        command.ResultId = "publication-result";
+        command.ResultJson = Json.Write(new { published = true });
+        await app.Store.Write(db =>
+        {
+            db.Commands.Add(command);
+            db.Assignments.Add(new AssignmentRecord { Id = command.Id, WorkerId = worker.Id, Prompt = "Publish exact head" });
+            return Task.FromResult(true);
+        });
+        await app.Store.SetOutcome(worker.Id, new(command.Id, 0, "VerifiedComplete", "First publication verified.",
+            new(GitHubMergeTaskKinds.Version, GitHubMergeTaskKinds.PublishedExactHead, first)));
+        await app.Store.SetOutcome(worker.Id, new(command.Id, 1, "VerifiedComplete", "Later head on the same pull request verified.",
+            new(GitHubMergeTaskKinds.Version, GitHubMergeTaskKinds.PublishedExactHead, laterHead)));
+
+        var error = await Assert.ThrowsAsync<ControlException>(() => app.Store.SetOutcome(worker.Id,
+            new(command.Id, 2, "VerifiedComplete", "Different pull request.",
+                new(GitHubMergeTaskKinds.Version, GitHubMergeTaskKinds.PublishedExactHead, otherPullRequest))));
+
+        Assert.Contains("already bound", error.Message);
+        var detail = await app.Store.Detail(worker.Id);
+        Assert.Equal(2, detail.Worker.Revision);
+        Assert.Equal(laterHead, Json.Read<GitHubMergeOutcomeAuthority>(detail.Assignments.Single().GitHubAuthorityJson).Scope);
+        Assert.Equal(first, Json.Read<GitHubMergeOutcomeAuthority>(detail.Assignments.Single().GitHubAuthorProvenanceJson).Scope);
+    }
+
+    [Fact]
+    public async Task NullTypedScopeHeadIsRejectedBeforeGuidanceRendering()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var malformed = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Author, "Owner/Repo", 0, null!);
+
+        var error = await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(worker.Id,
+            new(Guid.NewGuid().ToString(), "Implement this change.", 0, GitHubMergeScope: malformed)));
+
+        Assert.Equal(400, error.Status);
+        Assert.Empty((await app.Store.Detail(worker.Id)).Commands);
+    }
+
+    [Fact]
     public async Task GenericEvidenceCannotForgeTypedGitHubAuthority()
     {
         await using var app = new TestApp();

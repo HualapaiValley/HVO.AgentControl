@@ -33,7 +33,7 @@ public static class AssignmentGuidance
                 Role: {input.GitHubMergeScope.Role}
                 Repository: {input.GitHubMergeScope.Repository}
                 Pull request: {(input.GitHubMergeScope.PullRequestNumber == 0 ? "to be bound by the verified publication result" : input.GitHubMergeScope.PullRequestNumber)}
-                Exact head: {(input.GitHubMergeScope.HeadSha.Length == 0 ? "to be bound by the verified publication result" : input.GitHubMergeScope.HeadSha)}
+                Exact head: {(string.IsNullOrEmpty(input.GitHubMergeScope.HeadSha) ? "to be bound by the verified publication result" : input.GitHubMergeScope.HeadSha)}
 
                 {input.Text}
                 """;

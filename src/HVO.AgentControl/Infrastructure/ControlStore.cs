@@ -469,6 +469,18 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         GitHubMergeOutcomeAuthority? authority = null;
         if (input.GitHubMergeResult is not null)
             authority = GitHubMergeTaskAuthority.Create(command, assignment, input, Now);
+        if (authority?.Scope.Role == GitHubMergeTaskKinds.Author && assignment.GitHubAuthorProvenanceJson != "{}")
+        {
+            GitHubMergeOutcomeAuthority retained;
+            try
+            {
+                retained = Json.Read<GitHubMergeOutcomeAuthority>(assignment.GitHubAuthorProvenanceJson);
+                GitHubMergeTaskAuthority.ValidateExactScope(retained.Scope);
+            }
+            catch { throw new ControlException("Retained author publication provenance is invalid."); }
+            if (!GitHubMergeTaskAuthority.SamePublication(retained, authority))
+                throw new ControlException("This author task is already bound to a different pull request publication.");
+        }
         worker.Outcome = input.Outcome; worker.Revision++;
         assignment.Outcome = input.Outcome; assignment.Evidence = input.Evidence;
         assignment.GitHubAuthorityJson = authority is null ? "{}" : Json.Write(authority);

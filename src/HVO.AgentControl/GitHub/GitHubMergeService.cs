@@ -19,7 +19,7 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             throw new ControlException("Invalid GitHub merge policy.", 400);
 
         var latest = await db.GitHubMergePolicies.Where(x => x.Id == input.Id).OrderByDescending(x => x.Revision).FirstOrDefaultAsync();
-        if (latest is not null && (latest.Repository != input.Repository || latest.BaseBranch != input.BaseBranch))
+        if (latest is not null && (!GitHubMergeTaskAuthority.SameRepository(latest.Repository, input.Repository) || latest.BaseBranch != input.BaseBranch))
             throw new ControlException("Merge policy identity conflicts with the existing repository target.");
         if (latest is not null && latest.Revision == input.ExpectedRevision + 1 &&
             latest.State == (input.Active ? "Active" : "Disabled") &&
@@ -77,14 +77,14 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
 
         var credential = await Credential(input.Repository);
         var remote = await github.Observe(credential.Value, input.Repository, input.PullRequestNumber, CancellationToken.None);
-        if (!remote.Complete || remote.HeadSha != input.HeadSha)
+        if (!remote.Complete || !GitHubMergeTaskAuthority.SameHead(remote.HeadSha, input.HeadSha))
             throw new ControlException("Complete GitHub review evidence for the exact head is unavailable.");
         var review = remote.Reviews.SingleOrDefault(x => x.Id == input.GitHubReviewId);
-        if (review is null || review.State != "APPROVED" || review.CommitId != input.HeadSha ||
+        if (review is null || review.State != "APPROVED" || !GitHubMergeTaskAuthority.SameHead(review.CommitId, input.HeadSha) ||
             !string.Equals(review.User, input.GitHubReviewerIdentity, StringComparison.OrdinalIgnoreCase))
             throw new ControlException("The GitHub review receipt is not an approval for the exact head.");
         var latest = LatestReviews(remote.Reviews);
-        if (!latest.TryGetValue(review.User, out var current) || current.State != "APPROVED" || current.CommitId != input.HeadSha)
+        if (!latest.TryGetValue(review.User, out var current) || current.State != "APPROVED" || !GitHubMergeTaskAuthority.SameHead(current.CommitId, input.HeadSha))
             throw new ControlException("The recorded GitHub reviewer no longer approves the exact head.");
         if (string.Equals(remote.AuthorIdentity, review.User, StringComparison.OrdinalIgnoreCase))
             throw new ControlException("The pull request author cannot supply native GitHub approval.");
@@ -147,7 +147,8 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         await store.Read(db => RequireReceiptAuthority(db, authority.Review!));
         var credential = await Credential(input.Repository);
         var remote = await github.Observe(credential.Value, input.Repository, input.PullRequestNumber, CancellationToken.None);
-        if (!remote.Complete || remote.HeadSha != input.ExpectedHeadSha || remote.BaseSha != input.BaseSha || remote.BaseBranch != input.BaseBranch)
+        if (!remote.Complete || !GitHubMergeTaskAuthority.SameHead(remote.HeadSha, input.ExpectedHeadSha) ||
+            !GitHubMergeTaskAuthority.SameHead(remote.BaseSha, input.BaseSha) || remote.BaseBranch != input.BaseBranch)
             throw new ControlException("Complete GitHub identity evidence does not match the requested head and target branch.");
 
         return await store.Write(async db =>
@@ -255,6 +256,7 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         }
         if (!started)
         {
+            await ReleaseLease(id, leaseId);
             await Observe(id);
             return await GetIntent(id);
         }
@@ -389,9 +391,12 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
                 var review = await db.GitHubReviewReceipts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == current.ReviewReceiptId);
                 if (lease is null) throw new ControlException("The exact merge execution lease is no longer owned by this request.");
                 if (current.ObservationId != observation.Id || currentObservation is null || currentObservation.State != "Ready" ||
-                    !currentObservation.Complete || currentObservation.IntentId != current.Id || currentObservation.Repository != current.Repository ||
-                    currentObservation.PullRequestNumber != current.PullRequestNumber || currentObservation.HeadSha != current.ExpectedHeadSha ||
-                    currentObservation.BaseBranch != current.BaseBranch || currentObservation.BaseSha != current.BaseSha)
+                    !currentObservation.Complete || currentObservation.IntentId != current.Id ||
+                    !GitHubMergeTaskAuthority.SameRepository(currentObservation.Repository, current.Repository) ||
+                    currentObservation.PullRequestNumber != current.PullRequestNumber ||
+                    !GitHubMergeTaskAuthority.SameHead(currentObservation.HeadSha, current.ExpectedHeadSha) ||
+                    currentObservation.BaseBranch != current.BaseBranch ||
+                    !GitHubMergeTaskAuthority.SameHead(currentObservation.BaseSha, current.BaseSha))
                     throw new ControlException("The exact ready observation changed before merge effect admission.");
                 ValidateAuthority(current, policy, review);
                 await RequireReceiptAuthority(db, review!);
@@ -467,23 +472,23 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
     private static string Evaluate(GitHubMergeIntent intent, GitHubReviewReceipt receipt, GitHubMergePolicy? policy,
         GitHubPullRequestObservation remote, out string detail)
     {
-        if (remote.HeadSha != intent.ExpectedHeadSha) { detail = "Pull request head changed since review."; return "Blocked"; }
+        if (!GitHubMergeTaskAuthority.SameHead(remote.HeadSha, intent.ExpectedHeadSha)) { detail = "Pull request head changed since review."; return "Blocked"; }
         if (remote.BaseBranch != intent.BaseBranch) { detail = "Pull request target branch changed."; return "Blocked"; }
         if (remote.Merged && !string.IsNullOrWhiteSpace(remote.MergeCommitSha)) { detail = "GitHub confirms that the exact-head pull request is merged."; return "Merged"; }
-        if (remote.BaseSha != intent.BaseSha) { detail = "Pull request target branch or base changed."; return "Blocked"; }
+        if (!GitHubMergeTaskAuthority.SameHead(remote.BaseSha, intent.BaseSha)) { detail = "Pull request target branch or base changed."; return "Blocked"; }
         if (policy is null || policy.State != "Active" || policy.Revision != intent.PolicyRevision)
         { detail = "The intent's trusted repository policy revision is no longer current and active."; return "Blocked"; }
         if (!remote.Complete) { detail = "GitHub observation is incomplete; review, thread, mergeability or check pagination could not be proven complete."; return "Blocked"; }
         if (remote.State != "open" || remote.Mergeable != true) { detail = "Pull request state is not currently mergeable."; return "Blocked"; }
         if (remote.UnresolvedThreads > 0) { detail = "Unresolved review threads remain, including outdated threads."; return "Blocked"; }
         var exactReview = remote.Reviews.SingleOrDefault(x => x.Id == receipt.GitHubReviewId);
-        if (exactReview is null || exactReview.State != "APPROVED" || exactReview.CommitId != intent.ExpectedHeadSha ||
+        if (exactReview is null || exactReview.State != "APPROVED" || !GitHubMergeTaskAuthority.SameHead(exactReview.CommitId, intent.ExpectedHeadSha) ||
             !string.Equals(exactReview.User, receipt.GitHubReviewerIdentity, StringComparison.OrdinalIgnoreCase))
         { detail = "The retained central review receipt does not match an exact-head GitHub approval."; return "Blocked"; }
         var latest = LatestReviews(remote.Reviews);
         if (latest.Values.Any(x => x.State == "CHANGES_REQUESTED")) { detail = "A reviewer's latest applicable state requests changes."; return "Blocked"; }
         if (!latest.TryGetValue(receipt.GitHubReviewerIdentity, out var currentReview) || currentReview.State != "APPROVED" ||
-            currentReview.CommitId != intent.ExpectedHeadSha || string.Equals(currentReview.User, remote.AuthorIdentity, StringComparison.OrdinalIgnoreCase))
+            !GitHubMergeTaskAuthority.SameHead(currentReview.CommitId, intent.ExpectedHeadSha) || string.Equals(currentReview.User, remote.AuthorIdentity, StringComparison.OrdinalIgnoreCase))
         { detail = "Native GitHub approval by the retained independent reviewer is not current for the exact head."; return "Blocked"; }
         var checks = remote.Checks.Concat(remote.Statuses).ToArray();
         var missing = Json.Read<string[]>(intent.RequiredChecksJson).Where(name =>
@@ -549,7 +554,7 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             receipt.PullRequestNumber, receipt.HeadSha, GitHubMergeTaskKinds.Author);
         var reviewer = RequireAssignment(reviewCommand, reviewAssignment, receipt.ReviewerWorkerId, receipt.Repository,
             receipt.PullRequestNumber, receipt.HeadSha, GitHubMergeTaskKinds.Reviewer);
-        if (author != retained.Author || reviewer != retained.Reviewer)
+        if (!SameAuthority(author, retained.Author) || !SameAuthority(reviewer, retained.Reviewer))
             throw new ControlException("The typed task authority retained by the review receipt has changed.");
         if (await HasAuthorEvidence(db, receipt.ReviewerWorkerId, receipt.Repository, receipt.PullRequestNumber, receipt.HeadSha))
             throw new ControlException("A worker with retained author-role evidence for this pull request cannot act as its reviewer.");
@@ -558,7 +563,8 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
 
     private static GitHubReviewReceipt SameReview(GitHubReviewReceipt prior, RecordGitHubReviewInput input)
     {
-        if (prior.Repository != input.Repository || prior.PullRequestNumber != input.PullRequestNumber || prior.HeadSha != input.HeadSha ||
+        if (!GitHubMergeTaskAuthority.SameRepository(prior.Repository, input.Repository) || prior.PullRequestNumber != input.PullRequestNumber ||
+            !GitHubMergeTaskAuthority.SameHead(prior.HeadSha, input.HeadSha) ||
             prior.AuthorWorkerId != input.AuthorWorkerId || prior.ReviewerWorkerId != input.ReviewerWorkerId ||
             prior.AuthorCommandId != input.AuthorCommandId || prior.ReviewCommandId != input.ReviewCommandId ||
             prior.GitHubReviewId != input.GitHubReviewId || !string.Equals(prior.GitHubReviewerIdentity, input.GitHubReviewerIdentity, StringComparison.OrdinalIgnoreCase))
@@ -568,8 +574,9 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
 
     private static GitHubMergeIntent SameIntent(GitHubMergeIntent prior, CreateGitHubMergeIntentInput input)
     {
-        if (prior.Repository != input.Repository || prior.PullRequestNumber != input.PullRequestNumber || prior.ExpectedHeadSha != input.ExpectedHeadSha ||
-            prior.BaseBranch != input.BaseBranch || prior.BaseSha != input.BaseSha || prior.ReviewReceiptId != input.ReviewReceiptId ||
+        if (!GitHubMergeTaskAuthority.SameRepository(prior.Repository, input.Repository) || prior.PullRequestNumber != input.PullRequestNumber ||
+            !GitHubMergeTaskAuthority.SameHead(prior.ExpectedHeadSha, input.ExpectedHeadSha) || prior.BaseBranch != input.BaseBranch ||
+            !GitHubMergeTaskAuthority.SameHead(prior.BaseSha, input.BaseSha) || prior.ReviewReceiptId != input.ReviewReceiptId ||
             prior.PolicyId != input.PolicyId || prior.PolicyRevision != input.PolicyRevision)
             throw new ControlException("Merge intent ID conflicts with the existing immutable request.");
         return prior;
@@ -577,22 +584,31 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
 
     private static void ValidateAuthority(CreateGitHubMergeIntentInput input, GitHubMergePolicy? policy, GitHubReviewReceipt? review)
     {
-        if (policy is null || policy.State != "Active" || policy.Revision != input.PolicyRevision || policy.Repository != input.Repository || policy.BaseBranch != input.BaseBranch)
+        if (policy is null || policy.State != "Active" || policy.Revision != input.PolicyRevision ||
+            !GitHubMergeTaskAuthority.SameRepository(policy.Repository, input.Repository) || policy.BaseBranch != input.BaseBranch)
             throw new ControlException("The requested trusted repository policy revision is unavailable.");
-        if (review is null || review.Repository != input.Repository || review.PullRequestNumber != input.PullRequestNumber || review.HeadSha != input.ExpectedHeadSha)
+        if (review is null || !GitHubMergeTaskAuthority.SameRepository(review.Repository, input.Repository) ||
+            review.PullRequestNumber != input.PullRequestNumber || !GitHubMergeTaskAuthority.SameHead(review.HeadSha, input.ExpectedHeadSha))
             throw new ControlException("The retained central review receipt does not cover the exact pull request head.");
     }
 
     private static void ValidateAuthority(GitHubMergeIntent intent, GitHubMergePolicy? policy, GitHubReviewReceipt? review)
     {
         if (policy is null || policy.State != "Active" || policy.Revision != intent.PolicyRevision ||
-            policy.Repository != intent.Repository || policy.BaseBranch != intent.BaseBranch ||
+            !GitHubMergeTaskAuthority.SameRepository(policy.Repository, intent.Repository) || policy.BaseBranch != intent.BaseBranch ||
             policy.RequiredChecksJson != intent.RequiredChecksJson)
             throw new ControlException("The intent's trusted repository policy revision is no longer current and active.");
-        if (review is null || review.Repository != intent.Repository || review.PullRequestNumber != intent.PullRequestNumber ||
-            review.HeadSha != intent.ExpectedHeadSha || review.Id != intent.ReviewReceiptId)
+        if (review is null || !GitHubMergeTaskAuthority.SameRepository(review.Repository, intent.Repository) ||
+            review.PullRequestNumber != intent.PullRequestNumber || !GitHubMergeTaskAuthority.SameHead(review.HeadSha, intent.ExpectedHeadSha) ||
+            review.Id != intent.ReviewReceiptId)
             throw new ControlException("The retained central review receipt no longer covers the exact pull request head.");
     }
+
+    private static bool SameAuthority(GitHubMergeOutcomeAuthority left, GitHubMergeOutcomeAuthority right) =>
+        left.Version == right.Version && GitHubMergeTaskAuthority.SameScope(left.Scope, right.Scope) &&
+        left.Verdict == right.Verdict && left.WorkerId == right.WorkerId && left.CommandId == right.CommandId &&
+        left.CommandResultId == right.CommandResultId && left.CommandResultSha256 == right.CommandResultSha256 &&
+        left.EvidenceSha256 == right.EvidenceSha256 && left.RecordedAt == right.RecordedAt;
 
     private static void ValidateReview(RecordGitHubReviewInput input)
     {
