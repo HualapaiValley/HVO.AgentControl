@@ -27,6 +27,24 @@ The upstream **1.18.29** multi-platform image is pinned by manifest digest. Its 
 
 Conversation IDs separate history; they do not isolate credentials, process memory, filesystem or global configuration. All sessions in one sidecar share a trust boundary. Different tenants or incompatible provider policies require separate services.
 
+## Service identity and process incarnation
+
+Before starting OpenCode, the entrypoint takes a nonblocking exclusive `flock` on `/var/lib/opencode/.agentcontrol-service.lock`. Its open descriptor survives `exec` into OpenCode; the real-container smoke verifies that a second sidecar using the same volume fails before changing the manifest. The pinned image already includes BusyBox `flock`; no daemon or SSH transport is involved. Never delete or replace the lock file while a process may own it. All processes sharing this state must use the shipped entrypoint; the lock does not constrain a Docker administrator who bypasses it.
+
+The stable UUID is stored in `/var/lib/opencode/state/agentcontrol-instance-id`. A corrupt identity, or an identity missing while a previous manifest exists, fails startup without generating a replacement. An operator must investigate and restore the original identity from trusted state. The entrypoint publishes `/var/lib/opencode/workspaces/control/.agentcontrol-service.json` through atomic rename before starting each native process:
+
+```json
+{
+  "schemaVersion": 1,
+  "instanceId": "a7e2d753-2521-4e77-b0f9-c49b5eb4917e",
+  "incarnationId": "25e78c20-ea4e-462d-aee0-b499acbbd737",
+  "startedAt": "2026-09-08T08:00:00Z",
+  "directory": "/var/lib/opencode/workspaces/control"
+}
+```
+
+Read it through authenticated `GET /file/content?path=.agentcontrol-service.json&directory=/var/lib/opencode/workspaces/control`. Native 1.18.29 returns a JSON envelope with `type: "text"` and a string `content` containing the manifest JSON. Unauthenticated access returns 401. Validate the schema, canonical directory and expected instance UUID before using a saved session binding. Reconnecting a web client leaves every field unchanged; recreating the sidecar with the same volume preserves `instanceId` and changes `incarnationId`. The timestamp describes entrypoint startup, not an uptime measurement or proof of a completed request. Compare incarnation IDs to detect native replacement; do not infer successful recovery or replay an uncertain instruction from this manifest. Restoring a backup or cloning a volume requires an explicit reconciliation decision, since copied identity and history do not establish continuity of computation.
+
 ## Start an isolated service
 
 This is an opt-in infrastructure operation; it is not required for the existing demo. Create a new dedicated secret in a private directory. The bind-mounted file must be readable by container UID 1000 (Compose file secrets do not remap host ownership):
