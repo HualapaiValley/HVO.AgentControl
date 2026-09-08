@@ -50,6 +50,10 @@ public sealed class DevContainerCliOperationAdapterTests
         Assert.Equal("Observed", oneExactAndMismatch.Status);
         var multiple = adapter.Reconcile(request, [new("first", first.Resolved.Labels), new("second", first.Resolved.Labels)]);
         Assert.Equal("Uncertain", multiple.Status); Assert.Equal("multiple_labels_observed", multiple.Receipt);
+        var blankAndValid = adapter.Reconcile(request, [new("", first.Resolved.Labels), new("valid", first.Resolved.Labels)]);
+        Assert.Equal("Uncertain", blankAndValid.Status); Assert.Equal("multiple_labels_observed", blankAndValid.Receipt);
+        var soleBlank = adapter.Reconcile(request, [new(null, first.Resolved.Labels)]);
+        Assert.Equal("Uncertain", soleBlank.Status); Assert.Equal("container_identity_missing", soleBlank.Receipt);
     }
 
     [Fact]

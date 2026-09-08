@@ -37,10 +37,11 @@ public sealed class DevContainerCliOperationAdapter : IDevContainerCliOperationA
         if (error is not null) return Result(request.RequestId, "Failed", error, requested, null, null, error);
         if (observations.Count > MaxObservations) return Result(request.RequestId, "Failed", "observation_limit_exceeded", requested, resolved, null, "Too many host observations were supplied.");
 
-        var matches = observations.Where(observation => !string.IsNullOrWhiteSpace(observation.ContainerId) &&
+        var matches = observations.Where(observation =>
             resolved!.Labels.All(pair => observation.Labels.TryGetValue(pair.Key, out var value) && value == pair.Value)).ToList();
         if (matches.Count == 0) return Result(request.RequestId, "Uncertain", "labels_not_observed", requested, resolved, null, "No exact ownership-label observation was supplied.");
         if (matches.Count > 1) return Result(request.RequestId, "Uncertain", "multiple_labels_observed", requested, resolved, null, "Multiple exact ownership-label observations were supplied.");
+        if (string.IsNullOrWhiteSpace(matches[0].ContainerId)) return Result(request.RequestId, "Uncertain", "container_identity_missing", requested, resolved, null, "The exact ownership-label observation has no container identity.");
 
         return Result(request.RequestId, "Observed", "labels_observed", requested, resolved, matches[0], matches[0].Output);
     }
