@@ -85,11 +85,13 @@ public partial class Home
         if (firstRender) module = await JavaScript.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Home.razor.js");
         if (module is not null) await module.InvokeVoidAsync("observeTranscript", selectedId);
     }
-    private Task SendPrompt() => Execute(async () =>
+    private Task SendPrompt(string renderedWorkerId, long renderedWorkerRevision) => Execute(async () =>
     {
+        if (selectedId != renderedWorkerId || detail?.Worker.Id != renderedWorkerId || detail.Worker.Revision != renderedWorkerRevision)
+            throw new ControlException("The selected conversation changed. Wait for its details before sending this instruction.");
         var current = SelectedDetail();
         promptRequestId ??= Guid.NewGuid().ToString();
-        var command = await Store.Prompt(current.Worker.Id, new(promptRequestId, promptText, current.Worker.Revision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
+        var command = await Store.Prompt(renderedWorkerId, new(promptRequestId, promptText, renderedWorkerRevision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
         notice = "Instruction queued. You can leave this page while the worker runs.";
         promptText = ""; promptDrafts.Remove(current.Worker.Id); promptRequestId = null;
     });

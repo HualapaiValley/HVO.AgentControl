@@ -124,6 +124,10 @@ public sealed class HomeConversationRaceTests
         var pendingB = home.Navigate(b.Id);
         await startedB.Task.WaitAsync(TimeSpan.FromSeconds(10));
         home.SetRenderedDraft(a.Id, "draft-from-rendered-A-25x");
+        await home.SendRendered(a.Id, a.Revision);
+        Assert.NotNull(home.VisibleError);
+        Assert.Empty((await app.Store.Detail(a.Id)).Commands);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
         releaseB.SetResult();
         await pendingB;
 
@@ -363,7 +367,13 @@ public sealed class HomeConversationRaceTests
         public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
-        public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
+        public Task Send(string text)
+        {
+            SetField("promptText", text);
+            var worker = Visible!.Worker;
+            return InvokeTask("SendPrompt", worker.Id, worker.Revision);
+        }
+        public Task SendRendered(string workerId, long revision) => InvokeTask("SendPrompt", workerId, revision);
         public void SetDraft(string text) => SetField("promptText", text);
         public void SetRenderedDraft(string workerId, string text) => Invoke("SetPromptText", workerId, text);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
@@ -385,6 +395,7 @@ public sealed class HomeConversationRaceTests
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;
         private void SetField(string name, object value) => typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, value);
         private Task Invoke(string name) => (Task)typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, null)!;
+        private Task InvokeTask(string name, params object[] args) => (Task)typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, args)!;
         private void Invoke(string name, params object[] args) => typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, args);
     }
 
