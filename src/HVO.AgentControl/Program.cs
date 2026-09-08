@@ -100,6 +100,11 @@ app.Use(async (context, next) =>
     try { await next(); }
     catch (ControlException ex) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = ex.Message }); }
     catch (AntiforgeryValidationException) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = "Invalid antiforgery token; reload the page." }); }
+    catch (BadHttpRequestException ex) when (!context.Response.HasStarted)
+    {
+        context.Response.StatusCode = ex.StatusCode;
+        await context.Response.WriteAsJsonAsync(new { error = "Invalid request body or parameters.", code = "invalid_request" });
+    }
     catch (Exception ex) when (!context.Response.HasStarted)
     {
         app.Logger.LogError("Request failed ({Category}); no durable acceptance was returned", ex.GetType().Name);

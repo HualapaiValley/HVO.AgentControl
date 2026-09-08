@@ -18,6 +18,7 @@ public static class ApiEndpoints
             return await next(context);
         });
         group.MapGet("/csrf", (HttpContext context, IAntiforgery antiforgery) => new { token = antiforgery.GetAndStoreTokens(context).RequestToken });
+        group.MapInventoryApi();
         group.MapGet("/providers/opencode-go/key", (ProviderKeyService keys) => keys.Status());
         group.MapPost("/providers/opencode-go/key", (SaveProviderKey input, ProviderKeyService keys) => keys.Save(input));
         group.MapPost("/runtimes/{id}/providers/opencode-go", (string id, ApplyProviderKey input, ProviderKeyService keys, CancellationToken token) => keys.Apply(id, input, token));
