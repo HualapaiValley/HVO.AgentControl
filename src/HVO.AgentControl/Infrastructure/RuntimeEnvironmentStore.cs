@@ -10,7 +10,7 @@ public sealed partial class ControlStore
 {
     public Task<RuntimeEnvironmentView> RuntimeEnvironment(string runtimeId) => Read(async db =>
     {
-        var runtime = await RequireEnvironmentRuntime(db, InventoryId(runtimeId));
+        var runtime = await RequireEnvironmentRuntime(db, RuntimeEnvironmentId(runtimeId));
         return EnvironmentView(runtime, await db.RuntimeEnvironments.FindAsync(runtime.Id));
     });
 
@@ -19,7 +19,7 @@ public sealed partial class ControlStore
         // Host membership is owner-declared and must never be used as verified physical capacity.
         var id = InventoryId(hostId);
         if (take is < 1 or > 100) throw new InventoryException("validation", "Take must be between 1 and 100.");
-        var cursor = after is null ? "" : InventoryId(after);
+        var cursor = after is null ? "" : RuntimeEnvironmentId(after);
         _ = await RequireHost(db, id);
         var rows = await (from environment in db.RuntimeEnvironments.AsNoTracking()
                           join runtime in db.Runtimes.AsNoTracking() on environment.RuntimeId equals runtime.Id
@@ -33,7 +33,7 @@ public sealed partial class ControlStore
 
     public Task<RuntimeEnvironmentView> ConfigureRuntimeEnvironment(string runtimeId, ConfigureRuntimeEnvironmentInput input) => Write(async db =>
     {
-        var id = InventoryId(runtimeId);
+        var id = RuntimeEnvironmentId(runtimeId);
         var hostId = InventoryId(input.HostId);
         if (input.Kind is not (RuntimeEnvironmentKind.ExistingMachine or RuntimeEnvironmentKind.ManagedDevcontainer))
             throw new InventoryException("validation", "Choose ExistingMachine or ManagedDevcontainer; use reset to return to legacy SSH configuration.");
@@ -67,7 +67,7 @@ public sealed partial class ControlStore
 
     public Task<RuntimeEnvironmentView> ResetRuntimeEnvironment(string runtimeId, ResetRuntimeEnvironmentInput input) => Write(async db =>
     {
-        var id = InventoryId(runtimeId);
+        var id = RuntimeEnvironmentId(runtimeId);
         return await MutateInventory(db, input.RequestId, "RuntimeEnvironment", id, "Reset",
             new { input.ExpectedRevision, input.ExpectedRuntimeRevision }, async () =>
             {
@@ -94,6 +94,15 @@ public sealed partial class ControlStore
 
     private static async Task<RuntimeRecord> RequireEnvironmentRuntime(ControlDb db, string id) =>
         await db.Runtimes.SingleOrDefaultAsync(x => x.Id == id) ?? throw new InventoryException("not_found", "Runtime not found.", 404);
+
+    private static string RuntimeEnvironmentId(string? value)
+    {
+        // Legacy SaveRuntime admits case-sensitive N-format keys, including the all-zero GUID.
+        // Preserve those keys in routes, receipts, foreign keys and UUID pagination cursors.
+        if (value is null || !Guid.TryParseExact(value, "N", out _))
+            throw new InventoryException("validation", "Use the exact 32-character runtime ID returned by runtime inventory.");
+        return value;
+    }
 
     private static void RequireEnvironmentRevisions(RuntimeRecord runtime, RuntimeEnvironmentRecord? environment, long runtimeRevision, long revision)
     {

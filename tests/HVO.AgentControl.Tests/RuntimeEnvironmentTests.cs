@@ -59,6 +59,35 @@ public sealed class RuntimeEnvironmentTests
     }
 
     [Fact]
+    public async Task LegacyRuntimeKeyCasingIsPreservedWithoutRedirectingAnAssociationOrReceipt()
+    {
+        await using var app = new TestApp(); using var owner = await app.SignIn(); var host = await Host(app.Store);
+        string[] keys = ["AABBCCDD00112233445566778899AABB", "aabbccdd00112233445566778899aabb", new('0', 32)];
+        foreach (var key in keys)
+        {
+            var profile = PersistenceTests.Profile(); profile.Id = key;
+            var runtime = await app.Store.SaveRuntime(profile);
+            var route = $"/api/v1/runtimes/{key}/environment";
+            var legacy = await owner.GetFromJsonAsync<RuntimeEnvironmentView>(route);
+            Assert.Equal(key, legacy!.RuntimeId); Assert.Equal(0, legacy.Revision);
+            var input = Configure(runtime, host);
+            var response = await owner.PutAsJsonAsync(route, input);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var configured = (await response.Content.ReadFromJsonAsync<RuntimeEnvironmentView>())!;
+            Assert.Equal(key, configured.RuntimeId); Assert.Equal(host.Id, configured.RequestedHostId);
+            Assert.Equal(key, (await app.Store.InventoryMutation(input.RequestId)).ResourceId);
+            Assert.Equal(configured, await app.Store.ConfigureRuntimeEnvironment(key, input));
+        }
+        var first = await app.Store.HostRuntimeEnvironments(host.Id, take: 2);
+        Assert.Equal(new[] { keys[2], keys[0] }, first.Items.Select(x => x.RuntimeId));
+        Assert.Equal(keys[0], first.NextAfter);
+        Assert.Equal(keys[1], Assert.Single((await app.Store.HostRuntimeEnvironments(host.Id, first.NextAfter)).Items).RuntimeId);
+        var upper = await app.Store.RuntimeEnvironment(keys[0]);
+        await app.Store.ResetRuntimeEnvironment(keys[0], new(Id(), upper.Revision, upper.RuntimeRevision));
+        Assert.Equal("Configured", (await app.Store.RuntimeEnvironment(keys[1])).State);
+    }
+
+    [Fact]
     public async Task BothRevisionsAndRequestIntentAreRequiredAndConcurrentEditsCommitOnce()
     {
         await using var app = new TestApp();
