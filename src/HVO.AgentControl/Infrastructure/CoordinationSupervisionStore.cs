@@ -14,11 +14,11 @@ public sealed partial class ControlStore
         if (!due) return false;
         return await Write(async db =>
         {
-            var run = await db.CoordinationRuns.FirstOrDefaultAsync(x => x.State != "Completed" && x.State != "Stopped");
-            if (run is null || run.LastSupervisorAt > now - 30000) return false;
-            run.LastSupervisorAt = now;
+            var runs = await db.CoordinationRuns.Where(x =>
+                x.State != "Completed" && x.State != "Stopped" && x.LastSupervisorAt <= now - 30000).ToListAsync();
+            foreach (var run in runs) run.LastSupervisorAt = now;
             // An explicit pause never becomes an automatic resume.
-            return true;
+            return runs.Count > 0;
         });
     }
 }

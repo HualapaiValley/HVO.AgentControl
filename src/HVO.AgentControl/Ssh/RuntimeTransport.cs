@@ -14,6 +14,7 @@ public interface IRuntimeTransport : IAsyncDisposable
     OpenCodeClient Api { get; }
     bool Connected { get; }
     string Platform { get; }
+    Task ValidateConnection(CancellationToken cancellationToken) => Task.CompletedTask;
     string InstalledExecutable => "";
     NativeProcessObservation? NativeProcess => null;
     Task<CapabilitySnapshot> ProbeCapabilities(string directory, CancellationToken cancellationToken) =>

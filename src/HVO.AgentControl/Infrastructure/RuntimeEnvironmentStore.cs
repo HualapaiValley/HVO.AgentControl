@@ -113,6 +113,7 @@ public sealed partial class ControlStore
 
     private async Task RequireEnvironmentEditable(ControlDb db, RuntimeRecord runtime)
     {
+        RequireDevelopmentRuntime(runtime);
         if (runtime.DesiredConnected || runtime.Transport != "Disconnected")
             throw InventoryConflict("runtime_connected", "Explicitly disconnect the runtime before changing its environment association.");
         if (activeTerminals.GetValueOrDefault(runtime.Id) > 0)
