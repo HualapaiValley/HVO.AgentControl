@@ -193,6 +193,18 @@ public sealed class LocalDevContainerRunnerTests
         Assert.True(fixture.Process.InspectCalls > 0); Assert.Equal(probes, fixture.Process.ExecCalls);
         var removed = await runner.RemoveOwned(fixture.Request, observed.Observed.ContainerId);
         Assert.Equal("Removed", removed.State);
+        if (drift == "workspace-missing")
+        {
+            Assert.Equal("owned_container_removed_workspace_retention_unverified", removed.Code);
+            Assert.Contains("workspace-missing-or-unverified:" + fixture.Workspace.Directory, observed.RetainedResources);
+            Assert.Contains("workspace-missing-or-unverified:" + fixture.Workspace.Directory, removed.RetainedResources);
+            Assert.DoesNotContain("workspace:" + fixture.Workspace.Directory, removed.RetainedResources);
+        }
+        else
+        {
+            Assert.Equal("owned_container_removed_retained_data_preserved", removed.Code);
+            Assert.Contains("workspace:" + fixture.Workspace.Directory, removed.RetainedResources);
+        }
         Assert.Equal("up_attempt_already_recorded_zero_owners_no_retry", (await runner.Provision(fixture.Request)).Code);
         Assert.Equal(1, fixture.Process.UpCalls);
     }

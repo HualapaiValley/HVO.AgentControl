@@ -64,7 +64,9 @@ public sealed class DevContainerCliAcceptanceTests
                         new("bash", ["bash", "--version"], "GNU bash"),
                         new("feature", ["hvo-feature-proof"], "feature-installed"),
                         new("postCreate", ["cat", "/home/vscode/.hvo-post-create"], "post-create-observed"),
-                        new("project", ["dotnet", "run", "--project", "Probe.csproj", "--configuration", "Release"], "disposable-project-built")
+                        // Hosted runner UID may differ from vscode's pinned 1000.
+                        // Only disposable build outputs need cross-UID cleanup.
+                        new("project", ["sh", "-c", "umask 000; dotnet run --project Probe.csproj --configuration Release"], "disposable-project-built")
                     ]));
                 requests.Add(new(Guid.NewGuid().ToString("D"), name, ColdBuild: name == "cold"));
             }
@@ -135,6 +137,12 @@ public sealed class DevContainerCliAcceptanceTests
             // An interrupted CLI may still have Docker effects. A momentary zero
             // observation is not enough to delete a potentially mounted checkout.
             if (receipts.Any(x => x.EffectStarted && x.State == "Unknown")) mayDelete = false;
+            if (mayDelete)
+            {
+                try { Directory.Delete(root, true); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                { mayDelete = false; cleanupErrors.Add("Fixture directory cleanup failed; retained root: " + error.Message); }
+            }
             var report = Environment.GetEnvironmentVariable("HVO_DEVCONTAINER_RECEIPT") ?? Path.Combine(Path.GetTempPath(), "hvo-cli-acceptance-receipt-" + Guid.NewGuid().ToString("N") + ".json");
             Directory.CreateDirectory(Path.GetDirectoryName(report)!);
             await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new
@@ -150,7 +158,6 @@ public sealed class DevContainerCliAcceptanceTests
                 fixtureRootRetained = !mayDelete,
                 retained = "Docker images/build cache retained; checkout retention verified before any disposable fixture directory cleanup."
             }, new JsonSerializerOptions { WriteIndented = true }));
-            if (mayDelete) Directory.Delete(root, true);
             Assert.True(cleanupErrors.Count == 0, string.Join("; ", cleanupErrors));
         }
 

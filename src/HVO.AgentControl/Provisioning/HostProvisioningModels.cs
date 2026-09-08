@@ -24,6 +24,8 @@ public enum ProvisionAction { CreateOrObserve, Observe, Remove }
 // The caller MUST durably bind OperationId -> Digest, serialize all users of this
 // operation/workspace, and hold the admission until disposal. It owns capacity and
 // authorization. Implementations must reject conflicting intent across restarts.
+// Remove authority includes the caller's preservation/backup or explicit loss
+// disposition for container-local state and any missing/unverified bind source.
 public interface IProvisionAttemptLedger
 {
     Task<IProvisionAttempt> Acquire(ProvisionIntent intent, ProvisionAction action, CancellationToken token);

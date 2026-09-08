@@ -50,7 +50,9 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
                 context.EffectStarted = removed.Started;
                 if (!Success(removed)) return context.Result("Unknown", "removal_not_confirmed");
                 if (await ObserveOwners(intent, token) is not null) return context.Result("Unknown", "container_still_observed");
-                return context.Result("Removed", "owned_container_removed_retained_data_preserved");
+                return context.Result("Removed", WorkspacePresent(intent)
+                    ? "owned_container_removed_retained_data_preserved"
+                    : "owned_container_removed_workspace_retention_unverified");
             }
             if (owners is not null)
             {
@@ -447,6 +449,11 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new ProvisionFault("Failed", "symlink_host_path_not_authorized");
         return path;
     }
+    private static bool WorkspacePresent(ProvisionIntent intent)
+    {
+        try { CanonicalPath(intent.Workspace.Directory, true); return true; }
+        catch (Exception error) when (error is ProvisionFault or IOException or UnauthorizedAccessException) { return false; }
+    }
     private sealed class ProvisionFault(string state, string code) : Exception(code) { public string State => state; public string Code => Message; }
     private sealed class RunContext(string operationId, Action<ProvisionProgress>? observer)
     {
@@ -467,7 +474,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
         public HostProvisionResult Result(string state, string code)
         {
             var retained = new List<string>();
-            if (Intent is not null) retained.Add("workspace:" + Intent.Workspace.Directory);
+            if (Intent is not null) retained.Add((WorkspacePresent(Intent) ? "workspace:" : "workspace-missing-or-unverified:") + Intent.Workspace.Directory);
             retained.Add("docker-image-and-build-cache:retained");
             if (Observed is not null) retained.AddRange(Observed.Mounts.Where(x => x.Type == "volume").Select(x => "volume:" + x.VolumeName));
             lock (progress) return new(operationId, state, code, EffectStarted, Intent, Configuration, Observed, Executed, progress.ToImmutableArray(), retained.ToImmutableArray());
