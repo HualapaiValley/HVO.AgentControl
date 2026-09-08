@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260907193857_WorkItemOwnership")]
+    partial class WorkItemOwnership
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -44,44 +47,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasKey("Id");
 
                     b.ToTable("Assignments");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.CommandAuthority", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("AcknowledgedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("AcknowledgementData")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Attempt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("AuthorityGeneration")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("CommandId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("EnrollmentId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CommandId")
-                        .IsUnique();
-
-                    b.HasIndex("EnrollmentId");
-
-                    b.ToTable("CommandAuthorities");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.CommandRecord", b =>
@@ -131,10 +96,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ProviderPoolId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
                     b.Property<long>("QueueOrder")
                         .HasColumnType("INTEGER");
 
@@ -170,9 +131,6 @@ namespace HVO.AgentControl.Infrastructure
                 {
                     b.Property<string>("Id")
                         .HasColumnType("TEXT");
-
-                    b.Property<bool>("ContinuousSupervision")
-                        .HasColumnType("INTEGER");
 
                     b.Property<string>("CoordinatorWorkerId")
                         .IsRequired()
@@ -210,9 +168,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("LastSupervisorAt")
-                        .HasColumnType("INTEGER");
-
                     b.Property<int>("MaxRounds")
                         .HasColumnType("INTEGER");
 
@@ -236,37 +191,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasKey("Id");
 
                     b.ToTable("CoordinationRuns");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.EvidenceCursor", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CursorName")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CursorValue")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("EnrollmentId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("LastAcknowledgedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("LastConsumedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("EnrollmentId", "CursorName")
-                        .IsUnique();
-
-                    b.ToTable("EvidenceCursors");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.JournalEvent", b =>
@@ -490,44 +414,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique();
 
                     b.ToTable("OperatorUpdateSchedules");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.ParticipantEnrollment", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AdapterType")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("AuthorityGeneration")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("DisplayName")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("EnrolledAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("LastSeenAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("Revision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AdapterType");
-
-                    b.HasIndex("State");
-
-                    b.ToTable("Enrollments");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.PendingRequest", b =>
@@ -763,10 +649,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("Repository")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
                     b.Property<long>("Revision")
                         .HasColumnType("INTEGER");
 
@@ -788,10 +670,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("IssueNumber");
 
                     b.HasIndex("OwnerWorkerId");
-
-                    b.HasIndex("Repository", "Branch")
-                        .IsUnique()
-                        .HasFilter("State NOT IN ('Released', 'Abandoned')");
 
                     b.ToTable("WorkItems");
                 });
@@ -1045,71 +923,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasKey("Id");
 
                     b.ToTable("GitHubAccess");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Infrastructure.ProviderFailureReceipt", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Category")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CommandId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("ObservedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("PoolId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("RetryAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("Status")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("ProviderFailureReceipt");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Infrastructure.ProviderPool", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("ConsecutiveFailures")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("LastCommandId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("ObservedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ProviderId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("RetryAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("Revision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("ProviderPool");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Services.ProviderCredential", b =>
