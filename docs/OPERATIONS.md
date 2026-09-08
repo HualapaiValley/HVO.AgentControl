@@ -95,6 +95,8 @@ Each application request has a UUID and immutable routing/content. Retrying that
 
 `AcceptedByRuntime` means receipt. `Running` requires native evidence. `Finished` means an associated native turn ended, not that its objective succeeded. Assignment outcomes remain separate; the owner records evidence for reported/verified completion, failure or blocking.
 
+Coordinator native errors are classified before decision JSON repair. A run can show `Waiting` with **Coordinator held after native …** while its heartbeat and independent workers continue. See [coordinator native failure recovery](COORDINATOR_NATIVE_FAILURES.md) for the durable hold, eligible recovery, and remaining fallback/compaction limitations.
+
 For `DeliveryUnknown`, inspect the corresponding native message ID, transcript and files. Native identity can establish acceptance; prompt text similarity cannot. Unknown work blocks further prompts on that worker until evidence resolves it or the owner acknowledges uncertainty. Acknowledgement marks that command withdrawn without retry. Any later instruction is a new explicit request. Uncertain session creation is reconciled only by the exact application creation marker and workspace; otherwise its workspace claim remains held until explicit resolution.
 
 An abort receipt is **cancellation requested**. AgentControl waits for observed idle; a remote child process may have effects beyond that receipt. Other workers remain independent. Permissions are answered only by native request identity. A retried reply never grants a different request/scope; after native restart a formerly pending request may become `NoLongerPending` rather than falsely “answered.”
