@@ -51,3 +51,7 @@ public sealed record NativeProcessObservationEvidence(
     string Provenance,
     string Detail,
     string Freshness);
+
+// Lifecycle stops are bound to the observed process, not to transport reachability.
+public sealed record OwnedNativeProcess(string ManagedServerId, int ProcessId, string Incarnation, long ObservedAt);
+public sealed record RuntimeLifecycleInput(long Revision, OwnedNativeProcess? OwnedProcess = null);

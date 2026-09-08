@@ -22,4 +22,5 @@ public interface IRuntimeTransport : IAsyncDisposable
         Task.FromResult<RuntimeTelemetrySample?>(null);
     Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken);
     Task StopOwnedServer(CancellationToken cancellationToken);
+    Task StopOwnedServer(OwnedNativeProcess expected, CancellationToken cancellationToken) => StopOwnedServer(cancellationToken);
 }

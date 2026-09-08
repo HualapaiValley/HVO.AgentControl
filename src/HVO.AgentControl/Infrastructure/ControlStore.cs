@@ -207,10 +207,37 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     public Task<CommandRecord> RuntimeCommand(string runtimeId, string kind, string id) => Write(async db =>
     {
         var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
-        var command = await Record(db, id, runtimeId, null, kind, "{}");
-        if (command.Attempts != 0 || command.State != Delivery.Queued) return command;
+        if (await db.Commands.FindAsync(id) is { } prior) return Same(prior, runtimeId, null, kind, prior.Payload);
+        if (kind is not ("EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer"))
+            throw new ControlException("Unsupported runtime lifecycle command.", 400);
         runtime.DesiredConnected = kind is "EnsureServer" or "RefreshState";
         runtime.Revision++;
+        OwnedNativeProcess? owned = null;
+        if (kind == "StopManagedServer")
+        {
+            var observed = await db.Events.AsNoTracking().Where(x => x.RuntimeId == runtimeId && x.Type == "NativeProcessObserved")
+                .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync();
+            if (observed is not null)
+            {
+                var evidence = Json.Read<NativeProcessObservationEvidence>(observed.Payload);
+                if (evidence is { State: NativeProcessObservationState.Observed, Freshness: "Fresh", ProcessId: > 0 } &&
+                    evidence.ObservedAt >= Now - 60000 && evidence.ManagedServerId == runtime.ManagedServerId)
+                    owned = new(evidence.ManagedServerId, evidence.ProcessId.Value, evidence.Incarnation, evidence.ObservedAt);
+            }
+        }
+        var command = await Record(db, id, runtimeId, null, kind, Json.Write(new RuntimeLifecycleInput(runtime.Revision, owned)));
+        foreach (var queued in await db.Commands.Where(x => x.RuntimeId == runtimeId && x.Id != command.Id &&
+                     ((x.State == Delivery.Queued && (x.Kind == "EnsureServer" || x.Kind == "RefreshState" || x.Kind == "DisconnectRuntime" || x.Kind == "StopManagedServer")) ||
+                      (x.State == Delivery.Dispatching && x.Kind == "StopManagedServer"))).ToListAsync())
+        {
+            var dispatchedStop = queued.State == Delivery.Dispatching;
+            queued.State = dispatchedStop ? Delivery.Unknown : Delivery.Cancelled;
+            queued.Detail = dispatchedStop
+                ? "A newer runtime lifecycle intent arrived after stop dispatch. The stop outcome is unknown; it will not be repeated."
+                : "Superseded by a newer runtime lifecycle intent; no destructive action was performed.";
+            queued.UpdatedAt = Now;
+            Event(db, "RuntimeLifecycleSuperseded", runtimeId, commandId: queued.Id, payload: new { supersededBy = command.Id, state = queued.State });
+        }
         return command;
     });
 
