@@ -1,6 +1,7 @@
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Ssh;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -70,6 +71,39 @@ public sealed class AssignmentCapabilitiesTests
         Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, request)).Id);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Kind == "Abort");
         Assert.Contains("signing", Json.Read<PromptInput>(first.Payload).Text);
+    }
+
+    [Fact]
+    public async Task CoalescedCapabilityReceiptSurvivesTerminalCompletionRestartAndReplay()
+    {
+        string data, secrets, workerId, firstId, coalescedId;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var worker = await PersistenceTests.SeedWorker(app.Store); workerId = worker.Id;
+            firstId = Guid.NewGuid().ToString(); coalescedId = Guid.NewGuid().ToString();
+
+            var first = await app.Store.DiscoverCapabilities(worker.Id, new(firstId));
+            var coalesced = await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId));
+            Assert.Equal(first.Id, coalesced.Id);
+            Assert.Single((await app.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = Delivery.Unknown; return true; });
+            Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId))).Id);
+            var other = await PersistenceTests.SeedWorker(app.Store);
+            await Assert.ThrowsAsync<ControlException>(() => app.Store.DiscoverCapabilities(other.Id, new(coalescedId)));
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = Delivery.Finished; return true; });
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var replayed = await restarted.Store.DiscoverCapabilities(workerId, new(coalescedId));
+        var repeated = await restarted.Store.DiscoverCapabilities(workerId, new(coalescedId));
+
+        Assert.Equal(firstId, replayed.Id);
+        Assert.Equal(firstId, repeated.Id);
+        Assert.Equal(Delivery.Finished, replayed.State);
+        Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+        Assert.Single(await restarted.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == coalescedId).ToListAsync()));
     }
 
     [Fact]

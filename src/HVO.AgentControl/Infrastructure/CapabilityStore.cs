@@ -35,13 +35,31 @@ public sealed partial class ControlStore
 
     internal async Task<CommandRecord> EnqueueCapabilities(ControlDb db, WorkerRecord worker, string requestId)
     {
+        ValidateRequestId(requestId);
         if (await db.Commands.FindAsync(requestId) is { } prior)
         {
             if (prior.WorkerId != worker.Id || prior.Origin != "capability-report") throw new ControlException("Request ID belongs to another operation.");
             return prior;
         }
+        var aliases = await db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == requestId).ToListAsync();
+        if (aliases.Count > 1) throw new ControlException("Capability request receipt is inconsistent; inspect the audit journal.");
+        if (aliases.SingleOrDefault() is { } receipt)
+        {
+            var alias = Json.Read<CapabilityReceiptAlias>(receipt.Payload);
+            if (receipt.RuntimeId != worker.RuntimeId || receipt.WorkerId != worker.Id || alias.WorkerId != worker.Id || alias.Origin != "capability-report")
+                throw new ControlException("Request ID belongs to another operation.");
+            var canonical = await db.Commands.FindAsync(alias.CommandId);
+            if (canonical is null || canonical.WorkerId != worker.Id || canonical.Origin != "capability-report")
+                throw new ControlException("Capability request receipt is unavailable; inspect the audit journal.");
+            return canonical;
+        }
         if (worker.CapabilityCommandId is { } existing && await db.Commands.FindAsync(existing) is { } pending &&
-            (pending.State == Delivery.Queued || Delivery.InFlight(pending.State))) return pending;
+            (pending.State == Delivery.Queued || Delivery.InFlight(pending.State)))
+        {
+            Event(db, "CapabilityInquiryCoalesced", worker.RuntimeId, worker.Id, requestId,
+                new CapabilityReceiptAlias(worker.Id, "capability-report", pending.Id), provenance: "user");
+            return pending;
+        }
         var command = await EnqueuePrompt(db, worker.Id, new(requestId, CapabilityInquiry, worker.Revision), "capability-report");
         worker.CapabilityCommandId = command.Id;
         if (worker.CapabilityReport.Length == 0) worker.CapabilityReportedAt = null;
@@ -60,4 +78,6 @@ public sealed partial class ControlStore
         Use lightweight read-only checks. Do not install anything, run benchmarks, generate media, or perform signing.
         Give a concise report of at most 6000 characters; mention anything requiring a follow-up. Do not start other work.
         """;
+
+    private sealed record CapabilityReceiptAlias(string WorkerId, string Origin, string CommandId);
 }
