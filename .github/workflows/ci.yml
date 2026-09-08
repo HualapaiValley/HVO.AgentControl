@@ -100,6 +100,9 @@ jobs:
       - name: Terminal target selection regression
         working-directory: tests/Browser
         run: node terminal-target-selection.test.cjs
+      - name: Terminal asset loader regressions
+        working-directory: tests/Browser
+        run: node --test terminal-assets.test.cjs
       - name: Onboarding fixture cleanup regressions
         working-directory: tests/Browser
         run: node --test onboarding-cleanup.test.cjs
