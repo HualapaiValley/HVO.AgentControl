@@ -1,5 +1,5 @@
 # Independent, opt-in control service. See docs/CONTROL_SIDECAR.md before use.
-# The AgentControl direct HTTP adapter/session registry is a subsequent #140 slice.
+# Register its direct HTTP endpoint on the host's Control services page.
 name: hvo-agentcontrol-control
 
 services:

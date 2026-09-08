@@ -374,7 +374,13 @@ public sealed class RuntimeEnvironmentTests
         {
             var previous = db.Database.GetMigrations().Single(x => x.EndsWith("HostProjectInventory", StringComparison.Ordinal));
             await db.GetService<IMigrator>().MigrateAsync(previous);
-            db.Hosts.Add(host); db.Projects.Add(project); db.InventoryMutations.Add(receipt); db.Runtimes.Add(runtime);
+            db.Hosts.Add(host); db.Projects.Add(project); db.InventoryMutations.Add(receipt);
+            var properties = db.Entry(runtime).Metadata.GetProperties().Where(x => x.Name != nameof(RuntimeRecord.ConnectionKind)).ToArray();
+            var columns = string.Join(",", properties.Select(x => "\"" + x.Name + "\""));
+            var placeholders = string.Join(",", properties.Select((_, index) => "{" + index + "}"));
+            var values = properties.Select(x => x.PropertyInfo!.GetValue(runtime)!).ToArray();
+            var historicalInsert = "INSERT INTO Runtimes (" + columns + ") VALUES (" + placeholders + ")";
+            await db.Database.ExecuteSqlRawAsync(historicalInsert, values);
             await db.SaveChangesAsync();
         }
         Assert.Equal(Json.Write(host), Json.Write(await app.Store.Host(host.Id)));

@@ -18,6 +18,10 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test isolated OpenCode sidecar lifecycle without provider credentials
         run: python3 tests/control_sidecar_smoke.py
+      - name: Test demo lifecycle retains control network configuration
+        run: python3 tests/demo_lifecycle_smoke.py
+      - name: Test private control network across web recreation
+        run: python3 tests/control_web_network_smoke.py
 
   build:
     runs-on: ubuntu-latest
@@ -117,7 +121,8 @@ jobs:
           python3 tests/Browser/seed-provider-pool.py artifacts/ui-data/agentcontrol.db
           python3 tests/Browser/seed-coordination-supervision.py artifacts/ui-data/agentcontrol.db
           python3 tests/Browser/seed-conversation-race.py artifacts/ui-data/agentcontrol.db
-          HVO_PROVIDER_POOL_FIXTURE=1 HVO_PROVIDER_KEY_FIXTURE=1 HVO_COORDINATION_SUPERVISION_FIXTURE=1 HVO_CONVERSATION_RACE_FIXTURE=1 node tests/Browser/package-smoke.cjs
+          python3 tests/Browser/seed-control-services.py artifacts/ui-data/agentcontrol.db
+          HVO_PROVIDER_POOL_FIXTURE=1 HVO_PROVIDER_KEY_FIXTURE=1 HVO_COORDINATION_SUPERVISION_FIXTURE=1 HVO_CONVERSATION_RACE_FIXTURE=1 HVO_CONTROL_SERVICE_FIXTURE=1 node tests/Browser/package-smoke.cjs
       - name: Upload UI diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4

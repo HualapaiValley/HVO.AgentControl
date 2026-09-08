@@ -125,6 +125,8 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
 
     private async Task<RuntimeRecord> SaveRuntime(ControlDb db, RuntimeRecord input)
     {
+        RequireDevelopmentRuntime(input);
+        if (await db.Runtimes.FindAsync(input.Id) is { } registered) RequireDevelopmentRuntime(registered);
         ValidateRuntime(input);
         var existing = await db.Runtimes.FindAsync(input.Id);
         if (input.Capacity != 1 && await db.RuntimeEnvironments.AnyAsync(x => x.RuntimeId == input.Id && x.Kind == RuntimeEnvironmentKind.ManagedDevcontainer))
@@ -208,6 +210,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
         if (await db.Commands.FindAsync(id) is { } prior) return Same(prior, runtimeId, null, kind, prior.Payload);
+        if (kind == "StopManagedServer") RequireDevelopmentRuntime(runtime);
         if (kind is not ("EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer"))
             throw new ControlException("Unsupported runtime lifecycle command.", 400);
         runtime.DesiredConnected = kind is "EnsureServer" or "RefreshState";
@@ -245,6 +248,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var runtime = await db.Runtimes.FindAsync(input.RuntimeId) ?? throw new ControlException("Runtime not found.", 404);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, input.RuntimeId, null, "CreateWorker", Json.Write(input));
+        RequireDevelopmentRuntime(runtime);
         await RequireManagedWorkerSlot(db, runtime);
         ValidatePath(input.Directory);
         if (input.Role is not (SessionRoles.Worker or SessionRoles.Coordinator)) throw new ControlException("Choose Worker or Coordinator role.", 400);
@@ -262,7 +266,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
 
     public Task<CommandRecord> InspectWorkspace(InspectWorkspaceInput input) => Write(async db =>
     {
-        _ = await db.Runtimes.FindAsync(input.RuntimeId) ?? throw new ControlException("Runtime not found.", 404);
+        RequireDevelopmentRuntime(await db.Runtimes.FindAsync(input.RuntimeId) ?? throw new ControlException("Runtime not found.", 404));
         ValidatePath(input.Directory);
         return await Record(db, input.Id, input.RuntimeId, null, "InspectWorkspace", Json.Write(input));
     });
