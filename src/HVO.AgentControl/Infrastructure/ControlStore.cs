@@ -253,6 +253,27 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         return command;
     });
 
+    public Task<CommandRecord> ReinspectNativeProcess(string runtimeId, ReinspectNativeProcessInput input) => Write(async db =>
+    {
+        var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
+        var payload = Json.Write(input);
+        if (await db.Commands.FindAsync(input.Id) is { } prior)
+            return Same(prior, runtimeId, null, "ReinspectNativeProcess", payload);
+        RequireDevelopmentRuntime(runtime);
+        if (input.ExpectedRuntimeRevision != runtime.Revision || input.ManagedServerId != runtime.ManagedServerId ||
+            !NativeProcessProbe.ValidMarker(input.ExpectedIncarnation) || !runtime.DesiredConnected)
+            throw new ControlException("Refresh the connected runtime identity before requesting native-process reinspection.");
+        var observed = await db.Events.AsNoTracking().Where(x => x.RuntimeId == runtimeId && x.Type == "NativeProcessObserved")
+            .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync();
+        var evidence = observed is null ? null : Json.Read<NativeProcessObservationEvidence>(observed.Payload);
+        if (evidence is not { State: NativeProcessObservationState.Observed, ProcessId: > 0 } ||
+            evidence.ManagedServerId != input.ManagedServerId || evidence.Incarnation != input.ExpectedIncarnation)
+            throw new ControlException("Expected native-process identity is not retained for this runtime. Reconnect and inspect before requesting reinspection.");
+        var command = await Record(db, input.Id, runtimeId, null, "ReinspectNativeProcess", payload);
+        command.ExecutionPayload = Json.Write(new NativeProcessReinspectionRequest(input, evidence.ProcessId.Value));
+        return command;
+    });
+
     public Task<CommandRecord> CreateWorker(CreateWorkerInput input) => Write(async db =>
     {
         var runtime = await db.Runtimes.FindAsync(input.RuntimeId) ?? throw new ControlException("Runtime not found.", 404);

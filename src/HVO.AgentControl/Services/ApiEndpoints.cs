@@ -64,6 +64,8 @@ public static class ApiEndpoints
         group.MapPost("/runtimes/verified-connect", (VerifiedRuntimeInput input, RuntimeVerificationService verification) => verification.SaveAndConnect(input));
         group.MapPost("/runtimes/{id}/connect", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "EnsureServer", input.Id));
         group.MapPost("/runtimes/{id}/refresh", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "RefreshState", input.Id));
+        group.MapPost("/runtimes/{id}/native-process/reinspect", (string id, ReinspectNativeProcessInput input, ControlStore store) =>
+            store.ReinspectNativeProcess(id, input));
         group.MapPost("/runtimes/{id}/disconnect", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "DisconnectRuntime", input.Id));
         group.MapPost("/runtimes/{id}/stop", (string id, RequestId input, ControlStore store) => store.RuntimeCommand(id, "StopManagedServer", input.Id));
         group.MapPost("/workers", (CreateWorkerInput input, ControlStore store) => store.CreateWorker(input));
