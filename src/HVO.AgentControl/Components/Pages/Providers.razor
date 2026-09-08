@@ -69,6 +69,10 @@
             {
                 <p class="meta">Go key revision @delivery.KeyRevision · @(delivery.KeyRevision != keyStatus.Revision ? "Saved key changed; apply the latest revision." : delivery.State == "StoredOnRuntime" ? "Stored by OpenCode. Model access and allowance not yet tested." : delivery.State == "FailedBeforeSend" ? "Connection failed before sending. Retry when the runtime is available." : "Delivery unconfirmed. Applying again safely replaces the same provider key.")</p>
             }
+            @if (keyStatus?.Readiness.FirstOrDefault(x => x.RuntimeId == runtime.Id) is { } readiness)
+            {
+                <p class="meta">Go readiness: @readiness.State · @readiness.Detail</p>
+            }
             @if (runtime.Health != "Healthy") { <p class="meta">Verify and connect this runtime first.</p> }
         </section>
     }
