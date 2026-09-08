@@ -1,0 +1,475 @@
+{
+  "schemaVersion": 1,
+  "planVersion": "2026-09-07.3",
+  "repository": "RoySalisbury/HVO.AgentControl",
+  "observedAt": "2026-09-07T21:18:55.922661+00:00",
+  "ready": [
+    {
+      "issue": 7,
+      "title": "Persist evidence cursors and bounded coordinator retrieval",
+      "state": "ready",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:26Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
+      "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing."
+    },
+    {
+      "issue": 3,
+      "title": "Persist scheduled operator updates independently of model turns",
+      "state": "ready",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:20Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Immediate milestone and active-set update semantics",
+      "reason": "Schedules/outbox shipped in PR71; material milestones and active-set changes remain."
+    }
+  ],
+  "issues": [
+    {
+      "issue": 1,
+      "title": "Beta: prove AgentControl coordinating development of its own repository",
+      "state": "epic",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:18Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Maintain acceptance checklist",
+      "reason": "Beta tracking epic; update delivered evidence, do not dispatch entire epic."
+    },
+    {
+      "issue": 3,
+      "title": "Persist scheduled operator updates independently of model turns",
+      "state": "ready",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:20Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Immediate milestone and active-set update semantics",
+      "reason": "Schedules/outbox shipped in PR71; material milestones and active-set changes remain."
+    },
+    {
+      "issue": 4,
+      "title": "Add participant enrollment and explicit command receipts",
+      "state": "active",
+      "priority": 1,
+      "unblocks": 1,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:21Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Version enrollment/attempt identity and stale-generation tests",
+      "reason": "Stable IDs exist; formal authority generation/receipt contract is still incomplete."
+    },
+    {
+      "issue": 5,
+      "title": "Track work-item ownership through review and cleanup",
+      "state": "active",
+      "priority": 1,
+      "unblocks": 7,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:23Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Durable work item and atomic modifying-owner claim with restart tests",
+      "reason": "Core missing ownership prevents reliable cross-task and cross-repo lifecycle."
+    },
+    {
+      "issue": 6,
+      "title": "Add endpoint-scoped resource reservations",
+      "state": "blocked",
+      "priority": 1,
+      "unblocks": 2,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:24Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Persist endpoint claims and reconcile release",
+      "reason": "Reservations need durable task ownership and explicit endpoint identity."
+    },
+    {
+      "issue": 7,
+      "title": "Persist evidence cursors and bounded coordinator retrieval",
+      "state": "ready",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:26Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
+      "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing."
+    },
+    {
+      "issue": 8,
+      "title": "Record exact-range reviews and bounded correction handoffs",
+      "state": "blocked",
+      "priority": 1,
+      "unblocks": 2,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:28Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Persist author/reviewer/head verdict and invalidate changed-head approval",
+      "reason": "Review receipts are currently reported prose; merge gates need durable exact-head evidence."
+    },
+    {
+      "issue": 9,
+      "title": "Investigate and implement one additional native agent adapter",
+      "state": "blocked",
+      "priority": 3,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:29Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 4,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Evaluate and implement one bounded native adapter",
+      "reason": "Additional harness expansion should follow an explicit adapter contract."
+    },
+    {
+      "issue": 10,
+      "title": "Expose current assignment, expected events and stalls in Coordination",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:31Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Reconcile intervention/deadline visibility with #75",
+      "reason": "Status UI shipped in PR71/51; reconcile remaining acceptance with active #75 before another UI change."
+    },
+    {
+      "issue": 13,
+      "title": "Exercise restart, long tools and uncertain coordination delivery",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:33Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Acceptance-to-test/native-evidence matrix before closure",
+      "reason": "PR63/71 plus prior native exercises cover much of this; verify remaining native scenario evidence."
+    },
+    {
+      "issue": 24,
+      "title": "Verify schema-constrained coordinator output with bounded repair",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:34Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Verify remaining provider-specific acceptance; do not redo parser recovery",
+      "reason": "Bounded repair/recovery shipped in PR49/52; native schema-constrained free-model verification remains distinct."
+    },
+    {
+      "issue": 34,
+      "title": "Persist model usage and timing; report by worker and model",
+      "state": "needs-triage",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:36Z",
+      "planStale": true,
+      "blockers": [],
+      "nextSlice": "Complete backfill correction and independent review",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 35,
+      "title": "Show periodic runtime CPU and memory telemetry",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:37Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Validate deployed sampling before scoping another platform collector",
+      "reason": "History PR73 and periodic sampler PR79 merged; deployment validation and macOS/v1 scope remain."
+    },
+    {
+      "issue": 42,
+      "title": "Provision project-scoped task sessions with worker-owned environment verification",
+      "state": "blocked",
+      "priority": 1,
+      "unblocks": 3,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T20:54:48Z",
+      "planStale": true,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 6,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Project identity and task-owned worktree/session preparation",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 43,
+      "title": "Provision and retire devcontainer workers across multiple Docker hosts",
+      "state": "blocked",
+      "priority": 2,
+      "unblocks": 1,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:41Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 6,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 42,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Durable Docker-host provisioning workflow; separate ready inventory slice if needed",
+      "reason": "CLI templates verified; automatic lifecycle depends on ownership/workspace boundaries."
+    },
+    {
+      "issue": 44,
+      "title": "Enable repository-scoped worker GitHub issue and PR publication",
+      "state": "blocked",
+      "priority": 1,
+      "unblocks": 2,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:43Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 8,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Publication outbox with repository-qualified receipts",
+      "reason": "App credentials and publication work; durable write intent/uncertain reconciliation remains."
+    },
+    {
+      "issue": 53,
+      "title": "New UI design",
+      "state": "epic",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:44Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Review child #75 against visual references",
+      "reason": "Design parent of #75, not a duplicate implementation ticket."
+    },
+    {
+      "issue": 54,
+      "title": "Provider sign-in from AgentHost and managed devcontainer credentials",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T19:36:04Z",
+      "planStale": true,
+      "blockers": [],
+      "nextSlice": "Durable provider readiness and supported-method discovery; no OAuth cloning",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 65,
+      "title": "Reduce avoidable worker approvals and explain already-resolved requests",
+      "state": "blocked",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T21:13:26Z",
+      "planStale": true,
+      "blockers": [
+        {
+          "issue": 42,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Integrate task-owned scratch/tool inventory into child prompts",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 66,
+      "title": "Preserve task evidence and export prompt/environment evaluation datasets",
+      "state": "blocked",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:49Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Bounded durable evidence archive before operational pruning",
+      "reason": "Evidence retention needs stable task identity; #34/#35 enrich records but are not hard blockers for archive foundation."
+    },
+    {
+      "issue": 67,
+      "title": "Accept GitHub comment instructions and dispatch managed cloud workers",
+      "state": "blocked",
+      "priority": 3,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:50Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 42,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 43,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 44,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Authenticated/deduplicated webhook inbox after prerequisites",
+      "reason": "External intake must not outrun task isolation, capacity lifecycle and publication reconciliation."
+    },
+    {
+      "issue": 69,
+      "title": "Add task intake with model selection, risk floors and bounded escalation",
+      "state": "blocked",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T21:13:28Z",
+      "planStale": true,
+      "blockers": [
+        {
+          "issue": 5,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Persist model routing decisions and risk floors on work items",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 70,
+      "title": "Enable coordinator-managed merges with exact-revision review and CI gates",
+      "state": "blocked",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:53Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 8,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 44,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Conditional serialized merge intents with refreshed CI/head checks",
+      "reason": "CI read permission merged PR74; exact-review and publication intents still needed for durable automatic merges."
+    },
+    {
+      "issue": 75,
+      "title": "Chat-first compact worker UI with measured performance improvements",
+      "state": "active",
+      "priority": 0,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T20:54:47Z",
+      "planStale": true,
+      "blockers": [],
+      "nextSlice": "Finish active chat/performance implementation; preserve approvals and drafts",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 78,
+      "title": "Prioritize backlog by dependencies and evidence with periodic coordinator triage",
+      "state": "active",
+      "priority": 0,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T20:44:41Z",
+      "planStale": true,
+      "blockers": [],
+      "nextSlice": "Root executable audit and canonical operating plan; durable scheduler follows",
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+    },
+    {
+      "issue": 82,
+      "title": "Track shared provider limits and recover with bounded model fallback",
+      "state": "active",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T20:16:57Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 84,
+      "title": "Refresh provider readiness safely after runtime key registration",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T19:35:14Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    }
+  ],
+  "limitations": [
+    "Issue closure is prerequisite evidence, not proof of deployment.",
+    "Revalidate issue revisions, ownership, runtime capabilities and exact scope before dispatch.",
+    "No semantic duplicate inference or automatic closure; recommendations require evidence review."
+  ]
+}

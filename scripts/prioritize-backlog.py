@@ -79,6 +79,18 @@ def prioritize(issues, plan, active=(), now=None, pulls=()):
                             'No semantic duplicate inference or automatic closure; recommendations require evidence review.']}
 
 
+def validate_plan_schema(plan, path=''):
+    """Validate that a plan dict has the required input schema fields."""
+    prefix = f'{path}: ' if path else ''
+    for key in ('version', 'repository', 'items'):
+        if key not in plan:
+            raise ValueError(f'{prefix}Plan missing required input field "{key}"')
+    if not isinstance(plan['items'], list):
+        raise ValueError(f'{prefix}Plan "items" must be a list')
+    if 'schemaVersion' in plan or 'ready' in plan or 'issues' in plan:
+        raise ValueError(f'{prefix}Plan has output schema fields (schemaVersion/ready/issues); use an input plan with "items"')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--issues', type=Path, help='Offline snapshot with repository and issues keys; omit to fetch using gh')
@@ -86,6 +98,7 @@ def main():
     parser.add_argument('--active', type=int, nargs='*', default=[], help='Issue IDs with active or uncertain ownership')
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text())
+    validate_plan_schema(plan, str(args.plan))
     if args.issues:
         snapshot = json.loads(args.issues.read_text())
         if snapshot['repository'].casefold() != plan['repository'].casefold():
