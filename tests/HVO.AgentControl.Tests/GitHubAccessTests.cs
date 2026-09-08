@@ -350,6 +350,7 @@ public sealed class GitHubAccessTests
     public async Task DeliveryRotatesOwnedFileAndPreservesPersonalLogin()
     {
         var runtime = SshIntegrationTests.Profile("b", "GitHub delivery", 19998);
+        runtime.StateDirectory = "/home/agent/github-delivery-" + Guid.NewGuid().ToString("N");
         var secrets = new Secrets(Options.Create(new ControlOptions { SecretsDirectory = SshIntegrationTests.FixtureSecrets }));
         var delivery = new GitHubCredentialDelivery(secrets);
         async Task<string> Docker(string script)
