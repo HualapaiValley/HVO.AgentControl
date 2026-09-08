@@ -35,13 +35,35 @@ public sealed partial class ControlStore
 
     internal async Task<CommandRecord> EnqueueCapabilities(ControlDb db, WorkerRecord worker, string requestId)
     {
+        ValidateRequestId(requestId);
         if (await db.Commands.FindAsync(requestId) is { } prior)
         {
-            if (prior.WorkerId != worker.Id || prior.Origin != "capability-report") throw new ControlException("Request ID belongs to another operation.");
+            if (prior.Kind == CapabilityAliasKind)
+            {
+                var alias = Json.Read<CapabilityReceiptAlias>(prior.Payload);
+                return await ResolveAlias(db, worker, prior.RuntimeId, prior.WorkerId, prior.Origin, alias);
+            }
+            if (prior.RuntimeId != worker.RuntimeId || prior.WorkerId != worker.Id || prior.Kind != "Prompt" || prior.Origin != "capability-report")
+                throw new ControlException("Request ID belongs to another operation.");
             return prior;
         }
+        var aliases = await db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == requestId).ToListAsync();
+        if (aliases.Count > 1) throw new ControlException("Capability request receipt is inconsistent; inspect the audit journal.");
+        if (aliases.SingleOrDefault() is { } receipt)
+        {
+            var alias = Json.Read<CapabilityReceiptAlias>(receipt.Payload);
+            var canonical = await ResolveAlias(db, worker, receipt.RuntimeId, receipt.WorkerId, "capability-report", alias);
+            await RecordCapabilityAlias(db, worker, requestId, alias);
+            return canonical;
+        }
         if (worker.CapabilityCommandId is { } existing && await db.Commands.FindAsync(existing) is { } pending &&
-            (pending.State == Delivery.Queued || Delivery.InFlight(pending.State))) return pending;
+            (pending.State == Delivery.Queued || Delivery.InFlight(pending.State)))
+        {
+            var alias = new CapabilityReceiptAlias(worker.Id, "capability-report", pending.Id);
+            await RecordCapabilityAlias(db, worker, requestId, alias);
+            Event(db, "CapabilityInquiryCoalesced", worker.RuntimeId, worker.Id, requestId, alias, provenance: "user");
+            return pending;
+        }
         var command = await EnqueuePrompt(db, worker.Id, new(requestId, CapabilityInquiry, worker.Revision), "capability-report");
         worker.CapabilityCommandId = command.Id;
         if (worker.CapabilityReport.Length == 0) worker.CapabilityReportedAt = null;
@@ -60,4 +82,29 @@ public sealed partial class ControlStore
         Use lightweight read-only checks. Do not install anything, run benchmarks, generate media, or perform signing.
         Give a concise report of at most 6000 characters; mention anything requiring a follow-up. Do not start other work.
         """;
+
+    private const string CapabilityAliasKind = "CapabilityInquiryAlias";
+
+    private async Task<CommandRecord> RecordCapabilityAlias(ControlDb db, WorkerRecord worker, string requestId, CapabilityReceiptAlias alias)
+    {
+        var receipt = await Record(db, requestId, worker.RuntimeId, worker.Id, CapabilityAliasKind, Json.Write(alias));
+        receipt.Origin = "capability-report";
+        receipt.State = Delivery.Finished;
+        receipt.Detail = "Accepted capability inquiry alias; canonical prompt receipt is durable.";
+        return receipt;
+    }
+
+    private static async Task<CommandRecord> ResolveAlias(ControlDb db, WorkerRecord worker, string? runtimeId, string? workerId,
+        string origin, CapabilityReceiptAlias alias)
+    {
+        if (runtimeId != worker.RuntimeId || workerId != worker.Id || alias.WorkerId != worker.Id || alias.Origin != "capability-report")
+            throw new ControlException("Request ID belongs to another operation.");
+        var canonical = await db.Commands.FindAsync(alias.CommandId);
+        if (canonical is null || canonical.RuntimeId != worker.RuntimeId || canonical.WorkerId != worker.Id || canonical.Kind != "Prompt" ||
+            canonical.Origin != origin)
+            throw new ControlException("Capability request receipt is unavailable; inspect the audit journal.");
+        return canonical;
+    }
+
+    private sealed record CapabilityReceiptAlias(string WorkerId, string Origin, string CommandId);
 }

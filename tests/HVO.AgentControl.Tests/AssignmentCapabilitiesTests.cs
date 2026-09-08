@@ -1,6 +1,11 @@
+using System.Reflection;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Services;
 using HVO.AgentControl.Ssh;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -70,6 +75,120 @@ public sealed class AssignmentCapabilitiesTests
         Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, request)).Id);
         Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Kind == "Abort");
         Assert.Contains("signing", Json.Read<PromptInput>(first.Payload).Text);
+    }
+
+    [Theory]
+    [InlineData(Delivery.Finished)]
+    [InlineData(Delivery.Cancelled)]
+    public async Task CoalescedCapabilityReceiptSurvivesTerminalCompletionRestartAndReplay(string terminalState)
+    {
+        string data, secrets, workerId, firstId, coalescedId;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var worker = await PersistenceTests.SeedWorker(app.Store); workerId = worker.Id;
+            firstId = Guid.NewGuid().ToString(); coalescedId = Guid.NewGuid().ToString();
+
+            var first = await app.Store.DiscoverCapabilities(worker.Id, new(firstId));
+            var coalesced = await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId));
+            Assert.Equal(first.Id, coalesced.Id);
+            Assert.Single((await app.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = Delivery.Unknown; return true; });
+            Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId))).Id);
+            var other = await PersistenceTests.SeedWorker(app.Store);
+            await Assert.ThrowsAsync<ControlException>(() => app.Store.DiscoverCapabilities(other.Id, new(coalescedId)));
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = terminalState; return true; });
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var replayed = await restarted.Store.DiscoverCapabilities(workerId, new(coalescedId));
+        var repeated = await restarted.Store.DiscoverCapabilities(workerId, new(coalescedId));
+
+        Assert.Equal(firstId, replayed.Id);
+        Assert.Equal(firstId, repeated.Id);
+        Assert.Equal(terminalState, replayed.State);
+        Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+        Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Id == coalescedId && x.Kind == "CapabilityInquiryAlias");
+        Assert.Single(await restarted.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == coalescedId).ToListAsync()));
+    }
+
+    [Fact]
+    public async Task CoalescedCapabilityReceiptSurvivesEventRetentionBeforeReplay()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var first = await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString()));
+        string coalescedId;
+        await app.Store.Write(async db =>
+        {
+            for (var index = 0; index < 110; index++) ControlStore.Event(db, "RetentionFixture", payload: new { index });
+            return true;
+        });
+        coalescedId = Guid.NewGuid().ToString();
+        await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId));
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = Delivery.Finished; return true; });
+        var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions { EventRetention = 100 }), NullLogger<RuntimeSupervisor>.Instance);
+        var retain = typeof(RuntimeSupervisor).GetMethod("Retain", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        await (Task<bool>)retain.Invoke(supervisor, null)!;
+
+        var replayed = await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId));
+
+        Assert.Equal(first.Id, replayed.Id);
+        Assert.Equal(Delivery.Finished, replayed.State);
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+        Assert.Single(await app.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == coalescedId).ToListAsync()));
+    }
+
+    [Fact]
+    public async Task EventRetentionPrunesStaleAliasesAcrossWorkersAndPreservesRecentReceiptAfterRestart()
+    {
+        string data, secrets, otherWorkerId, otherFirstId, recentAliasId, otherStaleAliasId;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var other = await PersistenceTests.SeedWorker(app.Store); otherWorkerId = other.Id;
+            var first = await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString()));
+            var otherFirst = await app.Store.DiscoverCapabilities(other.Id, new(Guid.NewGuid().ToString())); otherFirstId = otherFirst.Id;
+            Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString()))).Id);
+            otherStaleAliasId = Guid.NewGuid().ToString();
+            Assert.Equal(otherFirst.Id, (await app.Store.DiscoverCapabilities(other.Id, new(otherStaleAliasId))).Id);
+            await app.Store.Write(async db =>
+            {
+                for (var index = 0; index < 110; index++) ControlStore.Event(db, "RetentionFixture", payload: new { index });
+                return true;
+            });
+            recentAliasId = Guid.NewGuid().ToString();
+            Assert.Equal(otherFirst.Id, (await app.Store.DiscoverCapabilities(other.Id, new(recentAliasId))).Id);
+            await app.Store.Write(async db =>
+            {
+                (await db.Commands.FindAsync(first.Id))!.State = Delivery.Finished;
+                (await db.Commands.FindAsync(otherFirst.Id))!.State = Delivery.Finished;
+                return true;
+            });
+            var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions { EventRetention = 4 }), NullLogger<RuntimeSupervisor>.Instance);
+            var retain = typeof(RuntimeSupervisor).GetMethod("Retain", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            await (Task<bool>)retain.Invoke(supervisor, null)!;
+
+            var retainedAliases = await app.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced")
+                .OrderBy(x => x.Sequence).Select(x => x.CommandId).ToListAsync());
+            Assert.Equal([recentAliasId], retainedAliases);
+            Assert.NotNull(await app.Store.Read(async db => await db.Commands.FindAsync(otherStaleAliasId)));
+            Assert.DoesNotContain(await app.Store.Read(db => db.Events.Where(x => x.Type == "RetentionFixture").ToListAsync()),
+                x => x.Payload.Contains("\"index\":0", StringComparison.Ordinal));
+            Assert.NotNull(await app.Store.Read(async db => await db.Commands.FindAsync(first.Id)));
+            Assert.NotNull(await app.Store.Read(async db => await db.Commands.FindAsync(otherFirst.Id)));
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var replayed = await restarted.Store.DiscoverCapabilities(otherWorkerId, new(otherStaleAliasId));
+        var repeated = await restarted.Store.DiscoverCapabilities(otherWorkerId, new(otherStaleAliasId));
+
+        Assert.Equal(otherFirstId, replayed.Id);
+        Assert.Equal(otherFirstId, repeated.Id);
+        Assert.Equal(Delivery.Finished, replayed.State);
+        Assert.Equal(2, (await restarted.Store.Snapshot()).Commands.Count(x => x.Kind == "Prompt"));
     }
 
     [Fact]
