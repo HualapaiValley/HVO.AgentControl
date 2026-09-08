@@ -1,18 +1,19 @@
 const { chromium, expect } = require('@playwright/test');
 const fs = require('node:fs'), path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { createFixture, cleanupFixture } = require('./setup-recovery-ownership.cjs');
 const root = path.resolve(__dirname, '../..'), base = process.env.HVO_BASE_URL || 'http://127.0.0.1:5056';
 const container = 'hvo-agentcontrol-setup-' + Date.now();
 const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
 (async () => {
- let browser;
+ let browser, ownedContainer;
  try {
-  docker(['run','-d','--name',container,'hvo-agentcontrol-ssh-fixture:local']);
-  docker(['cp',root+'/.fixture/secrets/fixture-key.pub',container+':/home/agent/.ssh/authorized_keys']);
-  docker(['exec',container,'chown','agent:agent','/home/agent/.ssh/authorized_keys']);
-  docker(['exec',container,'chmod','600','/home/agent/.ssh/authorized_keys']);
-  docker(['exec',container,'mv','/usr/bin/tmux','/usr/bin/tmux.hvo-test-hidden']);
-  const info=JSON.parse(docker(['inspect',container]))[0], host=info.NetworkSettings.Networks.bridge.IPAddress;
+  ownedContainer=createFixture(docker,container);
+  docker(['cp',root+'/.fixture/secrets/fixture-key.pub',ownedContainer+':/home/agent/.ssh/authorized_keys']);
+  docker(['exec',ownedContainer,'chown','agent:agent','/home/agent/.ssh/authorized_keys']);
+  docker(['exec',ownedContainer,'chmod','600','/home/agent/.ssh/authorized_keys']);
+  docker(['exec',ownedContainer,'mv','/usr/bin/tmux','/usr/bin/tmux.hvo-test-hidden']);
+  const info=JSON.parse(docker(['inspect',ownedContainer]))[0], host=info.NetworkSettings.Networks.bridge.IPAddress;
   browser=await chromium.launch({headless:true,args:['--no-sandbox']});
   const context=await browser.newContext(), page=await context.newPage(); const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(base+'/login');await page.getByLabel('Owner password').fill(fs.readFileSync(root+'/.fixture/secrets/owner-password','utf8').trim());
@@ -39,7 +40,7 @@ const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: [
   await expect(terminal.getByRole('status')).toHaveText('Terminal connected.',{timeout:15000});
   await terminal.locator('.xterm-helper-textarea').pressSequentially("command -v tmux || printf '\\110\\126\\117\\137\\116\\117\\137\\124\\115\\125\\130\\n'");await terminal.keyboard.press('Enter');
   await expect.poll(()=>output).toContain('HVO_NO_TMUX');await terminal.close();
-  docker(['exec',container,'mv','/usr/bin/tmux.hvo-test-hidden','/usr/bin/tmux']);
+  docker(['exec',ownedContainer,'mv','/usr/bin/tmux.hvo-test-hidden','/usr/bin/tmux']);
   await card.getByRole('button',{name:'Edit',exact:true}).click();await profile.getByRole('button',{name:'Verify',exact:true}).click();
   await expect(profile.getByRole('button',{name:'Save and set up workers',exact:true})).toBeVisible({timeout:30000});
   await profile.getByRole('button',{name:'Save and set up workers',exact:true}).click();
@@ -48,5 +49,5 @@ const docker = args => execFileSync('docker', args, { encoding: 'utf8', stdio: [
   const csrf=(await (await context.request.get(base+'/api/v1/csrf')).json()).token;
   await context.request.post(base+'/api/v1/runtimes/'+saved.id+'/disconnect',{headers:{'X-CSRF-TOKEN':csrf},data:{id:crypto.randomUUID()}});
   console.log('PASS: missing tmux blocks agent startup but permits secure save and a real terminal; restoring tmux permits re-verification and worker setup without re-entering credentials.');
- } finally { if(browser)await browser.close();docker(['rm','-f',container]); }
+ } finally { try { if(browser)await browser.close(); } finally { cleanupFixture(docker,ownedContainer); } }
 })().catch(e=>{console.error(e);process.exit(1);});
