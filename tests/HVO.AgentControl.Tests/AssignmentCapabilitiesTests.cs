@@ -77,8 +77,10 @@ public sealed class AssignmentCapabilitiesTests
         Assert.Contains("signing", Json.Read<PromptInput>(first.Payload).Text);
     }
 
-    [Fact]
-    public async Task CoalescedCapabilityReceiptSurvivesTerminalCompletionRestartAndReplay()
+    [Theory]
+    [InlineData(Delivery.Finished)]
+    [InlineData(Delivery.Cancelled)]
+    public async Task CoalescedCapabilityReceiptSurvivesTerminalCompletionRestartAndReplay(string terminalState)
     {
         string data, secrets, workerId, firstId, coalescedId;
         await using (var app = new TestApp())
@@ -96,7 +98,7 @@ public sealed class AssignmentCapabilitiesTests
             Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId))).Id);
             var other = await PersistenceTests.SeedWorker(app.Store);
             await Assert.ThrowsAsync<ControlException>(() => app.Store.DiscoverCapabilities(other.Id, new(coalescedId)));
-            await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = Delivery.Finished; return true; });
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(first.Id))!.State = terminalState; return true; });
         }
 
         await using var restarted = new TestApp(data, secrets);
@@ -105,8 +107,9 @@ public sealed class AssignmentCapabilitiesTests
 
         Assert.Equal(firstId, replayed.Id);
         Assert.Equal(firstId, repeated.Id);
-        Assert.Equal(Delivery.Finished, replayed.State);
+        Assert.Equal(terminalState, replayed.State);
         Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+        Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Id == coalescedId && x.Kind == "CapabilityInquiryAlias");
         Assert.Single(await restarted.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == coalescedId).ToListAsync()));
     }
 
@@ -140,7 +143,7 @@ public sealed class AssignmentCapabilitiesTests
     [Fact]
     public async Task EventRetentionPrunesStaleAliasesAcrossWorkersAndPreservesRecentReceiptAfterRestart()
     {
-        string data, secrets, otherWorkerId, otherFirstId, recentAliasId;
+        string data, secrets, otherWorkerId, otherFirstId, recentAliasId, otherStaleAliasId;
         await using (var app = new TestApp())
         {
             data = app.DataPath; secrets = app.SecretPath;
@@ -149,7 +152,7 @@ public sealed class AssignmentCapabilitiesTests
             var first = await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString()));
             var otherFirst = await app.Store.DiscoverCapabilities(other.Id, new(Guid.NewGuid().ToString())); otherFirstId = otherFirst.Id;
             Assert.Equal(first.Id, (await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString()))).Id);
-            var otherStaleAliasId = Guid.NewGuid().ToString();
+            otherStaleAliasId = Guid.NewGuid().ToString();
             Assert.Equal(otherFirst.Id, (await app.Store.DiscoverCapabilities(other.Id, new(otherStaleAliasId))).Id);
             await app.Store.Write(async db =>
             {
@@ -171,6 +174,7 @@ public sealed class AssignmentCapabilitiesTests
             var retainedAliases = await app.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced")
                 .OrderBy(x => x.Sequence).Select(x => x.CommandId).ToListAsync());
             Assert.Equal([recentAliasId], retainedAliases);
+            Assert.NotNull(await app.Store.Read(async db => await db.Commands.FindAsync(otherStaleAliasId)));
             Assert.DoesNotContain(await app.Store.Read(db => db.Events.Where(x => x.Type == "RetentionFixture").ToListAsync()),
                 x => x.Payload.Contains("\"index\":0", StringComparison.Ordinal));
             Assert.NotNull(await app.Store.Read(async db => await db.Commands.FindAsync(first.Id)));
@@ -178,9 +182,11 @@ public sealed class AssignmentCapabilitiesTests
         }
 
         await using var restarted = new TestApp(data, secrets);
-        var replayed = await restarted.Store.DiscoverCapabilities(otherWorkerId, new(recentAliasId));
+        var replayed = await restarted.Store.DiscoverCapabilities(otherWorkerId, new(otherStaleAliasId));
+        var repeated = await restarted.Store.DiscoverCapabilities(otherWorkerId, new(otherStaleAliasId));
 
         Assert.Equal(otherFirstId, replayed.Id);
+        Assert.Equal(otherFirstId, repeated.Id);
         Assert.Equal(Delivery.Finished, replayed.State);
         Assert.Equal(2, (await restarted.Store.Snapshot()).Commands.Count(x => x.Kind == "Prompt"));
     }
