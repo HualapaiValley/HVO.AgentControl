@@ -51,7 +51,11 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       await renewal.getByLabel('Replacement coordinator instruction', { exact: true }).fill('Continue existing browser task under service supervision.');
       await expect(renewal.getByLabel('Keep supervising until I pause or stop')).toBeChecked();
       await renewal.getByRole('button', { name: 'Apply checkpoint and continue' }).click();
-      await expect(run.getByRole('heading', { name: 'Ready', exact: true })).toBeVisible();
+      // The disconnected fixture moves from Ready to Waiting on the service tick.
+      // Wait for that stable state before the next owner action so it uses the
+      // current revision; continuous supervision does not pause itself here.
+      await expect.poll(async () => (await (await context.request.get(base + '/api/v1/coordinations')).json())[0].state).toBe('Waiting');
+      await expect(run.getByRole('heading', { name: 'Waiting', exact: true })).toBeVisible();
       await expect(run).toContainText('Continuous supervision');
       await expect(run).toContainText('no fixed turn cutoff');
       await expect.poll(async () => (await (await context.request.get(base + '/api/v1/coordinations')).json())[0].lastSupervisorAt).toBeGreaterThan(0);
@@ -61,10 +65,13 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
       await page.setViewportSize({ width: 390, height: 844 });
       await run.getByRole('button', { name: 'Pause coordination', exact: true }).click();
+      await expect(run.getByRole('heading', { name: 'Paused', exact: true })).toBeVisible();
+      await expect(renewal).toBeVisible();
       await expect(renewal.getByLabel('Replacement coordinator instruction')).toHaveValue('Continue existing browser task under service supervision.');
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       await run.getByRole('button', { name: 'Resume coordination', exact: true }).click();
-      await expect(run.getByRole('heading', { name: 'Ready', exact: true })).toBeVisible();
+      await expect.poll(async () => (await (await context.request.get(base + '/api/v1/coordinations')).json())[0].state).toBe('Waiting');
+      await expect(run.getByRole('heading', { name: 'Waiting', exact: true })).toBeVisible();
       await run.getByRole('button', { name: 'Stop coordination', exact: true }).click();
       await expect(run.getByRole('heading', { name: 'Stopped', exact: true })).toBeVisible();
       const saved = (await (await context.request.get(base + '/api/v1/coordinations')).json())[0];
