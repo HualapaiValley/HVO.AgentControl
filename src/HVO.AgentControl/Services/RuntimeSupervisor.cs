@@ -163,7 +163,8 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     if (events.Count > 0) await ObserveEvents(id, events);
                     var workers = await store.Read(db => db.Workers.Where(x => x.RuntimeId == id).AsNoTracking().ToListAsync(token));
                     var pendingPrompts = await store.Read(db => db.Commands.Where(x => x.RuntimeId == id && x.Kind == "Prompt" &&
-                        (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running))
+                        (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running ||
+                         x.State != Delivery.Queued && db.Set<ProviderPool>().Any(p => p.RecoveryCommandId == x.Id && p.Id == x.ProviderPoolId)))
                         .Select(x => new { x.WorkerId, x.NativeMessageId }).ToListAsync(token));
                     var historyUnavailable = false;
                     foreach (var worker in workers)
@@ -558,7 +559,9 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         var activity = snapshot.Permissions.Length > 0 ? "WaitingPermission" : snapshot.Questions.Length > 0 ? "WaitingQuestion" : snapshot.Status switch { "idle" => "Idle", "busy" => "Active", "retry" => "Retrying", _ => "Unknown" };
         if (worker.Activity != activity) { worker.Activity = activity; worker.Revision++; changed = true; }
         worker.Stale = false; worker.LastObservedAt = ControlStore.Now;
-        var commands = await db.Commands.Where(x => x.WorkerId == workerId && (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running)).ToListAsync();
+        var recoveryIds = await db.Set<ProviderPool>().Where(p => p.RecoveryCommandId != "").Select(p => p.RecoveryCommandId).ToListAsync();
+        var commands = await db.Commands.Where(x => x.WorkerId == workerId && (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running ||
+            x.Kind == "Prompt" && x.State != Delivery.Queued && recoveryIds.Contains(x.Id))).ToListAsync();
         var nativeRetry = NativeRetryFailure.Parse(snapshot.StatusDetail);
         var abortObserved = activity == "Idle" && commands.Any(x => x.Kind == "Abort" && x.State == Delivery.Accepted);
         foreach (var command in commands)
@@ -566,33 +569,43 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             if (command.Kind == "Abort" && activity == "Idle" && command.State == Delivery.Accepted)
             { command.State = Delivery.Finished; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
             if (command.Kind != "Prompt") continue;
+            var retired = command.State is Delivery.Cancelled or Delivery.Failed or Delivery.Finished;
+            var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
+            var assistants = user ? NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId) : [];
+            // Preserve scoped failure evidence even when the same snapshot settles an abort.
+            foreach (var assistant in assistants)
+            {
+                var info = assistant.GetProperty("info");
+                if (info.TryGetProperty("error", out var nativeError) && ProviderFailure.Parse(nativeError, ControlStore.Now) is { } failure)
+                    await ControlStore.ObserveProviderFailure(db, worker, command, info.GetProperty("id").GetString()!, failure);
+            }
             if (nativeRetry is not null)
             {
                 var poolId = command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : ControlStore.PoolId(worker, command);
                 if (poolId == "provider:" + nativeRetry.ProviderId)
                     await ControlStore.ObserveProviderFailure(db, worker, command, "retry:" + nativeRetry.Attempt, nativeRetry.Failure, nativeRetry);
             }
-            if (abortObserved && command.State is Delivery.Accepted or Delivery.Running)
+            if (abortObserved && (command.State is Delivery.Accepted or Delivery.Running || user && recoveryIds.Contains(command.Id)))
             {
+                await ControlStore.ObserveProviderCompletion(db, command, false);
+                if (retired) continue; // Routing retirement is not undone by later native evidence.
                 command.State = Delivery.Cancelled; command.Detail = "Cancellation requested and native idle observed. Review tool effects; subprocess termination is not guaranteed.";
                 command.UpdatedAt = ControlStore.Now; worker.Outcome = "Cancelled";
                 if (await db.Assignments.FindAsync(command.Id) is { } cancelled) cancelled.Outcome = "Cancelled";
                 ControlStore.Event(db, "CancellationObserved", worker.RuntimeId, workerId, command.Id); changed = true;
                 continue;
             }
-            var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             if (!user) continue;
-            var assistants = NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId);
             var stoppedToolFailure = activity == "Idle" && assistants.Length > 0 &&
                 snapshot.IdleToolFailureMessageId == assistants[^1].GetProperty("info").GetProperty("id").GetString() &&
                 NativeTurnEvidence.IsCompletedToolFailure(assistants[^1]);
             var ended = assistants.Length > 0 && (NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]) || stoppedToolFailure);
             var failed = assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
-            foreach (var assistant in assistants)
+            if (retired)
             {
-                var info = assistant.GetProperty("info");
-                if (info.TryGetProperty("error", out var nativeError) && ProviderFailure.Parse(nativeError, ControlStore.Now) is { } failure)
-                    await ControlStore.ObserveProviderFailure(db, worker, command, info.GetProperty("id").GetString()!, failure);
+                if (activity == "Idle" && ended)
+                    await ControlStore.ObserveProviderCompletion(db, command, !failed && ControlStore.ResponseText(Json.Write(new { messages = assistants })).Length > 0);
+                continue;
             }
             command.AcceptedAt ??= ControlStore.Now;
             var progress = ControlStore.ResponseText(Json.Write(new { messages = assistants }));
@@ -691,7 +704,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         // Reconciliation completes accepted/running native work, but must never overwrite a terminal or uncertain receipt.
         if (command.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled or Delivery.Unknown) return false;
         command.State = state; command.Detail = detail; command.UpdatedAt = ControlStore.Now;
-        if (command.Kind == "Prompt" && state is Delivery.Failed or Delivery.Unknown)
+        if (command.Kind == "Prompt" && state == Delivery.Failed)
             await ControlStore.ObserveProviderCompletion(db, command, false);
         if (state == Delivery.Failed && command.Kind == "CreateWorker")
             await db.WorkspaceClaims.Where(x => x.CommandId == id && x.WorkerId == null).ExecuteDeleteAsync();

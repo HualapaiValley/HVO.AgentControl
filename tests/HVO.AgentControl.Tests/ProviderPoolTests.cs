@@ -88,6 +88,15 @@ public sealed class ProviderPoolTests
         return (Task<bool>)method.Invoke(supervisor, [worker.Id, snapshot])!;
     }
 
+    private static Task<bool> Complete(TestApp app, string commandId, string state)
+    {
+        var supervisor = new RuntimeSupervisor(app.Store, null!,
+            Microsoft.Extensions.Options.Options.Create(new ControlOptions()),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<RuntimeSupervisor>.Instance);
+        var method = supervisor.GetType().GetMethod("Complete", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        return (Task<bool>)method.Invoke(supervisor, [commandId, state, "fixture transition"])!;
+    }
+
     private static NativeSnapshot ErrorSnapshot(WorkerRecord worker, CommandRecord command) => new(
         JsonSerializer.SerializeToElement(new { }),
         [
@@ -257,6 +266,167 @@ public sealed class ProviderPoolTests
             Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, another));
             return true;
         });
+    }
+
+    [Fact]
+    public async Task LateFailureDoesNotReplaceAnUnresolvedRecoveryLease()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+        var recovery = Command(worker, "openai"); recovery.State = Delivery.Running;
+        var late = Command(worker, "openai"); late.State = Delivery.Running;
+        var waiting = Command(worker, "openai");
+        await app.Store.Write(async db =>
+        {
+            db.Commands.AddRange(failed, recovery, late, waiting);
+            await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+            var pool = (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!;
+            pool.RetryAt = ControlStore.Now - 1;
+            Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+            await ControlStore.ObserveProviderFailure(db, worker, late, "late", new("Throttled", 429, null));
+            Assert.Equal(recovery.Id, pool.RecoveryCommandId);
+            Assert.Equal("Throttled", pool.State);
+            Assert.False(await ControlStore.ProviderDispatchAllowed(db, worker, waiting));
+            return true;
+        });
+        Assert.Equal(2, await app.Store.Read(db => db.Set<ProviderFailureReceipt>().CountAsync()));
+    }
+
+    [Fact]
+    public async Task CancellingKnownUnsentRecoverySettlesLeaseWithoutClaimingAvailability()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+        var recovery = Command(worker, "openai");
+        await app.Store.Write(async db =>
+        {
+            db.Commands.AddRange(failed, recovery);
+            await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+            (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!.RetryAt = ControlStore.Now - 1;
+            Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+            return true;
+        });
+        await app.Store.EditQueue(recovery.Id, "cancel");
+        var pool = Assert.Single(await app.Store.ProviderPools());
+        Assert.Equal("RecoveryRequired", pool.State);
+        Assert.Empty(pool.RecoveryCommandId);
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.EditQueue(recovery.Id, "cancel"));
+        Assert.Equal("RecoveryRequired", Assert.Single(await app.Store.ProviderPools()).State);
+    }
+
+    [Theory]
+    [InlineData("Exhausted")]
+    [InlineData("AuthenticationRequired")]
+    public async Task ManualHoldSurvivesRestartAndSuccessfulReservedAttempt(string category)
+    {
+        string data, secrets, recoveryId;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+            var recovery = Command(worker, "openai");
+            var late = Command(worker, "openai"); late.State = Delivery.Running;
+            recoveryId = recovery.Id;
+            await app.Store.Write(async db =>
+            {
+                db.Commands.AddRange(failed, recovery, late);
+                await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+                var pool = (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!;
+                pool.RetryAt = ControlStore.Now - 1;
+                Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+                recovery.State = Delivery.Running;
+                await ControlStore.ObserveProviderFailure(db, worker, late, "manual", new(category, 401, null));
+                Assert.Equal(recovery.Id, pool.RecoveryCommandId);
+                Assert.Equal(category, pool.State);
+                return true;
+            });
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        await restarted.Store.Write(async db =>
+        {
+            var recovery = (await db.Commands.FindAsync(recoveryId))!;
+            await ControlStore.ObserveProviderCompletion(db, recovery, true);
+            return true;
+        });
+        var persisted = Assert.Single(await restarted.Store.ProviderPools());
+        Assert.Equal(category, persisted.State);
+        Assert.Empty(persisted.RecoveryCommandId);
+        Assert.Equal(2, await restarted.Store.Read(db => db.Set<ProviderFailureReceipt>().CountAsync()));
+    }
+
+    [Fact]
+    public async Task BusyPreflightRequeueKeepsReservationAcrossLateFailureAndRestart()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+            var recovery = Command(worker, "openai"); recovery.State = Delivery.Dispatching;
+            var late = Command(worker, "openai"); late.State = Delivery.Running;
+            var peer = Command(worker, "openai");
+            await app.Store.Write(async db =>
+            {
+                db.Commands.AddRange(failed, recovery, late, peer);
+                await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+                var pool = (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!;
+                pool.RetryAt = ControlStore.Now - 1;
+                Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+                return true;
+            });
+            Assert.True(await Complete(app, recovery.Id, Delivery.Queued));
+            await app.Store.Write(async db =>
+            {
+                await ControlStore.ObserveProviderFailure(db, worker, late, "late", new("Throttled", 429, ControlStore.Now - 1));
+                var pool = (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!;
+                pool.RetryAt = ControlStore.Now - 1;
+                Assert.Equal(recovery.Id, pool.RecoveryCommandId);
+                Assert.False(await ControlStore.ProviderDispatchAllowed(db, worker, peer));
+                Assert.Equal(Delivery.Running, late.State);
+                return true;
+            });
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var poolAfterRestart = Assert.Single(await restarted.Store.ProviderPools());
+        Assert.NotEmpty(poolAfterRestart.RecoveryCommandId);
+        var workerAfterRestart = (await restarted.Store.Snapshot()).Workers.Single();
+        await restarted.Store.Write(async db =>
+        {
+            Assert.False(await ControlStore.ProviderDispatchAllowed(db, workerAfterRestart, Command(workerAfterRestart, "openai")));
+            return true;
+        });
+    }
+
+    [Fact]
+    public async Task AcceptedAbortSettlesReservedAttemptWithoutClaimingRecovery()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var failed = Command(worker, "openai"); failed.State = Delivery.Failed;
+        var recovery = Command(worker, "openai");
+        var abort = new CommandRecord { Id = Guid.NewGuid().ToString(), RuntimeId = worker.RuntimeId, WorkerId = worker.Id, Kind = "Abort", State = Delivery.Accepted };
+        await app.Store.Write(async db =>
+        {
+            db.Commands.AddRange(failed, recovery, abort);
+            await ControlStore.ObserveProviderFailure(db, worker, failed, "first", new("Throttled", 429, null));
+            var pool = (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!;
+            pool.RetryAt = ControlStore.Now - 1;
+            Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
+            recovery.State = Delivery.Accepted; recovery.NativeMessageId = "msg_recovery";
+            return true;
+        });
+        var idle = new NativeSnapshot(JsonSerializer.SerializeToElement(new { }), [], "idle", JsonSerializer.SerializeToElement(new { }), [], []);
+        await Reconcile(app, worker, idle);
+        await Reconcile(app, worker, idle);
+        var pool = Assert.Single(await app.Store.ProviderPools());
+        Assert.Equal("RecoveryRequired", pool.State);
+        Assert.Empty(pool.RecoveryCommandId);
+        Assert.Equal(Delivery.Cancelled, await app.Store.Read(async db => (await db.Commands.FindAsync(recovery.Id))!.State));
+        Assert.Equal(Delivery.Finished, await app.Store.Read(async db => (await db.Commands.FindAsync(abort.Id))!.State));
     }
 
     [Fact]
