@@ -17,8 +17,8 @@ services:
       Control__AllowInsecureLocalHttp: "true"
       Logging__LogLevel__Default: Warning
     volumes:
-      - ./.fixture/demo-data:/data
-      - ./.fixture/demo-secrets:/run/secrets:ro
+      - "${DEMO_DATA_DIRECTORY:-./.fixture/demo-data}:/data"
+      - "${DEMO_SECRETS_DIRECTORY:-./.fixture/demo-secrets}:/run/secrets:ro"
     stop_grace_period: 30s
   coordinator:
     profiles: [coordinator]

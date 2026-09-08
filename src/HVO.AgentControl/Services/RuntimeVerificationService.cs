@@ -20,6 +20,7 @@ public sealed class RuntimeVerificationService(Secrets secrets, ControlStore sto
     public async Task<RuntimeVerification> Verify(RuntimeVerifyInput input, CancellationToken cancellationToken)
     {
         var profile = Json.Read<RuntimeRecord>(Json.Write(input.Profile));
+        if (profile.ConnectionKind != RuntimeConnections.Ssh) throw new ControlException("Use control service registration for a direct HTTP endpoint.", 400);
         ValidateEndpoint(profile);
         _ = StartupOptions.Arguments(profile);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -46,6 +47,7 @@ public sealed class RuntimeVerificationService(Secrets secrets, ControlStore sto
         var existing = await store.Read(async db => await db.Runtimes.FindAsync(profile.Id));
         if (existing is not null)
         {
+            if (existing.ConnectionKind != RuntimeConnections.Ssh) throw new ControlException("Host-owned control services do not use SSH verification.");
             if (existing.DesiredConnected || existing.Transport == "Connected") throw new ControlException("Disconnect the runtime before verifying profile changes.");
             if (existing.Revision != profile.Revision) throw new ControlException("Runtime changed; reopen its profile before verifying.");
         }

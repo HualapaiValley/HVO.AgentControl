@@ -6,6 +6,7 @@ namespace HVO.AgentControl.Components.Pages;
 public partial class Coordination
 {
     private List<CoordinationRun> runs = [];
+    private HashSet<string> hostOperationsIds = [];
     private readonly HashSet<string> selected = [];
     private string coordinatorId = "", instruction = "";
     private int maxRounds = 20;
@@ -37,7 +38,13 @@ public partial class Coordination
         await Store.PromptCoordination(run.Id, new(id, run.Revision, followups.GetValueOrDefault(run.Id, "")));
         followupIds.Remove(run.Id); followups.Remove(run.Id); notice = "Follow-up recorded for the coordinator.";
     });
-    protected override async Task SnapshotChanged() => runs = await Store.Coordinations();
+    protected override async Task SnapshotChanged()
+    {
+        runs = await Store.Coordinations();
+        hostOperationsIds = (await Store.ControlServices()).SelectMany(x => x.Sessions)
+            .Where(x => x.ScopeKind == "HostOperations").Select(x => x.WorkerId).ToHashSet();
+        if (hostOperationsIds.Contains(coordinatorId)) coordinatorId = "";
+    }
     private void Select(string id, bool include) { if (include) selected.Add(id); else selected.Remove(id); }
     private Task Start() => Execute(async () =>
     {

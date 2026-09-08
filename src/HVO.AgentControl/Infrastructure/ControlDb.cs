@@ -6,6 +6,8 @@ namespace HVO.AgentControl.Infrastructure;
 
 public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(options)
 {
+    public DbSet<ControlServiceRecord> ControlServices => Set<ControlServiceRecord>();
+    public DbSet<ControlSessionBinding> ControlSessions => Set<ControlSessionBinding>();
     public DbSet<HostRecord> Hosts => Set<HostRecord>();
     public DbSet<ProjectRecord> Projects => Set<ProjectRecord>();
     public DbSet<InventoryMutationReceipt> InventoryMutations => Set<InventoryMutationReceipt>();
@@ -34,6 +36,12 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        model.Entity<ControlServiceRecord>().HasOne<RuntimeRecord>().WithOne().HasForeignKey<ControlServiceRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<ControlServiceRecord>().HasIndex(x => x.InstanceId).IsUnique();
+        model.Entity<ControlSessionBinding>().Ignore(x => x.Title);
+        model.Entity<ControlSessionBinding>().HasIndex(x => new { x.ScopeKind, x.ScopeId }).IsUnique();
+        model.Entity<ControlSessionBinding>().HasIndex(x => x.WorkerId).IsUnique();
+        model.Entity<ControlSessionBinding>().HasOne<ControlServiceRecord>().WithMany().HasForeignKey(x => x.ControlServiceId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<HostRecord>().HasKey(x => x.Sequence);
         model.Entity<HostRecord>().Property(x => x.Id).IsRequired();
         model.Entity<HostRecord>().HasIndex(x => x.Id).IsUnique();
@@ -55,8 +63,9 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<HVO.AgentControl.Services.ProviderCredential>();
         model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
+        model.Entity<RuntimeRecord>().Property(x => x.ConnectionKind).HasDefaultValue(RuntimeConnections.Ssh);
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.ManagedServerId, x.NativeSessionId }).IsUnique();
-        model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.Directory }).IsUnique();
+        model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.Directory }).IsUnique().HasFilter("Role != 'Coordinator'");
         model.Entity<TranscriptMessage>().HasIndex(x => new { x.WorkerId, x.NativeId }).IsUnique();
         model.Entity<ModelUsageRecord>().HasKey(x => new { x.RuntimeId, x.NativeSessionId, x.NativeMessageId });
         model.Entity<ModelUsageRecord>().HasIndex(x => new { x.WorkerId, x.CreatedAt });
