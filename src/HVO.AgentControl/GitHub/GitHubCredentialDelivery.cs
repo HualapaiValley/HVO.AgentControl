@@ -33,7 +33,8 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
             test ! -L {{q}} && umask 077 && mkdir -p {{q}} &&
             test "$(cd {{q}} && pwd -P)" = {{q}} &&
             test ! -L {{q}}/hosts.yml && test ! -L {{q}}/.agentcontrol-owner &&
-            { test ! -e {{q}}/hosts.yml || test "$(cat {{q}}/.agentcontrol-owner 2>/dev/null)" = {{BootstrapScript.Quote(runtime.ManagedServerId)}}; } ||
+            ( { test ! -e {{q}}/hosts.yml && test ! -e {{q}}/.agentcontrol-owner; } ||
+              { test -e {{q}}/hosts.yml && test "$(cat {{q}}/.agentcontrol-owner 2>/dev/null)" = {{BootstrapScript.Quote(runtime.ManagedServerId)}}; } ) ||
             { echo EXISTING_GITHUB_CONFIGURATION; exit 1; }
             chmod 700 {{q}}
             """, token);
@@ -41,11 +42,14 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
         SshRuntimeTransportFactory.AttachHostKey(sftp, runtime.HostKeySha256);
         await sftp.ConnectAsync(token);
         var hostsPath = directory + "/hosts.yml";
-        if (sftp.Exists(hostsPath))
+        var ownerPath = directory + "/.agentcontrol-owner";
+        var hostsExist = sftp.Exists(hostsPath);
+        var owner = sftp.Exists(ownerPath) ? Read(sftp, ownerPath) : null;
+        if (!IsManagedConfigurationReplacementAllowed(hostsExist, owner, runtime.ManagedServerId))
+            throw new ControlException("Existing GitHub configuration ownership is not verified; refusing replacement.");
+        if (hostsExist)
         {
-            using var existing = new MemoryStream();
-            sftp.DownloadFile(hostsPath, existing);
-            var hosts = Encoding.UTF8.GetString(existing.ToArray());
+            var hosts = Read(sftp, hostsPath);
             if (!IsExclusivelyManagedHosts(hosts, credential.Actor))
                 throw new ControlException("Existing GitHub configuration contains accounts or hosts outside AgentControl; refusing replacement.");
         }
@@ -83,6 +87,9 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
         return JsonScalarIsCanonical(primary) && primary == user;
     }
 
+    public static bool IsManagedConfigurationReplacementAllowed(bool hostsExist, string? owner, string managedServerId) =>
+        hostsExist ? owner == managedServerId : owner is null;
+
     private static bool JsonScalarIsCanonical(string value)
     {
         try
@@ -104,5 +111,12 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
             sftp.RenameFile(temporary, path, isPosix: true);
         }
         finally { if (sftp.Exists(temporary)) sftp.DeleteFile(temporary); }
+    }
+
+    private static string Read(SftpClient sftp, string path)
+    {
+        using var stream = new MemoryStream();
+        sftp.DownloadFile(path, stream);
+        return Encoding.UTF8.GetString(stream.ToArray());
     }
 }

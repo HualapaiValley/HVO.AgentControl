@@ -235,6 +235,17 @@ public sealed class GitHubAccessTests
     }
 
     [Fact]
+    public void ManagedConfigurationReplacementRequiresExactMarkerWhenEitherFileExists()
+    {
+        const string server = "managed-server";
+        Assert.True(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(false, null, server));
+        Assert.True(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, server, server));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(false, server, server));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, null, server));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, "other-server", server));
+    }
+
+    [Fact]
     public async Task ReusingRegistrationNarrowsScopeAndKeepsIndependentEncryptedCredentials()
     {
         await using var app = new TestApp();
