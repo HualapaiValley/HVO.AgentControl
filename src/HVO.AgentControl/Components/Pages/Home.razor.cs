@@ -114,7 +114,12 @@ public partial class Home
     {
         var current = SelectedDetail();
         var selected = selection.Capture(current.Worker.Id);
-        var cursor = olderMessages.Concat(current.Messages).OrderBy(x => x.NativeCreatedAt).ThenBy(x => x.NativeId).First();
+        var cursor = olderMessages.Concat(current.Messages).OrderBy(x => x.NativeCreatedAt).ThenBy(x => x.NativeId, StringComparer.Ordinal).FirstOrDefault();
+        if (cursor is null)
+        {
+            notice = "No earlier messages are stored locally. Native OpenCode history remains on the runtime.";
+            return;
+        }
         WorkerDetail history;
         try { history = await ReadDetail(current.Worker.Id, cursor.NativeCreatedAt, cursor.NativeId); }
         catch when (!selection.IsCurrent(selected)) { return; }

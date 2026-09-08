@@ -114,6 +114,37 @@ public sealed class HomeConversationRaceTests
     }
 
     [Fact]
+    public async Task EmptyHistoryShowsNoticeWithoutAConnectionError()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await SeedWorkers(app.Store);
+        var home = Home(app.Store, (id, before) => app.Store.Detail(id, before));
+        await home.Navigate(worker.Id);
+        await home.LoadOlder();
+        Assert.Null(home.VisibleError);
+        Assert.Equal("No earlier messages are stored locally. Native OpenCode history remains on the runtime.", home.Notice);
+    }
+
+    [Fact]
+    public async Task MixedCaseTimestampTiesUseOrdinalCursorOrdering()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await SeedWorkers(app.Store);
+        await app.Store.Write(db =>
+        {
+            foreach (var id in new[] { "a", "Z", "Y", "X" }) db.Messages.Add(new TranscriptMessage
+            {
+                WorkerId = worker.Id, NativeId = id, Role = "user", NativeCreatedAt = 42,
+                Json = "{\"info\":{},\"parts\":[{\"type\":\"text\",\"text\":\"message\"}]}"
+            });
+            return Task.FromResult(true);
+        });
+        var home = Home(app.Store, (id, before) => app.Store.Detail(id, before));
+        await home.Navigate(worker.Id); await home.LoadOlder();
+        Assert.Equal("X", home.LastBeforeId);
+    }
+
+    [Fact]
     public async Task DelayedOlderHistoryIsRejectedAfterAThenBThenA()
     {
         await using var app = new TestApp();
@@ -180,20 +211,28 @@ public sealed class HomeConversationRaceTests
     private sealed class TestHome : Home
     {
         private readonly Func<string, long?, Task<WorkerDetail>> read;
+        private readonly ControlStore store;
 
         public TestHome(ControlStore store, Func<string, long?, Task<WorkerDetail>> read)
         {
-            Store = store; Authentication = new Authenticated(); this.read = read;
+            Store = this.store = store; Authentication = new Authenticated(); this.read = read;
         }
 
         public WorkerDetail? Visible => Field<WorkerDetail?>("detail");
         public string? VisibleError => error;
+        public string? Notice => Field<string?>("notice");
+        public string? LastBeforeId { get; private set; }
         public IReadOnlyList<TranscriptMessage> Older => Field<List<TranscriptMessage>>("olderMessages");
         public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before);
+        protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
+        {
+            LastBeforeId = beforeId;
+            return store.Detail(workerId, before, beforeId);
+        }
 
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;
         private void SetField(string name, object value) => typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, value);
