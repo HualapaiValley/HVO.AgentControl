@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260908153800_DurableProvisioningOperations")]
+    [Migration("20260908170214_DurableProvisioningOperations")]
     partial class DurableProvisioningOperations
     {
         /// <inheritdoc />
@@ -221,8 +221,18 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("Generation")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsCurrent")
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("NativeSessionId")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PredecessorId")
                         .HasColumnType("TEXT");
 
                     b.Property<long>("Revision")
@@ -248,10 +258,18 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
                     b.HasIndex("ControlServiceId");
 
+                    b.HasIndex("PredecessorId")
+                        .IsUnique()
+                        .HasFilter("PredecessorId IS NOT NULL");
+
                     b.HasIndex("WorkerId")
                         .IsUnique();
 
                     b.HasIndex("ScopeKind", "ScopeId")
+                        .IsUnique()
+                        .HasFilter("IsCurrent = 1");
+
+                    b.HasIndex("ScopeKind", "ScopeId", "Generation")
                         .IsUnique();
 
                     b.ToTable("ControlSessions");
@@ -1981,6 +1999,42 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("ProviderKeyDelivery");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Services.ProviderReadinessReceipt", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("KeyRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PendingDisposalJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProviderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ProviderReadinessReceipt");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Telemetry.RuntimeTelemetryHistoryRecord", b =>

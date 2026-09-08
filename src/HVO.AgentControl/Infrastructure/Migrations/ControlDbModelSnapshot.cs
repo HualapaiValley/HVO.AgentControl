@@ -43,7 +43,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("Assignments", (string)null);
+                    b.ToTable("Assignments");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.CommandAuthority", b =>
@@ -81,7 +81,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("EnrollmentId");
 
-                    b.ToTable("CommandAuthorities", (string)null);
+                    b.ToTable("CommandAuthorities");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.CommandRecord", b =>
@@ -163,7 +163,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("State", "QueueOrder");
 
-                    b.ToTable("Commands", (string)null);
+                    b.ToTable("Commands");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.ControlServiceRecord", b =>
@@ -198,7 +198,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("InstanceId")
                         .IsUnique();
 
-                    b.ToTable("ControlServices", (string)null);
+                    b.ToTable("ControlServices");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.ControlSessionBinding", b =>
@@ -269,7 +269,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("ScopeKind", "ScopeId", "Generation")
                         .IsUnique();
 
-                    b.ToTable("ControlSessions", (string)null);
+                    b.ToTable("ControlSessions");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.CoordinationRun", b =>
@@ -341,7 +341,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("CoordinationRuns", (string)null);
+                    b.ToTable("CoordinationRuns");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.EvidenceConsumerCursor", b =>
@@ -360,7 +360,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("ConsumerId");
 
-                    b.ToTable("EvidenceConsumerCursors", (string)null);
+                    b.ToTable("EvidenceConsumerCursors");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.EvidenceCursor", b =>
@@ -391,7 +391,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("EnrollmentId", "CursorName")
                         .IsUnique();
 
-                    b.ToTable("EvidenceCursors", (string)null);
+                    b.ToTable("EvidenceCursors");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.EvidenceReadReceipt", b =>
@@ -423,7 +423,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("ConsumerId", "AcknowledgedAt");
 
-                    b.ToTable("EvidenceReadReceipts", (string)null);
+                    b.ToTable("EvidenceReadReceipts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.HostRecord", b =>
@@ -466,7 +466,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("Id")
                         .IsUnique();
 
-                    b.ToTable("Hosts", (string)null);
+                    b.ToTable("Hosts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.InventoryMutationReceipt", b =>
@@ -499,7 +499,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("RequestId");
 
-                    b.ToTable("InventoryMutations", (string)null);
+                    b.ToTable("InventoryMutations");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.JournalEvent", b =>
@@ -548,7 +548,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("WorkerId", "Sequence");
 
-                    b.ToTable("Events", (string)null);
+                    b.ToTable("Events");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.ModelUsageRecord", b =>
@@ -624,7 +624,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("ProviderId", "ModelId", "CreatedAt");
 
-                    b.ToTable("ModelUsage", (string)null);
+                    b.ToTable("ModelUsage");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.OperatorStatusUpdate", b =>
@@ -681,7 +681,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("ScheduleId", "Kind", "DueAt")
                         .IsUnique();
 
-                    b.ToTable("OperatorStatusUpdates", (string)null);
+                    b.ToTable("OperatorStatusUpdates");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.OperatorUpdateSchedule", b =>
@@ -722,7 +722,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("CoordinationRunId")
                         .IsUnique();
 
-                    b.ToTable("OperatorUpdateSchedules", (string)null);
+                    b.ToTable("OperatorUpdateSchedules");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.ParticipantEnrollment", b =>
@@ -760,7 +760,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("State");
 
-                    b.ToTable("Enrollments", (string)null);
+                    b.ToTable("Enrollments");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.PendingRequest", b =>
@@ -796,7 +796,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("WorkerId", "Kind", "NativeId")
                         .IsUnique();
 
-                    b.ToTable("Requests", (string)null);
+                    b.ToTable("Requests");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.ProjectRecord", b =>
@@ -846,7 +846,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("RepositoryUrl")
                         .IsUnique();
 
-                    b.ToTable("Projects", (string)null);
+                    b.ToTable("Projects");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.RuntimeEnvironmentRecord", b =>
@@ -887,7 +887,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("HostId");
 
-                    b.ToTable("RuntimeEnvironments", (string)null);
+                    b.ToTable("RuntimeEnvironments");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.RuntimeRecord", b =>
@@ -1034,7 +1034,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("Runtimes", (string)null);
+                    b.ToTable("Runtimes");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.TaskBindingRecord", b =>
@@ -1107,7 +1107,7 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique()
                         .HasFilter("State = 'Active'");
 
-                    b.ToTable("TaskBindings", (string)null);
+                    b.ToTable("TaskBindings");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.TaskSessionBindingRecord", b =>
@@ -1159,7 +1159,7 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique()
                         .HasFilter("NativeSessionId <> ''");
 
-                    b.ToTable("TaskSessionBindings", (string)null);
+                    b.ToTable("TaskSessionBindings");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.TaskWorkspaceRecord", b =>
@@ -1225,7 +1225,7 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique()
                         .HasFilter("State = 'Active'");
 
-                    b.ToTable("TaskWorkspaces", (string)null);
+                    b.ToTable("TaskWorkspaces");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.TranscriptMessage", b =>
@@ -1258,7 +1258,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("WorkerId", "NativeId")
                         .IsUnique();
 
-                    b.ToTable("Messages", (string)null);
+                    b.ToTable("Messages");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkItem", b =>
@@ -1314,7 +1314,7 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique()
                         .HasFilter("State NOT IN ('Released', 'Abandoned')");
 
-                    b.ToTable("WorkItems", (string)null);
+                    b.ToTable("WorkItems");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkItemPhase", b =>
@@ -1355,7 +1355,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("WorkItemId", "Name")
                         .IsUnique();
 
-                    b.ToTable("WorkItemPhases", (string)null);
+                    b.ToTable("WorkItemPhases");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkerRecord", b =>
@@ -1485,7 +1485,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("RuntimeId", "ManagedServerId", "NativeSessionId")
                         .IsUnique();
 
-                    b.ToTable("Workers", (string)null);
+                    b.ToTable("Workers");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkerSlotRecord", b =>
@@ -1539,7 +1539,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("RuntimeId", "Name")
                         .IsUnique();
 
-                    b.ToTable("WorkerSlots", (string)null);
+                    b.ToTable("WorkerSlots");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkspaceClaim", b =>
@@ -1564,7 +1564,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("WorkspaceClaims", (string)null);
+                    b.ToTable("WorkspaceClaims");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.GitHub.GitHubAccess", b =>
@@ -1645,7 +1645,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("GitHubAccess", (string)null);
+                    b.ToTable("GitHubAccess");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Infrastructure.ProviderFailureReceipt", b =>
@@ -1676,7 +1676,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("ProviderFailureReceipt", (string)null);
+                    b.ToTable("ProviderFailureReceipt");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Infrastructure.ProviderFallbackReceipt", b =>
@@ -1732,7 +1732,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("SourceCommandId")
                         .IsUnique();
 
-                    b.ToTable("ProviderFallbackReceipt", (string)null);
+                    b.ToTable("ProviderFallbackReceipt");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Infrastructure.ProviderPool", b =>
@@ -1766,7 +1766,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("ProviderPool", (string)null);
+                    b.ToTable("ProviderPool");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionAttemptRecord", b =>
@@ -1794,7 +1794,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("HostId", "WorkspaceId")
                         .IsUnique();
 
-                    b.ToTable("ProvisionAttempts", (string)null);
+                    b.ToTable("ProvisionAttempts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionEffectRecord", b =>
@@ -1813,7 +1813,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("OperationId", "Effect", "ResourceId");
 
-                    b.ToTable("ProvisionEffects", (string)null);
+                    b.ToTable("ProvisionEffects");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionOperationRecord", b =>
@@ -1972,7 +1972,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("HostId", "State");
 
-                    b.ToTable("ProvisionOperations", (string)null);
+                    b.ToTable("ProvisionOperations");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Services.ProviderCredential", b =>
@@ -1992,7 +1992,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("ProviderCredential", (string)null);
+                    b.ToTable("ProviderCredential");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Services.ProviderKeyDelivery", b =>
@@ -2020,7 +2020,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasKey("Id");
 
-                    b.ToTable("ProviderKeyDelivery", (string)null);
+                    b.ToTable("ProviderKeyDelivery");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Services.ProviderReadinessReceipt", b =>
@@ -2104,7 +2104,7 @@ namespace HVO.AgentControl.Infrastructure
 
                     b.HasIndex("RuntimeId", "ObservedAt", "Sequence");
 
-                    b.ToTable("TelemetryHistory", (string)null);
+                    b.ToTable("TelemetryHistory");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.ControlServiceRecord", b =>
