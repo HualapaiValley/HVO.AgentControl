@@ -28,6 +28,14 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("GitHubAuthorProvenanceJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("GitHubAuthorityJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Outcome")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -1917,9 +1925,34 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("CredentialConfigurationFingerprint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CredentialState")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Detail")
                         .IsRequired()
                         .HasColumnType("TEXT");
+
+                    b.Property<string>("EnvironmentPolicyFingerprint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("EnvironmentPolicyVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("EnvironmentProcessId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EnvironmentProcessIncarnation")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EnvironmentVerifiedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<long?>("ExpiresAt")
                         .HasColumnType("INTEGER");
@@ -2059,6 +2092,13 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("RecoveryCommandId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("RecoveryOwnershipUnknown")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("RetryAt")
                         .HasColumnType("INTEGER");
 
@@ -2072,6 +2112,246 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("ProviderPool");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionAttemptRecord", b =>
+                {
+                    b.Property<string>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AuthorityRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CapacityFingerprint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CapacityReservationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CapacityRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IntentDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IntentJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkspaceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkspaceIdentity")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("OperationId");
+
+                    b.HasIndex("HostId", "WorkspaceIdentity")
+                        .IsUnique();
+
+                    b.ToTable("ProvisionAttempts");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionEffectRecord", b =>
+                {
+                    b.Property<string>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Effect")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResourceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("StartedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("OperationId", "Effect");
+
+                    b.ToTable("ProvisionEffects");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionOperationRecord", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ApprovedIntentJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ApprovedWorkspaceIdentity")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("AuthorityRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("CancelRequested")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CapacityReservationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CapacityRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("CapacityValidUntil")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("ColdBuild")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ConfigurationPath")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ConfigurationSha256")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("EffectStarted")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("EnvironmentRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("HostRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Id")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IntentDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObservedContainerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObservedImageId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProgressJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ProjectRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("ReconcileRequested")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("RequestedBuildCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RequestedBuildMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RequestedJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("RequestedRuntimeCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RequestedRuntimeMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ReservedBuildCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ReservedBuildMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ReservedRuntimeCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ReservedRuntimeMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ResultJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("RuntimeRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SourceRevision")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkspaceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("Id")
+                        .IsUnique();
+
+                    b.HasIndex("HostId", "State");
+
+                    b.ToTable("ProvisionOperations");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Services.ProviderCredential", b =>
@@ -2311,6 +2591,25 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .WithMany()
                         .HasForeignKey("WorkerSlotId")
                         .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionAttemptRecord", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Provisioning.ProvisionOperationRecord", null)
+                        .WithOne()
+                        .HasForeignKey("HVO.AgentControl.Provisioning.ProvisionAttemptRecord", "OperationId")
+                        .HasPrincipalKey("HVO.AgentControl.Provisioning.ProvisionOperationRecord", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionEffectRecord", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Provisioning.ProvisionAttemptRecord", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

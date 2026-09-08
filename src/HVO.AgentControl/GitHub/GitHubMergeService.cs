@@ -69,11 +69,11 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         if (evidence.Author is null || evidence.Reviewer is null || input.AuthorWorkerId == input.ReviewerWorkerId)
             throw new ControlException("The author and reviewer must be distinct registered workers.", 400);
         RequireAssignment(evidence.AuthorCommand, evidence.AuthorAssignment, input.AuthorWorkerId, input.Repository,
-            input.PullRequestNumber, input.HeadSha, false);
+            input.PullRequestNumber, input.HeadSha, GitHubMergeTaskKinds.Author);
         RequireAssignment(evidence.ReviewCommand, evidence.ReviewAssignment, input.ReviewerWorkerId, input.Repository,
-            input.PullRequestNumber, input.HeadSha, true);
+            input.PullRequestNumber, input.HeadSha, GitHubMergeTaskKinds.Reviewer);
         if (await store.Read(db => HasAuthorEvidence(db, input.ReviewerWorkerId, input.Repository, input.PullRequestNumber, input.HeadSha)))
-            throw new ControlException("A worker with retained author-role evidence for this exact head cannot act as its reviewer.");
+            throw new ControlException("A worker with retained author-role evidence for this pull request cannot act as its reviewer.");
 
         var credential = await Credential(input.Repository);
         var remote = await github.Observe(credential.Value, input.Repository, input.PullRequestNumber, CancellationToken.None);
@@ -100,12 +100,12 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             var currentReviewAssignment = await db.Assignments.SingleOrDefaultAsync(x => x.Id == input.ReviewCommandId);
             if (currentAuthor is null || currentReviewer is null || input.AuthorWorkerId == input.ReviewerWorkerId)
                 throw new ControlException("The author and reviewer must remain distinct registered workers.");
-            RequireAssignment(currentAuthorCommand, currentAuthorAssignment, input.AuthorWorkerId, input.Repository,
-                input.PullRequestNumber, input.HeadSha, false);
-            RequireAssignment(currentReviewCommand, currentReviewAssignment, input.ReviewerWorkerId, input.Repository,
-                input.PullRequestNumber, input.HeadSha, true);
+            var authorAuthority = RequireAssignment(currentAuthorCommand, currentAuthorAssignment, input.AuthorWorkerId,
+                input.Repository, input.PullRequestNumber, input.HeadSha, GitHubMergeTaskKinds.Author);
+            var reviewerAuthority = RequireAssignment(currentReviewCommand, currentReviewAssignment, input.ReviewerWorkerId,
+                input.Repository, input.PullRequestNumber, input.HeadSha, GitHubMergeTaskKinds.Reviewer);
             if (await HasAuthorEvidence(db, input.ReviewerWorkerId, input.Repository, input.PullRequestNumber, input.HeadSha))
-                throw new ControlException("A worker with retained author-role evidence for this exact head cannot act as its reviewer.");
+                throw new ControlException("A worker with retained author-role evidence for this pull request cannot act as its reviewer.");
             var receipt = new GitHubReviewReceipt
             {
                 Id = input.Id,
@@ -118,11 +118,8 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
                 ReviewCommandId = input.ReviewCommandId,
                 GitHubReviewId = input.GitHubReviewId,
                 GitHubReviewerIdentity = input.GitHubReviewerIdentity,
-                EvidenceJson = Json.Write(new
-                {
-                    author = new { command = currentAuthorCommand, assignment = currentAuthorAssignment },
-                    reviewer = new { command = currentReviewCommand, assignment = currentReviewAssignment }
-                }),
+                EvidenceJson = Json.Write(new GitHubReviewAuthoritySnapshot(GitHubMergeTaskKinds.Version,
+                    authorAuthority, reviewerAuthority)),
                 RecordedAt = ControlStore.Now
             };
             db.GitHubReviewReceipts.Add(receipt);
@@ -147,6 +144,7 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             Review = await db.GitHubReviewReceipts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == input.ReviewReceiptId)
         });
         ValidateAuthority(input, authority.Policy, authority.Review);
+        await store.Read(db => RequireReceiptAuthority(db, authority.Review!));
         var credential = await Credential(input.Repository);
         var remote = await github.Observe(credential.Value, input.Repository, input.PullRequestNumber, CancellationToken.None);
         if (!remote.Complete || remote.HeadSha != input.ExpectedHeadSha || remote.BaseSha != input.BaseSha || remote.BaseBranch != input.BaseBranch)
@@ -158,6 +156,7 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             var policy = await db.GitHubMergePolicies.AsNoTracking().Where(x => x.Id == input.PolicyId).OrderByDescending(x => x.Revision).FirstOrDefaultAsync();
             var review = await db.GitHubReviewReceipts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == input.ReviewReceiptId);
             ValidateAuthority(input, policy, review);
+            await RequireReceiptAuthority(db, review!);
             var intent = new GitHubMergeIntent
             {
                 Id = input.Id,
@@ -193,10 +192,15 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
     public async Task<GitHubCheckObservation> Observe(string id)
     {
         var intent = await GetIntent(id);
-        var authority = await store.Read(async db => new
+        var authority = await store.Read(async db =>
         {
-            Receipt = await db.GitHubReviewReceipts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == intent.ReviewReceiptId),
-            Policy = await db.GitHubMergePolicies.AsNoTracking().Where(x => x.Id == intent.PolicyId).OrderByDescending(x => x.Revision).FirstOrDefaultAsync()
+            var receipt = await db.GitHubReviewReceipts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == intent.ReviewReceiptId);
+            if (receipt is not null) await RequireReceiptAuthority(db, receipt);
+            return new
+            {
+                Receipt = receipt,
+                Policy = await db.GitHubMergePolicies.AsNoTracking().Where(x => x.Id == intent.PolicyId).OrderByDescending(x => x.Revision).FirstOrDefaultAsync()
+            };
         });
         var receipt = authority.Receipt ?? throw new ControlException("The retained review receipt is unavailable.");
         var credential = await Credential(intent.Repository);
@@ -218,30 +222,38 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         }
         if (intent.Revision != input.ExpectedRevision)
             throw new ControlException("Merge intent changed; refresh before executing.");
-        if (!await AcquireLease(intent))
+        var leaseId = await AcquireLease(intent);
+        if (leaseId is null)
             throw new ControlException("Another merge intent owns the durable repository target-branch lease.", 409);
 
         GitHubCheckObservation observation;
         try { observation = await Observe(id); }
         catch (Exception exception)
         {
-            await HoldBeforeAttempt(id, "GitHub prerequisites could not be completely observed; no merge was attempted. " + exception.Message);
+            await HoldBeforeAttempt(id, leaseId, "GitHub prerequisites could not be completely observed; no merge was attempted. " + exception.Message);
             if (exception is ControlException) throw;
             throw new ControlException("GitHub prerequisites are unavailable; no merge was attempted.");
         }
         if (observation.State != "Ready")
         {
-            await ReleaseLease(id);
+            await ReleaseLease(id, leaseId);
             throw new ControlException("GitHub merge gates are not satisfied: " + observation.Detail);
         }
         GitHubInstallationToken credential;
         try { credential = await Credential(intent.Repository); }
         catch
         {
-            await HoldBeforeAttempt(id, "GitHub merge credentials are unavailable; no merge was attempted.");
+            await HoldBeforeAttempt(id, leaseId, "GitHub merge credentials are unavailable; no merge was attempted.");
             throw;
         }
-        if (!await StartAttempt(intent, observation))
+        bool started;
+        try { started = await StartAttempt(intent, observation, leaseId); }
+        catch (ControlException exception)
+        {
+            await HoldBeforeAttempt(id, leaseId, "GitHub merge authority changed before effect admission; no merge was attempted. " + exception.Message);
+            throw;
+        }
+        if (!started)
         {
             await Observe(id);
             return await GetIntent(id);
@@ -251,12 +263,12 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         try { sha = await github.Merge(credential.Value, intent.Repository, intent.PullRequestNumber, intent.ExpectedHeadSha, CancellationToken.None); }
         catch (Exception exception)
         {
-            await CompleteAttempt(intent, observation.Id, "Unknown", "The merge response was lost; reconcile GitHub before any further execution. " + exception.Message, null, false);
+            await CompleteAttempt(intent, observation.Id, leaseId, "Unknown", "The merge response was lost; reconcile GitHub before any further execution. " + exception.Message, null, false);
             throw new ControlException("The GitHub merge outcome is unknown; no repeat PUT is permitted until reconciliation.");
         }
         if (sha is null)
-            return await CompleteAttempt(intent, observation.Id, "Rejected", "GitHub returned a definite response without confirming the merge.", null, true);
-        return await CompleteAttempt(intent, observation.Id, "Merged", "GitHub confirmed the expected-head merge.", sha, true);
+            return await CompleteAttempt(intent, observation.Id, leaseId, "Rejected", "GitHub returned a definite response without confirming the merge.", null, true);
+        return await CompleteAttempt(intent, observation.Id, leaseId, "Merged", "GitHub confirmed the expected-head merge.", sha, true);
     }
 
     private async Task<GitHubCheckObservation> PersistObservation(GitHubMergeIntent intent, GitHubPullRequestObservation remote,
@@ -332,23 +344,24 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         return observation;
     });
 
-    private async Task<bool> AcquireLease(GitHubMergeIntent intent)
+    private async Task<string?> AcquireLease(GitHubMergeIntent intent)
     {
+        var leaseId = Guid.NewGuid().ToString("N");
         try
         {
             return await store.Write(async db =>
             {
                 var lease = await db.GitHubMergeLeases.AsNoTracking().SingleOrDefaultAsync(x => x.Repository == intent.Repository && x.BaseBranch == intent.BaseBranch);
-                if (lease is not null) return lease.IntentId == intent.Id;
+                if (lease is not null) return null;
                 db.GitHubMergeLeases.Add(new GitHubMergeLease
                 {
-                    Id = Guid.NewGuid().ToString("N"),
+                    Id = leaseId,
                     Repository = intent.Repository,
                     BaseBranch = intent.BaseBranch,
                     IntentId = intent.Id,
                     AcquiredAt = ControlStore.Now
                 });
-                return true;
+                return leaseId;
             });
         }
         catch (DbUpdateException)
@@ -356,19 +369,34 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             var lease = await store.Read(db => db.GitHubMergeLeases.AsNoTracking()
                 .SingleOrDefaultAsync(x => x.Repository == intent.Repository && x.BaseBranch == intent.BaseBranch));
             if (lease is null) throw;
-            return lease.IntentId == intent.Id;
+            return null;
         }
     }
 
-    private async Task<bool> StartAttempt(GitHubMergeIntent intent, GitHubCheckObservation observation)
+    private async Task<bool> StartAttempt(GitHubMergeIntent intent, GitHubCheckObservation observation, string leaseId)
     {
         try
         {
             return await store.Write(async db =>
             {
                 if (await db.GitHubMergeAttempts.AnyAsync(x => x.IntentId == intent.Id)) return false;
-                db.GitHubMergeAttempts.Add(Receipt(intent, observation.Id, "Attempted", "Durable receipt recorded before the GitHub merge request.", null));
                 var current = await db.GitHubMergeIntents.FindAsync(intent.Id) ?? throw new ControlException("Merge intent disappeared.");
+                var currentObservation = await db.GitHubCheckObservations.AsNoTracking().SingleOrDefaultAsync(x => x.Id == observation.Id);
+                var lease = await db.GitHubMergeLeases.SingleOrDefaultAsync(x => x.Id == leaseId && x.IntentId == intent.Id &&
+                    x.Repository == intent.Repository && x.BaseBranch == intent.BaseBranch);
+                var policy = await db.GitHubMergePolicies.AsNoTracking().Where(x => x.Id == current.PolicyId)
+                    .OrderByDescending(x => x.Revision).FirstOrDefaultAsync();
+                var review = await db.GitHubReviewReceipts.AsNoTracking().SingleOrDefaultAsync(x => x.Id == current.ReviewReceiptId);
+                if (lease is null) throw new ControlException("The exact merge execution lease is no longer owned by this request.");
+                if (current.ObservationId != observation.Id || currentObservation is null || currentObservation.State != "Ready" ||
+                    !currentObservation.Complete || currentObservation.IntentId != current.Id || currentObservation.Repository != current.Repository ||
+                    currentObservation.PullRequestNumber != current.PullRequestNumber || currentObservation.HeadSha != current.ExpectedHeadSha ||
+                    currentObservation.BaseBranch != current.BaseBranch || currentObservation.BaseSha != current.BaseSha)
+                    throw new ControlException("The exact ready observation changed before merge effect admission.");
+                ValidateAuthority(current, policy, review);
+                await RequireReceiptAuthority(db, review!);
+                db.GitHubMergeAttempts.Add(Receipt(intent, observation.Id, "Attempted",
+                    "Durable receipt recorded before the GitHub merge request.", null, leaseId));
                 current.State = "Attempted";
                 current.Detail = "A merge request may have been sent; persisted reconciliation controls any retry.";
                 current.Revision++;
@@ -381,38 +409,43 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         }
     }
 
-    private Task<GitHubMergeIntent> CompleteAttempt(GitHubMergeIntent intent, string observationId, string state,
-        string detail, string? mergeCommitSha, bool releaseLease) => store.Write(async db =>
+    private Task<GitHubMergeIntent> CompleteAttempt(GitHubMergeIntent intent, string observationId, string leaseId,
+        string state, string detail, string? mergeCommitSha, bool releaseLease) => store.Write(async db =>
     {
         if (!await db.GitHubMergeAttempts.AnyAsync(x => x.IntentId == intent.Id && x.State == state))
             db.GitHubMergeAttempts.Add(Receipt(intent, observationId, state, detail, mergeCommitSha));
         var current = await db.GitHubMergeIntents.FindAsync(intent.Id) ?? throw new ControlException("Merge intent disappeared.");
-        current.State = state == "Rejected" ? "Blocked" : state;
-        current.Detail = detail;
-        current.Revision++;
-        if (state == "Merged" && current.MergeCommitSha is null)
+        if (current.State != "Merged")
         {
-            current.MergeCommitSha = mergeCommitSha;
-            current.ReceiptJson = Json.Write(new { intent.Repository, intent.PullRequestNumber, intent.ExpectedHeadSha, mergeCommitSha, recordedAt = ControlStore.Now });
+            current.State = state == "Rejected" ? "Blocked" : state;
+            current.Detail = detail;
+            current.Revision++;
+            if (state == "Merged" && current.MergeCommitSha is null)
+            {
+                current.MergeCommitSha = mergeCommitSha;
+                current.ReceiptJson = Json.Write(new { intent.Repository, intent.PullRequestNumber, intent.ExpectedHeadSha, mergeCommitSha, recordedAt = ControlStore.Now });
+            }
         }
-        if (releaseLease) db.GitHubMergeLeases.RemoveRange(db.GitHubMergeLeases.Where(x => x.IntentId == intent.Id));
+        if (releaseLease) db.GitHubMergeLeases.RemoveRange(db.GitHubMergeLeases.Where(x => x.Id == leaseId && x.IntentId == intent.Id));
         ControlStore.Event(db, "GitHubMergeReceiptRecorded", payload: new { current.Id, state, mergeCommitSha });
         return current;
     });
 
-    private Task ReleaseLease(string intentId) => store.Write(async db =>
+    private Task ReleaseLease(string intentId, string leaseId) => store.Write(async db =>
     {
-        db.GitHubMergeLeases.RemoveRange(await db.GitHubMergeLeases.Where(x => x.IntentId == intentId).ToListAsync());
+        db.GitHubMergeLeases.RemoveRange(await db.GitHubMergeLeases.Where(x => x.Id == leaseId && x.IntentId == intentId).ToListAsync());
         return true;
     });
 
-    private Task HoldBeforeAttempt(string intentId, string detail) => store.Write(async db =>
+    private Task HoldBeforeAttempt(string intentId, string leaseId, string detail) => store.Write(async db =>
     {
         var current = await db.GitHubMergeIntents.FindAsync(intentId) ?? throw new ControlException("Merge intent disappeared.");
+        var lease = await db.GitHubMergeLeases.SingleOrDefaultAsync(x => x.Id == leaseId && x.IntentId == intentId);
+        if (lease is null || await db.GitHubMergeAttempts.AnyAsync(x => x.IntentId == intentId)) return false;
         current.State = "Blocked";
         current.Detail = detail;
         current.Revision++;
-        db.GitHubMergeLeases.RemoveRange(await db.GitHubMergeLeases.Where(x => x.IntentId == intentId).ToListAsync());
+        db.GitHubMergeLeases.Remove(lease);
         return true;
     });
 
@@ -468,56 +501,59 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         .GroupBy(x => x.User, StringComparer.OrdinalIgnoreCase)
         .ToDictionary(x => x.Key, x => x.OrderByDescending(y => y.SubmittedAt, StringComparer.Ordinal).ThenByDescending(y => y.Id).First(), StringComparer.OrdinalIgnoreCase);
 
-    private static GitHubMergeAttempt Receipt(GitHubMergeIntent intent, string observationId, string state, string detail, string? sha) => new()
-    {
-        Id = Guid.NewGuid().ToString("N"),
-        IntentId = intent.Id,
-        Repository = intent.Repository,
-        BaseBranch = intent.BaseBranch,
-        HeadSha = intent.ExpectedHeadSha,
-        ObservationId = observationId,
-        State = state,
-        Detail = detail,
-        StartedAt = ControlStore.Now,
-        CompletedAt = state == "Attempted" ? null : ControlStore.Now,
-        MergeCommitSha = sha,
-        ReceiptJson = Json.Write(new { intent.Repository, intent.PullRequestNumber, intent.ExpectedHeadSha, state, detail, mergeCommitSha = sha, recordedAt = ControlStore.Now })
-    };
+    private static GitHubMergeAttempt Receipt(GitHubMergeIntent intent, string observationId, string state, string detail,
+        string? sha, string? id = null) => new()
+        {
+            Id = id ?? Guid.NewGuid().ToString("N"),
+            IntentId = intent.Id,
+            Repository = intent.Repository,
+            BaseBranch = intent.BaseBranch,
+            HeadSha = intent.ExpectedHeadSha,
+            ObservationId = observationId,
+            State = state,
+            Detail = detail,
+            StartedAt = ControlStore.Now,
+            CompletedAt = state == "Attempted" ? null : ControlStore.Now,
+            MergeCommitSha = sha,
+            ReceiptJson = Json.Write(new { intent.Repository, intent.PullRequestNumber, intent.ExpectedHeadSha, state, detail, mergeCommitSha = sha, recordedAt = ControlStore.Now })
+        };
 
-    private static void RequireAssignment(CommandRecord? command, AssignmentRecord? assignment, string workerId,
-        string repository, int pullRequestNumber, string headSha, bool reviewer)
-    {
-        if (command is null || assignment is null || command.Id != assignment.Id || command.WorkerId != workerId ||
-            assignment.WorkerId != workerId || command.Kind != "Prompt" || command.State != Delivery.Finished)
-            throw new ControlException("Retained command and assignment evidence is unavailable for the exact worker.");
-        if (reviewer ? assignment.Outcome != "VerifiedComplete" : assignment.Outcome is not ("ReportedComplete" or "VerifiedComplete"))
-            throw new ControlException(reviewer ? "Reviewer assignment lacks a verified central outcome." : "Author assignment lacks a completed central outcome.");
-        var role = reviewer ? "reviewer" : "author";
-        if (!HasRole(assignment.Prompt, role))
-            throw new ControlException($"Retained central assignment does not identify the merge {role} role.");
-        if (!HasIdentity(command, assignment, repository, pullRequestNumber, headSha))
-            throw new ControlException("Retained assignment evidence is not bound to the exact repository, pull request and head SHA.");
-    }
+    private static GitHubMergeOutcomeAuthority RequireAssignment(CommandRecord? command, AssignmentRecord? assignment,
+        string workerId, string repository, int pullRequestNumber, string headSha, string role) =>
+        GitHubMergeTaskAuthority.RequireCurrent(command, assignment, workerId,
+            GitHubMergeTaskAuthority.Scope(role, repository, pullRequestNumber, headSha));
 
     private static async Task<bool> HasAuthorEvidence(ControlDb db, string workerId, string repository, int pullRequestNumber, string headSha)
     {
-        var commands = await db.Commands.AsNoTracking().Where(x => x.WorkerId == workerId && x.Kind == "Prompt").ToListAsync();
-        var commandIds = commands.Select(x => x.Id).ToArray();
-        var assignments = await db.Assignments.AsNoTracking().Where(x => x.WorkerId == workerId && commandIds.Contains(x.Id)).ToListAsync();
-        return commands.Join(assignments, x => x.Id, x => x.Id, (command, assignment) => new { command, assignment })
-            .Any(x => HasRole(x.assignment.Prompt, "author") && HasIdentity(x.command, x.assignment, repository, pullRequestNumber, headSha));
+        var assignments = await db.Assignments.AsNoTracking().Where(x => x.WorkerId == workerId).ToListAsync();
+        return assignments.Any(assignment => GitHubMergeTaskAuthority.HasRetainedAuthorProvenance(
+            assignment, workerId, repository, pullRequestNumber));
     }
 
-    private static bool HasRole(string prompt, string role) =>
-        Regex.IsMatch(prompt, $@"^Merge role:[ \t]*{role}[ \t]*\r?$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-    private static bool HasIdentity(CommandRecord command, AssignmentRecord assignment, string repository, int pullRequestNumber, string headSha)
+    private static async Task<GitHubReviewAuthoritySnapshot> RequireReceiptAuthority(ControlDb db, GitHubReviewReceipt receipt)
     {
-        var evidence = command.Payload + "\n" + assignment.Prompt;
-        var repositoryPattern = $@"(?<![A-Za-z0-9_.-]){Regex.Escape(repository)}(?![A-Za-z0-9_.-])";
-        var shaPattern = $@"(?<![0-9a-f]){Regex.Escape(headSha)}(?![0-9a-f])";
-        return Regex.IsMatch(evidence, repositoryPattern, RegexOptions.IgnoreCase) && Regex.IsMatch(evidence, shaPattern, RegexOptions.IgnoreCase) &&
-            Regex.IsMatch(evidence, $@"(?:#|/pull/|pullRequestNumber\D{{0,8}}){pullRequestNumber}(?:\D|$)", RegexOptions.IgnoreCase);
+        if (receipt.AuthorWorkerId == receipt.ReviewerWorkerId ||
+            !await db.Workers.AsNoTracking().AnyAsync(x => x.Id == receipt.AuthorWorkerId) ||
+            !await db.Workers.AsNoTracking().AnyAsync(x => x.Id == receipt.ReviewerWorkerId))
+            throw new ControlException("The retained author and reviewer registrations are unavailable or no longer distinct.");
+        GitHubReviewAuthoritySnapshot retained;
+        try { retained = Json.Read<GitHubReviewAuthoritySnapshot>(receipt.EvidenceJson); }
+        catch { throw new ControlException("The review receipt lacks typed retained task authority."); }
+        if (retained.Version != GitHubMergeTaskKinds.Version)
+            throw new ControlException("The review receipt uses an unsupported typed authority version.");
+        var authorCommand = await db.Commands.AsNoTracking().SingleOrDefaultAsync(x => x.Id == receipt.AuthorCommandId);
+        var reviewCommand = await db.Commands.AsNoTracking().SingleOrDefaultAsync(x => x.Id == receipt.ReviewCommandId);
+        var authorAssignment = await db.Assignments.AsNoTracking().SingleOrDefaultAsync(x => x.Id == receipt.AuthorCommandId);
+        var reviewAssignment = await db.Assignments.AsNoTracking().SingleOrDefaultAsync(x => x.Id == receipt.ReviewCommandId);
+        var author = RequireAssignment(authorCommand, authorAssignment, receipt.AuthorWorkerId, receipt.Repository,
+            receipt.PullRequestNumber, receipt.HeadSha, GitHubMergeTaskKinds.Author);
+        var reviewer = RequireAssignment(reviewCommand, reviewAssignment, receipt.ReviewerWorkerId, receipt.Repository,
+            receipt.PullRequestNumber, receipt.HeadSha, GitHubMergeTaskKinds.Reviewer);
+        if (author != retained.Author || reviewer != retained.Reviewer)
+            throw new ControlException("The typed task authority retained by the review receipt has changed.");
+        if (await HasAuthorEvidence(db, receipt.ReviewerWorkerId, receipt.Repository, receipt.PullRequestNumber, receipt.HeadSha))
+            throw new ControlException("A worker with retained author-role evidence for this pull request cannot act as its reviewer.");
+        return retained;
     }
 
     private static GitHubReviewReceipt SameReview(GitHubReviewReceipt prior, RecordGitHubReviewInput input)
@@ -545,6 +581,17 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
             throw new ControlException("The requested trusted repository policy revision is unavailable.");
         if (review is null || review.Repository != input.Repository || review.PullRequestNumber != input.PullRequestNumber || review.HeadSha != input.ExpectedHeadSha)
             throw new ControlException("The retained central review receipt does not cover the exact pull request head.");
+    }
+
+    private static void ValidateAuthority(GitHubMergeIntent intent, GitHubMergePolicy? policy, GitHubReviewReceipt? review)
+    {
+        if (policy is null || policy.State != "Active" || policy.Revision != intent.PolicyRevision ||
+            policy.Repository != intent.Repository || policy.BaseBranch != intent.BaseBranch ||
+            policy.RequiredChecksJson != intent.RequiredChecksJson)
+            throw new ControlException("The intent's trusted repository policy revision is no longer current and active.");
+        if (review is null || review.Repository != intent.Repository || review.PullRequestNumber != intent.PullRequestNumber ||
+            review.HeadSha != intent.ExpectedHeadSha || review.Id != intent.ReviewReceiptId)
+            throw new ControlException("The retained central review receipt no longer covers the exact pull request head.");
     }
 
     private static void ValidateReview(RecordGitHubReviewInput input)

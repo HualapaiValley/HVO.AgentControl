@@ -1,4 +1,6 @@
+using System.Text.Json;
 using HVO.AgentControl.Core;
+using HVO.AgentControl.GitHub;
 using HVO.AgentControl.Ssh;
 using HVO.AgentControl.Telemetry;
 using Microsoft.EntityFrameworkCore;
@@ -286,13 +288,14 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var worker = await db.Workers.FindAsync(workerId) ?? throw new ControlException("Worker not found.", 404);
         var payload = Json.Write(input);
-        if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, worker.RuntimeId, workerId, "Prompt", payload);
+        if (await db.Commands.FindAsync(input.Id) is { } prior) return SamePrompt(prior, worker.RuntimeId, workerId, input, payload);
         if (worker.Role == SessionRoles.Coordinator && !origin.StartsWith("coordinator-decision:", StringComparison.Ordinal))
             throw new ControlException("Coordinators route work only. Send instructions through Coordination.");
         if (worker.Role != SessionRoles.Coordinator && origin.StartsWith("coordinator-decision:", StringComparison.Ordinal))
             throw new ControlException("Routing decisions require a coordinator session.");
         if (string.IsNullOrWhiteSpace(input.Text) || input.Text.Length > options.Value.MaxPromptCharacters)
             throw new ControlException($"Prompt must contain 1–{options.Value.MaxPromptCharacters} characters.", 400);
+        if (input.GitHubMergeScope is not null) GitHubMergeTaskAuthority.ValidatePromptScope(input.GitHubMergeScope);
         var rendered = AssignmentGuidance.Render(input, worker.Directory);
         if (rendered.Length > options.Value.MaxPromptCharacters) throw new ControlException("Rendered instruction exceeds the prompt limit.", 400);
         if (worker.Archived) throw new ControlException("Restore this worker before sending instructions.");
@@ -348,6 +351,20 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         if (command.RuntimeId != runtimeId || command.WorkerId != workerId || command.Kind != kind || command.Payload != payload)
             throw new ControlException("Request ID was already used for different content or routing.");
         return command;
+    }
+
+    private static CommandRecord SamePrompt(CommandRecord command, string runtimeId, string workerId,
+        PromptInput input, string payload)
+    {
+        if (command.RuntimeId == runtimeId && command.WorkerId == workerId && command.Kind == "Prompt")
+        {
+            try
+            {
+                if (Json.Read<PromptInput>(command.Payload) == input) return command;
+            }
+            catch (Exception exception) when (exception is JsonException or InvalidOperationException) { }
+        }
+        return Same(command, runtimeId, workerId, "Prompt", payload);
     }
 
     private async Task<CommandRecord> Record(ControlDb db, string id, string runtimeId, string? workerId, string kind, string payload)
@@ -449,8 +466,14 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             throw new ControlException("Only a settled prompt delivery can receive a reviewed outcome.");
         var assignment = await db.Assignments.FindAsync(command.Id);
         if (assignment is null || assignment.WorkerId != workerId) throw new ControlException("Reviewed assignment was not found for this worker.", 404);
+        GitHubMergeOutcomeAuthority? authority = null;
+        if (input.GitHubMergeResult is not null)
+            authority = GitHubMergeTaskAuthority.Create(command, assignment, input, Now);
         worker.Outcome = input.Outcome; worker.Revision++;
         assignment.Outcome = input.Outcome; assignment.Evidence = input.Evidence;
+        assignment.GitHubAuthorityJson = authority is null ? "{}" : Json.Write(authority);
+        if (authority?.Scope.Role == GitHubMergeTaskKinds.Author && assignment.GitHubAuthorProvenanceJson == "{}")
+            assignment.GitHubAuthorProvenanceJson = Json.Write(authority);
         Event(db, "AssignmentOutcomeRecorded", worker.RuntimeId, workerId, command?.Id, input, "user");
         return true;
     });

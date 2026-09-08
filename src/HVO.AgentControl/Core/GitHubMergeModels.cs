@@ -99,6 +99,28 @@ public sealed class GitHubMergeLease
     public long AcquiredAt { get; set; }
 }
 
+public static class GitHubMergeTaskKinds
+{
+    public const int Version = 1;
+    public const string Purpose = "PullRequestMergeAuthority";
+    public const string Author = "Author";
+    public const string Reviewer = "Reviewer";
+    public const string PublishedExactHead = "PublishedExactHead";
+    public const string ApprovedExactHead = "ApprovedExactHead";
+}
+
+public sealed record GitHubMergeTaskScope(int Version, string Purpose, string Role, string Repository,
+    int PullRequestNumber, string HeadSha);
+
+public sealed record GitHubMergeTaskResult(int Version, string Verdict, GitHubMergeTaskScope Scope);
+
+public sealed record GitHubMergeOutcomeAuthority(int Version, GitHubMergeTaskScope Scope, string Verdict,
+    string WorkerId, string CommandId, string CommandResultId, string CommandResultSha256,
+    string EvidenceSha256, long RecordedAt);
+
+public sealed record GitHubReviewAuthoritySnapshot(int Version, GitHubMergeOutcomeAuthority Author,
+    GitHubMergeOutcomeAuthority Reviewer);
+
 public sealed record ConfigureGitHubMergePolicyInput(string Id, string Repository, string BaseBranch,
     string[] RequiredChecks, long ExpectedRevision, bool Active = true);
 public sealed record RecordGitHubReviewInput(string Id, string Repository, int PullRequestNumber, string HeadSha,

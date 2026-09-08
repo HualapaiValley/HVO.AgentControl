@@ -10,6 +10,20 @@ namespace HVO.AgentControl.Infrastructure.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AddColumn<string>(
+                name: "GitHubAuthorProvenanceJson",
+                table: "Assignments",
+                type: "TEXT",
+                nullable: false,
+                defaultValue: "{}");
+
+            migrationBuilder.AddColumn<string>(
+                name: "GitHubAuthorityJson",
+                table: "Assignments",
+                type: "TEXT",
+                nullable: false,
+                defaultValue: "{}");
+
             migrationBuilder.CreateTable(
                 name: "GitHubCheckObservations",
                 columns: table => new
@@ -199,6 +213,14 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
             migrationBuilder.DropTable(
                 name: "GitHubReviewReceipts");
+
+            migrationBuilder.DropColumn(
+                name: "GitHubAuthorProvenanceJson",
+                table: "Assignments");
+
+            migrationBuilder.DropColumn(
+                name: "GitHubAuthorityJson",
+                table: "Assignments");
         }
     }
 }

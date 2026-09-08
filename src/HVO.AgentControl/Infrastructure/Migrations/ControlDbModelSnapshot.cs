@@ -25,6 +25,14 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("GitHubAuthorProvenanceJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("GitHubAuthorityJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Outcome")
                         .IsRequired()
                         .HasColumnType("TEXT");

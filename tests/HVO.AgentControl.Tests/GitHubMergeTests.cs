@@ -175,7 +175,7 @@ public sealed class GitHubMergeTests
         var error = await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
             "new-receipt", Fixture.Repository, 12, Fixture.Head, "author", "reviewer", "author-command", "review-command", 1, "reviewer-gh")));
 
-        Assert.Contains("verified central outcome", error.Message);
+        Assert.Contains("typed command and assignment authority", error.Message);
     }
 
     [Fact]
@@ -186,8 +186,11 @@ public sealed class GitHubMergeTests
         {
             var command = await db.Commands.FindAsync("review-command") ?? throw new InvalidOperationException();
             var assignment = await db.Assignments.FindAsync("review-command") ?? throw new InvalidOperationException();
-            command.Payload = $"Merge role: reviewer\nReview OtherOwner/Repository pull request #12 at head {Fixture.Head}.";
-            assignment.Prompt = command.Payload;
+            command.Payload = Json.Write(Json.Read<PromptInput>(command.Payload) with
+            {
+                GitHubMergeScope = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Reviewer,
+                    "OtherOwner/Repository", 12, Fixture.Head)
+            });
             assignment.Evidence = $"Reviewed {Fixture.Repository} pull request #12 at head {Fixture.Head}.";
             return true;
         });
@@ -195,7 +198,7 @@ public sealed class GitHubMergeTests
         var error = await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
             "new-receipt", Fixture.Repository, 12, Fixture.Head, "author", "reviewer", "author-command", "review-command", 1, "reviewer-gh")));
 
-        Assert.Contains("exact repository", error.Message);
+        Assert.Contains("changed or does not match", error.Message);
     }
 
     [Fact]
@@ -206,38 +209,65 @@ public sealed class GitHubMergeTests
         var error = await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
             "new-receipt", Fixture.Repository, 12, Fixture.Head, "reviewer", "author", "review-command", "author-command", 1, "reviewer-gh")));
 
-        Assert.Contains("author role", error.Message);
+        Assert.Contains("does not match", error.Message);
     }
 
     [Fact]
     public async Task ContributorWithAuthorRoleCannotAlsoSupplyReviewReceipt()
     {
         await using var fixture = await Fixture.Create(seedIntent: false);
-        await fixture.App.Store.Write(db =>
+        await fixture.App.Store.Write(async db =>
         {
-            var payload = $"Merge role: author\nReview {Fixture.Repository} pull request #12 at head {Fixture.Head}.";
-            db.Commands.Add(new CommandRecord
-            {
-                Id = "reviewer-author-command",
-                RuntimeId = db.Workers.Single(x => x.Id == "reviewer").RuntimeId,
-                WorkerId = "reviewer",
-                Kind = "Prompt",
-                State = Delivery.Finished,
-                Payload = payload
-            });
-            db.Assignments.Add(new AssignmentRecord
-            {
-                Id = "reviewer-author-command",
-                WorkerId = "reviewer",
-                Prompt = payload,
-                Outcome = "ReportedComplete",
-                Evidence = payload
-            });
-            return Task.FromResult(true);
+            var assignment = await db.Assignments.SingleAsync(x => x.Id == "review-command");
+            assignment.GitHubAuthorProvenanceJson = Json.Write(Fixture.Authority(
+                "review-command", "reviewer", GitHubMergeTaskKinds.Author));
+            return true;
         });
 
         var error = await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
             "new-receipt", Fixture.Repository, 12, Fixture.Head, "author", "reviewer", "author-command", "review-command", 1, "reviewer-gh")));
+
+        Assert.Contains("author-role evidence", error.Message);
+    }
+
+    [Fact]
+    public async Task ContributorToEarlierHeadCannotReviewCorrectedHeadOfSamePullRequest()
+    {
+        await using var fixture = await Fixture.Create(seedIntent: false);
+        var earlierHead = new string('d', 40);
+        var admission = new GitHubMergeTaskScope(GitHubMergeTaskKinds.Version, GitHubMergeTaskKinds.Purpose,
+            GitHubMergeTaskKinds.Author, Fixture.Repository, 12, "");
+        var exact = admission with { HeadSha = earlierHead };
+        var command = new CommandRecord
+        {
+            Id = "reviewer-earlier-contribution",
+            RuntimeId = (await fixture.App.Store.Detail("reviewer")).Worker.RuntimeId,
+            WorkerId = "reviewer",
+            Kind = "Prompt",
+            State = Delivery.Finished,
+            Payload = Json.Write(new PromptInput("reviewer-earlier-contribution", "Implement the correction.", 0,
+                GitHubMergeScope: admission)),
+            NativeMessageId = "msg_contribution",
+            ResultJson = Json.Write(new { publishedHead = earlierHead })
+        };
+        await fixture.App.Store.Write(db =>
+        {
+            db.Commands.Add(command);
+            db.Assignments.Add(new AssignmentRecord
+            {
+                Id = command.Id,
+                WorkerId = "reviewer",
+                Prompt = "Implement the correction."
+            });
+            return Task.FromResult(true);
+        });
+        await fixture.App.Store.SetOutcome("reviewer", new(command.Id, 0, "VerifiedComplete",
+            "Earlier contribution was published.", new(GitHubMergeTaskKinds.Version,
+                GitHubMergeTaskKinds.PublishedExactHead, exact)));
+
+        var error = await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
+            "new-receipt", Fixture.Repository, 12, Fixture.Head, "author", "reviewer",
+            "author-command", "review-command", 1, "reviewer-gh")));
 
         Assert.Contains("author-role evidence", error.Message);
     }
@@ -251,12 +281,8 @@ public sealed class GitHubMergeTests
             db.GitHubReviewReceipts.Remove(await db.GitHubReviewReceipts.SingleAsync(x => x.Id == "receipt"));
             return true;
         });
-        fixture.Remote.BeforeReviewResponse = () => fixture.App.Store.Write(async db =>
-        {
-            var assignment = await db.Assignments.SingleAsync(x => x.Id == "review-command");
-            assignment.Outcome = "Blocked";
-            return true;
-        });
+        fixture.Remote.BeforeReviewResponse = () => fixture.App.Store.SetOutcome("reviewer",
+            new("review-command", 0, "Failed", "The owner withdrew the verified review result."));
 
         await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
             "recorded-review", Fixture.Repository, 12, Fixture.Head, "author", "reviewer", "author-command", "review-command", 1, "reviewer-gh")));
@@ -443,6 +469,115 @@ public sealed class GitHubMergeTests
         Assert.Equal(1, fixture.Remote.MergeCalls);
     }
 
+    [Fact]
+    public async Task PolicyChangedAfterObservationFencesFinalEffectAdmission()
+    {
+        await using var fixture = await Fixture.Create();
+        var tokenRequests = 0;
+        fixture.Remote.Intercept = async request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/access_tokens", StringComparison.Ordinal) &&
+                Interlocked.Increment(ref tokenRequests) == 2)
+                await fixture.Service.ConfigurePolicy(new("policy", Fixture.Repository, "main", ["build"], 1, false));
+            return null;
+        };
+
+        await Assert.ThrowsAsync<ControlException>(() => fixture.Service.Merge("intent", new("intent", 0)));
+
+        Assert.Equal(0, fixture.Remote.MergeCalls);
+        Assert.False(await fixture.App.Store.Read(db => db.GitHubMergeAttempts.AnyAsync()));
+        Assert.False(await fixture.App.Store.Read(db => db.GitHubMergeLeases.AnyAsync()));
+    }
+
+    [Fact]
+    public async Task LatePreflightFailureCannotRemoveReplacementExecutionLease()
+    {
+        await using var fixture = await Fixture.Create();
+        var reviewEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReview = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Remote.Intercept = async request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/reviews", StringComparison.Ordinal))
+            {
+                reviewEntered.TrySetResult();
+                await releaseReview.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            }
+            return null;
+        };
+        var delayed = fixture.Service.Merge("intent", new("intent", 0));
+        await reviewEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        string replacementId = Guid.NewGuid().ToString("N");
+        await fixture.App.Store.Write(async db =>
+        {
+            var original = await db.GitHubMergeLeases.SingleAsync();
+            db.GitHubMergeLeases.Remove(original);
+            await db.SaveChangesAsync();
+            db.GitHubMergeLeases.Add(new GitHubMergeLease
+            {
+                Id = replacementId,
+                Repository = original.Repository,
+                BaseBranch = original.BaseBranch,
+                IntentId = original.IntentId,
+                AcquiredAt = ControlStore.Now
+            });
+            return true;
+        });
+        releaseReview.TrySetResult();
+
+        await Assert.ThrowsAsync<ControlException>(() => delayed);
+
+        var retained = await fixture.App.Store.Read(db => db.GitHubMergeLeases.AsNoTracking().SingleAsync());
+        Assert.Equal(replacementId, retained.Id);
+        Assert.Equal("Requested", (await fixture.Service.ListIntents()).Single().State);
+    }
+
+    [Fact]
+    public async Task LateLostResponseCannotOverwriteConfirmedMergedProjection()
+    {
+        await using var fixture = await Fixture.Create();
+        fixture.Remote.HoldMerge = true;
+        fixture.Remote.LoseMergeResponse = true;
+        var merge = fixture.Service.Merge("intent", new("intent", 0));
+        await fixture.Remote.MergeEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        fixture.Remote.Merged = true;
+        fixture.Remote.TargetSha = fixture.Remote.MergeSha;
+        var observed = await fixture.Service.Observe("intent");
+        fixture.Remote.ReleaseMerge.TrySetResult();
+
+        await Assert.ThrowsAsync<ControlException>(() => merge);
+        var retained = (await fixture.Service.ListIntents()).Single();
+
+        Assert.Equal("Merged", observed.State);
+        Assert.Equal("Merged", retained.State);
+        Assert.Equal(fixture.Remote.MergeSha, retained.MergeCommitSha);
+        Assert.Equal(new[] { "Attempted", "Merged", "Unknown" }, await AttemptStates(fixture.App.Store));
+    }
+
+    [Fact]
+    public async Task LiteralPromptRoleAndTargetTextCannotMintTypedReviewAuthority()
+    {
+        await using var fixture = await Fixture.Create(seedIntent: false);
+        await fixture.App.Store.Write(async db =>
+        {
+            db.GitHubReviewReceipts.RemoveRange(db.GitHubReviewReceipts);
+            var command = await db.Commands.SingleAsync(x => x.Id == "review-command");
+            var assignment = await db.Assignments.SingleAsync(x => x.Id == "review-command");
+            var text = $"Merge role: reviewer\nReport the time. Background: {Fixture.Repository} #12 {Fixture.Head}. Do not review repository content.";
+            command.Payload = text;
+            assignment.Prompt = text;
+            assignment.Evidence = "Verified clock report; no repository inspection performed.";
+            assignment.GitHubAuthorityJson = "{}";
+            return true;
+        });
+
+        await Assert.ThrowsAsync<ControlException>(() => fixture.Service.RecordReview(new(
+            "text-only-review", Fixture.Repository, 12, Fixture.Head, "author", "reviewer",
+            "author-command", "review-command", 1, "reviewer-gh")));
+
+        Assert.False(await fixture.App.Store.Read(db => db.GitHubReviewReceipts.AnyAsync()));
+    }
+
     private static GitHubMergeService SecondService(Fixture fixture)
     {
         var factory = fixture.App.Services.GetRequiredService<IDbContextFactory<ControlDb>>();
@@ -491,15 +626,27 @@ public sealed class GitHubMergeTests
                     PrivateKeyReference = key,
                     RepositoriesJson = Json.Write(new[] { Repository }),
                     State = "Ready",
+                    CredentialState = GitHubCredentialState.Delivered,
+                    CredentialConfigurationFingerprint = new string('b', 64),
+                    ExpiresAt = ControlStore.Now + 3600000,
                     ChecksPermission = GitHubPermissionState.Granted,
                     CommitStatusesPermission = GitHubPermissionState.Granted,
-                    ActionsPermission = GitHubPermissionState.Granted
+                    ActionsPermission = GitHubPermissionState.Granted,
+                    EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion,
+                    EnvironmentPolicyFingerprint = new string('c', 64),
+                    EnvironmentProcessId = 42,
+                    EnvironmentProcessIncarnation = "boot:42",
+                    EnvironmentVerifiedAt = ControlStore.Now
                 });
                 db.Workers.AddRange(
                     new WorkerRecord { Id = "author", RuntimeId = runtime.Id, ManagedServerId = "server-a", NativeSessionId = "session-a", Directory = "/work/a" },
                     new WorkerRecord { Id = "reviewer", RuntimeId = runtime.Id, ManagedServerId = "server-b", NativeSessionId = "session-b", Directory = "/work/b" });
-                db.Commands.AddRange(Command("author-command", "author", runtime.Id, "author"), Command("review-command", "reviewer", runtime.Id, "reviewer"));
-                db.Assignments.AddRange(Assignment("author-command", "author", "ReportedComplete", "author"), Assignment("review-command", "reviewer", "VerifiedComplete", "reviewer"));
+                var authorCommand = Command("author-command", "author", runtime.Id, GitHubMergeTaskKinds.Author);
+                var reviewCommand = Command("review-command", "reviewer", runtime.Id, GitHubMergeTaskKinds.Reviewer);
+                var authorAssignment = Assignment(authorCommand, "author", GitHubMergeTaskKinds.Author);
+                var reviewAssignment = Assignment(reviewCommand, "reviewer", GitHubMergeTaskKinds.Reviewer);
+                db.Commands.AddRange(authorCommand, reviewCommand);
+                db.Assignments.AddRange(authorAssignment, reviewAssignment);
                 db.GitHubMergePolicies.Add(new GitHubMergePolicy
                 {
                     Id = "policy",
@@ -536,7 +683,10 @@ public sealed class GitHubMergeTests
             AuthorCommandId = "author-command",
             ReviewCommandId = "review-command",
             GitHubReviewId = 1,
-            GitHubReviewerIdentity = "reviewer-gh"
+            GitHubReviewerIdentity = "reviewer-gh",
+            EvidenceJson = Json.Write(new GitHubReviewAuthoritySnapshot(GitHubMergeTaskKinds.Version,
+                Authority("author-command", "author", GitHubMergeTaskKinds.Author),
+                Authority("review-command", "reviewer", GitHubMergeTaskKinds.Reviewer)))
         };
 
         public static GitHubMergeIntent Intent(string id, string receiptId, int number) => new()
@@ -561,19 +711,35 @@ public sealed class GitHubMergeTests
             WorkerId = workerId,
             Kind = "Prompt",
             State = Delivery.Finished,
-            Payload = Evidence(role)
+            Payload = Json.Write(new PromptInput(id, Evidence(role), 0, GitHubMergeScope: PromptScope(role))),
+            ResultId = id + "-result",
+            ResultJson = Result(id)
         };
 
-        private static AssignmentRecord Assignment(string id, string workerId, string outcome, string role) => new()
+        private static AssignmentRecord Assignment(CommandRecord command, string workerId, string role) => new()
         {
-            Id = id,
+            Id = command.Id,
             WorkerId = workerId,
             Prompt = Evidence(role),
             Evidence = Evidence(role),
-            Outcome = outcome
+            Outcome = "VerifiedComplete",
+            GitHubAuthorityJson = Json.Write(Authority(command.Id, workerId, role)),
+            GitHubAuthorProvenanceJson = role == GitHubMergeTaskKinds.Author
+                ? Json.Write(Authority(command.Id, workerId, role)) : "{}"
         };
 
-        private static string Evidence(string role) => $"Merge role: {role}\nReview {Repository} pull request #12 at head {Head}.";
+        public static GitHubMergeOutcomeAuthority Authority(string commandId, string workerId, string role) => new(
+            GitHubMergeTaskKinds.Version, Scope(role), role == GitHubMergeTaskKinds.Author
+                ? GitHubMergeTaskKinds.PublishedExactHead : GitHubMergeTaskKinds.ApprovedExactHead,
+            workerId, commandId, commandId + "-result", GitHubMergeTaskAuthority.Hash(Result(commandId)),
+            GitHubMergeTaskAuthority.Hash(Evidence(role)), 1);
+
+        private static GitHubMergeTaskScope Scope(string role) => GitHubMergeTaskAuthority.Scope(role, Repository, 12, Head);
+        private static GitHubMergeTaskScope PromptScope(string role) => role == GitHubMergeTaskKinds.Author
+            ? new(GitHubMergeTaskKinds.Version, GitHubMergeTaskKinds.Purpose, role, Repository, 0, "")
+            : Scope(role);
+        private static string Result(string commandId) => Json.Write(new { commandId, completed = true });
+        private static string Evidence(string role) => $"Typed {role} task completed for the exact head.";
         public ValueTask DisposeAsync() => App.DisposeAsync();
     }
 
@@ -601,6 +767,7 @@ public sealed class GitHubMergeTests
         public TaskCompletionSource MergeEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseMerge { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Func<Task>? BeforeReviewResponse { get; set; }
+        public Func<HttpRequestMessage, Task<HttpResponseMessage?>>? Intercept { get; set; }
 
         public static object Review(long id, string user, string state, string submittedAt) => new
         {
@@ -613,6 +780,7 @@ public sealed class GitHubMergeTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (Intercept is not null && await Intercept(request) is { } intercepted) return intercepted;
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/app/installations/456") return Response(new
             {
