@@ -38,6 +38,8 @@ For the current explicit lightweight template, the internal path is `/home/agent
 
 Canonicalize and validate every managed path against its registered root before remote effects; reject traversal and escaping symlinks. Never interpolate model-provided paths into a shell command. Persist the resolved path and observed filesystem ownership for cleanup decisions.
 
+Until #42 opens a fresh task session in its assigned worktree, assignment guidance uses the verified native session directory as the only task root. It derives per-assignment task and scratch paths beneath that directory and tells workers not to select sibling worktrees, `/tmp`, or other external roots. A genuinely necessary external path remains a one-time, exact-scope owner approval with its task cause; this convention does not automatically grant or remember directory access.
+
 ## Container and endpoint identity
 
 Where the selected Dev Container configuration permits naming, use `hvo-ac-worker-<12-character-id>` as a readable container name. A CLI-generated name is also valid and must be recorded rather than renamed behind its configuration. Full immutable ownership labels are authoritative:
