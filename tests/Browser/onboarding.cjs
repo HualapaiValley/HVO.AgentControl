@@ -7,11 +7,11 @@ const container = 'hvo-agentcontrol-fixture-a';
 function docker(args, input) { return execFileSync('docker', ['exec', '-i', container, ...args], {input, encoding:'utf8'}); }
 (async () => {
   const password = 'browser-onboarding-' + crypto.randomBytes(20).toString('hex');
-  docker(['chpasswd'], 'agent:' + password + '\n');
-  docker(['sh','-c', "printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/00-hvo-onboarding.conf; kill -HUP $(cat /run/sshd.pid)"]);
-  const browser = await chromium.launch({args:['--no-sandbox']});
-  let context, runtime, csrf;
+  let browser, context, runtime, csrf;
   try {
+    docker(['chpasswd'], 'agent:' + password + '\n');
+    docker(['sh','-c', "printf 'PasswordAuthentication yes\\n' > /etc/ssh/sshd_config.d/00-hvo-onboarding.conf; kill -HUP $(cat /run/sshd.pid)"]);
+    browser = await chromium.launch({args:['--no-sandbox']});
     context = await browser.newContext({viewport:{width:1440,height:1100}});
     const page = await context.newPage(), errors = [];
     page.on('pageerror', e => errors.push(e.message));
@@ -75,14 +75,26 @@ function docker(args, input) { return execFileSync('docker', ['exec', '-i', cont
     console.log('PASS: guided first trust, missing/wrong password, encrypted saved credential reuse, verification invalidation, real startup flags and automatic worker setup.');
   } finally {
     if(runtime && context) {
-      await context.request.post(base+'/api/v1/runtimes/'+runtime.id+'/stop',{data:{id:crypto.randomUUID()},headers:{'X-CSRF-TOKEN':csrf}});
-      for(let i=0;i<40;i++) {
-        const snap = await (await context.request.get(base+'/api/v1/snapshot')).json();
-        if(snap.runtimes.find(r=>r.id===runtime.id)?.transport==='Disconnected') break;
-        await new Promise(resolve=>setTimeout(resolve,250));
+      try {
+        await context.request.post(base+'/api/v1/runtimes/'+runtime.id+'/stop',{data:{id:crypto.randomUUID()},headers:{'X-CSRF-TOKEN':csrf}});
+        for(let i=0;i<40;i++) {
+          const snap = await (await context.request.get(base+'/api/v1/snapshot')).json();
+          if(snap.runtimes.find(r=>r.id===runtime.id)?.transport==='Disconnected') break;
+          await new Promise(resolve=>setTimeout(resolve,250));
+        }
+      } finally {
+        try {
+          if(browser) await browser.close();
+        } finally {
+          docker(['sh','-c','rm -f /etc/ssh/sshd_config.d/00-hvo-onboarding.conf; passwd -d agent >/dev/null; kill -HUP $(cat /run/sshd.pid)']);
+        }
+      }
+    } else {
+      try {
+        if(browser) await browser.close();
+      } finally {
+        docker(['sh','-c','rm -f /etc/ssh/sshd_config.d/00-hvo-onboarding.conf; passwd -d agent >/dev/null; kill -HUP $(cat /run/sshd.pid)']);
       }
     }
-    await browser.close();
-    docker(['sh','-c','rm -f /etc/ssh/sshd_config.d/00-hvo-onboarding.conf; passwd -d agent >/dev/null; kill -HUP $(cat /run/sshd.pid)']);
   }
 })().catch(e=>{console.error(e);process.exit(1)});
