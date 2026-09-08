@@ -125,6 +125,22 @@ public sealed class ProviderKeyTests
     }
 
     [Fact]
+    public async Task ExternalCanaryAttestationTransitionsRefreshCompletedToReady()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db => { db.Runtimes.Add(runtime); return Task.FromResult(true); });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new Factory(new Handler(false)));
+        await service.Save(new(Key, 0));
+        await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        var status = await service.AttestReady(runtime.Id, new(1, true));
+
+        Assert.Equal("Ready", Assert.Single(status.Readiness).State);
+        await Assert.ThrowsAsync<ControlException>(() => service.AttestReady(runtime.Id, new(1, false)));
+    }
+
+    [Fact]
     public async Task OutstandingManagedDeliveryPreventsScopedDisposal()
     {
         await using var app = new TestApp();
@@ -165,7 +181,7 @@ public sealed class ProviderKeyTests
     }
 
     [Fact]
-    public async Task UnobservableChildStatusPreventsScopedDisposal()
+    public async Task ActiveStatusOutsideSessionListingPreventsScopedDisposal()
     {
         await using var app = new TestApp();
         var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
@@ -185,7 +201,7 @@ public sealed class ProviderKeyTests
             });
             return Task.FromResult(true);
         });
-        var native = new RefreshHandler(false, omitChildStatus: true);
+        var native = new RefreshHandler(false, unlistedActive: true);
         var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(native));
         await service.Save(new(Key, 0));
 
@@ -213,7 +229,7 @@ public sealed class ProviderKeyTests
         public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
             Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") })));
     }
-    private sealed class RefreshHandler(bool activeSession, bool omitChildStatus = false) : HttpMessageHandler
+    private sealed class RefreshHandler(bool activeSession, bool unlistedActive = false) : HttpMessageHandler
     {
         public int AuthCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -230,9 +246,8 @@ public sealed class ProviderKeyTests
             if (request.Method == HttpMethod.Get && path == "/session")
                 return Json(new[] { new { id = "ses_root", parentID = (string?)null }, new { id = "ses_child", parentID = (string?)"ses_root" } });
             if (request.Method == HttpMethod.Get && path == "/session/status")
-                return Json(activeSession ? new Dictionary<string, object> { ["ses_root"] = new { type = "idle" }, ["ses_child"] = new { type = "busy" } } :
-                    omitChildStatus ? new Dictionary<string, object> { ["ses_root"] = new { type = "idle" } } :
-                    new Dictionary<string, object> { ["ses_root"] = new { type = "idle" }, ["ses_child"] = new { type = "idle" } });
+                return Json(activeSession ? new Dictionary<string, object> { ["ses_child"] = new { type = "busy" } } :
+                    unlistedActive ? new Dictionary<string, object> { ["ses_external"] = new { type = "busy" } } : new Dictionary<string, object>());
             if (request.Method == HttpMethod.Post && path == "/instance/dispose")
             {
                 DisposeCalls++;
