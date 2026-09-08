@@ -60,7 +60,8 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       await expect(run).toContainText('no fixed turn cutoff');
       await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
       await page.setViewportSize({ width: 390, height: 844 });
-      await run.getByRole('button', { name: 'Pause coordination', exact: true }).click();
+      await expect(run.getByRole('heading', { name: 'Paused', exact: true })).toBeVisible({ timeout: 15000 });
+      await expect(renewal).toBeVisible();
       await expect(renewal.getByLabel('Replacement coordinator instruction')).toHaveValue('Continue existing browser task under service supervision.');
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       await run.getByRole('button', { name: 'Resume coordination', exact: true }).click();
