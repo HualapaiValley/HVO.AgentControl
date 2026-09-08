@@ -162,6 +162,27 @@ public sealed class NativeProcessObservationTests
     }
 
     [Fact]
+    public async Task UnverifiedReplacementRemainsRetryableWhenFreshCausalEvidenceArrives()
+    {
+        await using var app = new TestApp();
+        var (runtime, worker, command) = await InFlightPrompt(app);
+        await app.Store.ObserveNativeProcess(runtime.Id, Observed(runtime, OldMarker, 41));
+
+        var mismatched = Replacement(runtime, 99, "other:100", 42, NewMarker, NativeProcessExitEvidence.Unknown, null);
+        var first = await app.Store.ObserveNativeProcess(runtime.Id, Observed(runtime, NewMarker, 42, mismatched));
+        Assert.Equal(0, first.ReplacementReceipts);
+        Assert.Equal(0, first.InterruptedCommands);
+
+        var matching = Replacement(runtime, 41, OldMarker, 42, NewMarker, NativeProcessExitEvidence.Unknown, null);
+        var second = await app.Store.ObserveNativeProcess(runtime.Id, Observed(runtime, NewMarker, 42, matching));
+        Assert.Equal(1, second.ReplacementReceipts);
+        Assert.Equal(1, second.InterruptedCommands);
+        Assert.Single(await app.Store.Read(db => db.Events.Where(x => x.Type == "NativeProcessReplacementUnverified").ToListAsync()));
+        Assert.Single(await app.Store.Read(db => db.Events.Where(x => x.Type == "NativeProcessReplaced").ToListAsync()));
+        Assert.Equal(Delivery.Unknown, (await app.Store.Detail(worker.Id)).Commands.Single(x => x.Id == command.Id).State);
+    }
+
+    [Fact]
     public async Task LostBootstrapResponseAndControllerRestartRecoverReceiptExactlyOnce()
     {
         string data, secrets, runtimeId, workerId, commandId, nativeSessionId, nativeMessageId;

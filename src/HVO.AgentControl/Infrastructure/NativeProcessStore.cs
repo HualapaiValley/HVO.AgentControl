@@ -21,19 +21,21 @@ public sealed partial class ControlStore
 
         var evidence = new NativeProcessObservationEvidence(runtimeId, observation.ManagedServerId, observation.State, observation.Platform,
             observation.ProcessId, observation.Incarnation, observation.ObservedAt, observation.Provenance, observation.Detail, freshness);
-        var observed = Event(db, "NativeProcessObserved", runtimeId, payload: evidence, provenance: observation.Provenance,
-            nativeId: observation.Incarnation.Length > 0 ? observation.Incarnation : null);
-        observed.ObservedAt = observation.ObservedAt;
 
         var unseen = new List<NativeProcessReplacementReceipt>();
         foreach (var replacement in observation.Replacements)
         {
-            if (await db.Events.AnyAsync(x => x.RuntimeId == runtimeId && x.NativeId == replacement.Id &&
-                (x.Type == "NativeProcessReplaced" || x.Type == "NativeProcessReplacementUnverified"))) continue;
+            if (await db.Events.AnyAsync(x => x.RuntimeId == runtimeId && x.NativeId == replacement.Id && x.Type == "NativeProcessReplaced")) continue;
             if (unseen.Any(x => x.Id == replacement.Id)) continue;
             unseen.Add(replacement);
         }
-        if (unseen.Count == 0) return new(freshness, 0, 0);
+        if (unseen.Count == 0)
+        {
+            var observed = Event(db, "NativeProcessObserved", runtimeId, payload: evidence, provenance: observation.Provenance,
+                nativeId: observation.Incarnation.Length > 0 ? observation.Incarnation : null);
+            observed.ObservedAt = observation.ObservedAt;
+            return new(freshness, 0, 0);
+        }
 
         var marker = prior is { State: NativeProcessObservationState.Observed, Freshness: "Fresh" } ? prior.Incarnation : "";
         var processId = prior is { State: NativeProcessObservationState.Observed, Freshness: "Fresh" } ? prior.ProcessId : null;
@@ -47,12 +49,18 @@ public sealed partial class ControlStore
         causal = causal && marker == observation.Incarnation && processId == observation.ProcessId;
         if (!causal)
         {
+            var unverifiedObservation = Event(db, "NativeProcessObservationUnverified", runtimeId, payload: evidence,
+                provenance: observation.Provenance, nativeId: observation.Incarnation.Length > 0 ? observation.Incarnation : null);
+            unverifiedObservation.ObservedAt = observation.ObservedAt;
             foreach (var replacement in unseen)
                 Event(db, "NativeProcessReplacementUnverified", runtimeId, payload: new { replacement, freshness, reason = "Missing fresh causal incarnation chain" },
                     provenance: observation.Provenance, nativeId: replacement.Id);
             return new(freshness, 0, 0);
         }
 
+        var confirmedObservation = Event(db, "NativeProcessObserved", runtimeId, payload: evidence, provenance: observation.Provenance,
+            nativeId: observation.Incarnation.Length > 0 ? observation.Incarnation : null);
+        confirmedObservation.ObservedAt = observation.ObservedAt;
         foreach (var replacement in unseen)
             Event(db, "NativeProcessReplaced", runtimeId, payload: replacement, provenance: observation.Provenance, nativeId: replacement.Id);
 
