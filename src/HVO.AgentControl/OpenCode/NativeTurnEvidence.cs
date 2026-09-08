@@ -38,6 +38,16 @@ public static class NativeTurnEvidence
         return result.ToArray();
     }
 
+    public static bool IsTerminalAssistantResponse(JsonElement message)
+    {
+        var info = message.GetProperty("info");
+        if (info.TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) return true;
+        if (!info.GetProperty("time").TryGetProperty("completed", out var completed) || completed.ValueKind != JsonValueKind.Number) return false;
+        return message.GetProperty("parts").EnumerateArray().All(part => part.GetProperty("type").GetString() != "tool" ||
+            part.TryGetProperty("state", out var state) && state.TryGetProperty("status", out var status) &&
+            status.GetString() is "completed" or "error" or "cancelled");
+    }
+
     private static bool IsTrue(JsonElement value, string property) =>
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(property, out var found) && found.ValueKind == JsonValueKind.True;
 }

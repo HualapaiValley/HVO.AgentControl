@@ -506,7 +506,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             if (!user) continue;
             var assistants = NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId);
-            var ended = assistants.Any(x => x.GetProperty("info").GetProperty("time").TryGetProperty("completed", out _));
+            var ended = assistants.Length > 0 && NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]);
             var failed = assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
             foreach (var assistant in assistants)
             {
