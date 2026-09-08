@@ -264,10 +264,21 @@ public sealed partial class ControlStore
 
     internal static async Task ObserveProviderFailure(ControlDb db, WorkerRecord worker, CommandRecord command, string nativeId, ProviderFailure failure,
         NativeRetryFailure? nativeRetry = null)
+        => await ObserveProviderFailure(db, worker, command, nativeId, failure,
+            command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : PoolId(worker, command), nativeRetry);
+
+    internal static async Task ObserveAttributedProviderFailure(ControlDb db, WorkerRecord worker, CommandRecord command, string nativeId,
+        string providerId, ProviderFailure failure)
+    {
+        if (string.IsNullOrWhiteSpace(providerId) || providerId.Length > 200) return;
+        await ObserveProviderFailure(db, worker, command, nativeId, failure, "provider:" + providerId);
+    }
+
+    private static async Task ObserveProviderFailure(ControlDb db, WorkerRecord worker, CommandRecord command, string nativeId, ProviderFailure failure,
+        string poolId, NativeRetryFailure? nativeRetry = null)
     {
         var receiptId = command.Id + ":" + nativeId;
         if (await db.Set<ProviderFailureReceipt>().FindAsync(receiptId) is not null) return;
-        var poolId = command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : PoolId(worker, command);
         var pool = await db.Set<ProviderPool>().FindAsync(poolId);
         if (pool is null)
         {
@@ -293,6 +304,19 @@ public sealed partial class ControlStore
         if (nativeRetry is not null)
             Event(db, "ProviderNativeRetryObserved", worker.RuntimeId, worker.Id, command.Id,
                 new { poolId, nativeRetry.Attempt, nativeRetry.Next }, provenance: "native", nativeId: nativeId);
+    }
+
+    internal static async Task HoldUnattributedProviderSettlement(ControlDb db, CommandRecord command, string nativeId,
+        string? actualProviderId, string? actualModelId)
+    {
+        if (command.Kind != "Prompt" || command.ProviderPoolId.Length == 0) return;
+        var pool = await db.Set<ProviderPool>().FindAsync(command.ProviderPoolId);
+        if (pool is null || pool.RecoveryOwnershipUnknown || pool.RecoveryCommandId != command.Id) return;
+        pool.RecoveryOwnershipUnknown = true;
+        if (pool.State == "Recovering") { pool.State = "RecoveryRequired"; pool.RetryAt = null; }
+        pool.Revision++;
+        Event(db, "ProviderRecoverySettlementUnattributed", command.RuntimeId, command.WorkerId, command.Id,
+            new { pool.Id, actualProviderId, actualModelId }, provenance: "native", nativeId: nativeId);
     }
 
     internal static async Task ObserveProviderCompletion(ControlDb db, CommandRecord command, bool successful)

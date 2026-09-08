@@ -572,12 +572,34 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             var retired = command.State is Delivery.Cancelled or Delivery.Failed or Delivery.Finished;
             var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             var assistants = user ? NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId) : [];
+            var compactionFailure = user && activity == "Idle"
+                ? NativeTurnEvidence.CompletedAutomaticCompactionFailure(snapshot.Messages, command.NativeMessageId) : null;
             // Preserve scoped failure evidence even when the same snapshot settles an abort.
             foreach (var assistant in assistants)
             {
                 var info = assistant.GetProperty("info");
                 if (info.TryGetProperty("error", out var nativeError) && ProviderFailure.Parse(nativeError, ControlStore.Now) is { } failure)
                     await ControlStore.ObserveProviderFailure(db, worker, command, info.GetProperty("id").GetString()!, failure);
+            }
+            if (compactionFailure is not null)
+            {
+                var providerFailure = ProviderFailure.Parse(compactionFailure.Error, ControlStore.Now);
+                if (providerFailure is not null && compactionFailure.ProviderId is not null)
+                    await ControlStore.ObserveAttributedProviderFailure(db, worker, command, compactionFailure.SummaryMessageId,
+                        compactionFailure.ProviderId, providerFailure);
+                if (!await db.Events.AnyAsync(x => x.Type == "AutomaticCompactionFailed" && x.CommandId == command.Id &&
+                    x.NativeId == compactionFailure.SummaryMessageId))
+                    ControlStore.Event(db, "AutomaticCompactionFailed", worker.RuntimeId, worker.Id, command.Id, new
+                    {
+                        callerMessageId = command.NativeMessageId,
+                        compactionFailure.CompactionMessageId,
+                        compactionFailure.SummaryMessageId,
+                        compactionFailure.SessionId,
+                        compactionFailure.ProviderId,
+                        compactionFailure.ModelId,
+                        category = providerFailure?.Category ?? compactionFailure.ErrorName ?? "NativeError",
+                        status = providerFailure?.Status
+                    }, provenance: "native", nativeId: compactionFailure.SummaryMessageId);
             }
             if (nativeRetry is not null)
             {
@@ -599,12 +621,14 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             var stoppedToolFailure = activity == "Idle" && assistants.Length > 0 &&
                 snapshot.IdleToolFailureMessageId == assistants[^1].GetProperty("info").GetProperty("id").GetString() &&
                 NativeTurnEvidence.IsCompletedToolFailure(assistants[^1]);
-            var ended = assistants.Length > 0 && (NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]) || stoppedToolFailure);
-            var failed = assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
+            var ended = compactionFailure is not null || assistants.Length > 0 && (NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]) || stoppedToolFailure);
+            var failed = compactionFailure is not null || assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
+            var resultMessages = compactionFailure is null ? assistants : [.. assistants, compactionFailure.Summary];
             if (retired)
             {
                 if (activity == "Idle" && ended)
-                    await ControlStore.ObserveProviderCompletion(db, command, !failed && ControlStore.ResponseText(Json.Write(new { messages = assistants })).Length > 0);
+                    await ObserveTurnSettlement(db, worker, command, compactionFailure,
+                        !failed && ControlStore.ResponseText(Json.Write(new { messages = assistants })).Length > 0);
                 continue;
             }
             command.AcceptedAt ??= ControlStore.Now;
@@ -614,8 +638,8 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             { command.ProgressText = progress; command.LastProgressAt = ControlStore.Now; changed = true; }
             if (activity == "Idle" && ended && !failed && progress.Length > 0 && command.Origin == "capability-report")
             { worker.CapabilityReport = progress; worker.CapabilityReportedAt = ControlStore.Now; }
-            if (activity == "Idle" && ended) command.ResultJson = Json.Write(new { messages = assistants });
-            if (activity == "Idle" && ended) await ControlStore.ObserveProviderCompletion(db, command, !failed && progress.Length > 0);
+            if (activity == "Idle" && ended) command.ResultJson = Json.Write(new { messages = resultMessages });
+            if (activity == "Idle" && ended) await ObserveTurnSettlement(db, worker, command, compactionFailure, !failed && progress.Length > 0);
             var assignment = await db.Assignments.FindAsync(command.Id);
             var interrupted = command.Detail == ControlStore.NativeProcessInterruptedDetail;
             var preserveRecordedOutcome = assignment is not null && ControlStore.IsRecordedTerminalOutcome(assignment.Outcome) && worker.Outcome == assignment.Outcome;
@@ -633,7 +657,8 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
             command.Detail = state == Delivery.Finished
-                ? stoppedToolFailure ? "Native idle and a refreshed failed tool step confirm the turn stopped. Task completion remains unverified." : "Native turn ended. Assignment outcome requires evidence and owner review."
+                ? compactionFailure is not null ? "Native automatic compaction failed after the caller turn. The original prompt was not replayed; retained history requires explicit recovery."
+                : stoppedToolFailure ? "Native idle and a refreshed failed tool step confirm the turn stopped. Task completion remains unverified." : "Native turn ended. Assignment outcome requires evidence and owner review."
                 : "Native caller message identity found in retained history.";
             var outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
             if (!interrupted || !preserveRecordedOutcome) worker.Outcome = outcome;
@@ -647,6 +672,23 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         if (changed) ControlStore.Event(db, "HistoryReconciled", worker.RuntimeId, workerId, payload: new { worker.Activity, worker.HistoryGap });
         return true;
     });
+
+    private static async Task ObserveTurnSettlement(ControlDb db, WorkerRecord worker, CommandRecord command,
+        AutomaticCompactionFailure? compactionFailure, bool successful)
+    {
+        if (compactionFailure is null)
+        {
+            await ControlStore.ObserveProviderCompletion(db, command, successful);
+            return;
+        }
+        var sourcePoolId = command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : ControlStore.PoolId(worker, command);
+        var actualPoolId = compactionFailure.ProviderId is null ? null : "provider:" + compactionFailure.ProviderId;
+        if (actualPoolId == sourcePoolId)
+            await ControlStore.ObserveProviderCompletion(db, command, false);
+        else
+            await ControlStore.HoldUnattributedProviderSettlement(db, command, compactionFailure.SummaryMessageId,
+                compactionFailure.ProviderId, compactionFailure.ModelId);
+    }
 
     private const string HistoryUnavailableDetail = "Native history could not be read within validated observation limits. SSH remains connected; affected worker activity is unknown until history can be refreshed.";
 
