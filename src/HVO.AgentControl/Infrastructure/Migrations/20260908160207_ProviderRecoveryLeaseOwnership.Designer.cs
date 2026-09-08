@@ -1736,6 +1736,9 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("RecoveryOwnershipUnknown")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("RetryAt")
                         .HasColumnType("INTEGER");
 

@@ -29,7 +29,7 @@ public partial class Providers
     {
         await Store.ResumePool(pool.Id, new(pool.Revision, recoveryVerified));
         recoveryVerified = false;
-        notice = "Model dispatch resumed. Failed tasks were not replayed.";
+        notice = "Provider access verified. Outstanding recovery reservations remain held; failed tasks were not replayed.";
     });
     private Task Start(string runtimeId) => Execute(async () => { await Logins.Start(runtimeId, Guid.NewGuid().ToString()); });
 }

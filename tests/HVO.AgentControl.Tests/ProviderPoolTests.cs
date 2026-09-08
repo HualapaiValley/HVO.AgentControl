@@ -286,7 +286,7 @@ public sealed class ProviderPoolTests
             Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, recovery));
             await ControlStore.ObserveProviderFailure(db, worker, late, "late", new("Throttled", 429, null));
             Assert.Equal(recovery.Id, pool.RecoveryCommandId);
-            Assert.Equal("Recovering", pool.State);
+            Assert.Equal("Throttled", pool.State);
             Assert.False(await ControlStore.ProviderDispatchAllowed(db, worker, waiting));
             return true;
         });

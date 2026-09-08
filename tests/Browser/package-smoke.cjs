@@ -123,14 +123,22 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await expect(pools).toContainText('Remaining subscription allowance is unknown');
     if (process.env.HVO_PROVIDER_POOL_FIXTURE === '1') {
       await expect(pools).toContainText('fixture-provider · Exhausted');
+      await expect(pools).toContainText('fixture-reserved-request');
       const resume = pools.getByRole('button', { name: 'Resume fixture-provider dispatch', exact: true });
       await expect(resume).toBeDisabled();
       await pools.getByRole('checkbox').check();
       await resume.click();
       await expect(pools).toContainText('fixture-provider · Available');
+      await expect(pools).toContainText('Other requests wait for its settlement');
+      const access = (await (await context.request.get(base + '/api/v1/providers/pools')).json()).find(x => x.id === 'provider:fixture-provider');
+      expect(access.recoveryCommandId).toBe('fixture-reserved-request');
       await page.reload();
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
       await expect(pools).toContainText('fixture-provider · Available');
+      await expect(pools).toContainText('fixture-reserved-request');
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(pools).toContainText('Other requests wait for its settlement');
+      await page.setViewportSize({ width: 1280, height: 900 });
     }
     const keyPanel = page.getByRole('region', { name: 'OpenCode Go key' });
     await expect(keyPanel.getByLabel('OpenCode Go API key')).toHaveAttribute('type', 'password');

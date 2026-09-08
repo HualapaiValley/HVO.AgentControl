@@ -15,6 +15,7 @@ public sealed class ProviderPool
     public int ConsecutiveFailures { get; set; }
     public string LastCommandId { get; set; } = "";
     public string RecoveryCommandId { get; set; } = "";
+    public bool RecoveryOwnershipUnknown { get; set; }
 }
 
 public sealed class ProviderFailureReceipt
@@ -232,15 +233,23 @@ public sealed partial class ControlStore
         var poolId = command.ProviderPoolId.Length > 0 ? command.ProviderPoolId : PoolId(worker, command);
         var pool = await db.Set<ProviderPool>().FindAsync(poolId);
         if (pool is null) return true;
-        if (pool.RecoveryCommandId.Length > 0)
+        if (pool.RecoveryOwnershipUnknown)
         {
-            if (pool.RecoveryCommandId == command.Id) return true;
+            command.Detail = $"Provider recovery ownership needs reconciliation ({poolId}); access verification cannot settle an unknown attempt.";
+            return false;
+        }
+        if (pool.RecoveryCommandId.Length > 0 && pool.RecoveryCommandId != command.Id)
+        {
             command.Detail = $"Waiting for the reserved provider recovery attempt ({poolId}). Remaining allowance unknown.";
             return false;
         }
         if (pool.State == "Available") return true;
+        if (pool.State == "Recovering" && pool.RecoveryCommandId == command.Id) return true;
         if (pool.State is "Throttled" or "Unavailable" && pool.RetryAt <= Now && pool.ConsecutiveFailures < 3)
         {
+            if (pool.RecoveryCommandId.Length == 0 && await db.Commands.AnyAsync(x => x.Id == pool.LastCommandId &&
+                (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)))
+                return false;
             // Admit one managed attempt after cooldown. Other runtimes wait until its
             // terminal evidence arrives; a restart never releases this lease silently.
             pool.State = "Recovering"; pool.RecoveryCommandId = command.Id; pool.Revision++;
@@ -267,21 +276,17 @@ public sealed partial class ControlStore
         }
         var observed = Now;
         pool.ConsecutiveFailures++;
-        var liveRecovery = pool.RecoveryCommandId.Length > 0 && pool.RecoveryCommandId != command.Id;
         // Exhaustion/authentication remain manual holds even if another in-flight
         // request reports a weaker transient failure or later succeeds.
         if (failure.Category is "Exhausted" or "AuthenticationRequired")
             pool.State = failure.Category;
-        else if (!liveRecovery && pool.State is not ("Exhausted" or "AuthenticationRequired"))
+        else if (pool.State is not ("Exhausted" or "AuthenticationRequired" or "RecoveryRequired"))
             pool.State = failure.Category;
         var jitter = Random.Shared.Next(1000, 5001);
         var retryAt = failure.Category is "Throttled" or "Unavailable"
             ? Math.Min(DateTimeOffset.MaxValue.ToUnixTimeMilliseconds(), Math.Max(failure.RetryAt ?? observed + 60000, observed + 1000) + jitter) : (long?)null;
-        if (!liveRecovery)
-        {
-            pool.RetryAt = pool.State is "Exhausted" or "AuthenticationRequired" ? null : Math.Max(pool.RetryAt ?? 0, retryAt ?? 0);
-            if (pool.ConsecutiveFailures >= 3 && pool.State is "Throttled" or "Unavailable") { pool.State = "RecoveryRequired"; pool.RetryAt = null; }
-        }
+        pool.RetryAt = pool.State is "Exhausted" or "AuthenticationRequired" or "RecoveryRequired" ? null : Math.Max(pool.RetryAt ?? 0, retryAt ?? 0);
+        if (pool.ConsecutiveFailures >= 3 && pool.State is "Throttled" or "Unavailable") { pool.State = "RecoveryRequired"; pool.RetryAt = null; }
         pool.ObservedAt = observed; pool.Revision++; pool.LastCommandId = command.Id;
         db.Add(new ProviderFailureReceipt { Id = receiptId, PoolId = poolId, CommandId = command.Id, Category = failure.Category, Status = failure.Status, ObservedAt = observed, RetryAt = retryAt });
         Event(db, "ProviderPoolBlocked", worker.RuntimeId, worker.Id, command.Id, new { poolId, pool.State, failure.Status, pool.RetryAt });
@@ -292,14 +297,21 @@ public sealed partial class ControlStore
 
     internal static async Task ObserveProviderCompletion(ControlDb db, CommandRecord command, bool successful)
     {
-        if (command.ProviderPoolId.Length == 0) return;
+        // Call only for known-unsent terminal outcomes or attributed native settlement,
+        // never for a lost response or administrative acknowledgement of uncertainty.
+        if (command.Kind != "Prompt" || command.ProviderPoolId.Length == 0) return;
         var pool = await db.Set<ProviderPool>().FindAsync(command.ProviderPoolId);
-        if (pool?.RecoveryCommandId != command.Id) return;
+        if (pool is null || pool.RecoveryOwnershipUnknown || pool.RecoveryCommandId != command.Id) return;
         pool.RecoveryCommandId = "";
-        if (pool.State is not ("Exhausted" or "AuthenticationRequired"))
+        // New failures (including cooldowns) and explicit access verification have
+        // independent authority. Settling a request must not overwrite either.
+        if (pool.State == "Recovering")
+        {
             pool.State = successful ? "Available" : "RecoveryRequired";
-        pool.RetryAt = null; pool.Revision++;
-        if (successful) pool.ConsecutiveFailures = 0;
+            pool.RetryAt = null;
+            if (successful) pool.ConsecutiveFailures = 0;
+        }
+        pool.Revision++;
         Event(db, "ProviderRecoveryObserved", command.RuntimeId, command.WorkerId, command.Id, new { pool.Id, pool.State });
     }
 
@@ -308,8 +320,8 @@ public sealed partial class ControlStore
         var pool = await db.Set<ProviderPool>().FindAsync(id) ?? throw new ControlException("Provider pool not found.", 404);
         if (pool.Revision != input.ExpectedRevision) throw new ControlException("Provider state changed; refresh before resuming.");
         if (!input.RecoveryVerified) throw new ControlException("Verify provider access and allowance before resuming.");
-        pool.State = "Available"; pool.RetryAt = null; pool.ConsecutiveFailures = 0; pool.RecoveryCommandId = ""; pool.Revision++;
-        Event(db, "ProviderPoolResumed", payload: new { pool.Id, pool.Revision }, provenance: "user");
+        pool.State = "Available"; pool.RetryAt = null; pool.ConsecutiveFailures = 0; pool.Revision++;
+        Event(db, "ProviderPoolResumed", payload: new { pool.Id, pool.Revision, pool.RecoveryCommandId, pool.RecoveryOwnershipUnknown }, provenance: "user");
         return pool;
     });
 }
