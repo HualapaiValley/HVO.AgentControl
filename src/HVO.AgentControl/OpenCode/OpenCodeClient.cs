@@ -204,7 +204,9 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
                     type.GetString() != "server.instance.disposed" || !payload.TryGetProperty("properties", out var properties) ||
                     properties.ValueKind != JsonValueKind.Object)
                     continue;
-                if (properties.TryGetProperty("directory", out var eventDirectory) && eventDirectory.GetString() == directory)
+                if (item.TryGetProperty("directory", out var envelopeDirectory) && envelopeDirectory.ValueKind == JsonValueKind.String &&
+                    envelopeDirectory.GetString() == directory && properties.TryGetProperty("directory", out var eventDirectory) &&
+                    eventDirectory.ValueKind == JsonValueKind.String && eventDirectory.GetString() == directory)
                     return;
                 throw new InvalidDataException("OpenCode disposal event directory does not match the controlled refresh scope.");
             }

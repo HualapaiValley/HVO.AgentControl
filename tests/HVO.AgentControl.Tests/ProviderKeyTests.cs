@@ -227,7 +227,7 @@ public sealed class ProviderKeyTests
     private sealed class Factory(Handler handler) : IRuntimeTransportFactory
     {
         public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
-            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") })));
+            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") }), runtime.ManagedServerId));
     }
     private sealed class RefreshHandler(bool activeSession, bool unlistedActive = false) : HttpMessageHandler
     {
@@ -276,13 +276,15 @@ public sealed class ProviderKeyTests
     private sealed class RefreshFactory(RefreshHandler handler) : IRuntimeTransportFactory
     {
         public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
-            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") })));
+            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") }), runtime.ManagedServerId));
     }
-    private sealed class Transport(OpenCodeClient api) : IRuntimeTransport
+    private sealed class Transport(OpenCodeClient api, string ownerId) : IRuntimeTransport
     {
         public OpenCodeClient Api => api;
         public NativeProcessObservation? NativeProcess { get; } = new("server", NativeProcessObservationState.Observed,
             "fixture", 7, "fixture-incarnation", ControlStore.Now, "SyntheticTest", "fixture", []);
+        public Task<RuntimeProcessIdentity?> ProbeProcessIdentity(CancellationToken token) =>
+            Task.FromResult<RuntimeProcessIdentity?>(new(RuntimeConnections.Ssh, ownerId, "fixture-incarnation", 7, ControlStore.Now));
         public bool Connected => true;
         public string Platform => "fixture";
         public Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken) => throw new NotSupportedException();

@@ -33,7 +33,10 @@ public sealed class ProviderReadinessReceipt
     public string State { get; set; } = "RefreshRequired";
     public string Detail { get; set; } = "Credential delivery has not refreshed native provider state.";
     public long UpdatedAt { get; set; }
+    [JsonIgnore] public string PendingDisposalJson { get; set; } = "";
 }
+
+internal sealed record ProviderDisposalAttempt(string OperationId, string Directory, RuntimeProcessIdentity Process);
 
 public sealed record SaveProviderKey(string Key, long ExpectedRevision);
 public sealed record ApplyProviderKey(long ExpectedRevision);
@@ -45,6 +48,8 @@ public sealed record ProviderKeyStatus(string ProviderId, bool Saved, long Revis
 public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRuntimeTransportFactory transports)
 {
     public const string ProviderId = "opencode-go";
+    internal const string LegacyPendingDisposal = "legacy-unattributed";
+    private sealed class RefreshUnverifiedException(string message) : Exception(message);
     private readonly SemaphoreSlim gate = new(1, 1);
 
     public Task<ProviderKeyStatus> Status() => store.Read(async db =>
@@ -118,6 +123,7 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
             // Persist before sending. A host restart or lost response leaves honest uncertainty.
             var deliveryId = ProviderId + ":" + runtimeId;
             var sent = false;
+            var stored = false;
             try
             {
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -126,6 +132,7 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 var key = secrets.Read(reference);
                 sent = true;
                 var result = await transport.Api.SetProviderKey(ProviderId, key, deadline.Token);
+                stored = result.ValueKind == System.Text.Json.JsonValueKind.True;
                 await Receipt(result.ValueKind == System.Text.Json.JsonValueKind.True ? "StoredOnRuntime" : "Unconfirmed");
                 if (result.ValueKind != System.Text.Json.JsonValueKind.True)
                 {
@@ -136,13 +143,14 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                     await Refresh(transport, runtimeId, deadline.Token);
                 }
             }
-            catch (Exception)
+            catch (Exception error)
             {
                 // Never expose provider responses, transport exceptions or request bodies here.
-                await Receipt(sent ? "Unconfirmed" : "FailedBeforeSend");
-                await Readiness(sent ? "Unknown" : "RefreshRequired", sent
+                if (!stored) await Receipt(sent ? "Unconfirmed" : "FailedBeforeSend");
+                await Readiness(sent ? "Unknown" : "RefreshRequired", error is RefreshUnverifiedException ? error.Message : sent
                     ? "Credential delivery or native refresh outcome is unknown."
                     : "Credential delivery did not start; native provider state was not refreshed.");
+                await InstanceReadiness("Unknown", error is RefreshUnverifiedException ? error.Message : "Native refresh completion is unverified; affected instances remain held.");
             }
             return await Status();
 
@@ -177,10 +185,33 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
             async Task Refresh(IRuntimeTransport transport, string id, CancellationToken cancellation)
             {
                 var api = transport.Api;
-                var directories = (await store.Read(async db => await db.Workers.Where(x => x.RuntimeId == id && !x.Archived)
-                    .Select(x => x.Directory).Distinct().ToListAsync())).Concat(ControlStore.Roots(runtime)).Distinct().ToList();
+                var directories = runtime.ConnectionKind == RuntimeConnections.ControlHttp ? [ControlStore.ControlDirectory] :
+                    (await store.Read(async db => await db.Workers.Where(x => x.RuntimeId == id && !x.Archived)
+                        .Select(x => x.Directory).Distinct().ToListAsync())).Concat(ControlStore.Roots(runtime))
+                        .Append(runtime.StateDirectory).Where(x => x.Length > 0).Distinct().ToList();
                 await Readiness("Refreshing", "Waiting for fresh idle evidence before scoped native refresh.");
                 await InstanceReadiness("Refreshing", "Waiting for all affected native instances to become idle.");
+                var pendingJson = await store.Read(async db => (await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + id))!.PendingDisposalJson);
+                if (pendingJson.Length > 0)
+                {
+                    if (pendingJson == LegacyPendingDisposal)
+                        throw new RefreshUnverifiedException("An earlier refresh has no process attribution. Automatic retry is held until explicit legacy recovery disposition.");
+                    var pending = Json.Read<ProviderDisposalAttempt>(pendingJson);
+                    var current = await FreshProcess(cancellation);
+                    // An old unobserved disposal can still emit a directory-only
+                    // completion. It cannot be attributed to another same-process
+                    // attempt, including after a host restart or event pruning.
+                    if (!pending.Process.MatchesOwner(runtime) || current.SameProcess(pending.Process))
+                        throw new RefreshUnverifiedException("A previous disposal is unresolved on this process; a verified replacement is required before another controlled refresh.");
+                    await store.Write(async db =>
+                    {
+                        var receipt = (await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + id))!;
+                        if (receipt.PendingDisposalJson != pendingJson) throw new ControlException("Pending refresh changed.");
+                        receipt.PendingDisposalJson = "";
+                        ControlStore.Event(db, "ProviderDisposalSupersededByProcessReplacement", id, payload: new { pending, current }, provenance: "observed");
+                        return true;
+                    });
+                }
                 var outstanding = await store.Read(db => db.Commands.AnyAsync(x => x.RuntimeId == id && x.Kind == "Prompt" &&
                     (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)));
                 if (outstanding)
@@ -206,30 +237,58 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                         await InstanceReadiness("RefreshRequired", "A managed or child native session became active; no further instance was disposed.");
                         return;
                     }
-                    var process = transport.NativeProcess;
-                    if (process is not { State: NativeProcessObservationState.Observed, ProcessId: > 0 } ||
-                        process.ObservedAt < ControlStore.Now - 60000 || string.IsNullOrWhiteSpace(process.Incarnation))
-                    {
-                        await Readiness("Unknown", "Scoped disposal completion cannot be attributed to a fresh verified runtime process.");
-                        await InstanceReadiness("Unknown", "Scoped disposal completion cannot be attributed to a fresh verified runtime process.");
-                        return;
-                    }
                     using var completionDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                     completionDeadline.CancelAfter(TimeSpan.FromSeconds(20));
+                    var process = await FreshProcess(completionDeadline.Token);
                     using var completion = await api.Subscribe(completionDeadline.Token);
-                    await api.DisposeInstance(directory, completionDeadline.Token);
-                    await api.WaitForInstanceDisposed(completion, directory, completionDeadline.Token);
-                    await transport.ValidateConnection(completionDeadline.Token);
-                    if (!transport.Connected)
+                    await SameProcess(process, completionDeadline.Token);
+                    var attempt = new ProviderDisposalAttempt(Guid.NewGuid().ToString(), directory, process);
+                    var attemptJson = Json.Write(attempt);
+                    await store.Write(async db =>
                     {
-                        await Readiness("Unknown", "The verified runtime connection changed while waiting for scoped disposal completion.");
-                        await InstanceReadiness("Unknown", "The verified runtime connection changed while waiting for scoped disposal completion.");
-                        return;
-                    }
-                    await api.Models(directory, cancellation);
+                        var receipt = (await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + id))!;
+                        if (receipt.PendingDisposalJson.Length > 0) throw new ControlException("Another disposal is unresolved.");
+                        receipt.PendingDisposalJson = attemptJson;
+                        ControlStore.Event(db, "ProviderDisposalStarted", id, payload: attempt, provenance: "controller");
+                        return true;
+                    });
+                    var acknowledgement = await api.DisposeInstance(directory, completionDeadline.Token);
+                    if (acknowledgement.ValueKind != System.Text.Json.JsonValueKind.True)
+                        throw new ControlException("Native disposal acknowledgement was not confirmed.");
+                    await api.WaitForInstanceDisposed(completion, directory, completionDeadline.Token);
+                    await SameProcess(process, completionDeadline.Token);
+                    await api.Models(directory, completionDeadline.Token);
+                    await SameProcess(process, completionDeadline.Token);
+                    await store.Write(async db =>
+                    {
+                        var receipt = (await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + id))!;
+                        if (receipt.PendingDisposalJson != attemptJson) throw new ControlException("Pending refresh changed.");
+                        receipt.PendingDisposalJson = "";
+                        ControlStore.Event(db, "ProviderDisposalCompleted", id, payload: attempt, provenance: "observed");
+                        return true;
+                    });
                 }
                 await Readiness("RefreshCompleted", "Scoped native provider caches were refreshed after fresh idle evidence; model access is not yet tested.");
                 await InstanceReadiness("RefreshCompleted", "Affected native caches were refreshed; model access remains untested.");
+
+                async Task<RuntimeProcessIdentity> FreshProcess(CancellationToken token)
+                {
+                    var started = ControlStore.Now;
+                    var observed = await transport.ProbeProcessIdentity(token);
+                    var unchanged = await store.Read(async db => await db.Runtimes.AnyAsync(x => x.Id == runtime.Id &&
+                        x.Revision == runtime.Revision && x.DesiredConnected && x.ManagedServerId == runtime.ManagedServerId &&
+                        x.ConnectionKind == runtime.ConnectionKind, token));
+                    if (!unchanged || !transport.Connected || observed is null || !observed.MatchesOwner(runtime) ||
+                        observed.ObservedAt < started || observed.ObservedAt > ControlStore.Now)
+                        throw new RefreshUnverifiedException("A fresh owned runtime process identity could not be verified; refresh remains held.");
+                    return observed;
+                }
+
+                async Task SameProcess(RuntimeProcessIdentity expected, CancellationToken token)
+                {
+                    if (!expected.SameProcess(await FreshProcess(token)))
+                        throw new RefreshUnverifiedException("The runtime process changed during controlled refresh; completion remains unverified.");
+                }
 
                 async Task<bool> SessionsIdle(string directory)
                 {

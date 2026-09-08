@@ -8,7 +8,7 @@ AgentHost holds public progress receipts in memory, with one pending attempt per
 
 OpenCode stores and renews credentials on the runtime under its OS user. Workers using that same user share provider access, while model selection remains a worker setting. Signing in does not abort sessions, clear native instances, change model defaults, retry failed tasks or copy credentials to other hosts.
 
-After sign-in, refresh workspace models in the worker editor. Existing OpenCode workspace instances can retain provider configuration loaded before authentication; a catalog refresh alone may not reload the provider plugin. If a newly selected provider cannot produce a response, reconcile active tasks before a controlled workspace/server reload. Automatic quiescing and safe provider-cache refresh remain follow-up work; authentication success does not claim an inference test passed.
+After sign-in, refresh workspace models in the worker editor. Existing OpenCode workspace instances can retain provider configuration loaded before authentication; a catalog refresh alone may not reload the provider plugin. If a newly selected provider cannot produce a response, reconcile active tasks before a controlled workspace/server reload. The saved Go-key flow now supports a controlled, idle-only cache refresh with durable holds and process continuity; see [Provider refresh completion](PROVIDER_REFRESH_CONTINUITY.md). OAuth refresh integration remains follow-up work. Authentication success does not claim an inference test passed.
 
 ## Provisioning contract (planned)
 

@@ -120,6 +120,15 @@ internal sealed class SshRuntimeTransport(SshClient ssh, ForwardedPortLocal forw
     public string InstalledExecutable { get; } = installedExecutable;
     public NativeProcessObservation NativeProcess { get; } = nativeProcess;
 
+    public async Task<RuntimeProcessIdentity?> ProbeProcessIdentity(CancellationToken cancellationToken)
+    {
+        var observed = NativeProcessProbe.Parse(runtime.ManagedServerId,
+            await SshRuntimeTransportFactory.Run(ssh, NativeProcessProbe.LiveScript(runtime), cancellationToken, 5), ControlStore.Now);
+        return observed.State == NativeProcessObservationState.Observed
+            ? new(RuntimeConnections.Ssh, runtime.ManagedServerId, observed.Incarnation, observed.ProcessId, observed.ObservedAt)
+            : null;
+    }
+
     public async Task<RuntimeTelemetrySample?> SampleTelemetry(string identity, CancellationToken cancellationToken) =>
         TelemetryProbe.Parse(await SshRuntimeTransportFactory.Run(ssh, TelemetryProbe.Script, cancellationToken, 5), identity);
 
