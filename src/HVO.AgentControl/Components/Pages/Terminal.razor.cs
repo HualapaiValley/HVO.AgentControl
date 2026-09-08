@@ -45,10 +45,13 @@ public partial class Terminal
     public async ValueTask DisposeAsync()
     {
         disposed = true; opening++;
-        if (module is not null)
+        var loaded = module;
+        module = null;
+        if (loaded is not null)
         {
-            try { await module.InvokeVoidAsync("close"); await module.DisposeAsync(); } catch (JSDisconnectedException) { }
+            try { await loaded.InvokeVoidAsync("close"); await loaded.DisposeAsync(); } catch (JSDisconnectedException) { }
         }
         self?.Dispose();
+        self = null;
     }
 }
