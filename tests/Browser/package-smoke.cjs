@@ -41,6 +41,25 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
         await expect(profile).toHaveCount(0);
       }
     }
+    if (process.env.HVO_CONVERSATION_RACE_FIXTURE === '1') {
+      const workerA = 'conversation-race-a';
+      const workerB = 'conversation-race-b';
+      await page.goto(base + '/');
+      await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+      await page.getByLabel('Agent conversation').selectOption(workerA);
+      await page.getByLabel('Agent conversation').selectOption(workerB);
+      await page.getByLabel('Agent conversation').selectOption(workerA);
+      const conversation = page.getByRole('region', { name: 'Worker conversation' });
+      await expect(conversation.getByRole('heading', { name: 'Conversation race A', exact: true })).toBeVisible();
+      await conversation.getByLabel('Task or follow-up').fill('Browser-selected worker identity');
+      await conversation.getByRole('button', { name: 'Send instruction', exact: true }).click();
+      await expect(page.getByRole('status')).toContainText('Instruction queued');
+      const snapshot = await (await context.request.get(base + '/api/v1/snapshot')).json();
+      const command = snapshot.commands.find(x => x.kind === 'Prompt' && JSON.parse(x.payload).text === 'Browser-selected worker identity');
+      expect(command.workerId).toBe(workerA);
+      expect(JSON.parse(command.payload).expectedRevision).toBe(7);
+      expect(snapshot.commands.some(x => x.workerId === workerB && x.kind === 'Prompt')).toBe(false);
+    }
     if (process.env.HVO_COORDINATION_SUPERVISION_FIXTURE === '1') {
       await page.goto(base + '/coordination');
       await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
