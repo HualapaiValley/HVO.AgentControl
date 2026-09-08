@@ -27,17 +27,23 @@ public sealed class ControlSessionBinding
     public string WorkerId { get; set; } = "";
     public string NativeSessionId { get; set; } = "";
     public string CreationCommandId { get; set; } = "";
+    public int Generation { get; set; }
+    public string? PredecessorId { get; set; }
+    public bool IsCurrent { get; set; } = true;
     public string State { get; set; } = "Queued";
     public string Detail { get; set; } = "Waiting for the control service.";
     public long Revision { get; set; }
-    public string Title => "agentcontrol-control:" + Id;
+    public string Title => "agentcontrol-control:" + Id + (Generation == 0 ? "" : ":g" + Generation);
 }
 
 public sealed record ControlServiceIdentity(int SchemaVersion, string InstanceId, string IncarnationId, string StartedAt, string Directory);
 public sealed record RegisterControlServiceInput(string Id, string Name, string Endpoint, string ExpectedInstanceId, string PasswordReference);
 public sealed record CreateControlSessionInput(string Id, string ScopeKind, string ScopeId, string Name,
-    string ProviderId = "", string ModelId = "", string Variant = "");
+    string ProviderId = "", string ModelId = "", string Variant = "", string Agent = "");
 public sealed record MigrateControlSessionInput(string Id, long ExpectedRevision, string ControlSessionId);
 public sealed record ControlServiceView(ControlServiceRecord Service, RuntimeRecord Connection, List<ControlSessionBinding> Sessions);
 
 public sealed record RetryControlSessionInput(string Id, long ExpectedRevision);
+public sealed record RenewControlSessionInput(string Id, long ExpectedRevision);
+public sealed record ControlSessionRenewalReceipt(string Id, string State, string SuccessorId, long RecordedAt);
+public sealed record ControlSessionRenewalResult(ControlSessionBinding Successor, ControlSessionRenewalReceipt Receipt);

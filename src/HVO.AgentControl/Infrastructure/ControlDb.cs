@@ -43,7 +43,10 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<ControlServiceRecord>().HasOne<RuntimeRecord>().WithOne().HasForeignKey<ControlServiceRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<ControlServiceRecord>().HasIndex(x => x.InstanceId).IsUnique();
         model.Entity<ControlSessionBinding>().Ignore(x => x.Title);
-        model.Entity<ControlSessionBinding>().HasIndex(x => new { x.ScopeKind, x.ScopeId }).IsUnique();
+        model.Entity<ControlSessionBinding>().Property(x => x.IsCurrent).HasDefaultValue(true).ValueGeneratedNever();
+        model.Entity<ControlSessionBinding>().HasIndex(x => new { x.ScopeKind, x.ScopeId, x.Generation }).IsUnique();
+        model.Entity<ControlSessionBinding>().HasIndex(x => new { x.ScopeKind, x.ScopeId }).IsUnique().HasFilter("IsCurrent = 1");
+        model.Entity<ControlSessionBinding>().HasIndex(x => x.PredecessorId).IsUnique().HasFilter("PredecessorId IS NOT NULL");
         model.Entity<ControlSessionBinding>().HasIndex(x => x.WorkerId).IsUnique();
         model.Entity<ControlSessionBinding>().HasOne<ControlServiceRecord>().WithMany().HasForeignKey(x => x.ControlServiceId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<HostRecord>().HasKey(x => x.Sequence);
