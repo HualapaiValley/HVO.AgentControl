@@ -55,9 +55,6 @@ jobs:
       - name: Soak runner regression checks
         run: python3 tests/test_soak_runner.py scripts/run-coordination-soak.sh
 
-      - name: Unit and persistence tests
-        run: dotnet test HVO.AgentControl.slnx --no-build --configuration Release
-
       - name: Coordination exercise tests (when present)
         run: |
           if test -f tests/CoordinationLab/CoordinationLab.csproj; then
@@ -68,9 +65,10 @@ jobs:
       - name: Start disposable SSH fixtures
         run: ./tests/Fixtures/start.sh
 
-      - name: SSH and recovery integration tests
+      - name: Unit, persistence, SSH and recovery tests
         env:
           HVO_SSH_FIXTURES: 1
+          HVO_GITHUB_CLI_TESTS: 1
         run: dotnet test HVO.AgentControl.slnx --no-build --configuration Release
 
       - name: Remove disposable SSH fixtures
