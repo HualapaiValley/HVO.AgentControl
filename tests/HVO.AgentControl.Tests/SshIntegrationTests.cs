@@ -212,21 +212,24 @@ public sealed class SshIntegrationTests
             Assert.Equal("dirty_worktree", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
             Assert.Equal(0, (await Docker("a", "rm", "-f", directory + "/untracked.txt")).ExitCode);
 
-            var marker = directory + "/configured-command-ran";
+            var marker = "/home/agent/configured-command-ran-" + Guid.NewGuid().ToString("N");
+            var helper = "/home/agent/configured-command-" + Guid.NewGuid().ToString("N");
             Assert.Equal(0, (await Docker("a", "sh", "-c", $$"""
                 set -eu
                 cd {{BootstrapScript.Quote(directory)}}
-                printf '#!/bin/sh\ntouch %s\n' {{BootstrapScript.Quote(marker)}} > configured-command
-                chmod 700 configured-command
+                printf '#!/bin/sh\ntouch %s\n' {{BootstrapScript.Quote(marker)}} > {{BootstrapScript.Quote(helper)}}
+                chmod 700 {{BootstrapScript.Quote(helper)}}
                 printf 'tracked.txt filter=fixture\n' > .gitattributes
                 git add .gitattributes
                 git commit -m attributes >/dev/null
-                git config core.fsmonitor {{BootstrapScript.Quote(directory + "/configured-command")}}
-                git config filter.fixture.clean {{BootstrapScript.Quote(directory + "/configured-command")}}
+                git config core.fsmonitor {{BootstrapScript.Quote(helper)}}
+                git config filter.fixture.clean {{BootstrapScript.Quote(helper)}}
+                touch tracked.txt
                 """)).ExitCode);
             head = (await Docker("a", "git", "-C", directory, "rev-parse", "HEAD")).Output.Trim();
-            Assert.Equal(PreparedCheckoutStatus.Verified, (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Status);
+            Assert.Equal("filter_configured", (await connection.VerifyPreparedCheckout(runtime, Input(), CancellationToken.None)).Code);
             Assert.Equal(0, (await Docker("a", "sh", "-c", "test ! -e " + BootstrapScript.Quote(marker))).ExitCode);
+            Assert.Equal(0, (await Docker("a", "rm", "-f", helper)).ExitCode);
 
             Assert.Equal(0, (await Docker("a", "sh", "-c", $$"""
                 set -eu
