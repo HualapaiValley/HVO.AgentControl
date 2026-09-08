@@ -10,8 +10,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260908015134_FallbackTerminalTaskOutcome")]
-    partial class FallbackTerminalTaskOutcome
+    [Migration("20260908001616_DurableEvidenceCursors")]
+    partial class DurableEvidenceCursors
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -289,38 +289,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("EvidenceCursors");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.EvidenceReadReceipt", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("AcknowledgedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("AfterSequence")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ConsumerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("NextSequence")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("PageJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ConsumerId", "AcknowledgedAt");
-
-                    b.ToTable("EvidenceReadReceipts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.JournalEvent", b =>
@@ -1152,23 +1120,7 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("SourceFailureCategory")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SourceFailureReceiptId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("SourcePoolId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SourceTaskOutcome")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SourceTerminalState")
                         .IsRequired()
                         .HasColumnType("TEXT");
 

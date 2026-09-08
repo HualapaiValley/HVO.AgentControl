@@ -238,6 +238,25 @@ namespace HVO.AgentControl.Infrastructure
                     b.ToTable("CoordinationRuns");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.EvidenceConsumerCursor", b =>
+                {
+                    b.Property<string>("ConsumerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("HistoryGap")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastConsumedSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("ConsumerId");
+
+                    b.ToTable("EvidenceConsumerCursors");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.EvidenceCursor", b =>
                 {
                     b.Property<string>("Id")
@@ -267,6 +286,38 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique();
 
                     b.ToTable("EvidenceCursors");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.EvidenceReadReceipt", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("AcknowledgedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("AfterSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ConsumerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("NextSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PageJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConsumerId", "AcknowledgedAt");
+
+                    b.ToTable("EvidenceReadReceipts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.JournalEvent", b =>

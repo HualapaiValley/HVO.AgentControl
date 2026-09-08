@@ -10,8 +10,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260908015134_FallbackTerminalTaskOutcome")]
-    partial class FallbackTerminalTaskOutcome
+    [Migration("20260908005636_DurableEvidenceReadReceipts")]
+    partial class DurableEvidenceReadReceipts
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -1161,10 +1161,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourcePoolId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SourceTaskOutcome")
                         .IsRequired()
                         .HasColumnType("TEXT");
 

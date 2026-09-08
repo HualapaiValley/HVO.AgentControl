@@ -219,6 +219,25 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.ToTable("CoordinationRuns");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.EvidenceConsumerCursor", b =>
+                {
+                    b.Property<string>("ConsumerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("HistoryGap")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastConsumedSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("ConsumerId");
+
+                    b.ToTable("EvidenceConsumerCursors");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.EvidenceCursor", b =>
                 {
                     b.Property<string>("Id").HasColumnType("TEXT");
