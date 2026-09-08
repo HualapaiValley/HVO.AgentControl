@@ -23,6 +23,22 @@ public sealed class RuntimeEnvironmentTests
         Assert.Equal(409, error.Status); Assert.Equal(code, error.Code);
     }
 
+    private static async Task<ActiveBindingSetup> ActiveBinding(TestApp app)
+    {
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var runtime = await app.Store.Read(async db => (await db.Runtimes.FindAsync(worker.RuntimeId))!);
+        var host = await Host(app.Store);
+        await app.Store.ConfigureRuntimeEnvironment(runtime.Id, Configure(runtime, host, RuntimeEnvironmentKind.ExistingMachine));
+        var project = await Project(app.Store);
+        var work = await app.Store.CreateWorkItem(new(Id(), "121", "Bound task", "feature/bound-task", project.RepositoryUrl, worker.Id));
+        var slot = await app.Store.CreateWorkerSlot(new(Id(), Id(), runtime.Id, "bound-slot"));
+        var binding = await app.Store.CreateTaskBinding(new(Id(), Id(), work.Id, project.Id, slot.Id, Id(), Id(), "/work/bound-task", work.Branch,
+            work.Revision, project.Revision, slot.Revision));
+        return new(worker, runtime, binding, work, await Host(app.Store));
+    }
+
+    private sealed record ActiveBindingSetup(WorkerRecord Worker, RuntimeRecord Runtime, TaskBindingView Binding, WorkItem Work, HostRecord ReplacementHost);
+
     [Fact]
     public async Task LegacyReadDoesNotInventHostingOrChangeSessions()
     {
@@ -56,6 +72,55 @@ public sealed class RuntimeEnvironmentTests
         Assert.Equal(0, await app.Store.Read(db => db.Commands.CountAsync()));
         Assert.Equal("RuntimeEnvironment", (await app.Store.InventoryMutation(input.RequestId)).ResourceKind);
         Assert.DoesNotContain("fingerprint", Json.Write(result), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ActiveTaskBindingBlocksEnvironmentChangesUntilTaskAndBindingAreReleased()
+    {
+        await using var app = new TestApp();
+        var setup = await ActiveBinding(app);
+        var before = await app.Store.RuntimeEnvironment(setup.Runtime.Id);
+
+        await Conflict(() => app.Store.ConfigureRuntimeEnvironment(setup.Runtime.Id,
+            new(Id(), before.Revision, before.RuntimeRevision, setup.ReplacementHost.Id, RuntimeEnvironmentKind.ExistingMachine)), "runtime_in_use");
+        await Conflict(() => app.Store.ResetRuntimeEnvironment(setup.Runtime.Id,
+            new(Id(), before.Revision, before.RuntimeRevision)), "runtime_in_use");
+        Assert.Equal(before, await app.Store.RuntimeEnvironment(setup.Runtime.Id));
+        Assert.Equal(TaskBindingState.Active, (await app.Store.TaskBinding(setup.Binding.Binding.Id)).Binding.State);
+
+        await app.Store.ReleaseWorkItem(new(setup.Work.Id, setup.Worker.Id));
+        await app.Store.ReleaseTaskBinding(setup.Binding.Binding.Id, new(Id(), setup.Binding.Binding.Revision));
+        var configured = await app.Store.ConfigureRuntimeEnvironment(setup.Runtime.Id,
+            new(Id(), before.Revision, before.RuntimeRevision, setup.ReplacementHost.Id, RuntimeEnvironmentKind.ExistingMachine));
+        var reset = await app.Store.ResetRuntimeEnvironment(setup.Runtime.Id,
+            new(Id(), configured.Revision, configured.RuntimeRevision));
+        Assert.Equal(RuntimeEnvironmentKind.LegacySsh, reset.RequestedKind);
+    }
+
+    [Fact]
+    public async Task EnvironmentApiReturnsConflictForActiveBindingAndSucceedsAfterRelease()
+    {
+        await using var app = new TestApp();
+        var setup = await ActiveBinding(app);
+        using var owner = await app.SignIn();
+        var route = $"/api/v1/runtimes/{setup.Runtime.Id}/environment";
+        var before = await app.Store.RuntimeEnvironment(setup.Runtime.Id);
+        var configure = new ConfigureRuntimeEnvironmentInput(Id(), before.Revision, before.RuntimeRevision,
+            setup.ReplacementHost.Id, RuntimeEnvironmentKind.ExistingMachine);
+
+        Assert.Equal(HttpStatusCode.Conflict, (await owner.PutAsJsonAsync(route, configure)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await owner.PostAsJsonAsync(route + "/reset",
+            new ResetRuntimeEnvironmentInput(Id(), before.Revision, before.RuntimeRevision))).StatusCode);
+        Assert.Equal(before, await owner.GetFromJsonAsync<RuntimeEnvironmentView>(route));
+
+        await app.Store.ReleaseWorkItem(new(setup.Work.Id, setup.Worker.Id));
+        await app.Store.ReleaseTaskBinding(setup.Binding.Binding.Id, new(Id(), setup.Binding.Binding.Revision));
+        var response = await owner.PutAsJsonAsync(route, configure with { RequestId = Id() });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var saved = (await response.Content.ReadFromJsonAsync<RuntimeEnvironmentView>())!;
+        Assert.Equal(setup.ReplacementHost.Id, saved.RequestedHostId);
+        Assert.Equal(HttpStatusCode.OK, (await owner.PostAsJsonAsync(route + "/reset",
+            new ResetRuntimeEnvironmentInput(Id(), saved.Revision, saved.RuntimeRevision))).StatusCode);
     }
 
     [Fact]

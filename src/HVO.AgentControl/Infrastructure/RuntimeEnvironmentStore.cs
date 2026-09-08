@@ -126,6 +126,8 @@ public sealed partial class ControlStore
         if (await db.Requests.AnyAsync(x => workerIds.Contains(x.WorkerId) && (x.State == "Pending" || x.State == "ReplyUnknown")) ||
             await db.WorkItems.AnyAsync(x => workerIds.Contains(x.OwnerWorkerId) && x.State != WorkItemState.Released && x.State != WorkItemState.Abandoned))
             throw InventoryConflict("runtime_in_use", "Resolve pending worker requests and release work-item ownership before changing the environment association.");
+        if (await db.TaskBindings.AnyAsync(x => x.RuntimeId == runtime.Id && x.State == TaskBindingState.Active))
+            throw InventoryConflict("runtime_in_use", "Release active task bindings before changing the environment association.");
         var runs = await db.CoordinationRuns.Where(x => x.State != "Completed" && x.State != "Stopped").ToListAsync();
         if (runs.Any(x => workerIds.Contains(x.CoordinatorWorkerId) || Json.Read<string[]>(x.WorkerIdsJson).Any(workerIds.Contains)))
             throw InventoryConflict("runtime_in_use", "Finish or stop coordination using this runtime before changing its environment association.");
