@@ -1,0 +1,15 @@
+{
+  "name": "AgentControl disposable CLI acceptance",
+  "build": {"dockerfile": "Dockerfile", "context": ".."},
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": false,
+  "userEnvProbe": "none",
+  "overrideCommand": true,
+  "shutdownAction": "none",
+  "workspaceFolder": "/workspaces/project",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/project,type=bind",
+  "runArgs": ["--cpus=2", "--memory=2g", "--pids-limit=512", "--network=bridge"],
+  "features": {"./features/proof": {}},
+  "postCreateCommand": ["sh", "-c", "printf 'post-create-observed' > /home/vscode/.hvo-post-create"]
+}
