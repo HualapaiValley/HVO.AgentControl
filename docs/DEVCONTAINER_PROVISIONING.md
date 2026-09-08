@@ -1,5 +1,7 @@
 # Dev Container provisioning
 
+The [execution environment milestone](EXECUTION_ENVIRONMENT_PLAN.md) defines the current priority and delivery contract: one worker per managed container by default, typed existing-machine/devcontainer creation, REST operation coverage, automated lifecycle/recovery acceptance, then gradual legacy-fleet migration. The initial SSH/tmux transport is an implementation choice; Docker lifecycle authority and future runtime transport are separate.
+
 Owner requirements, 2026-09-07. The worker template below is executable now; automatic UI/coordinator provisioning and host scheduling are planned work. GitHub App credential brokerage is implemented; see [Worker GitHub access](GITHUB_ACCESS.md).
 
 Tracking: [project/task sessions #42](https://github.com/RoySalisbury/HVO.AgentControl/issues/42), [multi-host provisioning #43](https://github.com/RoySalisbury/HVO.AgentControl/issues/43), [worker GitHub publication #44](https://github.com/RoySalisbury/HVO.AgentControl/issues/44).

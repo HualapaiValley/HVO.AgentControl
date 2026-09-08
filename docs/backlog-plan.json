@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-07.5",
+  "version": "2026-09-08.1",
   "repository": "RoySalisbury/HVO.AgentControl",
   "items": [
     {
@@ -37,32 +37,48 @@
       "issue": 4,
       "priority": 1,
       "disposition": "candidate",
-      "dependsOn": [],
-      "reason": "Stable IDs exist; formal authority generation/receipt contract is still incomplete.",
-      "nextSlice": "Version enrollment/attempt identity and stale-generation tests",
-      "auditedUpdatedAt": "2026-09-07T18:30:21Z",
-      "reviewedPulls": []
+      "dependsOn": [
+        121
+      ],
+      "reason": "Enrollment authority foundations shipped; integrate environment/task-session lifecycle without replacing current identities.",
+      "nextSlice": "Integrate existing authority generations with new environment/task-session bindings",
+      "auditedUpdatedAt": "2026-09-08T02:41:41Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "fd30d6e182fcd9507c075c907b2bcbf531de03b9",
+          "number": 94,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 5,
-      "priority": 1,
+      "priority": 0,
       "disposition": "candidate",
-      "dependsOn": [],
-      "reason": "Core missing ownership prevents reliable cross-task and cross-repo lifecycle.",
-      "nextSlice": "Durable work item and atomic modifying-owner claim with restart tests",
-      "auditedUpdatedAt": "2026-09-07T18:30:23Z",
-      "reviewedPulls": []
+      "dependsOn": [
+        121
+      ],
+      "reason": "WorkItem/phase ownership shipped in PR87; remaining task/session and scheduler integration must use that store.",
+      "nextSlice": "Wire task preparation/dispatch and legacy compatibility to existing ownership claims",
+      "auditedUpdatedAt": "2026-09-08T02:41:41Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "f2d776d887554db66b8733fb27ae6c552ef3f6ab",
+          "number": 87,
+          "state": "MERGED"
+        }
+      ]
     },
     {
       "issue": 6,
-      "priority": 1,
+      "priority": 0,
       "disposition": "candidate",
       "dependsOn": [
-        5
+        121
       ],
-      "reason": "Reservations need durable task ownership and explicit endpoint identity.",
-      "nextSlice": "Persist endpoint claims and reconcile release",
-      "auditedUpdatedAt": "2026-09-07T18:30:24Z",
+      "reason": "Owner priority: shared physical host and environment resource admission, using existing task ownership.",
+      "nextSlice": "Atomic host/environment/provisioning reservations, effective memory and restart-safe release",
+      "auditedUpdatedAt": "2026-09-08T03:37:02Z",
       "reviewedPulls": []
     },
     {
@@ -70,23 +86,13 @@
       "priority": 1,
       "disposition": "candidate",
       "dependsOn": [],
-      "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing.",
-      "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
-      "auditedUpdatedAt": "2026-09-07T18:30:26Z",
+      "reason": "Durable read/cursor/ack foundations shipped in PR105; bounded planner/MCP consumption remains.",
+      "nextSlice": "Integrate bounded API/tool evidence consumption with existing read receipts",
+      "auditedUpdatedAt": "2026-09-07T23:16:04Z",
       "reviewedPulls": [
         {
-          "headRefOid": "87e1dc97153600f1208dc22e5532e64deb933f24",
-          "number": 21,
-          "state": "MERGED"
-        },
-        {
-          "headRefOid": "020df2d0a2483669eb94e1433d0328104b7eec57",
-          "number": 38,
-          "state": "MERGED"
-        },
-        {
-          "headRefOid": "bde938e52e60210090f8e4d330b193840a433f5c",
-          "number": 41,
+          "headRefOid": "05c0cb116ed40f14f38c5c8a683d9cf75491a359",
+          "number": 105,
           "state": "MERGED"
         }
       ]
@@ -195,11 +201,11 @@
     },
     {
       "issue": 34,
-      "priority": 1,
-      "disposition": "review",
+      "priority": 2,
+      "disposition": "needs-triage",
       "dependsOn": [],
-      "reason": "PR72 in correction/review for startup backfill; do not duplicate ledger work.",
-      "nextSlice": "Complete backfill correction and independent review",
+      "reason": "Usage ledger/backfill work has advanced; re-audit remaining reports and API scope after the environment milestone.",
+      "nextSlice": "Reconcile remaining model/worker reporting acceptance; do not duplicate ledger/backfill",
       "auditedUpdatedAt": "2026-09-07T18:30:36Z",
       "reviewedPulls": [
         {
@@ -208,19 +214,19 @@
           "state": "MERGED"
         },
         {
-          "headRefOid": "20add80ee47094505667241006416be05ddd68ad",
+          "headRefOid": "4a715d97b9dda87fa07cf77dac40fd082af14db0",
           "number": 72,
-          "state": "OPEN"
+          "state": "MERGED"
         }
       ]
     },
     {
       "issue": 35,
-      "priority": 2,
-      "disposition": "needs-triage",
+      "priority": 1,
+      "disposition": "candidate",
       "dependsOn": [],
-      "reason": "History PR73 and periodic sampler PR79 merged; deployment validation and macOS/v1 scope remain.",
-      "nextSlice": "Validate deployed sampling before scoping another platform collector",
+      "reason": "Periodic telemetry exists; live OOMs require effective container limits and pressure evidence for admission/recovery.",
+      "nextSlice": "Expose cgroup limit/pressure/OOM observations with fresh bounded REST evidence",
       "auditedUpdatedAt": "2026-09-07T18:30:37Z",
       "reviewedPulls": [
         {
@@ -242,29 +248,29 @@
     },
     {
       "issue": 42,
-      "priority": 1,
+      "priority": 0,
       "disposition": "candidate",
       "dependsOn": [
-        5,
+        121,
         6
       ],
-      "reason": "Fresh repo task sessions require durable ownership and reservation.",
-      "nextSlice": "Project identity and task-owned worktree/session preparation",
-      "auditedUpdatedAt": "2026-09-07T20:54:48Z",
+      "reason": "Owner priority: project-qualified isolated workspaces and fresh task sessions on reusable compatible environments.",
+      "nextSlice": "Durable preparation/session operations and same/different repository isolation tests",
+      "auditedUpdatedAt": "2026-09-08T03:37:03Z",
       "reviewedPulls": []
     },
     {
       "issue": 43,
-      "priority": 2,
+      "priority": 0,
       "disposition": "candidate",
       "dependsOn": [
-        5,
+        121,
         6,
         42
       ],
-      "reason": "CLI templates verified; automatic lifecycle depends on ownership/workspace boundaries.",
-      "nextSlice": "Durable Docker-host provisioning workflow; separate ready inventory slice if needed",
-      "auditedUpdatedAt": "2026-09-07T18:30:41Z",
+      "reason": "Owner priority: typed runtime creation and official CLI lifecycle with REST/UI tests before fleet transition.",
+      "nextSlice": "Existing machine/devcontainer wizard, durable operations and executable create/restart/drain/retire acceptance",
+      "auditedUpdatedAt": "2026-09-08T03:37:05Z",
       "reviewedPulls": [
         {
           "headRefOid": "6251e11b75b1e9d680da368ce55f931efb48322e",
@@ -432,22 +438,22 @@
     },
     {
       "issue": 75,
-      "priority": 0,
-      "disposition": "candidate",
+      "priority": 2,
+      "disposition": "needs-triage",
       "dependsOn": [],
-      "reason": "Explicit owner priority: sluggish chat UI; Astra xhigh already assigned.",
-      "nextSlice": "Finish active chat/performance implementation; preserve approvals and drafts",
+      "reason": "Older chat/UI priority is superseded by environment structure and lifecycle; preserve shipped behavior.",
+      "nextSlice": "Re-audit remaining chat/performance scope after priority milestone; incident fixes remain exceptions",
       "auditedUpdatedAt": "2026-09-07T20:54:47Z",
       "reviewedPulls": []
     },
     {
       "issue": 78,
-      "priority": 0,
-      "disposition": "candidate",
+      "priority": 2,
+      "disposition": "needs-triage",
       "dependsOn": [],
-      "reason": "Owner requested dependency-aware periodic backlog triage.",
-      "nextSlice": "Root executable audit and canonical operating plan; durable scheduler follows",
-      "auditedUpdatedAt": "2026-09-07T20:44:41Z",
+      "reason": "Executable triage plan exists and owner ordering is refreshed here; durable periodic review remains.",
+      "nextSlice": "Integrate evidence-aware periodic prioritization after the environment milestone",
+      "auditedUpdatedAt": "2026-09-07T21:42:46Z",
       "reviewedPulls": []
     },
     {
@@ -468,6 +474,78 @@
       "reason": "Inspect before assignment",
       "nextSlice": "",
       "auditedUpdatedAt": "2026-09-07T19:35:14Z",
+      "reviewedPulls": []
+    },
+    {
+      "issue": 98,
+      "priority": 0,
+      "disposition": "epic",
+      "dependsOn": [
+        121,
+        6,
+        42,
+        43
+      ],
+      "reason": "Multi-project acceptance follows identity, resource and tested provisioning contracts; do not dispatch the whole epic.",
+      "nextSlice": "Second registered repository with shared capacity and project-isolated adviser/task evidence",
+      "auditedUpdatedAt": "2026-09-08T03:37:06Z",
+      "reviewedPulls": []
+    },
+    {
+      "issue": 103,
+      "priority": 1,
+      "disposition": "needs-triage",
+      "dependsOn": [],
+      "reason": "Final-response/stopped-denial fix PR106 and bounded history PR119 shipped; history-window and interrupted-turn cases remain scoped.",
+      "nextSlice": "Reconcile residual completion evidence with audit108 and distinct native-death issue120",
+      "auditedUpdatedAt": "2026-09-08T02:12:24Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "48b1668c6b3fbfe68011b52ae80f6028045e1624",
+          "number": 106,
+          "state": "MERGED"
+        },
+        {
+          "headRefOid": "92769c6523efbf45bf8ac79ebf0d3841aa3a9338",
+          "number": 119,
+          "state": "MERGED"
+        }
+      ]
+    },
+    {
+      "issue": 108,
+      "priority": 1,
+      "disposition": "epic",
+      "dependsOn": [],
+      "reason": "Already commissioned repository audit continues with existing owners/models; synthesize real scopes and pinned revisions.",
+      "nextSlice": "Finish active C/D and aggregate A/B findings without duplicate audits",
+      "auditedUpdatedAt": "2026-09-08T03:25:13Z",
+      "reviewedPulls": []
+    },
+    {
+      "issue": 120,
+      "priority": 1,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Kernel-confirmed native OOM exposed interrupted-task recovery gap; immediate connection repair shipped separately.",
+      "nextSlice": "Persist process/resource evidence and bounded interrupted-task recovery compatible with new environment model",
+      "auditedUpdatedAt": "2026-09-08T03:13:26Z",
+      "reviewedPulls": [
+        {
+          "headRefOid": "92769c6523efbf45bf8ac79ebf0d3841aa3a9338",
+          "number": 119,
+          "state": "MERGED"
+        }
+      ]
+    },
+    {
+      "issue": 121,
+      "priority": 0,
+      "disposition": "candidate",
+      "dependsOn": [],
+      "reason": "Owner priority: separate host/environment/worker/project/task identities before provisioning; reuse existing ownership/enrollment primitives.",
+      "nextSlice": "Additive domain/configuration/REST foundation and legacy compatibility per EXECUTION_ENVIRONMENT_PLAN.md",
+      "auditedUpdatedAt": "2026-09-08T03:31:38Z",
       "reviewedPulls": []
     }
   ]

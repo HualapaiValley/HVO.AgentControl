@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "planVersion": "2026-09-07.3",
+  "planVersion": "2026-09-08.1",
   "repository": "RoySalisbury/HVO.AgentControl",
-  "observedAt": "2026-09-07T21:18:55.922661+00:00",
+  "observedAt": "2026-09-08T03:39:07.434289+00:00",
   "ready": [
     {
       "issue": 7,
@@ -11,11 +11,37 @@
       "priority": 1,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:26Z",
+      "updatedAt": "2026-09-07T23:16:04Z",
       "planStale": false,
       "blockers": [],
-      "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
-      "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing."
+      "nextSlice": "Integrate bounded API/tool evidence consumption with existing read receipts",
+      "reason": "Durable read/cursor/ack foundations shipped in PR105; bounded planner/MCP consumption remains."
+    },
+    {
+      "issue": 35,
+      "title": "Show periodic runtime CPU and memory telemetry",
+      "state": "ready",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T18:30:37Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Expose cgroup limit/pressure/OOM observations with fresh bounded REST evidence",
+      "reason": "Periodic telemetry exists; live OOMs require effective container limits and pressure evidence for admission/recovery."
+    },
+    {
+      "issue": 120,
+      "title": "Recover interrupted tasks after native process death with resource evidence",
+      "state": "ready",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T03:13:26Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Persist process/resource evidence and bounded interrupted-task recovery compatible with new environment model",
+      "reason": "Kernel-confirmed native OOM exposed interrupted-task recovery gap; immediate connection repair shipped separately."
     },
     {
       "issue": 3,
@@ -29,6 +55,19 @@
       "blockers": [],
       "nextSlice": "Immediate milestone and active-set update semantics",
       "reason": "Schedules/outbox shipped in PR71; material milestones and active-set changes remain."
+    },
+    {
+      "issue": 54,
+      "title": "Provider sign-in from AgentHost and managed devcontainer credentials",
+      "state": "ready",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-07T19:36:04Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Durable provider readiness and supported-method discovery; no OAuth cloning",
+      "reason": "ChatGPT website flow shipped PR55; provider readiness and additional methods remain."
     }
   ],
   "issues": [
@@ -61,46 +100,56 @@
     {
       "issue": 4,
       "title": "Add participant enrollment and explicit command receipts",
-      "state": "active",
+      "state": "blocked",
       "priority": 1,
       "unblocks": 1,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:21Z",
+      "updatedAt": "2026-09-08T02:41:41Z",
       "planStale": false,
-      "blockers": [],
-      "nextSlice": "Version enrollment/attempt identity and stale-generation tests",
-      "reason": "Stable IDs exist; formal authority generation/receipt contract is still incomplete."
+      "blockers": [
+        {
+          "issue": 121,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Integrate existing authority generations with new environment/task-session bindings",
+      "reason": "Enrollment authority foundations shipped; integrate environment/task-session lifecycle without replacing current identities."
     },
     {
       "issue": 5,
       "title": "Track work-item ownership through review and cleanup",
-      "state": "active",
-      "priority": 1,
-      "unblocks": 7,
+      "state": "blocked",
+      "priority": 0,
+      "unblocks": 4,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:23Z",
+      "updatedAt": "2026-09-08T02:41:41Z",
       "planStale": false,
-      "blockers": [],
-      "nextSlice": "Durable work item and atomic modifying-owner claim with restart tests",
-      "reason": "Core missing ownership prevents reliable cross-task and cross-repo lifecycle."
+      "blockers": [
+        {
+          "issue": 121,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Wire task preparation/dispatch and legacy compatibility to existing ownership claims",
+      "reason": "WorkItem/phase ownership shipped in PR87; remaining task/session and scheduler integration must use that store."
     },
     {
       "issue": 6,
       "title": "Add endpoint-scoped resource reservations",
       "state": "blocked",
-      "priority": 1,
-      "unblocks": 2,
+      "priority": 0,
+      "unblocks": 3,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:24Z",
+      "updatedAt": "2026-09-08T03:37:02Z",
       "planStale": false,
       "blockers": [
         {
-          "issue": 5,
+          "issue": 121,
           "reason": "prerequisite remains open"
         }
       ],
-      "nextSlice": "Persist endpoint claims and reconcile release",
-      "reason": "Reservations need durable task ownership and explicit endpoint identity."
+      "nextSlice": "Atomic host/environment/provisioning reservations, effective memory and restart-safe release",
+      "reason": "Owner priority: shared physical host and environment resource admission, using existing task ownership."
     },
     {
       "issue": 7,
@@ -109,11 +158,11 @@
       "priority": 1,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:26Z",
+      "updatedAt": "2026-09-07T23:16:04Z",
       "planStale": false,
       "blockers": [],
-      "nextSlice": "Durable consumer cursors and bounded exact evidence retrieval",
-      "reason": "Bounded summaries shipped, but old evidence still fills prompts and cursor retrieval is missing."
+      "nextSlice": "Integrate bounded API/tool evidence consumption with existing read receipts",
+      "reason": "Durable read/cursor/ack foundations shipped in PR105; bounded planner/MCP consumption remains."
     },
     {
       "issue": 8,
@@ -194,40 +243,40 @@
       "issue": 34,
       "title": "Persist model usage and timing; report by worker and model",
       "state": "needs-triage",
-      "priority": 1,
+      "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
       "updatedAt": "2026-09-07T18:30:36Z",
-      "planStale": true,
+      "planStale": false,
       "blockers": [],
-      "nextSlice": "Complete backfill correction and independent review",
-      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+      "nextSlice": "Reconcile remaining model/worker reporting acceptance; do not duplicate ledger/backfill",
+      "reason": "Usage ledger/backfill work has advanced; re-audit remaining reports and API scope after the environment milestone."
     },
     {
       "issue": 35,
       "title": "Show periodic runtime CPU and memory telemetry",
-      "state": "needs-triage",
-      "priority": 2,
+      "state": "ready",
+      "priority": 1,
       "unblocks": 0,
       "ageDays": 0,
       "updatedAt": "2026-09-07T18:30:37Z",
       "planStale": false,
       "blockers": [],
-      "nextSlice": "Validate deployed sampling before scoping another platform collector",
-      "reason": "History PR73 and periodic sampler PR79 merged; deployment validation and macOS/v1 scope remain."
+      "nextSlice": "Expose cgroup limit/pressure/OOM observations with fresh bounded REST evidence",
+      "reason": "Periodic telemetry exists; live OOMs require effective container limits and pressure evidence for admission/recovery."
     },
     {
       "issue": 42,
       "title": "Provision project-scoped task sessions with worker-owned environment verification",
       "state": "blocked",
-      "priority": 1,
-      "unblocks": 3,
+      "priority": 0,
+      "unblocks": 4,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T20:54:48Z",
-      "planStale": true,
+      "updatedAt": "2026-09-08T03:37:03Z",
+      "planStale": false,
       "blockers": [
         {
-          "issue": 5,
+          "issue": 121,
           "reason": "prerequisite remains open"
         },
         {
@@ -235,21 +284,21 @@
           "reason": "prerequisite remains open"
         }
       ],
-      "nextSlice": "Project identity and task-owned worktree/session preparation",
-      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+      "nextSlice": "Durable preparation/session operations and same/different repository isolation tests",
+      "reason": "Owner priority: project-qualified isolated workspaces and fresh task sessions on reusable compatible environments."
     },
     {
       "issue": 43,
       "title": "Provision and retire devcontainer workers across multiple Docker hosts",
       "state": "blocked",
-      "priority": 2,
-      "unblocks": 1,
+      "priority": 0,
+      "unblocks": 2,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:41Z",
+      "updatedAt": "2026-09-08T03:37:05Z",
       "planStale": false,
       "blockers": [
         {
-          "issue": 5,
+          "issue": 121,
           "reason": "prerequisite remains open"
         },
         {
@@ -261,8 +310,8 @@
           "reason": "prerequisite remains open"
         }
       ],
-      "nextSlice": "Durable Docker-host provisioning workflow; separate ready inventory slice if needed",
-      "reason": "CLI templates verified; automatic lifecycle depends on ownership/workspace boundaries."
+      "nextSlice": "Existing machine/devcontainer wizard, durable operations and executable create/restart/drain/retire acceptance",
+      "reason": "Owner priority: typed runtime creation and official CLI lifecycle with REST/UI tests before fleet transition."
     },
     {
       "issue": 44,
@@ -302,15 +351,15 @@
     {
       "issue": 54,
       "title": "Provider sign-in from AgentHost and managed devcontainer credentials",
-      "state": "needs-triage",
+      "state": "ready",
       "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
       "updatedAt": "2026-09-07T19:36:04Z",
-      "planStale": true,
+      "planStale": false,
       "blockers": [],
       "nextSlice": "Durable provider readiness and supported-method discovery; no OAuth cloning",
-      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+      "reason": "ChatGPT website flow shipped PR55; provider readiness and additional methods remain."
     },
     {
       "issue": 65,
@@ -319,7 +368,7 @@
       "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T21:13:26Z",
+      "updatedAt": "2026-09-08T00:14:45Z",
       "planStale": true,
       "blockers": [
         {
@@ -337,8 +386,8 @@
       "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:49Z",
-      "planStale": false,
+      "updatedAt": "2026-09-08T02:41:41Z",
+      "planStale": true,
       "blockers": [
         {
           "issue": 5,
@@ -346,7 +395,7 @@
         }
       ],
       "nextSlice": "Bounded durable evidence archive before operational pruning",
-      "reason": "Evidence retention needs stable task identity; #34/#35 enrich records but are not hard blockers for archive foundation."
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
     },
     {
       "issue": 67,
@@ -382,7 +431,7 @@
       "unblocks": 0,
       "ageDays": 0,
       "updatedAt": "2026-09-07T21:13:28Z",
-      "planStale": true,
+      "planStale": false,
       "blockers": [
         {
           "issue": 5,
@@ -390,7 +439,7 @@
         }
       ],
       "nextSlice": "Persist model routing decisions and risk floors on work items",
-      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+      "reason": "Task models PR57 and reasoning PR76 merged; durable model/risk routing policy remains."
     },
     {
       "issue": 70,
@@ -399,8 +448,8 @@
       "priority": 1,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T18:30:53Z",
-      "planStale": false,
+      "updatedAt": "2026-09-07T21:42:34Z",
+      "planStale": true,
       "blockers": [
         {
           "issue": 8,
@@ -412,33 +461,33 @@
         }
       ],
       "nextSlice": "Conditional serialized merge intents with refreshed CI/head checks",
-      "reason": "CI read permission merged PR74; exact-review and publication intents still needed for durable automatic merges."
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
     },
     {
       "issue": 75,
       "title": "Chat-first compact worker UI with measured performance improvements",
-      "state": "active",
-      "priority": 0,
+      "state": "needs-triage",
+      "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
       "updatedAt": "2026-09-07T20:54:47Z",
-      "planStale": true,
+      "planStale": false,
       "blockers": [],
-      "nextSlice": "Finish active chat/performance implementation; preserve approvals and drafts",
-      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+      "nextSlice": "Re-audit remaining chat/performance scope after priority milestone; incident fixes remain exceptions",
+      "reason": "Older chat/UI priority is superseded by environment structure and lifecycle; preserve shipped behavior."
     },
     {
       "issue": 78,
       "title": "Prioritize backlog by dependencies and evidence with periodic coordinator triage",
-      "state": "active",
-      "priority": 0,
+      "state": "needs-triage",
+      "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T20:44:41Z",
-      "planStale": true,
+      "updatedAt": "2026-09-07T21:42:46Z",
+      "planStale": false,
       "blockers": [],
-      "nextSlice": "Root executable audit and canonical operating plan; durable scheduler follows",
-      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
+      "nextSlice": "Integrate evidence-aware periodic prioritization after the environment milestone",
+      "reason": "Executable triage plan exists and owner ordering is refreshed here; durable periodic review remains."
     },
     {
       "issue": 82,
@@ -447,11 +496,11 @@
       "priority": 2,
       "unblocks": 0,
       "ageDays": 0,
-      "updatedAt": "2026-09-07T20:16:57Z",
-      "planStale": false,
+      "updatedAt": "2026-09-07T23:13:12Z",
+      "planStale": true,
       "blockers": [],
       "nextSlice": "",
-      "reason": "Not in audited plan; inspect before assignment"
+      "reason": "Issue or referenced PR evidence changed since audit; refresh plan before assignment"
     },
     {
       "issue": 84,
@@ -464,7 +513,180 @@
       "planStale": false,
       "blockers": [],
       "nextSlice": "",
+      "reason": "Inspect before assignment"
+    },
+    {
+      "issue": 98,
+      "title": "Coordinate multiple repositories with project advisers and shared worker capacity",
+      "state": "blocked",
+      "priority": 0,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T03:37:06Z",
+      "planStale": false,
+      "blockers": [
+        {
+          "issue": 121,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 6,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 42,
+          "reason": "prerequisite remains open"
+        },
+        {
+          "issue": 43,
+          "reason": "prerequisite remains open"
+        }
+      ],
+      "nextSlice": "Second registered repository with shared capacity and project-isolated adviser/task evidence",
+      "reason": "Multi-project acceptance follows identity, resource and tested provisioning contracts; do not dispatch the whole epic."
+    },
+    {
+      "issue": 103,
+      "title": "Do not finish a command before its final native response is complete",
+      "state": "needs-triage",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:12:24Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Reconcile residual completion evidence with audit108 and distinct native-death issue120",
+      "reason": "Final-response/stopped-denial fix PR106 and bounded history PR119 shipped; history-window and interrupted-turn cases remain scoped."
+    },
+    {
+      "issue": 108,
+      "title": "Audit the full repository with Astra and prioritize verified defects",
+      "state": "active",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T03:25:13Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Finish active C/D and aggregate A/B findings without duplicate audits",
+      "reason": "Already commissioned repository audit continues with existing owners/models; synthesize real scopes and pinned revisions."
+    },
+    {
+      "issue": 109,
+      "title": "Recover pending replies after known-unsent preflight failure",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:12:24Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
       "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 110,
+      "title": "Preserve exclusive provider recovery leases across late failures",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:12:24Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 111,
+      "title": "Settle provider recovery leases when recovery commands are cancelled",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:12:24Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 112,
+      "title": "Settle superseded runtime stops before newer work can run",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:41:41Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 115,
+      "title": "Bind assignment outcomes to the exact reviewed command",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:41:41Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 116,
+      "title": "Persist coalesced capability request identities across retries",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:41:41Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 117,
+      "title": "Preserve ProviderPoolId in historical migration target models",
+      "state": "needs-triage",
+      "priority": 2,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T02:41:41Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "",
+      "reason": "Not in audited plan; inspect before assignment"
+    },
+    {
+      "issue": 120,
+      "title": "Recover interrupted tasks after native process death with resource evidence",
+      "state": "ready",
+      "priority": 1,
+      "unblocks": 0,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T03:13:26Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Persist process/resource evidence and bounded interrupted-task recovery compatible with new environment model",
+      "reason": "Kernel-confirmed native OOM exposed interrupted-task recovery gap; immediate connection repair shipped separately."
+    },
+    {
+      "issue": 121,
+      "title": "Separate host, execution runtime, worker and project task identities",
+      "state": "active",
+      "priority": 0,
+      "unblocks": 6,
+      "ageDays": 0,
+      "updatedAt": "2026-09-08T03:31:38Z",
+      "planStale": false,
+      "blockers": [],
+      "nextSlice": "Additive domain/configuration/REST foundation and legacy compatibility per EXECUTION_ENVIRONMENT_PLAN.md",
+      "reason": "Owner priority: separate host/environment/worker/project/task identities before provisioning; reuse existing ownership/enrollment primitives."
     }
   ],
   "limitations": [

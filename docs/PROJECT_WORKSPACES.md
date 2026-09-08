@@ -1,6 +1,6 @@
 # Reusable runtimes and project workspaces
 
-Owner clarification, 2026-09-07. This is a proposed extension, not implemented automatic provisioning.
+Owner clarification, updated 2026-09-08. This is a proposed extension, not implemented automatic provisioning. The [execution environment milestone](EXECUTION_ENVIRONMENT_PLAN.md) now defines the authoritative identity model, one-worker-per-devcontainer default, REST coverage, delivery order and fleet migration gates.
 
 See [managed project and worker conventions](PROVISIONING_CONVENTIONS.md) for the initial `HVO Development` workgroup, immutable project/task identities, managed host paths, container configuration precedence and required multi-project lifecycle verification.
 
@@ -10,14 +10,15 @@ A runtime is the reusable SSH execution environment and managed OpenCode server.
 
 Worker creation accepts an existing directory, or creates a Git worktree from an existing local repository with a new branch and base ref. The `Repository` input is a local source directory, not a clone URL. Provisioning does not automatically clone missing repositories. A model can run shell commands in child directories, but that does not create separate conversations or reliably establish project-specific context.
 
-The Home M4 worker currently uses `/Users/roys/Development/_github/RoySalisbury`. The beta workers use individual HVO.AgentControl checkouts. These are provisioning choices, not a requirement for one machine or container per repository.
+The removed Home M4 worker used `/Users/roys/Development/_github/RoySalisbury`; its runtime registration remains, and future enrollment must verify its environment again. The beta workers use individual HVO.AgentControl checkouts. These are provisioning choices, not a requirement for one machine or container per repository.
 
 ## Intended model
 
 - **Runtime:** reusable host/container, capabilities, credentials references, allowed workspace roots and execution capacity.
 - **Project:** repository identity/remote, base branch, setup instructions and required capabilities.
 - **Workspace:** project checkout or isolated worktree on a runtime, with exclusive ownership while in use.
-- **Worker session:** a fresh native conversation for each new task, bound to its project and workspace. Reconnection or recovery resumes that same task session; subsequent tasks get new sessions, including tasks for the same repository.
+- **Worker:** a reusable agent slot/profile, separate from its current task and native conversation.
+- **Worker task session:** a fresh native conversation for each new task, bound to its project and workspace. Reconnection or recovery resumes that same task session; subsequent tasks get new sessions, including tasks for the same repository.
 - **Coordinator:** routing conversation with explicit project/work-item metadata, independent of a development checkout. It can monitor multiple repositories and request preparation by an execution worker ahead of an assignment.
 
 Every task must carry a durable project ID that resolves to its repository identity, plus any issue/PR reference, requested branch/ref and dependencies. Repository identity must accompany external references: issue or PR numbers alone are ambiguous across repositories. Preserve this identity through dispatch, progress, results and handoffs. A cross-repository objective has separate project-scoped tasks with explicit dependencies; do not infer their destination from the preceding task or a worker's last directory. Resolve ambiguous destinations before executing repository operations.
