@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -75,6 +76,59 @@ public sealed class RuntimeLifecycleOwnershipTests
     }
 
     [Fact]
+    public async Task NewIntentAfterStopClaimPreventsTheRemoteStopAndRetainsAnUnknownReceipt()
+    {
+        await using var app = new TestApp();
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var runtime = (await app.Store.Snapshot()).Runtimes.Single(x => x.Id == worker.RuntimeId);
+        await app.Store.Write(async db => { (await db.Runtimes.FindAsync(runtime.Id))!.DesiredConnected = true; return true; });
+        var handler = new BarrierHandler(worker);
+        var factory = new CountingFactory(handler);
+        using var supervisor = new RuntimeSupervisor(app.Store, factory, Options.Create(new ControlOptions { PollMilliseconds = 20 }), NullLogger<RuntimeSupervisor>.Instance);
+        string? stopId = null;
+        var injected = 0;
+        var ensureId = Guid.NewGuid().ToString();
+        var injectedSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnChanged()
+        {
+            if (stopId is null || Interlocked.CompareExchange(ref injected, 0, 0) != 0) return;
+            var state = app.Store.Read(async db => (await db.Commands.FindAsync(stopId))?.State).GetAwaiter().GetResult();
+            if (state != Delivery.Dispatching || Interlocked.Exchange(ref injected, 1) != 0) return;
+            try
+            {
+                app.Store.RuntimeCommand(runtime.Id, "EnsureServer", ensureId).GetAwaiter().GetResult();
+                injectedSignal.TrySetResult();
+            }
+            catch (Exception ex) { injectedSignal.TrySetException(ex); throw; }
+        }
+        app.Store.Changed += OnChanged;
+        await supervisor.StartAsync(CancellationToken.None);
+        try
+        {
+            await handler.SnapshotStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await app.Store.ObserveNativeProcess(runtime.Id, Observed(runtime));
+            stopId = (await app.Store.RuntimeCommand(runtime.Id, "StopManagedServer", Guid.NewGuid().ToString())).Id;
+            handler.ReleaseSnapshot.TrySetResult();
+            await injectedSignal.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await TestApp.Wait(async () => (await app.Store.Snapshot()).Commands.FirstOrDefault(x => x.Id == ensureId)?.State == Delivery.Finished, "Post-claim ensure");
+
+            var snapshot = await app.Store.Snapshot();
+            Assert.Equal(1, injected);
+            Assert.Equal(0, factory.StopCalls);
+            Assert.Equal(Delivery.Unknown, snapshot.Commands.Single(x => x.Id == stopId).State);
+            Assert.Contains(await app.Store.Read(db => db.Events.Where(x => x.Type == "RuntimeLifecycleSuperseded" && x.CommandId == stopId).ToListAsync()),
+                x => x.Payload.Contains(ensureId, StringComparison.Ordinal));
+            Assert.Equal(worker.NativeSessionId, snapshot.Workers.Single(x => x.Id == worker.Id).NativeSessionId);
+        }
+        finally
+        {
+            app.Store.Changed -= OnChanged;
+            await supervisor.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task EnsureSupersedesQueuedStopAndOldRequestReplayCannotReverseIt()
     {
         await using var app = new TestApp();
@@ -128,7 +182,7 @@ public sealed class RuntimeLifecycleOwnershipTests
         var saved = (await app.Store.Snapshot()).Commands.Single(x => x.Id == ensure.Id);
         Assert.Equal(Delivery.Finished, saved.State);
         Assert.Equal(1, saved.Attempts);
-        Assert.Equal(Delivery.Dispatching, (await app.Store.Snapshot()).Commands.Single(x => x.Id == stop.Id).State);
+        Assert.Equal(Delivery.Unknown, (await app.Store.Snapshot()).Commands.Single(x => x.Id == stop.Id).State);
     }
 
     private static NativeProcessObservation Observed(RuntimeRecord runtime, long? observedAt = null) =>

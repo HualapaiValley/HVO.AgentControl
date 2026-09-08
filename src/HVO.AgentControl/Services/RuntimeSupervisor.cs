@@ -79,6 +79,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                                 var lifecycle = Json.Read<RuntimeLifecycleInput>(stop.Payload);
                                 if (lifecycle.OwnedProcess is null || lifecycle.OwnedProcess.ObservedAt < ControlStore.Now - 60000)
                                     throw new ControlException("Stop was not sent because fresh owned native-process evidence is unavailable.");
+                                if (!await StopStillCurrent(stop.Id, lifecycle)) continue;
                                 await transport.StopOwnedServer(lifecycle.OwnedProcess, token);
                                 stoppedOwned = true;
                                 await Complete(stop.Id, Delivery.Finished, "Owned server stopped; affected workers require reconciliation on next connect.");
@@ -692,6 +693,15 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         catch (JsonException) { return command.Kind != "StopManagedServer"; }
         catch (InvalidOperationException) { return command.Kind != "StopManagedServer"; }
     }
+
+    private Task<bool> StopStillCurrent(string id, RuntimeLifecycleInput expected) => store.Write(async db =>
+    {
+        var command = await db.Commands.FindAsync(id);
+        var runtime = command is null ? null : await db.Runtimes.FindAsync(command.RuntimeId);
+        if (command is not { Kind: "StopManagedServer", State: Delivery.Dispatching } || runtime is null) return false;
+        var lifecycle = Json.Read<RuntimeLifecycleInput>(command.Payload);
+        return lifecycle == expected && lifecycle.Revision == runtime.Revision;
+    });
     private Task<bool> MarkDisconnected(string id, string transport, string diagnostic, string health = "Unknown") => store.Write(async db =>
     {
         var runtime = (await db.Runtimes.FindAsync(id))!; runtime.Transport = transport; runtime.Health = health;

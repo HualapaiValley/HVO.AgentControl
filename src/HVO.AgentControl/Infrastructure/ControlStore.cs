@@ -226,13 +226,17 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             }
         }
         var command = await Record(db, id, runtimeId, null, kind, Json.Write(new RuntimeLifecycleInput(runtime.Revision, owned)));
-        foreach (var queued in await db.Commands.Where(x => x.RuntimeId == runtimeId && x.State == Delivery.Queued && x.Id != command.Id &&
-                     (x.Kind == "EnsureServer" || x.Kind == "RefreshState" || x.Kind == "DisconnectRuntime" || x.Kind == "StopManagedServer")).ToListAsync())
+        foreach (var queued in await db.Commands.Where(x => x.RuntimeId == runtimeId && x.Id != command.Id &&
+                     ((x.State == Delivery.Queued && (x.Kind == "EnsureServer" || x.Kind == "RefreshState" || x.Kind == "DisconnectRuntime" || x.Kind == "StopManagedServer")) ||
+                      (x.State == Delivery.Dispatching && x.Kind == "StopManagedServer"))).ToListAsync())
         {
-            queued.State = Delivery.Cancelled;
-            queued.Detail = "Superseded by a newer runtime lifecycle intent; no destructive action was performed.";
+            var dispatchedStop = queued.State == Delivery.Dispatching;
+            queued.State = dispatchedStop ? Delivery.Unknown : Delivery.Cancelled;
+            queued.Detail = dispatchedStop
+                ? "A newer runtime lifecycle intent arrived after stop dispatch. The stop outcome is unknown; it will not be repeated."
+                : "Superseded by a newer runtime lifecycle intent; no destructive action was performed.";
             queued.UpdatedAt = Now;
-            Event(db, "RuntimeLifecycleSuperseded", runtimeId, commandId: queued.Id, payload: new { supersededBy = command.Id });
+            Event(db, "RuntimeLifecycleSuperseded", runtimeId, commandId: queued.Id, payload: new { supersededBy = command.Id, state = queued.State });
         }
         return command;
     });
