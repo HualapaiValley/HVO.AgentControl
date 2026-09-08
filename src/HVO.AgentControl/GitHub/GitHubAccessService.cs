@@ -11,9 +11,31 @@ public sealed class GitHubAccessService(ControlStore store, Secrets secrets, Git
 
     public async Task<List<GitHubAccess>> List()
     {
-        var records = await store.Read(db => db.GitHubAccess.AsNoTracking().ToListAsync());
-        foreach (var record in records.Where(x => x.State == "Ready" && x.ExpiresAt <= ControlStore.Now))
-        { record.State = "Expired"; record.Detail = "The last delivered credential expired. Connect the runtime to renew it."; }
+        var (records, runtimes, native) = await store.Read(async db =>
+        {
+            var found = await db.GitHubAccess.AsNoTracking().ToListAsync();
+            var ids = found.Select(x => x.Id).ToArray();
+            var latest = new Dictionary<string, NativeProcessObservationEvidence>();
+            foreach (var id in ids)
+            {
+                var observed = await db.Events.AsNoTracking().Where(x => x.RuntimeId == id && x.Type == "NativeProcessObserved")
+                    .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync();
+                if (observed is not null) latest[id] = Json.Read<NativeProcessObservationEvidence>(observed.Payload);
+            }
+            return (found, await db.Runtimes.AsNoTracking().Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id), latest);
+        });
+        foreach (var record in records)
+        {
+            var now = ControlStore.Now;
+            if (record.State == "Ready" && record.ExpiresAt <= now)
+            { record.State = "Expired"; record.Detail = "The last delivered credential expired. Connect the runtime to renew it."; }
+            else if (record.State == "Ready" && (!runtimes.TryGetValue(record.Id, out var runtime) ||
+                !GitHubProcessEnvironment.HasCurrentEvidence(record, now, runtime, native.GetValueOrDefault(record.Id))))
+            {
+                record.State = "MigrationRequired";
+                record.Detail = "Stored access has not been verified against the current owned-process environment policy. Keep the runtime connected; AgentControl will verify it without restarting native work.";
+            }
+        }
         return records;
     }
 
@@ -75,7 +97,10 @@ public sealed class GitHubAccessService(ControlStore store, Secrets secrets, Git
                 var record = await db.GitHubAccess.FindAsync(runtimeId) ?? new GitHubAccess { Id = runtimeId };
                 record.AppId = input.AppId; record.InstallationId = input.InstallationId; record.PrivateKeyReference = reference;
                 record.RepositoriesJson = Json.Write(repositories); record.State = "Pending"; record.Detail = "Repository access verified; credential delivery pending.";
+                record.CredentialState = GitHubCredentialState.Pending; record.CredentialConfigurationFingerprint = "";
                 record.RetryAt = 0; record.ExpiresAt = null; record.Revision++;
+                record.EnvironmentPolicyVersion = 0; record.EnvironmentPolicyFingerprint = ""; record.EnvironmentProcessId = null;
+                record.EnvironmentProcessIncarnation = ""; record.EnvironmentVerifiedAt = null;
                 SavePermissionEvidence(record, credential);
                 if (previous is null) db.GitHubAccess.Add(record);
                 ControlStore.Event(db, "GitHubAccessConfigured", runtimeId, payload: new

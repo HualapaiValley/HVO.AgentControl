@@ -149,6 +149,14 @@ public sealed class GitHubAccessTests
         var access = new GitHubAccess
         {
             State = "Ready",
+            CredentialState = GitHubCredentialState.Delivered,
+            CredentialConfigurationFingerprint = new string('b', 64),
+            ExpiresAt = ControlStore.Now + 3600000,
+            EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion,
+            EnvironmentPolicyFingerprint = new string('a', 64),
+            EnvironmentProcessId = 7,
+            EnvironmentProcessIncarnation = "fixture-incarnation",
+            EnvironmentVerifiedAt = ControlStore.Now,
             ChecksPermission = token.ChecksPermission,
             CommitStatusesPermission = token.CommitStatusesPermission,
             ActionsPermission = token.ActionsPermission
@@ -284,8 +292,13 @@ public sealed class GitHubAccessTests
         Assert.NotEqual(source.PrivateKeyReference, copied.PrivateKeyReference);
         Assert.Equal(secrets.Read(source.PrivateKeyReference), secrets.Read(copied.PrivateKeyReference));
         Assert.Null(copied.ExpiresAt); Assert.Equal("Pending", copied.State);
+        Assert.Equal(GitHubCredentialState.Pending, copied.CredentialState);
         Assert.Equal("CredentialUnavailable", copied.ExactCiInspectionState);
-        copied.State = "Ready";
+        copied.State = "Ready"; copied.EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion;
+        copied.CredentialState = GitHubCredentialState.Delivered; copied.ExpiresAt = ControlStore.Now + 3600000;
+        copied.CredentialConfigurationFingerprint = new string('b', 64);
+        copied.EnvironmentPolicyFingerprint = new string('a', 64); copied.EnvironmentProcessId = 7;
+        copied.EnvironmentProcessIncarnation = "fixture-incarnation"; copied.EnvironmentVerifiedAt = ControlStore.Now;
         Assert.Equal("Ready", copied.ExactCiInspectionState);
         Assert.Equal(Now.ToUnixTimeMilliseconds(), copied.PermissionsVerifiedAt);
         await service.Disable(source.Id, source.Revision, CancellationToken.None);
@@ -297,6 +310,13 @@ public sealed class GitHubAccessTests
         Assert.DoesNotContain("installation-test-secret", response);
         Assert.Contains("checksPermission", response);
         Assert.Contains("exactCiInspectionState", response);
+        Assert.Contains("credentialState", response);
+        Assert.DoesNotContain("credentialConfigurationFingerprint", response);
+        Assert.DoesNotContain("environmentPolicyVersion", response);
+        Assert.DoesNotContain("environmentPolicyFingerprint", response);
+        Assert.DoesNotContain("environmentProcessId", response);
+        Assert.DoesNotContain("environmentProcessIncarnation", response);
+        Assert.DoesNotContain("environmentVerifiedAt", response);
         var events = await app.Store.Read(db => Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.ToListAsync(db.Events));
         Assert.All(events, e => { Assert.DoesNotContain("PRIVATE KEY", e.Payload); Assert.DoesNotContain("installation-test-secret", e.Payload); });
     }
@@ -335,6 +355,10 @@ public sealed class GitHubAccessTests
         {
             var grant = (await db.GitHubAccess.FindAsync(runtime.Id))!;
             grant.State = "Ready"; grant.ExpiresAt = ControlStore.Now - 1000;
+            grant.CredentialState = GitHubCredentialState.Delivered;
+            grant.EnvironmentPolicyVersion = GitHubProcessEnvironment.CurrentPolicyVersion;
+            grant.EnvironmentPolicyFingerprint = new string('a', 64); grant.EnvironmentProcessId = 7;
+            grant.EnvironmentProcessIncarnation = "fixture-incarnation"; grant.EnvironmentVerifiedAt = 1;
             return true;
         });
         Assert.Equal("Expired", Assert.Single(await service.List()).State);
@@ -353,6 +377,8 @@ public sealed class GitHubAccessTests
         runtime.StateDirectory = "/home/agent/github-delivery-" + Guid.NewGuid().ToString("N");
         var secrets = new Secrets(Options.Create(new ControlOptions { SecretsDirectory = SshIntegrationTests.FixtureSecrets }));
         var delivery = new GitHubCredentialDelivery(secrets);
+        var factory = new SshRuntimeTransportFactory(secrets);
+        IRuntimeTransport? connection = null;
         async Task<string> Docker(string script)
         {
             var start = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true };
@@ -366,6 +392,7 @@ public sealed class GitHubAccessTests
         await Docker("rm -rf " + runtime.StateDirectory + " && printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh && mkdir -p /home/agent/.config/gh && printf personal-login > /home/agent/.config/gh/hosts.yml");
         try
         {
+            connection = await factory.Connect(runtime, CancellationToken.None);
             var managedDirectory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
             await delivery.Deliver(runtime, new("fixture-token-one", Now.AddHours(1)), CancellationToken.None);
             var first = await Docker("cat " + managedDirectory + "/hosts.yml; stat -c '%a' " + managedDirectory + "/hosts.yml");
@@ -382,6 +409,14 @@ public sealed class GitHubAccessTests
             await Assert.ThrowsAsync<ControlException>(() => delivery.Deliver(runtime, new("must-not-replace", Now.AddHours(1)), CancellationToken.None));
             Assert.Equal("personal-login", await Docker("cat " + managedDirectory + "/hosts.yml"));
         }
-        finally { await Docker("rm -rf " + runtime.StateDirectory + " /home/agent/.config/gh /usr/local/bin/gh"); }
+        finally
+        {
+            if (connection is not null)
+            {
+                try { await connection.StopOwnedServer(CancellationToken.None); } catch (Exception) { }
+                await connection.DisposeAsync();
+            }
+            await Docker("rm -rf " + runtime.StateDirectory + " /home/agent/.config/gh /usr/local/bin/gh");
+        }
     }
 }
