@@ -40,6 +40,12 @@ public sealed record NativeProcessObservation(
 
 public sealed record NativeProcessObservationResult(string Freshness, int ReplacementReceipts, int InterruptedCommands);
 
+// This request is bound to the process already known by the owner. It never
+// changes the connection lifecycle; it only refreshes live identity evidence.
+public sealed record ReinspectNativeProcessInput(string Id, long ExpectedRuntimeRevision, string ManagedServerId,
+    string ExpectedIncarnation);
+internal sealed record NativeProcessReinspectionRequest(ReinspectNativeProcessInput Input, int ExpectedProcessId);
+
 public sealed record NativeProcessObservationEvidence(
     string RuntimeId,
     string ManagedServerId,

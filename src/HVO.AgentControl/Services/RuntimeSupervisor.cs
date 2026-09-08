@@ -265,6 +265,14 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     }
                 }
             }
+            if (command.Kind == "ReinspectNativeProcess" && !IsCurrentReinspection(command, await db.Runtimes.FindAsync(runtimeId)))
+            {
+                command.State = Delivery.Cancelled;
+                command.Detail = "Native-process reinspection was superseded by changed runtime identity; no observation was recorded.";
+                command.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "NativeProcessReinspectionSuperseded", runtimeId, commandId: command.Id);
+                continue;
+            }
             if (command.Kind == "Prompt")
             {
                 var worker = await db.Workers.FindAsync(command.WorkerId);
@@ -320,6 +328,24 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                         record.State = Delivery.Finished; record.Detail = "Workspace verified and provider/model discovery completed.";
                         ControlStore.Event(db, "WorkspaceInspected", runtime.Id, commandId: command.Id); return true;
                     });
+                    break;
+                case "ReinspectNativeProcess":
+                    var reinspection = Json.Read<NativeProcessReinspectionRequest>(command.ExecutionPayload);
+                    if (!await ReinspectionStillCurrent(command.Id, reinspection)) break;
+                    var started = ControlStore.Now;
+                    var identity = await transport.ProbeProcessIdentity(token);
+                    if (!transport.Connected || identity is null || !identity.MatchesOwner(runtime) ||
+                        identity.ProcessId != reinspection.ExpectedProcessId || identity.Incarnation != reinspection.Input.ExpectedIncarnation || identity.ObservedAt < started ||
+                        identity.ObservedAt > ControlStore.Now + 5000)
+                    {
+                        await Complete(command.Id, Delivery.Failed,
+                            "Live native-process identity did not confirm the requested owned process; no fresh stop authority was recorded.");
+                        break;
+                    }
+                    await store.CompleteNativeProcessReinspection(command.Id, reinspection,
+                        new(runtime.ManagedServerId, NativeProcessObservationState.Observed, transport.Platform, identity.ProcessId,
+                            identity.Incarnation, identity.ObservedAt, NativeProcessProbe.Provenance,
+                            "Owned native process identity observed through a live reinspection probe.", []));
                     break;
                 case "CreateControlSession":
                     var binding = await store.Read(db => db.ControlSessions.AsNoTracking().SingleAsync(x => x.CreationCommandId == command.Id, token));
@@ -564,6 +590,15 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             x.Kind == "Prompt" && x.State != Delivery.Queued && recoveryIds.Contains(x.Id))).ToListAsync();
         var nativeRetry = NativeRetryFailure.Parse(snapshot.StatusDetail);
         var abortObserved = activity == "Idle" && commands.Any(x => x.Kind == "Abort" && x.State == Delivery.Accepted);
+        var activePrompt = commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Dispatching or Delivery.Accepted or Delivery.Running &&
+                x.NativeMessageId is not null && snapshot.Messages.Any(message => message.GetProperty("info").GetProperty("id").GetString() == x.NativeMessageId))
+            .OrderByDescending(x => x.State == Delivery.Running).ThenByDescending(x => x.AcceptedAt ?? x.CreatedAt).FirstOrDefault();
+        var compacting = activePrompt is not null && activity != "Idle" && NativeTurnEvidence.IsAutomaticCompactionInProgress(snapshot.Messages,
+            activePrompt.NativeMessageId, worker.NativeSessionId);
+        if (compacting && worker.CurrentAction != "Automatic compaction in progress.")
+        { worker.CurrentAction = "Automatic compaction in progress."; changed = true; }
+        else if (!compacting && worker.CurrentAction == "Automatic compaction in progress.")
+        { worker.CurrentAction = ""; changed = true; }
         foreach (var command in commands)
         {
             if (command.Kind == "Abort" && activity == "Idle" && command.State == Delivery.Accepted)
@@ -773,13 +808,60 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         catch (InvalidOperationException) { return command.Kind != "StopManagedServer"; }
     }
 
+    private static bool IsCurrentReinspection(CommandRecord command, RuntimeRecord? runtime)
+    {
+        if (runtime is null || command.ExecutionPayload.Length == 0) return false;
+        try
+        {
+            var request = Json.Read<NativeProcessReinspectionRequest>(command.ExecutionPayload);
+            return command.State == Delivery.Queued && runtime.ConnectionKind == RuntimeConnections.Ssh && runtime.DesiredConnected &&
+                request.Input.ExpectedRuntimeRevision == runtime.Revision && request.Input.ManagedServerId == runtime.ManagedServerId &&
+                request.ExpectedProcessId > 0 && NativeProcessProbe.ValidMarker(request.Input.ExpectedIncarnation);
+        }
+        catch (JsonException) { return false; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    private Task<bool> ReinspectionStillCurrent(string id, NativeProcessReinspectionRequest request) => store.Write(async db =>
+    {
+        var command = await db.Commands.FindAsync(id);
+        var runtime = command is null ? null : await db.Runtimes.FindAsync(command.RuntimeId);
+        if (command is { Kind: "ReinspectNativeProcess", State: Delivery.Dispatching } && runtime is not null &&
+            command.ExecutionPayload == Json.Write(request) && runtime.ConnectionKind == RuntimeConnections.Ssh && runtime.DesiredConnected &&
+            runtime.Revision == request.Input.ExpectedRuntimeRevision && runtime.ManagedServerId == request.Input.ManagedServerId)
+            return true;
+        if (command is { State: Delivery.Dispatching })
+        {
+            command.State = Delivery.Cancelled;
+            command.Detail = "Native-process reinspection was superseded by changed runtime identity; no observation was recorded.";
+            command.UpdatedAt = ControlStore.Now;
+            ControlStore.Event(db, "NativeProcessReinspectionSuperseded", command.RuntimeId, commandId: command.Id);
+        }
+        return false;
+    });
+
     private Task<bool> StopStillCurrent(string id, RuntimeLifecycleInput expected) => store.Write(async db =>
     {
         var command = await db.Commands.FindAsync(id);
         var runtime = command is null ? null : await db.Runtimes.FindAsync(command.RuntimeId);
         if (command is not { Kind: "StopManagedServer", State: Delivery.Dispatching } || runtime is null) return false;
         var lifecycle = Json.Read<RuntimeLifecycleInput>(command.Payload);
-        return lifecycle == expected && lifecycle.Revision == runtime.Revision;
+        var observed = await db.Events.AsNoTracking().Where(x => x.RuntimeId == runtime.Id && x.Type == "NativeProcessObserved")
+            .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync();
+        var evidence = observed is null ? null : Json.Read<NativeProcessObservationEvidence>(observed.Payload);
+        var current = lifecycle == expected && lifecycle.Revision == runtime.Revision && expected.OwnedProcess is not null &&
+            evidence is { State: NativeProcessObservationState.Observed, Freshness: "Fresh", ProcessId: > 0 } &&
+            evidence.ManagedServerId == expected.OwnedProcess.ManagedServerId && evidence.ProcessId == expected.OwnedProcess.ProcessId &&
+            evidence.Incarnation == expected.OwnedProcess.Incarnation && evidence.ObservedAt == expected.OwnedProcess.ObservedAt &&
+            evidence.ObservedAt >= ControlStore.Now - 60000;
+        if (current) return true;
+        // This guard runs immediately before the stop POST, so a dispatching receipt
+        // has not had an effect and can be retired when its ownership proof changes.
+        command.State = Delivery.Cancelled;
+        command.Detail = "Stop was superseded by changed native-process ownership evidence; no stop was sent.";
+        command.UpdatedAt = ControlStore.Now;
+        ControlStore.Event(db, "NativeProcessStopSuperseded", command.RuntimeId, commandId: command.Id);
+        return false;
     });
     private Task<bool> MarkDisconnected(string id, string transport, string diagnostic, string health = "Unknown") => store.Write(async db =>
     {
