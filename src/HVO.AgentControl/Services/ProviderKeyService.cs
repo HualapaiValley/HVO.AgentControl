@@ -88,18 +88,29 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
         await gate.WaitAsync(token);
         try
         {
-            var (runtime, reference, revision) = await store.Read(async db =>
+            // Install the durable dispatch hold in the same transaction as revision validation.
+            // A claim that raced this mutation rechecks this hold before native submission.
+            var (runtime, reference, revision) = await store.Write(async db =>
             {
                 var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
                 if (!runtime.DesiredConnected || runtime.Health != "Healthy") throw new ControlException("Verify and connect the runtime first.");
                 var key = await db.Set<ProviderCredential>().FindAsync(ProviderId) ?? throw new ControlException("Save the OpenCode Go key first.");
                 if (key.Revision != input.ExpectedRevision) throw new ControlException("The saved key changed. Refresh before applying it.");
+                var deliveryId = ProviderId + ":" + runtimeId;
+                var delivery = await db.Set<ProviderKeyDelivery>().FindAsync(deliveryId);
+                if (delivery is null) { delivery = new() { Id = deliveryId, RuntimeId = runtimeId, ProviderId = ProviderId }; db.Add(delivery); }
+                delivery.KeyRevision = key.Revision; delivery.State = "Unconfirmed"; delivery.UpdatedAt = ControlStore.Now;
+                var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync(deliveryId);
+                if (receipt is null) { receipt = new() { Id = deliveryId, RuntimeId = runtimeId, ProviderId = ProviderId }; db.Add(receipt); }
+                receipt.KeyRevision = key.Revision; receipt.State = "RefreshRequired";
+                receipt.Detail = "Credential delivery is pending; native provider state was not refreshed.";
+                receipt.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "ProviderKeyDeliveryChanged", runtimeId, payload: new { ProviderId, revision = key.Revision, state = delivery.State }, provenance: "user");
+                ControlStore.Event(db, "ProviderReadinessChanged", runtimeId, payload: new { ProviderId, revision = key.Revision, state = receipt.State }, provenance: "user");
                 return (runtime, key.SecretReference, key.Revision);
             });
             // Persist before sending. A host restart or lost response leaves honest uncertainty.
             var deliveryId = ProviderId + ":" + runtimeId;
-            await Receipt("Unconfirmed");
-            await Readiness("RefreshRequired", "Credential delivery is pending; native provider state was not refreshed.");
             var sent = false;
             try
             {
@@ -158,14 +169,16 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                     return;
                 }
                 await Readiness("Refreshing", "Waiting for fresh idle evidence before scoped native refresh.");
+                var outstanding = await store.Read(db => db.Commands.AnyAsync(x => x.RuntimeId == id && x.Kind == "Prompt" &&
+                    (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)));
+                if (outstanding)
+                {
+                    await Readiness("RefreshRequired", "A managed delivery is outstanding; no instance was disposed.");
+                    return;
+                }
                 foreach (var directory in directories)
                 {
-                    var sessions = await api.Sessions(directory, cancellation);
-                    var statuses = await api.SessionStatuses(directory, cancellation);
-                    if (sessions.ValueKind != System.Text.Json.JsonValueKind.Array || statuses.ValueKind != System.Text.Json.JsonValueKind.Object ||
-                        sessions.EnumerateArray().Any(session => !session.TryGetProperty("id", out var sessionId) || sessionId.ValueKind != System.Text.Json.JsonValueKind.String ||
-                            !statuses.TryGetProperty(sessionId.GetString()!, out var status) || status.ValueKind != System.Text.Json.JsonValueKind.Object ||
-                            !status.TryGetProperty("type", out var type) || type.GetString() != "idle"))
+                    if (!await SessionsIdle(directory))
                     {
                         await Readiness("RefreshRequired", "A managed or child native session is active or cannot be observed; no instance was disposed.");
                         return;
@@ -173,10 +186,25 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 }
                 foreach (var directory in directories)
                 {
+                    if (!await SessionsIdle(directory))
+                    {
+                        await Readiness("RefreshRequired", "A managed or child native session became active; no further instance was disposed.");
+                        return;
+                    }
                     await api.DisposeInstance(directory, cancellation);
                     await api.Models(directory, cancellation);
                 }
                 await Readiness("RefreshCompleted", "Scoped native provider caches were refreshed after fresh idle evidence; model access is not yet tested.");
+
+                async Task<bool> SessionsIdle(string directory)
+                {
+                    var sessions = await api.Sessions(directory, cancellation);
+                    var statuses = await api.SessionStatuses(directory, cancellation);
+                    return sessions.ValueKind == System.Text.Json.JsonValueKind.Array && statuses.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                        sessions.EnumerateArray().All(session => session.TryGetProperty("id", out var sessionId) && sessionId.ValueKind == System.Text.Json.JsonValueKind.String &&
+                            (!statuses.TryGetProperty(sessionId.GetString()!, out var status) || status.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                                status.TryGetProperty("type", out var type) && type.GetString() == "idle"));
+                }
             }
         }
         finally { gate.Release(); }

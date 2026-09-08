@@ -124,6 +124,46 @@ public sealed class ProviderKeyTests
         Assert.DoesNotContain(Key, readiness.Detail);
     }
 
+    [Fact]
+    public async Task OutstandingManagedDeliveryPreventsScopedDisposal()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        var worker = new WorkerRecord
+        {
+            RuntimeId = runtime.Id,
+            ManagedServerId = runtime.ManagedServerId,
+            NativeSessionId = "ses_root",
+            Directory = "/workspace",
+            ProviderId = ProviderKeyService.ProviderId,
+            ModelId = "go-model",
+            Activity = "Idle",
+            Stale = false
+        };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(worker);
+            db.Commands.Add(new CommandRecord
+            {
+                RuntimeId = runtime.Id,
+                WorkerId = worker.Id,
+                Kind = "Prompt",
+                State = Delivery.Accepted,
+                Payload = Json.Write(new PromptInput("pending", "Task", worker.Revision))
+            });
+            return Task.FromResult(true);
+        });
+        var native = new RefreshHandler(false);
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(native));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        Assert.Equal("RefreshRequired", Assert.Single(status.Readiness).State);
+        Assert.Equal(0, native.DisposeCalls);
+    }
+
     private sealed class Handler(bool fail) : HttpMessageHandler
     {
         public int Calls { get; private set; }
@@ -159,11 +199,7 @@ public sealed class ProviderKeyTests
             if (request.Method == HttpMethod.Get && path == "/session")
                 return Json(new[] { new { id = "ses_root", parentID = (string?)null }, new { id = "ses_child", parentID = (string?)"ses_root" } });
             if (request.Method == HttpMethod.Get && path == "/session/status")
-                return Json(new Dictionary<string, object>
-                {
-                    ["ses_root"] = new { type = "idle" },
-                    ["ses_child"] = new { type = activeSession ? "busy" : "idle" }
-                });
+                return Json(activeSession ? new Dictionary<string, object> { ["ses_child"] = new { type = "busy" } } : new Dictionary<string, object>());
             if (request.Method == HttpMethod.Post && path == "/instance/dispose")
             {
                 DisposeCalls++;

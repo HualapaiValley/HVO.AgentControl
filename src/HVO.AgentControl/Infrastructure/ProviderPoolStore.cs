@@ -212,7 +212,7 @@ public sealed partial class ControlStore
         var providerId = PoolId(worker, command)["provider:".Length..];
         var readiness = await db.Set<HVO.AgentControl.Services.ProviderReadinessReceipt>()
             .FindAsync(providerId + ":" + worker.RuntimeId);
-        if (readiness is not null && readiness.State is not ("Ready" or "RefreshCompleted"))
+        if (readiness is not null && readiness.State != "Ready")
         {
             command.Detail = "Waiting for provider readiness refresh: " + readiness.State + ". " + readiness.Detail;
             return false;
