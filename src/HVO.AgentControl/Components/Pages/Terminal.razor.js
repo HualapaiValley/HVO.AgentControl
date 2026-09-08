@@ -1,11 +1,13 @@
 let socket, terminal, observer, heartbeat, generation = 0;
+const scripts = new Map();
 async function script(src) {
-    if (document.querySelector(`script[src="${src}"]`)) return;
-    await new Promise((resolve, reject) => {
+    if (window[src.includes('addon-fit') ? 'FitAddon' : 'Terminal']) return;
+    if (!scripts.has(src)) scripts.set(src, new Promise((resolve, reject) => {
         const element = document.createElement('script'); element.src = src;
-        element.onload = resolve; element.onerror = () => { element.remove(); reject(new Error('Terminal assets unavailable')); };
+        element.onload = resolve; element.onerror = () => { element.remove(); scripts.delete(src); reject(new Error('Terminal assets unavailable')); };
         document.head.appendChild(element);
-    });
+    }));
+    await scripts.get(src);
 }
 export function close() {
     generation++;
