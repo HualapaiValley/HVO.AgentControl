@@ -220,13 +220,21 @@ public sealed class SshIntegrationTests
             await TestApp.Wait(async () => (await store.Detail(w1.Id)).Worker.Activity == "Active" &&
                 (await store.Detail(w2.Id)).Worker.Activity == "Active", "Both workers must be active before testing isolated cancellation");
             var abort = await store.Abort(w1.Id, Guid.NewGuid().ToString());
-            await Finished(store, abort); await Finished(store, abortable);
+            await Finished(store, abort);
+            await TestApp.Wait(async () => (await store.Snapshot()).Commands.Single(x => x.Id == abortable.Id).State == Delivery.Cancelled,
+                "Interrupted prompt did not settle as cancelled");
+            var abortCommands = (await store.Snapshot()).Commands;
+            Assert.Equal(Delivery.Finished, abortCommands.Single(x => x.Id == abort.Id).State);
+            Assert.Equal(Delivery.Cancelled, abortCommands.Single(x => x.Id == abortable.Id).State);
             Assert.NotEqual("Idle", (await store.Detail(w2.Id)).Worker.Activity);
             await Finished(store, unaffected);
             Assert.Equal("Cancelled", (await store.Detail(w1.Id)).Worker.Outcome);
             var failed = await Prompt(store, w1, "native error is not success [error]");
             await Finished(store, failed);
             Assert.Equal("Failed", (await store.Detail(w1.Id)).Worker.Outcome);
+            var failedDetail = await store.Detail(w1.Id);
+            Assert.Equal(Delivery.Finished, failedDetail.Commands.Single(x => x.Id == failed.Id).State);
+            Assert.Equal("Failed", failedDetail.Assignments.Single(x => x.Id == failed.Id).Outcome);
             var snapshot = await store.Snapshot();
             Assert.All(snapshot.Commands.Where(x => x.Kind == "Prompt" && x.State != Delivery.Cancelled), x => Assert.Equal(1, x.Attempts));
             Assert.Equal(3, snapshot.Workers.Count);

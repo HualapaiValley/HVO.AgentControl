@@ -15,3 +15,15 @@ Model access shows observed state, unknown remaining allowance, retry time and w
 This slice does not estimate remaining subscription allowance from API prices, switch models, enable paid overage, provide multi-account credential bindings, or reconcile tool effects for fallback continuation. These remain #82/#69 work. Failure receipts and events retain only category/status/time and identifiers, never raw error messages or response bodies. Existing native transcript retention is unchanged.
 
 After an account-limit retry, the safe next step is to reconcile the latest turn and its tool receipts, inspect any uncertain side effects, and have an owner verify recovery before resuming an eligible queued route. Linked continuation/fallback creation is not implemented by this slice.
+
+## Advisory fallback receipts
+
+The authenticated fallback recommendation API records an advisory replacement route only. It requires the source prompt's own durable assignment outcome and a structured provider-failure receipt for that command and pool. A historical retry receipt and a still-held pool do not prove that a task ultimately failed; a native retry followed by a successful final response is not eligible.
+
+- A completed native failure has `Delivery.Finished` and assignment outcome `Failed`. Retained legacy turns with that pair remain eligible after restart without changing their delivery state or replaying them.
+- An interrupted prompt with `Delivery.Cancelled` and assignment outcome `Cancelled` is eligible only with its own `Exhausted` receipt. Cancellation without proven quota exhaustion, including merely transient failures, is not a fallback cause. An `Abort` control command completes as `Finished` and is never itself a fallback source.
+- Successful, in-flight, unknown, missing-outcome, transport-failed, and owner-cancelled completed turns are rejected. Eligibility never reads the mutable worker-wide outcome, which can describe a later task.
+
+Each new receipt records the source delivery state, `SourceTaskOutcome`, source failure receipt ID/category, and source/target pool IDs. The request ID is idempotent and only one recommendation may bind a source command. Old advisory receipts retain an empty task-outcome field as unknown; the migration does not infer failure retroactively. Recommendations are historical validation receipts, not continuing authorization for dispatch.
+
+Current worker revision/idle state, no outstanding work, configured target model, a distinct pool, and target readiness remain required. No work is dispatched, aborted, replayed, or resumed by this API. Receipt-aware tool reconciliation, owner-approved routing/risk/spend limits and a linked continuation remain #82 follow-up work.

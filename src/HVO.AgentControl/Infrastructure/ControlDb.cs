@@ -32,6 +32,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     {
         model.Entity<ProviderPool>();
         model.Entity<ProviderFailureReceipt>();
+        model.Entity<ProviderFallbackReceipt>().HasIndex(x => x.SourceCommandId).IsUnique();
         model.Entity<HVO.AgentControl.Services.ProviderCredential>();
         model.Entity<HVO.AgentControl.Services.ProviderKeyDelivery>();
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
