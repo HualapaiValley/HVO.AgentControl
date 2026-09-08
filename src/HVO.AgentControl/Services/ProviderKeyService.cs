@@ -133,7 +133,7 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 }
                 else
                 {
-                    await Refresh(transport.Api, runtimeId, deadline.Token);
+                    await Refresh(transport, runtimeId, deadline.Token);
                 }
             }
             catch (Exception)
@@ -174,8 +174,9 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 return true;
             });
 
-            async Task Refresh(OpenCode.OpenCodeClient api, string id, CancellationToken cancellation)
+            async Task Refresh(IRuntimeTransport transport, string id, CancellationToken cancellation)
             {
+                var api = transport.Api;
                 var directories = (await store.Read(async db => await db.Workers.Where(x => x.RuntimeId == id && !x.Archived)
                     .Select(x => x.Directory).Distinct().ToListAsync())).Concat(ControlStore.Roots(runtime)).Distinct().ToList();
                 await Readiness("Refreshing", "Waiting for fresh idle evidence before scoped native refresh.");
@@ -205,7 +206,19 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                         await InstanceReadiness("RefreshRequired", "A managed or child native session became active; no further instance was disposed.");
                         return;
                     }
-                    await api.DisposeInstance(directory, cancellation);
+                    var process = transport.NativeProcess;
+                    if (process is not { State: NativeProcessObservationState.Observed, ProcessId: > 0 } ||
+                        process.ObservedAt < ControlStore.Now - 60000 || string.IsNullOrWhiteSpace(process.Incarnation))
+                    {
+                        await Readiness("Unknown", "Scoped disposal completion cannot be attributed to a fresh verified runtime process.");
+                        await InstanceReadiness("Unknown", "Scoped disposal completion cannot be attributed to a fresh verified runtime process.");
+                        return;
+                    }
+                    using var completionDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                    completionDeadline.CancelAfter(TimeSpan.FromSeconds(20));
+                    var completion = await api.Subscribe(completionDeadline.Token);
+                    await api.DisposeInstance(directory, completionDeadline.Token);
+                    await api.WaitForInstanceDisposed(completion, directory, process.ProcessId!.Value, process.Incarnation, completionDeadline.Token);
                     await api.Models(directory, cancellation);
                 }
                 await Readiness("RefreshCompleted", "Scoped native provider caches were refreshed after fresh idle evidence; model access is not yet tested.");

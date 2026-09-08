@@ -254,6 +254,15 @@ public sealed class ProviderKeyTests
                 DisposePaths.Add(path);
                 return Json(true);
             }
+            if (request.Method == HttpMethod.Get && path == "/global/event")
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("data: {\"type\":\"server.instance.disposed\",\"properties\":{\"directory\":\"/workspace\",\"processID\":7,\"incarnation\":\"fixture-incarnation\"}}\n\n")
+                };
+                response.Content.Headers.ContentType = new("text/event-stream");
+                return Task.FromResult(response);
+            }
             if (request.Method == HttpMethod.Get && path == "/provider")
                 return Json(new { connected = new[] { ProviderKeyService.ProviderId }, all = new[] { new { id = ProviderKeyService.ProviderId, models = new Dictionary<string, object> { ["go-model"] = new { } } } } });
             throw new Xunit.Sdk.XunitException("Unexpected native request: " + request.Method + " " + request.RequestUri);
@@ -272,6 +281,8 @@ public sealed class ProviderKeyTests
     private sealed class Transport(OpenCodeClient api) : IRuntimeTransport
     {
         public OpenCodeClient Api => api;
+        public NativeProcessObservation? NativeProcess { get; } = new("server", NativeProcessObservationState.Observed,
+            "fixture", 7, "fixture-incarnation", ControlStore.Now, "SyntheticTest", "fixture", []);
         public bool Connected => true;
         public string Platform => "fixture";
         public Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken) => throw new NotSupportedException();
