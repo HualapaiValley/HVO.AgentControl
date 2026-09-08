@@ -29,6 +29,13 @@ public sealed class NativeTurnEvidenceTests
         Assert.Equal(2, NativeTurnEvidence.AssistantMessages(history, "msg_01").Length);
     }
 
+    [Fact]
+    public void AutomaticCompactionIsInProgressOnlyUntilTheMarkedContinuation()
+    {
+        Assert.True(NativeTurnEvidence.IsAutomaticCompactionInProgress([User(1), Compact(2)], "msg_01", "ses_test"));
+        Assert.False(NativeTurnEvidence.IsAutomaticCompactionInProgress([User(1), Compact(2), Continue(3)], "msg_01", "ses_test"));
+    }
+
     [Theory]
     [InlineData(false, true, true)]
     [InlineData(true, false, true)]

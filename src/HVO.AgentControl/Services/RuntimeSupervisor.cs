@@ -590,6 +590,15 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             x.Kind == "Prompt" && x.State != Delivery.Queued && recoveryIds.Contains(x.Id))).ToListAsync();
         var nativeRetry = NativeRetryFailure.Parse(snapshot.StatusDetail);
         var abortObserved = activity == "Idle" && commands.Any(x => x.Kind == "Abort" && x.State == Delivery.Accepted);
+        var activePrompt = commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Dispatching or Delivery.Accepted or Delivery.Running &&
+                x.NativeMessageId is not null && snapshot.Messages.Any(message => message.GetProperty("info").GetProperty("id").GetString() == x.NativeMessageId))
+            .OrderByDescending(x => x.State == Delivery.Running).ThenByDescending(x => x.AcceptedAt ?? x.CreatedAt).FirstOrDefault();
+        var compacting = activePrompt is not null && activity != "Idle" && NativeTurnEvidence.IsAutomaticCompactionInProgress(snapshot.Messages,
+            activePrompt.NativeMessageId, worker.NativeSessionId);
+        if (compacting && worker.CurrentAction != "Automatic compaction in progress.")
+        { worker.CurrentAction = "Automatic compaction in progress."; changed = true; }
+        else if (!compacting && worker.CurrentAction == "Automatic compaction in progress.")
+        { worker.CurrentAction = ""; changed = true; }
         foreach (var command in commands)
         {
             if (command.Kind == "Abort" && activity == "Idle" && command.State == Delivery.Accepted)
