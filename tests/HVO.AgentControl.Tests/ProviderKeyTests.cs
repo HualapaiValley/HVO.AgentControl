@@ -164,6 +164,37 @@ public sealed class ProviderKeyTests
         Assert.Equal(0, native.DisposeCalls);
     }
 
+    [Fact]
+    public async Task UnobservableChildStatusPreventsScopedDisposal()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_root",
+                Directory = "/workspace",
+                ProviderId = ProviderKeyService.ProviderId,
+                ModelId = "go-model",
+                Activity = "Idle",
+                Stale = false
+            });
+            return Task.FromResult(true);
+        });
+        var native = new RefreshHandler(false, omitChildStatus: true);
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(native));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        Assert.Equal("RefreshRequired", Assert.Single(status.Readiness).State);
+        Assert.Equal(0, native.DisposeCalls);
+    }
+
     private sealed class Handler(bool fail) : HttpMessageHandler
     {
         public int Calls { get; private set; }
@@ -182,7 +213,7 @@ public sealed class ProviderKeyTests
         public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
             Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") })));
     }
-    private sealed class RefreshHandler(bool activeSession) : HttpMessageHandler
+    private sealed class RefreshHandler(bool activeSession, bool omitChildStatus = false) : HttpMessageHandler
     {
         public int AuthCalls { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -199,7 +230,9 @@ public sealed class ProviderKeyTests
             if (request.Method == HttpMethod.Get && path == "/session")
                 return Json(new[] { new { id = "ses_root", parentID = (string?)null }, new { id = "ses_child", parentID = (string?)"ses_root" } });
             if (request.Method == HttpMethod.Get && path == "/session/status")
-                return Json(activeSession ? new Dictionary<string, object> { ["ses_child"] = new { type = "busy" } } : new Dictionary<string, object>());
+                return Json(activeSession ? new Dictionary<string, object> { ["ses_root"] = new { type = "idle" }, ["ses_child"] = new { type = "busy" } } :
+                    omitChildStatus ? new Dictionary<string, object> { ["ses_root"] = new { type = "idle" } } :
+                    new Dictionary<string, object> { ["ses_root"] = new { type = "idle" }, ["ses_child"] = new { type = "idle" } });
             if (request.Method == HttpMethod.Post && path == "/instance/dispose")
             {
                 DisposeCalls++;

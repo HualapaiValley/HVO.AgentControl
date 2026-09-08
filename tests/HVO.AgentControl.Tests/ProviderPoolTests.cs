@@ -44,6 +44,15 @@ public sealed class ProviderPoolTests
         ProviderPoolId = "provider:" + provider
     };
 
+    private static void ExternalReady(ControlDb db, WorkerRecord worker) => db.Set<ProviderReadinessReceipt>().Add(new()
+    {
+        Id = ProviderKeyService.ProviderId + ":" + worker.RuntimeId,
+        RuntimeId = worker.RuntimeId,
+        ProviderId = ProviderKeyService.ProviderId,
+        State = "Ready",
+        Detail = "External canary evidence recorded."
+    });
+
     private static JsonElement RetryStatus(int attempt, string provider, long next) => JsonSerializer.SerializeToElement(new
     {
         type = "retry",
@@ -208,6 +217,7 @@ public sealed class ProviderPoolTests
             {
                 var otherWorker = new WorkerRecord { RuntimeId = "other-runtime", ProviderId = "opencode-go" };
                 var waiting = Command(otherWorker);
+                ExternalReady(db, otherWorker);
                 Assert.False(await ControlStore.ProviderDispatchAllowed(db, otherWorker, waiting));
                 Assert.Contains("Remaining allowance unknown", waiting.Detail);
                 Assert.True(await ControlStore.ProviderDispatchAllowed(db, otherWorker, Command(otherWorker, "openai")));
@@ -232,6 +242,7 @@ public sealed class ProviderPoolTests
         var another = Command(worker);
         await app.Store.Write(async db =>
         {
+            ExternalReady(db, worker);
             db.Commands.AddRange(failed, next, another);
             await ControlStore.ObserveProviderFailure(db, worker, failed, "msg_failed", new("Throttled", 429, null));
             (await db.Set<ProviderPool>().FindAsync(failed.ProviderPoolId))!.RetryAt = ControlStore.Now - 1;
@@ -297,6 +308,20 @@ public sealed class ProviderPoolTests
             var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync("opencode-go:" + worker.RuntimeId);
             receipt!.State = "Ready"; receipt.Detail = "External canary evidence recorded.";
             Assert.True(await ControlStore.ProviderDispatchAllowed(db, worker, command));
+            return true;
+        });
+    }
+
+    [Fact]
+    public async Task MissingReadinessReceiptBlocksProviderDispatch()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = Command(worker, "opencode-go");
+        await app.Store.Write(async db =>
+        {
+            Assert.False(await ControlStore.ProviderDispatchAllowed(db, worker, command));
+            Assert.Contains("no receipt", command.Detail, StringComparison.OrdinalIgnoreCase);
             return true;
         });
     }
