@@ -26,6 +26,7 @@ public partial class Workers
     private string runtimeFilter = "", activityFilter = "", projectFilter = "";
     private string? workerRequestId, inspectionId, inspectedDirectory, inspectedRuntime;
     private List<ModelChoice>? inspectedModels;
+    private readonly Dictionary<string, CommandRecord> commandBodies = [];
 
     protected override void OnParametersSet()
     {
@@ -46,8 +47,11 @@ public partial class Workers
         newWorkerName = ""; newProject = ""; newDirectory = ControlStore.Roots(runtime)[0]; newModel = ""; newRepository = ""; newBranch = ""; newBaseRef = "HEAD";
         inspectionId = null; inspectedModels = null;
     }
-    protected override Task SnapshotChanged()
+    protected override async Task SnapshotChanged()
     {
+        var bodyIds = snapshot!.Commands.Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)
+            .Select(x => x.Id).Concat(inspectionId is null ? [] : [inspectionId]).Take(100).ToArray();
+        await Hydrate(snapshot.Commands, bodyIds);
         if (editing is not null && snapshot!.Workers.FirstOrDefault(x => x.Id == editing.Id) is { } current)
             editing.ModelsJson = current.ModelsJson;
         if (inspectionId is not null && snapshot!.Commands.FirstOrDefault(x => x.Id == inspectionId && x.State == Delivery.Finished) is { } inspected)
@@ -68,7 +72,18 @@ public partial class Workers
                 pendingCreationId = null; error = "Worker setup " + created.State + ". " + created.Detail;
             }
         }
-        return Task.CompletedTask;
+    }
+    private async Task Hydrate(List<CommandRecord> commands, IEnumerable<string> ids)
+    {
+        var summaries = commands.Where(x => ids.Contains(x.Id)).ToArray();
+        var missing = summaries.Where(x => !commandBodies.TryGetValue(x.Id, out var body) || body.UpdatedAt != x.UpdatedAt).Select(x => x.Id);
+        foreach (var body in await Store.CommandBodies(missing)) commandBodies[body.Id] = body;
+        foreach (var summary in summaries)
+        {
+            if (!commandBodies.TryGetValue(summary.Id, out var body)) continue;
+            var index = commands.FindIndex(x => x.Id == summary.Id);
+            if (index >= 0) commands[index] = body;
+        }
     }
     private List<ModelChoice> Models(string id) => id == inspectedRuntime && (newDirectory == inspectedDirectory || newRepository == inspectedDirectory) && inspectedModels is not null
         ? inspectedModels : Json.Read<List<ModelChoice>>(snapshot?.Runtimes.FirstOrDefault(x => x.Id == id)?.ModelsJson ?? "[]");

@@ -112,7 +112,8 @@
           @if (detail.Commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown))
           { <section class="pending-work" aria-label="Current instructions"><h3>Current instructions</h3>
             @foreach (var pending in detail.Commands.Where(x => x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown).OrderBy(x => x.QueueOrder))
-            { <div class="command"><strong>@DisplayStatus.DeliveryState(pending.State)</strong><p class="instruction-preview">@CommandText(pending)</p>
+            { <div class="command"><strong>@DisplayStatus.DeliveryState(pending.State)</strong><p class="instruction-preview">@(pending.Payload.Length == 0 ? "Instruction body available on request." : CommandText(pending))</p>
+              @if (pending.Payload.Length == 0) { <button class="subtle" @onclick="() => LoadCommandBody(pending)">Load instruction</button> }
               @if (pending.Kind == "Prompt" && pending.State == Delivery.Queued) { <div class="actions"><button class="subtle" @onclick='() => QueueAction(pending.Id, "first")'>Move first</button><button class="subtle" @onclick='() => QueueAction(pending.Id, "cancel")'>Cancel queued</button></div> }
               @if (pending.State == Delivery.Unknown) { <p>Check the conversation before resolving uncertain delivery.</p><button class="danger" @onclick='() => QueueAction(pending.Id, "resolveUnknown")'>Acknowledge uncertainty; never resend</button> }
             </div> }
@@ -121,7 +122,8 @@
           @foreach (var command in detail.Commands.OrderBy(x => x.QueueOrder))
           {
             <div class="command" @key="command.Id"><div><strong>@command.Kind</strong> <span class="badge @(command.State == Delivery.Unknown ? "attention" : "")">@command.State</span><p>@CommandText(command)</p><p class="meta">@CommandModel(command)</p><small>@command.Detail</small><p class="meta">@AssignmentGuidance.ProgressStatus(command)</p>
-              @if (command.Kind == "Prompt") { <details><summary>Exact submitted instruction</summary><pre>@(Json.Read<PromptInput>(command.ExecutionPayload.Length > 0 ? command.ExecutionPayload : command.Payload).Text)</pre></details> }<details><summary>Request identity</summary><code>@command.Id</code></details></div><div class="actions">
+              @if (command.Payload.Length == 0) { <button class="subtle" @onclick="() => LoadCommandBody(command)">Load request details</button> }
+              else if (command.Kind == "Prompt") { <details><summary>Exact submitted instruction</summary><pre>@(Json.Read<PromptInput>(command.ExecutionPayload.Length > 0 ? command.ExecutionPayload : command.Payload).Text)</pre></details> }<details><summary>Request identity</summary><code>@command.Id</code></details></div><div class="actions">
               @if (command.Kind == "Prompt" && command.State == Delivery.Queued) { <button class="subtle" @onclick='() => QueueAction(command.Id, "first")'>Move first</button><button class="subtle" @onclick='() => QueueAction(command.Id, "cancel")'>Cancel queued</button> }
               @if (command.State == Delivery.Unknown) { <button class="danger" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty; never resend</button> }
             </div></div>

@@ -91,7 +91,8 @@ public static class ApiEndpoints
         group.MapPost("/workers/{id}/outcome", (string id, OutcomeInput input, ControlStore store) => store.SetOutcome(id, input));
         group.MapPost("/requests/{id}/reply", (string id, ReplyInput input, ControlStore store) =>
             id == input.RequestId ? store.Reply(input) : throw new ControlException("Reply request identity mismatch.", 400));
-        group.MapGet("/commands/{id}", (string id, ControlStore store) => store.Read(async db => await db.Commands.FindAsync(id) ?? throw new ControlException("Command not found.", 404)));
+        group.MapGet("/commands/{id}", (string id, ControlStore store) => store.Command(id));
+        group.MapGet("/commands/{id}/prompt", (string id, ControlStore store) => store.CommandPrompt(id));
         group.MapPost("/commands/{id}/queue", (string id, QueueEdit input, ControlStore store) => store.EditQueue(id, input.Action));
         group.MapGet("/events", (long? after, string? workerId, ControlStore store) => store.Read(db => db.Events.AsNoTracking()
             .Where(x => x.Sequence > (after ?? 0) && (workerId == null || x.WorkerId == workerId)).OrderBy(x => x.Sequence).Take(200).ToListAsync()));

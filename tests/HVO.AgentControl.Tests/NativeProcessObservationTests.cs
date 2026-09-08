@@ -118,7 +118,7 @@ public sealed class NativeProcessObservationTests
         Assert.Equal(Delivery.Unknown, interrupted.State);
         Assert.Equal(command.NativeMessageId, interrupted.NativeMessageId);
         Assert.Equal(command.ProgressText, interrupted.ProgressText);
-        Assert.Equal(command.ResultJson, interrupted.ResultJson);
+        Assert.Equal(command.ResultJson, (await app.Store.Command(interrupted.Id)).ResultJson);
         Assert.Equal("Interrupted", detail.Assignments.Single(x => x.Id == command.Id).Outcome);
         Assert.Equal(Delivery.Finished, detail.Commands.Single(x => x.Id == finished.Id).State);
         Assert.Equal("NeedsReview", detail.Assignments.Single(x => x.Id == finished.Id).Outcome);
@@ -279,7 +279,7 @@ public sealed class NativeProcessObservationTests
         Assert.Equal(Delivery.Unknown, interrupted.State);
         Assert.Equal(ControlStore.NativeProcessInterruptedDetail, interrupted.Detail);
         Assert.Equal("Retained terminal evidence", interrupted.ProgressText);
-        Assert.Equal("{\"retained\":true}", interrupted.ResultJson);
+        Assert.Equal("{\"retained\":true}", (await app.Store.Command(interrupted.Id)).ResultJson);
         Assert.Equal("VerifiedComplete", detail.Worker.Outcome);
         Assert.Equal("VerifiedComplete", detail.Assignments.Single(x => x.Id == command.Id).Outcome);
         Assert.Equal("Owner verified retained task evidence.", detail.Assignments.Single(x => x.Id == command.Id).Evidence);

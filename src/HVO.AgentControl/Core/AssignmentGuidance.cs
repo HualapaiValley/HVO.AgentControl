@@ -64,7 +64,7 @@ public static class AssignmentGuidance
 
     public static string ProgressStatus(CommandRecord command)
     {
-        if (command.Kind != "Prompt" || !Delivery.InFlight(command.State) || command.AcceptedAt is null) return "";
+        if (command.Kind != "Prompt" || !Delivery.InFlight(command.State) || command.AcceptedAt is null || command.Payload.Length == 0) return "";
         var input = Json.Read<PromptInput>(command.Payload);
         if (input.ProgressMinutes is not { } minutes) return "";
         var due = (command.LastProgressAt ?? command.AcceptedAt.Value) + minutes * 60000L;

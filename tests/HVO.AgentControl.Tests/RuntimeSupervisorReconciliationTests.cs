@@ -35,7 +35,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         var detail = await restarted.Store.Detail(savedWorker.Id);
         Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
         Assert.Equal("NeedsReview", detail.Worker.Outcome);
-        Assert.Contains("Permission was rejected", detail.Commands.Single().ResultJson);
+        Assert.Contains("Permission was rejected", (await restarted.Store.Command(savedCommand.Id)).ResultJson);
     }
 
     [Theory]
@@ -70,7 +70,7 @@ public sealed class RuntimeSupervisorReconciliationTests
 
         var result = (await app.Store.Detail(worker.Id)).Commands.Single();
         Assert.Equal(Delivery.Finished, result.State);
-        Assert.Contains("Final response after permission denial", ControlStore.ResponseText(result.ResultJson));
+        Assert.Contains("Final response after permission denial", ControlStore.ResponseText((await app.Store.Command(result.Id)).ResultJson));
     }
 
     [Fact]
@@ -85,7 +85,7 @@ public sealed class RuntimeSupervisorReconciliationTests
             await Reconcile(app, worker, snapshot with { Messages = snapshot.Messages[..^1] });
             var retained = (await app.Store.Detail(worker.Id)).Commands.Single();
             Assert.Equal(Delivery.Accepted, retained.State);
-            Assert.Equal(command.ResultJson, retained.ResultJson);
+            Assert.Equal(command.ResultJson, (await app.Store.Command(retained.Id)).ResultJson);
             data = app.DataPath; secrets = app.SecretPath;
         }
 
@@ -98,7 +98,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         await Reconcile(restarted, restartedWorker, Snapshot(restartedWorker, restartedCommand, FinalAssistant(completed: 4, text: "Final review evidence")));
         var finished = (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single();
         Assert.Equal(Delivery.Finished, finished.State);
-        Assert.Contains("Final review evidence", ControlStore.ResponseText(finished.ResultJson!));
+        Assert.Contains("Final review evidence", ControlStore.ResponseText((await restarted.Store.Command(finished.Id)).ResultJson));
     }
 
     [Theory]
@@ -129,7 +129,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         var detail = await app.Store.Detail(worker.Id);
         Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
         Assert.Equal("Failed", detail.Worker.Outcome);
-        Assert.Contains("Provider failed", detail.Commands.Single().ResultJson);
+        Assert.Contains("Provider failed", (await app.Store.Command(command.Id)).ResultJson);
     }
 
     [Fact]
@@ -157,7 +157,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         await Reconcile(restarted, restartedWorker, Snapshot(restartedWorker, restartedCommand, FinalAssistant(completed: 4, text: "APPROVED receipt")));
         var completed = (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single();
         Assert.Equal(Delivery.Finished, completed.State);
-        Assert.Contains("APPROVED receipt", ControlStore.ResponseText(completed.ResultJson!));
+        Assert.Contains("APPROVED receipt", ControlStore.ResponseText((await restarted.Store.Command(completed.Id)).ResultJson));
     }
 
     [Fact]

@@ -9,8 +9,8 @@ public sealed class ActivityHub(ControlStore store) : Hub
 {
     public async Task<object> Resume(long sequence)
     {
-        var snapshot = await store.Snapshot();
-        return new { snapshot.Sequence, resnapshot = sequence != snapshot.Sequence };
+        var current = await store.Sequence();
+        return new { Sequence = current, resnapshot = sequence != current };
     }
 }
 

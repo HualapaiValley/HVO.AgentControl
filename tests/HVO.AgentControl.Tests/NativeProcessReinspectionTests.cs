@@ -64,8 +64,9 @@ public sealed class NativeProcessReinspectionTests
         var worker = (await app.Store.Snapshot()).Workers.Single(x => x.Id == ready.Worker.Id);
         var current = (await app.Store.NativeProcessObservations(ready.Runtime.Id)).First();
         Assert.Equal(Delivery.Finished, saved.State);
-        Assert.Equal("Confirmed", System.Text.Json.JsonDocument.Parse(saved.ResultJson).RootElement.GetProperty("state").GetString());
-        Assert.DoesNotContain(Incarnation, saved.ResultJson, StringComparison.Ordinal);
+        var exact = await app.Store.Command(saved.Id);
+        Assert.Equal("Confirmed", System.Text.Json.JsonDocument.Parse(exact.ResultJson).RootElement.GetProperty("state").GetString());
+        Assert.DoesNotContain(Incarnation, exact.ResultJson, StringComparison.Ordinal);
         Assert.Equal("Fresh", current.Freshness);
         Assert.Equal(Incarnation, current.Incarnation);
         Assert.Equal(1, transport.ProbeCalls);

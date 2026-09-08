@@ -41,7 +41,8 @@ const root = path.resolve(__dirname,'../..'), base = process.env.HVO_BASE_URL ||
   await page.getByLabel('Task or follow-up').fill('Reply with a short acknowledgement.');await page.getByRole('button',{name:'Send instruction',exact:true}).click();
   await expect.poll(async()=> (await get('/workers/'+worker.id)).commands.filter(x=>x.origin==='owner'&&x.kind==='Prompt').length).toBe(1);
   const submitted=(await get('/workers/'+worker.id)).commands.find(x=>x.origin==='owner'&&x.kind==='Prompt');
-  expect(JSON.parse(submitted.executionPayload).text).toContain('every 3 minutes');expect(JSON.parse(submitted.payload).text).toBe('Reply with a short acknowledgement.');
+  const body=await get('/commands/'+submitted.id);const effective=await get('/commands/'+submitted.id+'/prompt');
+  expect(effective.text).toContain('every 3 minutes');expect(JSON.parse(body.payload).text).toBe('Reply with a short acknowledgement.');
   await page.goto(base+'/?worker='+coordinator.id);await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
   await expect(page.getByLabel('Task or follow-up')).toHaveCount(0);await expect(page.getByText(/routing-only conversation/)).toBeVisible();
   await page.goto(base+'/coordination');await page.setViewportSize({width:390,height:844});await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');

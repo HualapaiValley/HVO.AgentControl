@@ -46,8 +46,9 @@ public sealed class CompactionFailureReconciliationTests
         Assert.Equal("Failed", detail.Worker.Outcome);
         Assert.Equal("Failed", Assert.Single(detail.Assignments).Outcome);
         Assert.Contains("automatic compaction failed", original.Detail, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("msg_summary", original.ResultJson, StringComparison.Ordinal);
-        Assert.Contains(kind, original.ResultJson, StringComparison.Ordinal);
+        var body = await app.Store.Command(original.Id);
+        Assert.Contains("msg_summary", body.ResultJson, StringComparison.Ordinal);
+        Assert.Contains(kind, body.ResultJson, StringComparison.Ordinal);
         Assert.Equal(1, await app.Store.Read(db => db.Events.CountAsync(x =>
             x.Type == "AutomaticCompactionFailed" && x.CommandId == command.Id && x.NativeId == "msg_summary")));
         Assert.Equal(eventDelivered ? 1 : 0, await app.Store.Read(db => db.Events.CountAsync(x => x.Type == "session.error")));
@@ -72,8 +73,9 @@ public sealed class CompactionFailureReconciliationTests
 
         var command = Assert.Single((await app.Store.Detail(worker.Id)).Commands);
         Assert.Equal(Delivery.Finished, command.State);
-        Assert.Contains("Verified task result", command.ResultJson, StringComparison.Ordinal);
-        Assert.DoesNotContain("Internal summary", command.ResultJson, StringComparison.Ordinal);
+        var body = await app.Store.Command(command.Id);
+        Assert.Contains("Verified task result", body.ResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("Internal summary", body.ResultJson, StringComparison.Ordinal);
         Assert.Empty(await app.Store.Read(db => db.Events.Where(x => x.Type == "AutomaticCompactionFailed").ToListAsync()));
     }
 
@@ -90,8 +92,9 @@ public sealed class CompactionFailureReconciliationTests
         var detail = await app.Store.Detail(worker.Id);
         Assert.Equal(Delivery.Finished, Assert.Single(detail.Commands).State);
         Assert.Equal("NeedsReview", detail.Worker.Outcome);
-        Assert.Contains("Verified task result", detail.Commands[0].ResultJson, StringComparison.Ordinal);
-        Assert.DoesNotContain("msg_summary", detail.Commands[0].ResultJson, StringComparison.Ordinal);
+        var body = await app.Store.Command(detail.Commands[0].Id);
+        Assert.Contains("Verified task result", body.ResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("msg_summary", body.ResultJson, StringComparison.Ordinal);
         Assert.Empty(await app.Store.Read(db => db.Set<ProviderFailureReceipt>().ToListAsync()));
     }
 

@@ -453,26 +453,84 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             Activity = x.Activity
         }).ToListAsync(), [], []));
 
-    public Task<ControlSnapshot> Snapshot() => Read(async db => new ControlSnapshot(
-        await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0, await db.Runtimes.AsNoTracking().ToListAsync(),
-        await db.Workers.AsNoTracking().ToListAsync(),
-        await db.Commands.AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(500)
-            .Union(db.Commands.AsNoTracking().Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)).ToListAsync(),
-        await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync()));
+    public Task<long> Sequence() => Read(async db => await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0);
+
+    public Task<ControlSnapshot> Snapshot() => Read(async db =>
+    {
+        var recent = await CommandMetadata(db.Commands.AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(500)).ToListAsync();
+        var outstanding = await CommandMetadata(db.Commands.AsNoTracking().Where(x =>
+            x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted ||
+            x.State == Delivery.Running || x.State == Delivery.Unknown ||
+            x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)).ToListAsync();
+        return new ControlSnapshot(await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0, await db.Runtimes.AsNoTracking().ToListAsync(),
+            await db.Workers.AsNoTracking().ToListAsync(),
+            recent.Concat(outstanding).DistinctBy(x => x.Id).OrderByDescending(x => x.CreatedAt).ToList(),
+            await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync());
+    });
 
     public Task<WorkerDetail> Detail(string id, long? before = null, string? beforeId = null)
     {
         if (before is null && !string.IsNullOrWhiteSpace(beforeId)) throw new ControlException("Transcript cursor ID requires its timestamp.", 400);
         if (beforeId is not null && string.IsNullOrWhiteSpace(beforeId)) throw new ControlException("Transcript cursor ID must not be empty.", 400);
-        return Read(async db => new WorkerDetail(
-            await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404),
-            await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before ||
-                beforeId != null && x.NativeCreatedAt == before && x.NativeId.CompareTo(beforeId) < 0))
-                .OrderByDescending(x => x.NativeCreatedAt).ThenByDescending(x => x.NativeId).Take(options.Value.HistoryLimit).ToListAsync(),
-            await db.Commands.Where(x => x.WorkerId == id).OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync(),
-            await db.Requests.Where(x => x.WorkerId == id).ToListAsync(),
-            await db.Assignments.Where(x => x.WorkerId == id).ToListAsync()));
+        return Read(async db =>
+        {
+            var recent = await CommandMetadata(db.Commands.AsNoTracking().Where(x => x.WorkerId == id)
+                .OrderByDescending(x => x.CreatedAt).Take(100)).ToListAsync();
+            var outstanding = await CommandMetadata(db.Commands.AsNoTracking().Where(x => x.WorkerId == id &&
+                (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted ||
+                 x.State == Delivery.Running || x.State == Delivery.Unknown))).ToListAsync();
+            return new WorkerDetail(
+                await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404),
+                await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before ||
+                    beforeId != null && x.NativeCreatedAt == before && x.NativeId.CompareTo(beforeId) < 0))
+                    .OrderByDescending(x => x.NativeCreatedAt).ThenByDescending(x => x.NativeId).Take(options.Value.HistoryLimit).ToListAsync(),
+                recent.Concat(outstanding).DistinctBy(x => x.Id).OrderByDescending(x => x.CreatedAt).ToList(),
+                await db.Requests.Where(x => x.WorkerId == id).ToListAsync(),
+                await db.Assignments.Where(x => x.WorkerId == id).ToListAsync());
+        });
     }
+
+    public Task<CommandRecord> Command(string id) => Read(async db =>
+        await db.Commands.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id) ?? throw new ControlException("Command not found.", 404));
+
+    public Task<List<CommandRecord>> CommandBodies(IEnumerable<string> ids)
+    {
+        var requested = ids.Distinct().ToArray();
+        if (requested.Length > 100) throw new ControlException("Load at most 100 command bodies at once.", 400);
+        return Read(db => db.Commands.AsNoTracking().Where(x => requested.Contains(x.Id)).ToListAsync());
+    }
+
+    public async Task<PromptInput> CommandPrompt(string id)
+    {
+        var command = await Command(id);
+        if (command.Kind != "Prompt") throw new ControlException("Command is not a prompt.", 400);
+        return Json.Read<PromptInput>(command.ExecutionPayload.Length > 0 ? command.ExecutionPayload : command.Payload);
+    }
+
+    private static IQueryable<CommandRecord> CommandMetadata(IQueryable<CommandRecord> commands) => commands.Select(x => new CommandRecord
+    {
+        Id = x.Id,
+        RuntimeId = x.RuntimeId,
+        WorkerId = x.WorkerId,
+        Kind = x.Kind,
+        Payload = "",
+        State = x.State,
+        ExecutionPayload = "",
+        ProviderPoolId = x.ProviderPoolId,
+        ProgressText = x.ProgressText.Length > 600 ? x.ProgressText.Substring(0, 600) : x.ProgressText,
+        LastProgressAt = x.LastProgressAt,
+        AcceptedAt = x.AcceptedAt,
+        Origin = x.Origin,
+        NativeMessageId = x.NativeMessageId,
+        ResultId = x.ResultId,
+        ResultJson = "",
+        Detail = x.Detail,
+        CreatedAt = x.CreatedAt,
+        UpdatedAt = x.UpdatedAt,
+        QueueOrder = x.QueueOrder,
+        Dismissed = x.Dismissed,
+        Attempts = x.Attempts
+    });
 
     public Task<bool> SetOutcome(string workerId, OutcomeInput input) => Write(async db =>
     {

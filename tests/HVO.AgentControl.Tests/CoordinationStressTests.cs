@@ -107,7 +107,8 @@ public sealed class CoordinationStressTests
 
         await app.Store.CoordinationTick();
 
-        var command = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
+        var commandSummary = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
+        var command = await app.Store.Command(commandSummary.Id);
         Assert.Equal(scope, Json.Read<PromptInput>(command.Payload).GitHubMergeScope);
         Assert.Contains("AgentControl retained GitHub merge task scope", command.ExecutionPayload);
     }

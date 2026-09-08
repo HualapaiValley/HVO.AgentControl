@@ -102,8 +102,12 @@
             <article class="command">
               <details>
                 <summary><a href="@ConversationUrl(command.WorkerId!)">@snapshot.Workers.FirstOrDefault(x => x.Id == command.WorkerId)?.Name</a> · @command.State · @AssignmentGuidance.ProgressStatus(command)</summary>
-                <p>@(command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : "Answer to worker question")</p>
-                <pre>@(command.State == Delivery.Finished ? HVO.AgentControl.Infrastructure.ControlStore.ResponseText(command.ResultJson) : command.ProgressText)</pre>
+                @if (command.Payload.Length == 0) { <button class="subtle" @onclick="() => LoadCommandBody(command)">Load request and response</button> }
+                else
+                {
+                  <p>@(command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : "Answer to worker question")</p>
+                  <pre>@(command.State == Delivery.Finished ? HVO.AgentControl.Infrastructure.ControlStore.ResponseText(command.ResultJson) : command.ProgressText)</pre>
+                }
                 <small>Request @command.Id</small>
               </details>
             </article>

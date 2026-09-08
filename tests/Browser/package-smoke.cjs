@@ -93,7 +93,10 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       await conversation.getByRole('button', { name: 'Send instruction', exact: true }).click();
       await expect(page.getByRole('status')).toContainText('Instruction queued');
       const snapshot = await (await context.request.get(base + '/api/v1/snapshot')).json();
-      const command = snapshot.commands.find(x => x.kind === 'Prompt' && JSON.parse(x.payload).text === 'Browser-selected worker identity');
+      const candidates = snapshot.commands.filter(x => x.workerId === workerA && x.kind === 'Prompt');
+      const exact = await Promise.all(candidates.map(async x =>
+        (await context.request.get(base + '/api/v1/commands/' + x.id)).json()));
+      const command = exact.find(x => JSON.parse(x.payload).text === 'Browser-selected worker identity');
       expect(command.workerId).toBe(workerA);
       expect(JSON.parse(command.payload).expectedRevision).toBe(7);
       expect(snapshot.commands.some(x => x.workerId === workerB && x.kind === 'Prompt')).toBe(false);

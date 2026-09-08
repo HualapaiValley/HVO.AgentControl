@@ -67,8 +67,8 @@ public sealed class CoordinationContextBudgetTests
         });
         var snapshot = await app.Store.Snapshot();
         Assert.Equal(report, snapshot.Workers.Single(x => x.Id == a.Id).CapabilityReport);
-        Assert.Equal(resultJson, snapshot.Commands.Single(x => x.Id == oldId).ResultJson);
-        var prompt = Json.Read<PromptInput>(snapshot.Commands.Single(x => x.Id == latest.DecisionCommandId).Payload).Text;
+        Assert.Equal(resultJson, (await app.Store.Command(oldId)).ResultJson);
+        var prompt = Json.Read<PromptInput>((await app.Store.Command(latest.DecisionCommandId!)).Payload).Text;
         Assert.True(prompt.Length <= 64000);
     }
 
@@ -118,9 +118,9 @@ public sealed class CoordinationContextBudgetTests
         Assert.Contains(context.Results, x => x.Response.Contains("Historical evidence omitted") && x.ResponseTruncated && x.EarlierTextOmitted);
         Assert.Equal(17, context.Dispatch!.Length);
         var snapshot = await app.Store.Snapshot();
-        Assert.All(snapshot.Commands.Where(x => ids.Contains(x.Id)), x => Assert.Equal(evidence, x.ResultJson));
+        foreach (var id in ids) Assert.Equal(evidence, (await app.Store.Command(id)).ResultJson);
         Assert.DoesNotContain(snapshot.Commands, x => x.Kind == "Prompt" && x.Origin == "coordinator:" + run.Id && !ids.Contains(x.Id));
-        Assert.True(Json.Read<PromptInput>(snapshot.Commands.Single(x => x.Id == latest.DecisionCommandId).Payload).Text.Length <= 64000);
+        Assert.True(Json.Read<PromptInput>((await app.Store.Command(latest.DecisionCommandId!)).Payload).Text.Length <= 64000);
     }
 
     [Fact]

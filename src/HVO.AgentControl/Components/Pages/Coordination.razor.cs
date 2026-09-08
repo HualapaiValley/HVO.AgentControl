@@ -20,6 +20,7 @@ public partial class Coordination
     private readonly Dictionary<string, int> renewalRounds = [];
     private readonly Dictionary<string, CoordinationRenewalInput> renewalRequests = [];
     private readonly Dictionary<string, bool> renewalSupervision = [];
+    private readonly Dictionary<string, CommandRecord> commandBodies = [];
     private Task Renew(CoordinationRun run) => Execute(async () =>
     {
         var instruction = renewalInstructions.GetValueOrDefault(run.Id, run.Instruction);
@@ -41,10 +42,28 @@ public partial class Coordination
     protected override async Task SnapshotChanged()
     {
         runs = await Store.Coordinations();
+        var summaries = snapshot!.Commands.Where(x => x.Origin.StartsWith("coordinator:", StringComparison.Ordinal) &&
+            (x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown))
+            .OrderBy(x => x.QueueOrder).Take(100).ToArray();
+        var missing = summaries.Where(x => !commandBodies.TryGetValue(x.Id, out var body) || body.UpdatedAt != x.UpdatedAt).Select(x => x.Id);
+        foreach (var body in await Store.CommandBodies(missing)) commandBodies[body.Id] = body;
+        foreach (var summary in summaries)
+        {
+            if (!commandBodies.TryGetValue(summary.Id, out var body)) continue;
+            var index = snapshot.Commands.FindIndex(x => x.Id == summary.Id);
+            if (index >= 0) snapshot.Commands[index] = body;
+        }
         hostOperationsIds = (await Store.ControlServices()).SelectMany(x => x.Sessions)
             .Where(x => x.ScopeKind == "HostOperations").Select(x => x.WorkerId).ToHashSet();
         if (hostOperationsIds.Contains(coordinatorId)) coordinatorId = "";
     }
+    private Task LoadCommandBody(CommandRecord command) => Execute(async () =>
+    {
+        var body = await Store.Command(command.Id);
+        commandBodies[body.Id] = body;
+        var index = snapshot!.Commands.FindIndex(x => x.Id == body.Id);
+        if (index >= 0) snapshot.Commands[index] = body;
+    });
     private void Select(string id, bool include) { if (include) selected.Add(id); else selected.Remove(id); }
     private Task Start() => Execute(async () =>
     {

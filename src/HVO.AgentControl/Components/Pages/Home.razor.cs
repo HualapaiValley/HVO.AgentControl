@@ -24,6 +24,7 @@ public partial class Home
     private readonly Dictionary<string, string> answers = [];
     private readonly Dictionary<string, HashSet<string>> choices = [];
     private readonly Dictionary<string, string> replyIds = [];
+    private readonly Dictionary<string, CommandRecord> commandBodies = [];
     private readonly List<TranscriptMessage> olderMessages = [];
     private readonly AsyncLocal<string?> historyBeforeId = new();
 
@@ -32,7 +33,7 @@ public partial class Home
         if (appliedWorkerId == WorkerId) return;
         appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = ""; outcomeExpectedRevision = 0;
-        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; promptRequestId = null;
+        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); commandBodies.Clear(); promptText = ""; promptRequestId = null;
         await Refresh();
     }
     protected override async Task SnapshotChanged()
@@ -47,6 +48,8 @@ public partial class Home
         try
         {
             var loaded = await ReadDetail(current.WorkerId!);
+            if (!selection.IsCurrent(current)) return;
+            await HydrateOutstanding(loaded);
             if (!selection.IsCurrent(current)) return;
             var isHostOperations = loaded.Worker.Role == SessionRoles.Coordinator &&
                 await Store.Read(db => db.ControlSessions.AnyAsync(x => x.WorkerId == loaded.Worker.Id && x.ScopeKind == "HostOperations"));
@@ -165,6 +168,26 @@ public partial class Home
         try { return await ReadDetail(workerId, before); }
         finally { historyBeforeId.Value = prior; }
     }
+    private async Task HydrateOutstanding(WorkerDetail loaded)
+    {
+        var summaries = loaded.Commands.Where(x => x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown)
+            .OrderBy(x => x.QueueOrder).Take(100).ToArray();
+        var missing = summaries.Where(x => !commandBodies.TryGetValue(x.Id, out var body) || body.UpdatedAt != x.UpdatedAt).Select(x => x.Id);
+        foreach (var body in await Store.CommandBodies(missing)) commandBodies[body.Id] = body;
+        foreach (var summary in summaries)
+        {
+            if (!commandBodies.TryGetValue(summary.Id, out var body)) continue;
+            var index = loaded.Commands.FindIndex(x => x.Id == summary.Id);
+            if (index >= 0) loaded.Commands[index] = body;
+        }
+    }
+    private Task LoadCommandBody(CommandRecord command) => Execute(async () =>
+    {
+        var body = await Store.Command(command.Id);
+        commandBodies[body.Id] = body;
+        var index = detail!.Commands.FindIndex(x => x.Id == body.Id);
+        if (index >= 0) detail.Commands[index] = body;
+    });
     private static string Timestamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToString("MMM d HH:mm:ss 'UTC'");
     private static string Pretty(string json)
     {
@@ -186,11 +209,12 @@ public partial class Home
     }
     private static string CommandModel(CommandRecord command)
     {
-        if (command.Kind != "Prompt") return "";
+        if (command.Kind != "Prompt" || command.Payload.Length == 0) return "";
         var prompt = Json.Read<PromptInput>(command.ExecutionPayload.Length > 0 ? command.ExecutionPayload : command.Payload);
         return $"{prompt.ProviderId}/{prompt.ModelId} {prompt.Agent} {prompt.Variant}";
     }
-    private static string CommandText(CommandRecord command) => command.Kind == "Prompt" ? Json.Read<PromptInput>(command.Payload).Text : "";
+    private static string CommandText(CommandRecord command) => command.Kind == "Prompt" && command.Payload.Length > 0
+        ? Json.Read<PromptInput>(command.Payload).Text : "";
     private static List<(string Label, string Text)> Parts(TranscriptMessage message)
     {
         using var doc = JsonDocument.Parse(message.Json);
