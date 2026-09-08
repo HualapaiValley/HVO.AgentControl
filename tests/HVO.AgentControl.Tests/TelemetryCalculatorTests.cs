@@ -264,6 +264,34 @@ public sealed class TelemetryCalculatorTests
     }
 
     [Fact]
+    public void UnavailableV2FactsFallBackToValidV1LimitsButMalformedV2RemainsAuthoritative()
+    {
+        var fallback = TelemetryParser.Parse(new Dictionary<string, string>
+        {
+            ["os"] = TelemetryParser.PlatformLinux,
+            ["cpuQuotaV2"] = "unknown",
+            ["memoryLimitV2"] = "",
+            ["cpuQuotaMicrosV1"] = "200000",
+            ["cpuPeriodMicrosV1"] = "100000",
+            ["memoryLimitV1"] = "4294967296"
+        }, 1000, SessA);
+        Assert.Equal(2.0, fallback.QuotaCores);
+        Assert.Equal(4_294_967_296L, fallback.MemoryLimitBytes);
+
+        var conflicting = TelemetryParser.Parse(new Dictionary<string, string>
+        {
+            ["os"] = TelemetryParser.PlatformLinux,
+            ["cpuQuotaV2"] = "invalid 100000",
+            ["memoryLimitV2"] = "invalid",
+            ["cpuQuotaMicrosV1"] = "200000",
+            ["cpuPeriodMicrosV1"] = "100000",
+            ["memoryLimitV1"] = "4294967296"
+        }, 1000, SessA);
+        Assert.Null(conflicting.QuotaCores);
+        Assert.Null(conflicting.MemoryLimitBytes);
+    }
+
+    [Fact]
     public void RawLinuxCgroupFactsAreIgnoredOutsideLinuxContract()
     {
         var facts = new Dictionary<string, string>
