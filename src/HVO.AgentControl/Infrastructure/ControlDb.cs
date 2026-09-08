@@ -6,6 +6,9 @@ namespace HVO.AgentControl.Infrastructure;
 
 public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(options)
 {
+    public DbSet<HostRecord> Hosts => Set<HostRecord>();
+    public DbSet<ProjectRecord> Projects => Set<ProjectRecord>();
+    public DbSet<InventoryMutationReceipt> InventoryMutations => Set<InventoryMutationReceipt>();
     public DbSet<HVO.AgentControl.GitHub.GitHubAccess> GitHubAccess => Set<HVO.AgentControl.GitHub.GitHubAccess>();
     public DbSet<CoordinationRun> CoordinationRuns => Set<CoordinationRun>();
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
@@ -30,6 +33,16 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        model.Entity<HostRecord>().HasKey(x => x.Sequence);
+        model.Entity<HostRecord>().Property(x => x.Id).IsRequired();
+        model.Entity<HostRecord>().HasIndex(x => x.Id).IsUnique();
+        model.Entity<HostRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<ProjectRecord>().HasKey(x => x.Sequence);
+        model.Entity<ProjectRecord>().Property(x => x.Id).IsRequired();
+        model.Entity<ProjectRecord>().HasIndex(x => x.Id).IsUnique();
+        model.Entity<ProjectRecord>().HasIndex(x => x.RepositoryUrl).IsUnique();
+        model.Entity<ProjectRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<InventoryMutationReceipt>().HasKey(x => x.RequestId);
         model.Entity<ProviderPool>();
         model.Entity<ProviderFailureReceipt>();
         model.Entity<ProviderFallbackReceipt>().HasIndex(x => x.SourceCommandId).IsUnique();
