@@ -154,6 +154,8 @@ public sealed class AssignmentRecord
     public string TemplateVersion { get; set; } = "manual-v1";
     public string Outcome { get; set; } = "Assigned";
     public string Evidence { get; set; } = "";
+    public string GitHubAuthorityJson { get; set; } = "{}";
+    public string GitHubAuthorProvenanceJson { get; set; } = "{}";
 }
 
 public sealed class WorkspaceClaim
@@ -338,11 +340,13 @@ public sealed record VerifiedRuntimeInput(RuntimeRecord Profile, string Verifica
 public sealed record CreateWorkerInput(string Id, string RuntimeId, string Name, string Project, string Directory,
     string ProviderId, string ModelId, string? Repository = null, string? Branch = null, string? BaseRef = null, string Role = SessionRoles.Worker, bool DiscoverCapabilities = false);
 public sealed record PromptInput(string Id, string Text, long ExpectedRevision, string? ProviderId = null,
-    string? ModelId = null, bool StatusInquiry = false, string? Agent = null, string? Variant = null, bool IncludeGuidance = false, int? ProgressMinutes = null);
+    string? ModelId = null, bool StatusInquiry = false, string? Agent = null, string? Variant = null, bool IncludeGuidance = false,
+    int? ProgressMinutes = null, GitHubMergeTaskScope? GitHubMergeScope = null);
 public sealed record ReplyInput(string Id, string RequestId, string? Permission, string[][]? Answers, bool Reject = false);
 public sealed record QueueEdit(string Action);
 public sealed record InspectWorkspaceInput(string Id, string RuntimeId, string Directory);
-public sealed record OutcomeInput(string CommandId, long ExpectedRevision, string Outcome, string Evidence);
+public sealed record OutcomeInput(string CommandId, long ExpectedRevision, string Outcome, string Evidence,
+    GitHubMergeTaskResult? GitHubMergeResult = null);
 public sealed record ControlSnapshot(long Sequence, List<RuntimeRecord> Runtimes, List<WorkerRecord> Workers,
     List<CommandRecord> Commands, List<PendingRequest> Requests);
 public sealed record WorkerDetail(WorkerRecord Worker, List<TranscriptMessage> Messages, List<CommandRecord> Commands,
@@ -380,7 +384,9 @@ public sealed record CoordinationControlInput(long ExpectedRevision, string Acti
 public sealed record CoordinationPromptInput(string Id, long ExpectedRevision, string Text);
 public sealed record CoordinationRenewalInput(string Id, long ExpectedRevision, int AdditionalRounds, string Instruction, bool ContinuousSupervision = false);
 public sealed record CoordinatorDecision(string Summary, CoordinatorAction[] Actions, bool Complete = false);
-public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null, string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null, string? ModelId = null, string? Variant = null);
+public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null,
+    string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null,
+    string? ModelId = null, string? Variant = null, GitHubMergeTaskScope? GitHubMergeScope = null);
 public sealed record CoordinatorResult(string Id, string WorkerId, string State, string Detail, string ProgressText,
     long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted, string Origin = "");
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);
