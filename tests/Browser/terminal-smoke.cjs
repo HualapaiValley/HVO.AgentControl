@@ -1,6 +1,7 @@
 const { chromium, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { selectRuntime } = require('./terminal-target-selection.cjs');
 const base = process.env.HVO_BASE_URL || 'http://127.0.0.1:5056';
 const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirname, '../../.fixture/secrets/owner-password');
 (async () => {
@@ -18,8 +19,9 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
     const snapshot = await (await context.request.get(base + '/api/v1/snapshot')).json();
-    const runtime = snapshot.runtimes.find(x => x.id === process.env.HVO_TERMINAL_RUNTIME_ID) || snapshot.runtimes.find(x => x.transport === 'Connected') || snapshot.runtimes[0];
-    if (!runtime) throw new Error('A registered SSH runtime is required.');
+    const explicitRuntimeId = process.env.HVO_TERMINAL_RUNTIME_ID;
+    const runtime = selectRuntime(snapshot.runtimes, explicitRuntimeId);
+    if (!runtime) throw new Error(explicitRuntimeId ? `Requested SSH runtime '${explicitRuntimeId}' is not registered.` : 'A registered SSH runtime is required.');
     await page.goto(base + '/terminal?runtime=' + runtime.id);
     await expect(page.getByRole('button', { name: 'Open terminal', exact: true })).toBeEnabled();
     await page.getByRole('button', { name: 'Open terminal', exact: true }).click();
