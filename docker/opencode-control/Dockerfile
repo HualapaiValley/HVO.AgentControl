@@ -20,6 +20,7 @@ ENV HOME=/var/lib/opencode \
 COPY control.json /etc/opencode/control.json
 COPY --chmod=755 entrypoint.sh healthcheck.sh /usr/local/bin/
 COPY password.sh /usr/local/lib/opencode-password.sh
+COPY identity.sh /usr/local/lib/opencode-identity.sh
 
 USER 1000:1000
 WORKDIR /var/lib/opencode/workspaces/control

@@ -10,6 +10,7 @@ namespace HVO.AgentControl.Components.Pages;
 public partial class Runtimes
 {
     [Inject] private RuntimeVerificationService Verification { get; set; } = default!;
+    private IEnumerable<RuntimeRecord> DevelopmentRuntimes => (snapshot?.Runtimes ?? []).Where(x => x.ConnectionKind == RuntimeConnections.Ssh);
     private RuntimeRecord? runtimeEdit;
     private string? deletingRuntimeId;
     private RuntimeVerification? runtimeVerification;
@@ -33,7 +34,7 @@ public partial class Runtimes
     protected override async Task SnapshotChanged()
     {
         telemetryHistory = [];
-        foreach (var runtime in snapshot!.Runtimes)
+        foreach (var runtime in DevelopmentRuntimes)
             telemetryHistory[runtime.Id] = await Store.TelemetryHistory(runtime.Id, 5);
         if (runtimeSetupId is not null && snapshot!.Runtimes.Any(x => x.Id == runtimeSetupId && x.Health == "Healthy"))
         {

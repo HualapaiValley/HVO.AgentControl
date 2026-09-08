@@ -4,6 +4,7 @@ using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
+using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Components.Pages;
 
@@ -15,7 +16,7 @@ public partial class Home
     private WorkerDetail? detail;
     private string? selectedId, appliedWorkerId, promptRequestId;
     private string outcomeCommandId = "";
-    private bool includeGuidance;
+    private bool includeGuidance, hostOperations;
     private int progressMinutes = 5;
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
     private readonly ConversationSelection selection = new();
@@ -27,7 +28,7 @@ public partial class Home
     protected override async Task OnParametersSetAsync()
     {
         if (appliedWorkerId == WorkerId) return;
-        appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null;
+        appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = "";
         olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; promptRequestId = null;
         await Refresh();
@@ -45,7 +46,10 @@ public partial class Home
         {
             var loaded = await ReadDetail(current.WorkerId!);
             if (!selection.IsCurrent(current)) return;
-            detail = loaded;
+            var isHostOperations = loaded.Worker.Role == SessionRoles.Coordinator &&
+                await Store.Read(db => db.ControlSessions.AnyAsync(x => x.WorkerId == loaded.Worker.Id && x.ScopeKind == "HostOperations"));
+            if (!selection.IsCurrent(current)) return;
+            detail = loaded; hostOperations = isHostOperations;
             var settled = detail.Commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Finished or Delivery.Failed or Delivery.Cancelled).ToList();
             if (!settled.Any(x => x.Id == outcomeCommandId)) outcomeCommandId = settled.OrderByDescending(x => x.CreatedAt).FirstOrDefault()?.Id ?? "";
         }

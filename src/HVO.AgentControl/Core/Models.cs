@@ -32,6 +32,7 @@ public sealed class ControlOptions
 
 public sealed class RuntimeRecord
 {
+    public string ConnectionKind { get; set; } = RuntimeConnections.Ssh;
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "";
     public string Host { get; set; } = "";

@@ -15,12 +15,13 @@
     @if (selectedId is null)
     {
     <section class="metrics" aria-label="Fleet overview">
-      <div><strong>@snapshot.Runtimes.Count(x => x.Transport == "Connected")<small>/ @snapshot.Runtimes.Count</small></strong><span>Runtimes connected</span></div>
+      <div><strong>@snapshot.Runtimes.Count(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Transport == "Connected")<small>/ @snapshot.Runtimes.Count(x => x.ConnectionKind == RuntimeConnections.Ssh)</small></strong><span>Runtimes connected</span></div>
       <div><strong>@snapshot.Workers.Count(x => x.Role == SessionRoles.Worker && x.Activity is "Active" or "Retrying")</strong><span>Workers active</span></div>
       <div><strong>@snapshot.Requests.Count</strong><span>Need a response</span></div>
       <div><strong>@snapshot.Commands.Count(x => x.State == Delivery.Queued)</strong><span>Instructions queued</span></div>
     </section>
-    @if (snapshot.Runtimes.Any(x => x.Health != "Healthy")) { <p class="notice">Some runtimes are unavailable or reconnecting. <a href="/runtimes">View runtime status</a>.</p> }
+    @if (snapshot.Runtimes.Any(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Health != "Healthy")) { <p class="notice">Some runtimes are unavailable or reconnecting. <a href="/runtimes">View runtime status</a>.</p> }
+    @if (snapshot.Runtimes.Any(x => x.ConnectionKind == RuntimeConnections.ControlHttp && x.Health != "Healthy")) { <p class="notice">The control service is unavailable or reconnecting. <a href="/control-services">View control service status</a>.</p> }
     }
     @if (snapshot.Workers.Count == 0)
     {
@@ -100,7 +101,8 @@
           </div>
           <details><summary>Earlier retained messages</summary><button class="subtle" @onclick="OlderHistory">Load earlier page</button>@foreach (var message in olderMessages.OrderBy(x => x.NativeCreatedAt)) { <article class="message"><strong>@message.Role · @Timestamp(message.NativeCreatedAt)</strong>@foreach (var part in Parts(message)) { <pre>@part.Text</pre> }</article> }</details>
 
-          @if (detail.Worker.Role == SessionRoles.Coordinator) { <p class="notice">This is a routing-only conversation. Send instructions and follow-ups through <a href="/coordination">Coordination</a>.</p> }
+          @if (hostOperations) { <p class="notice">This conversation is reserved for host operations. Host action tools are not enabled yet. Manage its connection and model in <a href="/control-services">Control services</a>.</p> }
+          else if (detail.Worker.Role == SessionRoles.Coordinator) { <p class="notice">This is a routing-only conversation. Send instructions and follow-ups through <a href="/coordination">Coordination</a>.</p> }
           else
           {
           <label class="check"><input type="checkbox" @bind="includeGuidance" /> Include coordination guidance</label>

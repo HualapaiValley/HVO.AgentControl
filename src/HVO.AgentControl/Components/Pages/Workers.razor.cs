@@ -39,7 +39,7 @@ public partial class Workers
     private void NewWorker() => BeginWorkerSetup(null);
     private void BeginWorkerSetup(string? runtimeId)
     {
-        var runtime = snapshot?.Runtimes.FirstOrDefault(x => x.Transport == "Connected" && (runtimeId is null || x.Id == runtimeId));
+        var runtime = snapshot?.Runtimes.FirstOrDefault(x => x.ConnectionKind == RuntimeConnections.Ssh && x.Transport == "Connected" && (runtimeId is null || x.Id == runtimeId));
         if (runtime is null) { error = "Connect the runtime before setting up a worker."; return; }
         newRole = RequestedRole == SessionRoles.Coordinator ? SessionRoles.Coordinator : SessionRoles.Worker;
         editing = null; creatingWorker = true; workerRequestId = null; newRuntimeId = runtime.Id;

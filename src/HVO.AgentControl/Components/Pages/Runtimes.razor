@@ -13,11 +13,11 @@
   else
   {
     <div class="section-heading"><h2>Runtimes</h2><button @onclick="NewRuntime">Add runtime</button></div>
-    @if (snapshot.Runtimes.Count == 0) { <div class="empty">Add an SSH host and login, then use Verify to check access and prepare your runtime.</div> }
+    @if (!DevelopmentRuntimes.Any()) { <div class="empty">Add an SSH host and login, then use Verify to check access and prepare your runtime.</div> }
     @if (runtimeEdit is not null)
     {
       <section class="panel" aria-label="Runtime profile">
-        <h2>@(snapshot.Runtimes.Any(x => x.Id == runtimeEdit.Id) ? "Edit runtime" : "Add runtime")</h2>
+        <h2>@(DevelopmentRuntimes.Any(x => x.Id == runtimeEdit.Id) ? "Edit runtime" : "Add runtime")</h2>
         <p>Verify checks SSH access and host requirements. A successful SSH login lets you save securely and open a terminal even when agent dependencies are missing.</p>
         <fieldset disabled="@busy" @oninput="ClearVerification" @onchange="ClearVerification">
         <div class="form-grid">
@@ -76,7 +76,7 @@
       </section>
     }
     <div class="runtime-grid">
-      @foreach (var runtime in snapshot.Runtimes)
+      @foreach (var runtime in DevelopmentRuntimes)
       {
         <article class="runtime-card" @key="runtime.Id">
           <div class="card-heading"><h3>@runtime.Name</h3><span class="badge @(runtime.Transport == "Connected" ? "good" : "")">@runtime.Transport</span></div>
@@ -128,7 +128,7 @@
         </article>
       }
     </div>
-    <details class="panel"><summary>Runtime operations & recent delivery</summary>@foreach (var command in snapshot.Commands.Where(x => x.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer").OrderByDescending(x => x.CreatedAt).Take(30)) { <p><strong>@RuntimeName(command.RuntimeId) · @command.Kind · @command.State</strong> @command.Detail <code>@command.Id</code>@if (command.State == Delivery.Unknown) { <button class="subtle" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty</button> }</p> }</details>
+    <details class="panel"><summary>Runtime operations & recent delivery</summary>@foreach (var command in snapshot.Commands.Where(x => DevelopmentRuntimes.Any(r => r.Id == x.RuntimeId)).Where(x => x.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer").OrderByDescending(x => x.CreatedAt).Take(30)) { <p><strong>@RuntimeName(command.RuntimeId) · @command.Kind · @command.State</strong> @command.Detail <code>@command.Id</code>@if (command.State == Delivery.Unknown) { <button class="subtle" @onclick='() => QueueAction(command.Id, "resolveUnknown")'>Acknowledge uncertainty</button> }</p> }</details>
     <footer>Work continues when you close this page.</footer>
   }
 </div>

@@ -137,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/global/health':
                 value = {'healthy': True, 'version': '1.18.29'}
             elif path == '/doc':
-                routes = ['/global/event', '/session', '/session/{sessionID}/prompt_async', '/session/{sessionID}/message', '/session/status', '/provider', '/path', '/session/{sessionID}/abort', '/permission/{requestID}/reply', '/question/{requestID}/reply']
+                routes = ['/global/event', '/session', '/session/{sessionID}/prompt_async', '/session/{sessionID}/message', '/session/{sessionID}/message/{messageID}', '/session/status', '/provider', '/path', '/session/{sessionID}/abort', '/permission/{requestID}/reply', '/question/{requestID}/reply']
                 value = {'paths': {route: {} for route in routes}}
             elif path == '/path':
                 value = {'directory': os.path.realpath(directory)}
