@@ -12,6 +12,9 @@ public sealed class DevContainerCliAcceptanceTests
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         var repository = Environment.GetEnvironmentVariable("HVO_DEVCONTAINER_REPOSITORY") ?? throw new InvalidOperationException("Set HVO_DEVCONTAINER_REPOSITORY to the checked-out source.");
+        var git = TrustedHostTool("git");
+        var docker = TrustedHostTool("docker");
+        var node = TrustedHostTool("node");
         var bundle = Path.Combine(repository, "tests/DevContainerCli/node_modules/@devcontainers/cli/dist/spec-node/devContainersSpecCLI.js");
         var root = Path.Combine(Path.GetTempPath(), "hvo-cli-acceptance-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -26,7 +29,7 @@ public sealed class DevContainerCliAcceptanceTests
         string[]? coldLayers = null, warmLayers = null;
         try
         {
-            foreach (var name in new[] { "cold", "warm", "bad-hook" })
+            foreach (var name in new[] { "cold", "warm", "bad-hook", "unsafe-feature", "ignored-feature" })
             {
                 var directory = Path.Combine(root, name);
                 Copy(Path.Combine(repository, "tests/DevContainerCli/fixture"), directory);
@@ -35,14 +38,24 @@ public sealed class DevContainerCliAcceptanceTests
                     var config = Path.Combine(directory, ".devcontainer/devcontainer.json");
                     File.WriteAllText(config, File.ReadAllText(config).Replace("printf 'post-create-observed' > /home/vscode/.hvo-post-create", "exit 17", StringComparison.Ordinal));
                 }
+                if (name == "unsafe-feature")
+                {
+                    var feature = Path.Combine(directory, ".devcontainer/features/proof/devcontainer-feature.json");
+                    var metadata = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(feature))!;
+                    metadata["privileged"] = JsonSerializer.SerializeToElement(true);
+                    metadata["capAdd"] = JsonSerializer.SerializeToElement(new[] { "SYS_PTRACE" });
+                    File.WriteAllText(feature, JsonSerializer.Serialize(metadata));
+                }
+                if (name == "ignored-feature") File.AppendAllText(Path.Combine(directory, ".gitignore"), "\n.devcontainer/features/proof/\n");
                 // The only writable bind is this disposable checkout. No owner
                 // source, credentials, Docker socket or fleet state is mounted.
                 File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
-                await Host("/usr/bin/git", ["init", "--quiet"], directory);
-                await Host("/usr/bin/git", ["remote", "add", "origin", "https://example.invalid/agentcontrol-disposable-fixture.git"], directory);
-                await Host("/usr/bin/git", ["add", "."], directory);
-                await Host("/usr/bin/git", ["-c", "user.name=AgentControl fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "Disposable pinned fixture"], directory);
-                var revision = (await Host("/usr/bin/git", ["rev-parse", "HEAD"], directory)).StandardOutput.Trim();
+                await Host(git, ["init", "--quiet"], directory);
+                await Host(git, ["remote", "add", "origin", "https://example.invalid/agentcontrol-disposable-fixture.git"], directory);
+                await Host(git, ["add", "."], directory);
+                await Host(git, ["-c", "user.name=AgentControl fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "Disposable pinned fixture"], directory);
+                var revision = (await Host(git, ["rev-parse", "HEAD"], directory)).StandardOutput.Trim();
+                Assert.Empty((await Host(git, ["status", "--porcelain=v1", "--untracked-files=all"], directory)).StandardOutput);
                 var configHash = LocalDevContainerRunner.Hash(await File.ReadAllBytesAsync(Path.Combine(directory, ".devcontainer/devcontainer.json")));
                 grants.Add(name, new(name, directory, "https://example.invalid/agentcontrol-disposable-fixture.git", revision, ".devcontainer/devcontainer.json", configHash,
                     "vscode", "/workspaces/project", [
@@ -55,10 +68,19 @@ public sealed class DevContainerCliAcceptanceTests
                     ]));
                 requests.Add(new(Guid.NewGuid().ToString("D"), name, ColdBuild: name == "cold"));
             }
-            var engine = JsonDocument.Parse((await Host("/usr/bin/docker", ["info", "--format", "{{json .}}"], root)).StandardOutput).RootElement.GetProperty("ID").GetString()!;
-            authority = new("acceptance-" + Guid.NewGuid().ToString("N"), 1, "LocalLinux", root, state, Real("/usr/bin/node"), bundle,
-                Real("/usr/bin/docker"), Real("/usr/bin/git"), "/var/run/docker.sock", engine, grants.ToImmutable());
+            var engine = JsonDocument.Parse((await Host(docker, ["info", "--format", "{{json .}}"], root)).StandardOutput).RootElement.GetProperty("ID").GetString()!;
+            authority = new("acceptance-" + Guid.NewGuid().ToString("N"), 1, "LocalLinux", root, state, node, bundle,
+                docker, git, "/var/run/docker.sock", engine, grants.ToImmutable());
             runner = new(authority, new FixtureFileLedger(Path.Combine(root, "attempts")), process);
+            // Pinned real read-configuration adds local Feature capabilities only
+            // to mergedConfiguration. Reject them before any up effect admission.
+            var elevated = await runner.Provision(requests[3]); receipts.Add(elevated);
+            Assert.Equal("Unsupported", elevated.State); Assert.False(elevated.EffectStarted);
+            Assert.True(elevated.ResolvedConfiguration!.Value.GetProperty("mergedConfiguration").GetProperty("privileged").GetBoolean());
+            Assert.Null(elevated.Observed);
+            // Git status above is clean although the consumed Feature is ignored.
+            var ignored = await runner.Provision(requests[4]); receipts.Add(ignored);
+            Assert.Equal("uncommitted_source_input", ignored.Code); Assert.False(ignored.EffectStarted); Assert.Null(ignored.Observed);
             var cold = await runner.Provision(requests[0]); receipts.Add(cold);
             Assert.True(cold.State == "VerifiedEnvironment", JsonSerializer.Serialize(cold));
             Assert.Equal("vscode", cold.Executed!.RemoteUser);
@@ -76,8 +98,8 @@ public sealed class DevContainerCliAcceptanceTests
             Assert.True(warm.State == "VerifiedEnvironment", JsonSerializer.Serialize(warm));
             Assert.NotEqual(cold.Observed.ContainerId, warm.Observed!.ContainerId);
             Assert.NotEqual(cold.Requested!.Workspace.Directory, warm.Requested!.Workspace.Directory);
-            coldLayers = JsonSerializer.Deserialize<string[]>((await Host("/usr/bin/docker", ["image", "inspect", "--format", "{{json .RootFS.Layers}}", cold.Observed.ImageId], root)).StandardOutput)!;
-            warmLayers = JsonSerializer.Deserialize<string[]>((await Host("/usr/bin/docker", ["image", "inspect", "--format", "{{json .RootFS.Layers}}", warm.Observed.ImageId], root)).StandardOutput)!;
+            coldLayers = JsonSerializer.Deserialize<string[]>((await Host(docker, ["image", "inspect", "--format", "{{json .RootFS.Layers}}", cold.Observed.ImageId], root)).StandardOutput)!;
+            warmLayers = JsonSerializer.Deserialize<string[]>((await Host(docker, ["image", "inspect", "--format", "{{json .RootFS.Layers}}", warm.Observed.ImageId], root)).StandardOutput)!;
             Assert.NotEmpty(coldLayers); Assert.Equal(coldLayers, warmLayers);
             var failed = await runner.Provision(requests[2]); receipts.Add(failed);
             Assert.Equal("Failed", failed.State); Assert.Equal("cli_failed_owned_resources_retained", failed.Code);
@@ -141,7 +163,18 @@ public sealed class DevContainerCliAcceptanceTests
         }
     }
 
-    private static string Real(string path) => new FileInfo(path).ResolveLinkTarget(true)?.FullName ?? path;
+    // This acceptance caller owns host enrollment. Resolve setup-node/toolcache
+    // installations once, then bind absolute paths into immutable host authority.
+    private static string TrustedHostTool(string name)
+    {
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+        {
+            if (!Path.IsPathFullyQualified(directory)) continue;
+            var candidate = Path.GetFullPath(Path.Combine(directory, name));
+            if (File.Exists(candidate)) return new FileInfo(candidate).ResolveLinkTarget(true)?.FullName ?? candidate;
+        }
+        throw new FileNotFoundException("Required trusted acceptance tool unavailable: " + name);
+    }
     private static void Copy(string source, string destination)
     {
         Directory.CreateDirectory(destination);
@@ -180,6 +213,11 @@ internal sealed class FixtureFileLedger(string directory) : IProvisionAttemptLed
     }
     private sealed class Attempt(FileStream gate, string path, FixtureAttemptState state, ProvisionAction action) : IProvisionAttempt
     {
+        public Task<bool> HasEffect(string effect, string resourceId, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return Task.FromResult(state.Effects.Contains(effect + ":" + resourceId));
+        }
         public Task<bool> TryBeginEffect(string effect, string resourceId, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();

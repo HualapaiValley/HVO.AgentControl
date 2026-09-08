@@ -34,8 +34,9 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             var intent = ResolveIntent(request);
             context.Intent = intent;
             await using var admission = await ledger.Acquire(intent, action, token);
-            await VerifyHost(intent, token);
-            if (action != ProvisionAction.Remove) await VerifySource(intent, token, allowUntracked: action == ProvisionAction.Observe);
+            // Docker ownership remains recoverable after the CLI installation or
+            // checkout disappears. Neither is authority for finding/removing owners.
+            await VerifyDockerHost(intent, token);
             var owners = await ObserveOwners(intent, token);
             context.Observed = owners;
             if (action == ProvisionAction.Remove)
@@ -53,18 +54,37 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             }
             if (owners is not null)
             {
-                if (owners.Running) context.Executed = await VerifyExecution(intent, owners, context, token);
+                try
+                {
+                    await VerifyCliHost(intent, token);
+                    await VerifySource(intent, token, allowUntracked: true);
+                    if (owners.Running) context.Executed = await VerifyExecution(intent, owners, context, token);
+                }
+                catch (Exception error) when (error is ProvisionFault or IOException or UnauthorizedAccessException)
+                {
+                    context.Add("reconcile", "Owner confirmed; environment probe unavailable: " + (error is ProvisionFault fault ? fault.Code : "approved_path_unavailable"));
+                    return context.Result("Observed", "owned_container_observed_environment_unverified");
+                }
                 return context.Result("Observed", "owned_container_observed_hooks_not_inferred");
             }
             if (action == ProvisionAction.Observe) return context.Result("Unknown", "zero_owners_observed_no_retry_authority");
+            if (await admission.HasEffect("up", intent.Workspace.Id, token)) return context.Result("Unknown", "up_attempt_already_recorded_zero_owners_no_retry");
+            await VerifyCliHost(intent, token);
+            await VerifySource(intent, token);
             var config = ReadApprovedConfig(intent);
             ValidateSupportedConfig(intent, config);
+            await VerifyCreationInputs(intent, token);
             var resolved = await Cli(intent, "read-configuration", ["--include-merged-configuration"], context, token);
             if (!Success(resolved)) throw new ProvisionFault("Failed", "configuration_resolution_failed");
             context.Configuration = ParseObject(resolved.StandardOutput, "invalid_resolved_configuration");
-            if (!context.Configuration.Value.TryGetProperty("configuration", out _)) throw new ProvisionFault("Failed", "missing_resolved_configuration");
+            if (!context.Configuration.Value.TryGetProperty("configuration", out var raw) || raw.ValueKind != JsonValueKind.Object)
+                throw new ProvisionFault("Failed", "missing_resolved_configuration");
+            if (!context.Configuration.Value.TryGetProperty("mergedConfiguration", out var effective) || effective.ValueKind != JsonValueKind.Object)
+                throw new ProvisionFault("Unsupported", "missing_effective_configuration");
+            ValidateConfigurationPolicy(intent, effective, resolved: true);
             // A configuration may be changed by another process while resolution runs.
             await VerifySource(intent, token);
+            await VerifyCreationInputs(intent, token);
             if (!await admission.TryBeginEffect("up", intent.Workspace.Id, token)) return context.Result("Unknown", "up_attempt_already_recorded_zero_owners_no_retry");
             context.EffectStarted = true;
             var extra = new List<string> { "--include-configuration", "--include-merged-configuration", "--frozen-lockfile" };
@@ -100,11 +120,11 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             !authority.Workspaces.TryGetValue(request.WorkspaceId, out var workspace)) throw new ProvisionFault("Failed", "unapproved_operation_or_workspace");
         if (workspace.Id != request.WorkspaceId || !Revision().IsMatch(workspace.SourceRevision) || !Digest().IsMatch(workspace.ConfigurationSha256) ||
             string.IsNullOrWhiteSpace(workspace.Repository) || workspace.Tools.IsDefault || workspace.Tools.Length > 20 || !UserName().IsMatch(workspace.RemoteUser)) throw new ProvisionFault("Failed", "invalid_approved_workspace");
-        CanonicalPath(authority.WorkspaceRoot, true);
-        var directory = CanonicalPath(workspace.Directory, true);
+        LexicalPath(authority.WorkspaceRoot);
+        var directory = LexicalPath(workspace.Directory);
         if (!Within(directory, authority.WorkspaceRoot) || directory == authority.WorkspaceRoot) throw new ProvisionFault("Failed", "workspace_outside_authority");
         if (Path.IsPathRooted(workspace.ConfigurationPath)) throw new ProvisionFault("Failed", "configuration_must_be_relative");
-        var config = CanonicalPath(Path.Combine(directory, workspace.ConfigurationPath), false);
+        var config = LexicalPath(Path.Combine(directory, workspace.ConfigurationPath));
         if (!Within(config, directory)) throw new ProvisionFault("Failed", "configuration_outside_workspace");
         if (!workspace.ContainerWorkspace.StartsWith('/') || workspace.ContainerWorkspace.Contains("..", StringComparison.Ordinal) || workspace.ContainerWorkspace.Any(char.IsControl))
             throw new ProvisionFault("Failed", "invalid_container_workspace");
@@ -140,18 +160,26 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
         return new(request.OperationId, authority.HostId, authority.Revision, workspace, CliVersion, CliSha256, request.ColdBuild, digest, labels);
     }
 
-    private async Task VerifyHost(ProvisionIntent intent, CancellationToken token)
+    private async Task VerifyDockerHost(ProvisionIntent intent, CancellationToken token)
     {
-        foreach (var path in new[] { authority!.NodePath, authority.CliBundlePath, authority.DockerPath, authority.GitPath }) CanonicalPath(path, false);
+        CanonicalPath(authority!.DockerPath, false);
         CanonicalPath(authority.ToolStateDirectory, true);
         if (!Path.IsPathFullyQualified(authority.DockerSocket) || !File.Exists(authority.DockerSocket)) throw new ProvisionFault("Unsupported", "configured_docker_socket_unavailable");
-        if (await ReadCliHash(authority.CliBundlePath, token) != CliSha256) throw new ProvisionFault("Failed", "cli_bundle_identity_mismatch");
-        var version = await Command(intent, authority.NodePath, [authority.CliBundlePath, "--version"], token);
-        if (!Success(version) || version.StandardOutput.Trim() != CliVersion) throw new ProvisionFault("Unsupported", "pinned_cli_unavailable");
         var engine = await Docker(intent, ["info", "--format", "{{json .}}"], token);
         if (!Success(engine)) throw new ProvisionFault("Unknown", "docker_engine_unavailable");
         var info = ParseObject(engine.StandardOutput, "malformed_docker_engine_identity");
         if (Text(info, "ID") != authority.DockerEngineId || Text(info, "OSType") != "linux") throw new ProvisionFault("Unknown", "docker_engine_identity_mismatch");
+    }
+
+    private async Task VerifyCliHost(ProvisionIntent intent, CancellationToken token)
+    {
+        foreach (var path in new[] { authority!.NodePath, authority.CliBundlePath, authority.GitPath }) CanonicalPath(path, false);
+        CanonicalPath(authority.WorkspaceRoot, true);
+        CanonicalPath(intent.Workspace.Directory, true);
+        CanonicalPath(ConfigPath(intent), false);
+        if (await ReadCliHash(authority.CliBundlePath, token) != CliSha256) throw new ProvisionFault("Failed", "cli_bundle_identity_mismatch");
+        var version = await Command(intent, authority.NodePath, [authority.CliBundlePath, "--version"], token);
+        if (!Success(version) || version.StandardOutput.Trim() != CliVersion) throw new ProvisionFault("Unsupported", "pinned_cli_unavailable");
     }
 
     private async Task VerifySource(ProvisionIntent intent, CancellationToken token, bool allowUntracked = false)
@@ -165,6 +193,61 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
         if (!Success(head) || head.StandardOutput.Trim() != intent.Workspace.SourceRevision || !Success(root) || root.StandardOutput.Trim() != intent.Workspace.Directory ||
             !Success(remote) || remote.StandardOutput.Trim() != intent.Workspace.Repository || !Success(status) || status.StandardOutput.Trim().Length != 0)
             throw new ProvisionFault("Failed", "source_identity_or_clean_checkout_changed");
+    }
+
+    private async Task VerifyCreationInputs(ProvisionIntent intent, CancellationToken token)
+    {
+        // Status omits ignored inputs and can trust index flags. Compare the fresh
+        // checkout with committed blobs, including the complete local Feature and
+        // build context. Existing owners never repeat up or pass through this gate.
+        var tree = await Command(intent, authority!.GitPath, ["ls-tree", "-r", "-z", "--full-tree", intent.Workspace.SourceRevision], token);
+        if (!Success(tree)) throw new ProvisionFault("Failed", "source_tree_evidence_unavailable");
+        var expected = new Dictionary<string, (string Mode, string Hash)>(StringComparer.Ordinal);
+        foreach (var entry in tree.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var tab = entry.IndexOf('\t');
+            var fields = tab < 0 ? [] : entry[..tab].Split(' ');
+            if (fields.Length != 3 || fields[0] is not ("100644" or "100755") || fields[1] != "blob" || !Revision().IsMatch(fields[2]))
+                throw new ProvisionFault("Unsupported", "unsupported_source_tree_entry");
+            var relative = entry[(tab + 1)..];
+            var path = LexicalPath(Path.Combine(intent.Workspace.Directory, relative));
+            if (!Within(path, intent.Workspace.Directory) || relative == ".git" || relative.StartsWith(".git/", StringComparison.Ordinal) ||
+                !expected.TryAdd(path, (fields[0], fields[2])) || expected.Count > 4096)
+                throw new ProvisionFault("Failed", "invalid_or_excessive_source_tree");
+        }
+        if (expected.Count == 0) throw new ProvisionFault("Failed", "empty_source_tree");
+        var pending = new Stack<string>(); pending.Push(intent.Workspace.Directory);
+        var visited = 0;
+        long totalBytes = 0;
+        var buffer = new byte[65536];
+        while (pending.TryPop(out var directory))
+            foreach (var item in Directory.EnumerateFileSystemEntries(directory))
+            {
+                token.ThrowIfCancellationRequested();
+                if (item == Path.Combine(intent.Workspace.Directory, ".git")) continue;
+                if (++visited > 8192) throw new ProvisionFault("Failed", "source_tree_limit_exceeded");
+                var attributes = File.GetAttributes(item);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) throw new ProvisionFault("Unsupported", "source_symlink_not_authorized");
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    if (!expected.Keys.Any(path => Within(path, item))) throw new ProvisionFault("Failed", "uncommitted_source_input");
+                    pending.Push(item); continue;
+                }
+                if (!expected.Remove(item, out var committed)) throw new ProvisionFault("Failed", "uncommitted_source_input");
+                await using var stream = File.OpenRead(item);
+                totalBytes += stream.Length;
+                if (totalBytes > 256L * 1024 * 1024) throw new ProvisionFault("Failed", "source_tree_limit_exceeded");
+                // SHA-1 is this approved Git repository's object format. Config
+                // and CLI identities are independently pinned with SHA-256.
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+                hash.AppendData(Encoding.UTF8.GetBytes("blob " + stream.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\0"));
+                int read;
+                while ((read = await stream.ReadAsync(buffer, token)) != 0) hash.AppendData(buffer.AsSpan(0, read));
+                var executable = !OperatingSystem.IsWindows() && (File.GetUnixFileMode(item) & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
+                if (Convert.ToHexStringLower(hash.GetHashAndReset()) != committed.Hash || executable != (committed.Mode == "100755"))
+                    throw new ProvisionFault("Failed", "committed_source_input_changed");
+            }
+        if (expected.Count != 0) throw new ProvisionFault("Failed", "committed_source_input_missing");
     }
 
     private JsonElement ReadApprovedConfig(ProvisionIntent intent)
@@ -181,17 +264,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
 
     private static void ValidateSupportedConfig(ProvisionIntent intent, JsonElement config)
     {
-        // Reviewed Dockerfile/image configurations only in this slice. Host hooks,
-        // external binds, Compose and elevated Docker capabilities need a separate
-        // explicit authority model, rather than inheriting the host's privileges.
-        foreach (var key in new[] { "dockerComposeFile", "initializeCommand", "mounts", "capAdd", "securityOpt" })
-            if (config.TryGetProperty(key, out _)) throw new ProvisionFault("Unsupported", "unsupported_configuration_capability_" + key);
-        if (config.TryGetProperty("privileged", out var privileged) && privileged.ValueKind != JsonValueKind.False) throw new ProvisionFault("Unsupported", "privileged_configuration_not_authorized");
-        if (Text(config, "remoteUser") != intent.Workspace.RemoteUser || Text(config, "workspaceFolder") != intent.Workspace.ContainerWorkspace ||
-            Text(config, "workspaceMount") != "source=${localWorkspaceFolder},target=" + intent.Workspace.ContainerWorkspace + ",type=bind") throw new ProvisionFault("Failed", "requested_configuration_identity_mismatch");
-        if (config.TryGetProperty("runArgs", out var arguments) && (arguments.ValueKind != JsonValueKind.Array ||
-            arguments.EnumerateArray().Any(x => x.ValueKind != JsonValueKind.String || !ResourceArgument().IsMatch(x.GetString()!))))
-            throw new ProvisionFault("Unsupported", "unsupported_docker_run_arguments");
+        ValidateConfigurationPolicy(intent, config, resolved: false);
         var configDirectory = Path.GetDirectoryName(ConfigPath(intent))!;
         if (config.TryGetProperty("build", out var build))
         {
@@ -213,6 +286,26 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
                 if (!Within(CanonicalPath(Path.GetFullPath(Path.Combine(configDirectory, feature.Name)), true), intent.Workspace.Directory)) throw new ProvisionFault("Failed", "feature_outside_workspace");
             }
         }
+    }
+
+    private static void ValidateConfigurationPolicy(ProvisionIntent intent, JsonElement config, bool resolved)
+    {
+        // Reviewed Dockerfile/image configurations only in this slice. Host hooks,
+        // external binds, Compose and elevated Docker capabilities need a separate
+        // explicit authority model, rather than inheriting the host's privileges.
+        foreach (var key in new[] { "dockerComposeFile", "initializeCommand" })
+            if (config.TryGetProperty(key, out _)) throw new ProvisionFault("Unsupported", "unsupported_configuration_capability_" + key);
+        foreach (var key in new[] { "mounts", "capAdd", "securityOpt" })
+            if (config.TryGetProperty(key, out var list) && (list.ValueKind != JsonValueKind.Array || list.GetArrayLength() != 0))
+                throw new ProvisionFault("Unsupported", "unsupported_configuration_capability_" + key);
+        if (config.TryGetProperty("privileged", out var privileged) && privileged.ValueKind != JsonValueKind.False) throw new ProvisionFault("Unsupported", "privileged_configuration_not_authorized");
+        if (Text(config, "remoteUser") != intent.Workspace.RemoteUser || Text(config, "workspaceFolder") != intent.Workspace.ContainerWorkspace ||
+            Text(config, "workspaceMount") != "source=" + (resolved ? intent.Workspace.Directory : "${localWorkspaceFolder}") + ",target=" + intent.Workspace.ContainerWorkspace + ",type=bind" ||
+            (config.TryGetProperty("containerUser", out _) && Text(config, "containerUser") != intent.Workspace.RemoteUser))
+            throw new ProvisionFault("Failed", "requested_configuration_identity_mismatch");
+        if (config.TryGetProperty("runArgs", out var arguments) && (arguments.ValueKind != JsonValueKind.Array ||
+            arguments.EnumerateArray().Any(x => x.ValueKind != JsonValueKind.String || !ResourceArgument().IsMatch(x.GetString()!))))
+            throw new ProvisionFault("Unsupported", "unsupported_docker_run_arguments");
     }
 
     private async Task<ProvisionContainerObservation?> ObserveOwners(ProvisionIntent intent, CancellationToken token)
@@ -238,7 +331,10 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             if (intent.Labels.Any(x => !labels.TryGetValue(x.Key, out var value) || value != x.Value)) throw new ProvisionFault("Unknown", "observed_intent_conflict");
             if (Text(item, "Id") != ids[0] || Text(item, "Image") is not { } image || !ImageId().IsMatch(image)) throw new ProvisionFault("Unknown", "invalid_observed_container_identity");
             var mounts = item.GetProperty("Mounts").EnumerateArray().Select(x => new ProvisionMount(Text(x, "Type")!, Text(x, "Source")!, Text(x, "Destination")!, Text(x, "Name"), x.GetProperty("RW").GetBoolean())).ToImmutableArray();
-            if (item.GetProperty("HostConfig").GetProperty("Privileged").GetBoolean() || mounts.Any(x => x.Type == "bind" && x.Source != intent.Workspace.Directory) ||
+            var hostConfig = item.GetProperty("HostConfig");
+            if (hostConfig.GetProperty("Privileged").GetBoolean() ||
+                !NullOrEmptyArray(hostConfig.GetProperty("CapAdd")) || !NullOrEmptyArray(hostConfig.GetProperty("SecurityOpt")) ||
+                mounts.Any(x => x.Type == "bind" && x.Source != intent.Workspace.Directory) ||
                 !mounts.Any(x => x.Type == "bind" && x.Source == intent.Workspace.Directory && x.Destination == intent.Workspace.ContainerWorkspace && x.Writable))
                 throw new ProvisionFault("Unknown", "observed_mount_or_privilege_mismatch");
             return new(ids[0], image, Text(config, "Image") ?? "", Text(config, "User") ?? "", item.GetProperty("State").GetProperty("Running").GetBoolean(), labels, mounts);
@@ -283,8 +379,8 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
         context.Add(verb, "Official Dev Container CLI " + CliVersion + " " + verb);
         return Command(intent, authority.NodePath, args, token, text => context.Add(verb, text), timeout);
     }
-    private Task<ProvisionProcessResult> Docker(ProvisionIntent intent, IEnumerable<string> args, CancellationToken token) => Command(intent, authority!.DockerPath, args, token);
-    private Task<ProvisionProcessResult> Command(ProvisionIntent intent, string executable, IEnumerable<string> args, CancellationToken token, Action<string>? progress = null, TimeSpan? timeout = null)
+    private Task<ProvisionProcessResult> Docker(ProvisionIntent intent, IEnumerable<string> args, CancellationToken token) => Command(intent, authority!.DockerPath, args, token, workingDirectory: authority.ToolStateDirectory);
+    private Task<ProvisionProcessResult> Command(ProvisionIntent intent, string executable, IEnumerable<string> args, CancellationToken token, Action<string>? progress = null, TimeSpan? timeout = null, string? workingDirectory = null)
     {
         var environment = new Dictionary<string, string>
         {
@@ -301,7 +397,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
             ["GIT_CONFIG_KEY_1"] = "core.hooksPath",
             ["GIT_CONFIG_VALUE_1"] = "/dev/null"
         }.ToImmutableDictionary(StringComparer.Ordinal);
-        return processes.Run(new(executable, args.ToImmutableArray(), intent.Workspace.Directory, environment, timeout ?? TimeSpan.FromSeconds(45), JsonLimit), progress, token);
+        return processes.Run(new(executable, args.ToImmutableArray(), workingDirectory ?? intent.Workspace.Directory, environment, timeout ?? TimeSpan.FromSeconds(45), JsonLimit), progress, token);
     }
 
     // CLI 0.89.0 --log-format json emits exec output as JSONL "raw"
@@ -326,6 +422,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
     }
 
     private static bool Success(ProvisionProcessResult result) => result.Started && result.ExitCode == 0 && !result.Interrupted && !result.Truncated;
+    private static bool NullOrEmptyArray(JsonElement value) => value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 0;
     private static string ConfigPath(ProvisionIntent intent) => Path.GetFullPath(Path.Combine(intent.Workspace.Directory, intent.Workspace.ConfigurationPath));
     public static string Hash(byte[] content) => Convert.ToHexStringLower(SHA256.HashData(content));
     private static JsonElement ParseObject(string json, string code)
@@ -336,9 +433,14 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
     }
     private static string? Text(JsonElement element, string name) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static bool Within(string path, string root) => path == root || path.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal);
-    private static string CanonicalPath(string path, bool directory)
+    private static string LexicalPath(string path)
     {
         if (!Path.IsPathFullyQualified(path) || Path.GetFullPath(path) != path || path.Any(char.IsControl)) throw new ProvisionFault("Failed", "noncanonical_host_path");
+        return path;
+    }
+    private static string CanonicalPath(string path, bool directory)
+    {
+        LexicalPath(path);
         FileSystemInfo item = directory ? new DirectoryInfo(path) : new FileInfo(path);
         if (!item.Exists) throw new ProvisionFault("Failed", "approved_path_missing");
         for (var current = path; current != "/"; current = Path.GetDirectoryName(current)!)

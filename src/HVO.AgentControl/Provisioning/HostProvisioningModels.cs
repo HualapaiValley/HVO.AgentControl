@@ -30,6 +30,9 @@ public interface IProvisionAttemptLedger
 }
 public interface IProvisionAttempt : IAsyncDisposable
 {
+    // Read committed history under the same held admission. This early check
+    // avoids requiring vanished source/CLI inputs for an already consumed attempt.
+    Task<bool> HasEffect(string effect, string resourceId, CancellationToken token);
     // Commit effect-start before returning true, once only. A lost process or an
     // uncertain result NEVER resets this permission. Removal is a separate intent.
     Task<bool> TryBeginEffect(string effect, string resourceId, CancellationToken token);

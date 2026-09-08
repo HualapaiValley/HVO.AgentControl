@@ -70,6 +70,8 @@ public sealed class LocalDevContainerRunnerTests
     [InlineData("malformed-inspect-types")]
     [InlineData("foreign-labels")]
     [InlineData("foreign-mount")]
+    [InlineData("extra-capability")]
+    [InlineData("extra-security-opt")]
     [InlineData("malformed-id")]
     [InlineData("engine-mismatch")]
     public async Task MalformedOrContradictoryOwnershipNeverExecutesOrEscapes(string mode)
@@ -102,7 +104,7 @@ public sealed class LocalDevContainerRunnerTests
         var workspace = fixture.Workspace with { Directory = link };
         var authority = fixture.Authority with { Workspaces = ImmutableDictionary<string, ApprovedProvisionWorkspace>.Empty.Add(workspace.Id, workspace) };
         var result = await fixture.Runner(authority).Provision(fixture.Request);
-        Assert.Equal("symlink_host_path_not_authorized", result.Code); Assert.Equal(0, fixture.Process.Calls);
+        Assert.Equal("symlink_host_path_not_authorized", result.Code); Assert.Equal(0, fixture.Process.UpCalls);
     }
 
     [Fact]
@@ -125,6 +127,92 @@ public sealed class LocalDevContainerRunnerTests
         var result = await fixture.Runner().Provision(fixture.Request);
         Assert.Equal("Failed", result.State); Assert.Equal("observed_execution_identity_mismatch", result.Code);
         Assert.NotNull(result.Observed);
+    }
+
+    [Theory]
+    [InlineData("merged-privileged")]
+    [InlineData("merged-capability")]
+    [InlineData("merged-security-opt")]
+    [InlineData("merged-mount")]
+    [InlineData("merged-user")]
+    [InlineData("merged-run-args")]
+    [InlineData("merged-missing")]
+    [InlineData("merged-invalid")]
+    public async Task SafeRawConfigurationCannotAuthorizeUnsafeOrMissingEffectiveConfiguration(string mode)
+    {
+        using var fixture = new Fixture(); fixture.Process.Mode = mode;
+        var result = await fixture.Runner().Provision(fixture.Request);
+        Assert.Contains(result.State, new[] { "Unsupported", "Failed" });
+        Assert.False(result.EffectStarted); Assert.Equal(0, fixture.Process.UpCalls);
+        // Correcting read-only resolution evidence still permits the first effect;
+        // the rejected resolved configuration did not consume admission.
+        fixture.Process.Mode = "";
+        Assert.Equal("VerifiedEnvironment", (await fixture.Runner().Provision(fixture.Request)).State);
+    }
+
+    [Fact]
+    public async Task IgnoredFeatureAndChangedBuildInputsCannotEscapeCommittedSourceValidation()
+    {
+        using var fixture = new Fixture();
+        var raw = File.ReadAllText(fixture.ConfigPath).Replace("\"image\":", "\"features\":{\"./ignored-feature\":{}},\"image\":", StringComparison.Ordinal);
+        File.WriteAllText(fixture.ConfigPath, raw);
+        File.WriteAllText(Path.Combine(fixture.Workspace.Directory, ".gitignore"), "ignored-feature/\n");
+        fixture.Process.Tree = SnapshotTree(fixture.Workspace.Directory);
+        var feature = Path.Combine(fixture.Workspace.Directory, "ignored-feature"); Directory.CreateDirectory(feature);
+        File.WriteAllText(Path.Combine(feature, "devcontainer-feature.json"), "{\"id\":\"ignored\",\"privileged\":true}");
+        var workspace = fixture.Workspace with { ConfigurationSha256 = LocalDevContainerRunner.Hash(File.ReadAllBytes(fixture.ConfigPath)) };
+        var authority = fixture.Authority with { Workspaces = fixture.Authority.Workspaces.SetItem(workspace.Id, workspace) };
+        var rejected = await fixture.Runner(authority).Provision(fixture.Request);
+        Assert.Equal("uncommitted_source_input", rejected.Code); Assert.False(rejected.EffectStarted);
+        fixture.Process.Tree = SnapshotTree(fixture.Workspace.Directory);
+        File.WriteAllText(Path.Combine(feature, "devcontainer-feature.json"), "{\"id\":\"ignored\",\"privileged\":false}");
+        Assert.Equal("committed_source_input_changed", (await fixture.Runner(authority).Provision(fixture.Request)).Code);
+        Assert.Equal(0, fixture.Process.UpCalls);
+    }
+
+    [Theory]
+    [InlineData("cli-missing")]
+    [InlineData("cli-changed")]
+    [InlineData("source-changed")]
+    [InlineData("workspace-missing")]
+    public async Task CommittedOwnerCanBeRecoveredAndRemovedAfterExecutionInputsDisappear(string drift)
+    {
+        using var fixture = new Fixture(); fixture.Process.Mode = "cancel";
+        Assert.Equal("Unknown", (await fixture.Runner().Provision(fixture.Request)).State);
+        fixture.Process.Mode = "";
+        if (drift == "cli-missing") File.Delete(fixture.Authority.CliBundlePath);
+        if (drift == "source-changed") await File.AppendAllTextAsync(fixture.ConfigPath, " ");
+        if (drift == "workspace-missing") Directory.Delete(fixture.Workspace.Directory, true);
+        var runner = drift == "cli-changed"
+            ? new LocalDevContainerRunner(fixture.Authority, fixture.Ledger, fixture.Process) { ReadCliHash = (_, _) => Task.FromResult(new string('0', 64)) }
+            : fixture.Runner();
+        var probes = fixture.Process.ExecCalls;
+        var observed = await runner.Reconcile(fixture.Request);
+        Assert.Equal("Observed", observed.State); Assert.Equal("owned_container_observed_environment_unverified", observed.Code);
+        Assert.Equal(FakeProcess.Container, observed.Observed!.ContainerId);
+        Assert.True(fixture.Process.InspectCalls > 0); Assert.Equal(probes, fixture.Process.ExecCalls);
+        var removed = await runner.RemoveOwned(fixture.Request, observed.Observed.ContainerId);
+        Assert.Equal("Removed", removed.State);
+        Assert.Equal("up_attempt_already_recorded_zero_owners_no_retry", (await runner.Provision(fixture.Request)).Code);
+        Assert.Equal(1, fixture.Process.UpCalls);
+    }
+
+    [Fact]
+    public async Task BlockingAdvisoryObserverDoesNotDelayProcessDeadline()
+    {
+        using var fixture = new Fixture();
+        using var release = new ManualResetEventSlim();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var command = new ProvisionProcessRequest("/bin/sh", ["-c", "printf started >&2; sleep 30"], fixture.Root,
+            ImmutableDictionary<string, string>.Empty, TimeSpan.FromMilliseconds(300), 1024);
+        try
+        {
+            var running = new BoundedProvisionProcess().Run(command, _ => { entered.TrySetResult(); release.Wait(); }, CancellationToken.None);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var result = await running.WaitAsync(TimeSpan.FromSeconds(7));
+            Assert.True(result.Started); Assert.True(result.Interrupted);
+        }
+        finally { release.Set(); }
     }
 
     [Theory]
@@ -172,6 +260,14 @@ public sealed class LocalDevContainerRunnerTests
         Assert.True(interrupted.Started); Assert.True(interrupted.Interrupted);
     }
 
+    private static string SnapshotTree(string directory) => string.Concat(Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal).Select(path =>
+    {
+        var content = File.ReadAllBytes(path);
+        var blob = System.Text.Encoding.UTF8.GetBytes("blob " + content.Length + "\0").Concat(content).ToArray();
+        var executable = !OperatingSystem.IsWindows() && (File.GetUnixFileMode(path) & UnixFileMode.UserExecute) != 0;
+        return (executable ? "100755" : "100644") + " blob " + Convert.ToHexStringLower(System.Security.Cryptography.SHA1.HashData(blob)) + "\t" + Path.GetRelativePath(directory, path) + "\0";
+    }));
+
     private sealed class Fixture : IDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "hvo-cli-unit-" + Guid.NewGuid().ToString("N"));
@@ -191,7 +287,7 @@ public sealed class LocalDevContainerRunnerTests
             File.WriteAllText(config, "{\"image\":\"fixture@sha256:" + new string('a', 64) + "\",\"remoteUser\":\"vscode\",\"workspaceFolder\":\"/workspaces/project\",\"workspaceMount\":\"source=${localWorkspaceFolder},target=/workspaces/project,type=bind\"}");
             Workspace = new("workspace", workspace, "https://example.invalid/fixture.git", new string('b', 40), "devcontainer.json", LocalDevContainerRunner.Hash(File.ReadAllBytes(config)), "vscode", "/workspaces/project", [new("dotnet", ["dotnet", "--version"], "10.0.400")]);
             Authority = new("fixture", 1, "LocalLinux", Root, tools, Path.Combine(tools, "node"), Path.Combine(tools, "cli.js"), Path.Combine(tools, "docker"), Path.Combine(tools, "git"), Path.Combine(tools, "socket"), "engine", ImmutableDictionary<string, ApprovedProvisionWorkspace>.Empty.Add(Workspace.Id, Workspace));
-            Process = new FakeProcess();
+            Process = new FakeProcess { Tree = SnapshotTree(workspace) };
             Ledger = new ObservingLedger(new FixtureFileLedger(Path.Combine(Root, "ledger")), intent => Process.Intent = intent);
         }
         public LocalDevContainerRunner Runner(ProvisionerHostAuthority? authority = null) => new(authority ?? Authority, Ledger, Process) { ReadCliHash = (_, _) => Task.FromResult(LocalDevContainerRunner.CliSha256) };
@@ -206,25 +302,42 @@ public sealed class LocalDevContainerRunnerTests
         public const string Container = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         public int Calls, UpCalls, ExecCalls, RemoveCalls, Owners;
         public string Mode = "";
+        public string Tree = "";
+        public int OwnershipQueries, InspectCalls;
         public ProvisionIntent Intent = default!;
         public Task<ProvisionProcessResult> Run(ProvisionProcessRequest request, Action<string>? progress, CancellationToken token)
         {
             Calls++;
             var args = request.Arguments;
             if (request.Executable.EndsWith("/git", StringComparison.Ordinal))
+            {
+                if (args[0] == "ls-tree") return Success(Tree);
                 return Success(args[0] == "status" ? "" : args[0] == "remote" ? Intent.Workspace.Repository : args[1] == "HEAD" ? Mode == "source-mismatch" ? new string('c', 40) : Intent.Workspace.SourceRevision : Intent.Workspace.Directory);
+            }
             if (request.Executable.EndsWith("/docker", StringComparison.Ordinal))
             {
                 if (args[0] == "info") return Json(new { ID = Mode == "engine-mismatch" ? "other" : "engine", OSType = "linux" });
-                if (args[1] == "ls") return Success(Mode == "malformed-id" ? "not-a-container-id" : string.Join('\n', Enumerable.Repeat(Container, Owners)));
+                if (args[1] == "ls") { OwnershipQueries++; return Success(Mode == "malformed-id" ? "not-a-container-id" : string.Join('\n', Enumerable.Repeat(Container, Owners))); }
                 if (args[1] == "rm") { Assert.Equal(Container, args[^1]); RemoveCalls++; Owners = 0; return Success(Container); }
+                InspectCalls++;
                 if (Mode == "missing-inspect-fields") return Success("[{}]");
                 if (Mode == "malformed-inspect-types") return Success("[{\"Config\":{\"Labels\":1}}]");
                 return Json(new[] { new { Id = Container, Image = "sha256:" + new string('b', 64), Config = new { Image = "fixture:resolved", User = "vscode", Labels = Mode == "foreign-labels" ? Intent.Labels.SetItem("hvo.agentcontrol.intent", "other") : Intent.Labels },
-                    State = new { Running = true }, HostConfig = new { Privileged = false }, Mounts = new[] { new { Type = "bind", Source = Mode == "foreign-mount" ? "/var/run/docker.sock" : Intent.Workspace.Directory, Destination = Intent.Workspace.ContainerWorkspace, RW = true } } } });
+                    State = new { Running = true }, HostConfig = new { Privileged = false, CapAdd = Mode == "extra-capability" ? new[] { "SYS_PTRACE" } : [], SecurityOpt = Mode == "extra-security-opt" ? new[] { "seccomp=unconfined" } : [] }, Mounts = new[] { new { Type = "bind", Source = Mode == "foreign-mount" ? "/var/run/docker.sock" : Intent.Workspace.Directory, Destination = Intent.Workspace.ContainerWorkspace, RW = true } } } });
             }
             if (args[1] == "--version") return Success(LocalDevContainerRunner.CliVersion);
-            if (args[1] == "read-configuration") return Json(new { configuration = new { remoteUser = "vscode" } });
+            if (args[1] == "read-configuration")
+            {
+                var merged = new Dictionary<string, object?> { ["remoteUser"] = "vscode", ["workspaceFolder"] = "/workspaces/project", ["workspaceMount"] = "source=" + Intent.Workspace.Directory + ",target=/workspaces/project,type=bind" };
+                if (Mode == "merged-privileged") merged["privileged"] = true;
+                if (Mode == "merged-capability") merged["capAdd"] = new[] { "SYS_PTRACE" };
+                if (Mode == "merged-security-opt") merged["securityOpt"] = new[] { "seccomp=unconfined" };
+                if (Mode == "merged-mount") merged["mounts"] = new[] { "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind" };
+                if (Mode == "merged-user") merged["remoteUser"] = "root";
+                if (Mode == "merged-run-args") merged["runArgs"] = new[] { "--network=host" };
+                if (Mode == "merged-missing") return Json(new { configuration = new { remoteUser = "vscode" } });
+                return Json(new { configuration = new { remoteUser = "vscode" }, mergedConfiguration = Mode == "merged-invalid" ? (object)"invalid" : merged });
+            }
             if (args[1] == "up")
             {
                 Assert.DoesNotContain("--remove-existing-container", args); UpCalls++; Owners = 1;

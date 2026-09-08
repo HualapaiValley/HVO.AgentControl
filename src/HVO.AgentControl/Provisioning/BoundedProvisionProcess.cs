@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Threading.Channels;
 
 namespace HVO.AgentControl.Provisioning;
 
@@ -20,6 +21,16 @@ public sealed class BoundedProvisionProcess : IProvisionProcessRunner
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { return new(false, null, false, false, "", ""); }
         var truncated = 0;
         var progressTruncated = 0;
+        // A single bounded consumer is advisory. Neither pipe drainage nor process
+        // completion waits for arbitrary application callbacks (including blocking
+        // callbacks). Drop old progress when a subscriber cannot keep up.
+        var updates = Channel.CreateBounded<string>(new BoundedChannelOptions(32) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.DropOldest });
+        if (progress is not null)
+            _ = Task.Run(async () =>
+            {
+                await foreach (var update in updates.Reader.ReadAllAsync())
+                    try { progress(update); } catch { /* advisory only */ }
+            }, CancellationToken.None);
         async Task<string> Drain(StreamReader reader, bool report)
         {
             var retained = new StringBuilder();
@@ -29,7 +40,7 @@ public sealed class BoundedProvisionProcess : IProvisionProcessRunner
                 var keep = Math.Min(count, request.OutputLimit - retained.Length);
                 if (keep > 0) retained.Append(buffer, 0, keep);
                 if (keep < count) { if (report) Interlocked.Exchange(ref progressTruncated, 1); else Interlocked.Exchange(ref truncated, 1); }
-                if (report) { try { progress?.Invoke(new string(buffer, 0, Math.Min(count, 2048))); } catch { /* advisory only */ } }
+                if (report && progress is not null) updates.Writer.TryWrite(new string(buffer, 0, Math.Min(count, 2048)));
             }
             return retained.ToString();
         }
@@ -46,6 +57,7 @@ public sealed class BoundedProvisionProcess : IProvisionProcessRunner
         // only a local process fact. Bound pipe draining if a descendant retains it.
         try { await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(5)); }
         catch (TimeoutException) { return new(true, null, true, true, "", ""); }
+        finally { updates.Writer.TryComplete(); }
         return new(true, process.HasExited ? process.ExitCode : null, interrupted, truncated != 0, await stdout, await stderr, progressTruncated != 0);
     }
 }
