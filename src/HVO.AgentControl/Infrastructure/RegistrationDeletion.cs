@@ -53,15 +53,20 @@ public sealed partial class ControlStore
         { if (prior.WorkerId != id) throw new ControlException("Request ID belongs to another worker."); return Same(prior, prior.RuntimeId, id, "DeleteWorker", payload); }
         var worker = await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404);
         if (worker.SettingsRevision != input.ExpectedRevision) throw new ControlException("Worker settings changed; refresh before deleting.");
-        if (worker.Stale || worker.Activity != "Idle" || worker.LastObservedAt is null || worker.LastObservedAt < Now - 15000)
+        var runtimeIsExplicitlyDisconnected = await db.Runtimes.AnyAsync(x =>
+            x.Id == worker.RuntimeId && !x.DesiredConnected && x.Transport == "Disconnected");
+        if (!runtimeIsExplicitlyDisconnected &&
+            (worker.Stale || worker.Activity != "Idle" || worker.LastObservedAt is null || worker.LastObservedAt < Now - 15000))
             throw new ControlException("A fresh idle observation is required. Reconnect and resolve active work before deleting.");
         if (await Unresolved(db, worker.RuntimeId, id) || await db.Requests.AnyAsync(x => x.WorkerId == id && (x.State == "Pending" || x.State == "ReplyUnknown")))
             throw new ControlException("Resolve queued work, uncertain delivery and pending requests before deleting.");
         var runs = await db.CoordinationRuns.Where(x => x.State != "Completed" && x.State != "Stopped").ToListAsync();
         if (runs.Any(x => x.CoordinatorWorkerId == id || Json.Read<string[]>(x.WorkerIdsJson).Contains(id)))
             throw new ControlException("This session belongs to an unfinished coordination. Stop or finish the run before deleting.");
+        if (await db.WorkItems.AnyAsync(x => x.OwnerWorkerId == id && x.State != WorkItemState.Released && x.State != WorkItemState.Abandoned))
+            throw new ControlException("Release or abandon active work item ownership before deleting this worker.");
         var command = await Record(db, input.Id, worker.RuntimeId, id, "DeleteWorker", payload);
-        command.State = Delivery.Finished; command.Detail = "Worker registration deleted and workspace claim released. Remote files, native conversation and command audit retained.";
+        command.State = Delivery.Finished; command.Detail = "Worker registration deleted and workspace claim released. No remote process was stopped; detached work may continue. Remote files, native conversation, runtime registration and command audit retained.";
         await db.WorkspaceClaims.Where(x => x.WorkerId == id).ExecuteDeleteAsync();
         await db.Messages.Where(x => x.WorkerId == id).ExecuteDeleteAsync();
         await db.Assignments.Where(x => x.WorkerId == id).ExecuteDeleteAsync();
