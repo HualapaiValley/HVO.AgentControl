@@ -57,7 +57,7 @@ public sealed class RuntimeSupervisorReconciliationTests
     }
 
     [Fact]
-    public async Task LatestAssistantErrorFinishesTheFailedTurn()
+    public async Task IncompleteLatestAssistantErrorDoesNotFinishTheTurn()
     {
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
@@ -69,8 +69,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         });
 
         await Reconcile(app, worker, Snapshot(worker, command, failed));
-        Assert.Equal(Delivery.Finished, (await app.Store.Detail(worker.Id)).Commands.Single().State);
-        Assert.Equal("Failed", (await app.Store.Snapshot()).Workers.Single().Outcome);
+        Assert.Equal(Delivery.Accepted, (await app.Store.Detail(worker.Id)).Commands.Single().State);
     }
 
     [Fact]
