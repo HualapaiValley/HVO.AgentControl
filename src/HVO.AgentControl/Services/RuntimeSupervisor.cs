@@ -13,7 +13,7 @@ using Microsoft.Extensions.Options;
 
 namespace HVO.AgentControl.Services;
 
-public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFactory transports,
+public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransportFactory transports,
     IOptions<ControlOptions> options, ILogger<RuntimeSupervisor> logger) : BackgroundService
 {
     private readonly ConcurrentDictionary<string, Task> loops = new();
@@ -126,7 +126,8 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             error => logger.LogDebug("Runtime {RuntimeId} telemetry unavailable ({Category})", id, error.GetType().Name), token);
                         failures = 0;
                     }
-                    if (!transport.Connected) throw new IOException("SSH transport disconnected.");
+                    if (!transport.Connected) throw new IOException("Runtime transport disconnected.");
+                    if (ControlStore.Now - lastHealth > 15000) await transport.ValidateConnection(token);
                     if (reader is { IsCompleted: false } && ControlStore.Now - Interlocked.Read(ref lastStreamFrame) > 45000)
                     {
                         await streamCancellation!.CancelAsync();
@@ -199,14 +200,17 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             var record = (await db.Runtimes.FindAsync(id))!;
                             record.Health = historyUnavailable ? "Degraded" : "Healthy";
                             if (!historyUnavailable) record.LastHealthyAt = ControlStore.Now;
+                            if (runtime.ConnectionKind == RuntimeConnections.ControlHttp)
+                                foreach (var controlWorker in await db.Workers.Where(x => x.RuntimeId == id).ToListAsync()) controlWorker.ModelsJson = Json.Write(models);
                             record.ModelsJson = Json.Write(models); record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
-                            record.Diagnostic = historyUnavailable ? HistoryUnavailableDetail : models.Count == 0 ? "Provider setup required in the remote runtime." : "SSH, API and session reconciliation are healthy.";
+                            record.Diagnostic = historyUnavailable ? HistoryUnavailableDetail : models.Count == 0 ? "Provider setup required in the remote runtime." : runtime.ConnectionKind == RuntimeConnections.ControlHttp ? "Control service HTTP, events, and sessions are healthy." : "SSH, API and session reconciliation are healthy.";
                             return true;
                         });
                         lastHealth = ControlStore.Now;
                     }
                     await FinishRuntimeCommands(id, "EnsureServer");
                     if (!historyUnavailable) await FinishRuntimeCommands(id, "RefreshState");
+                    await ReconcileControlCreation(runtime, transport, token);
                     await ReconcileCreation(runtime, transport, token);
                     var next = await Claim(id);
                     if (next is not null) await Dispatch(next, runtime, transport, token);
@@ -272,6 +276,12 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                 var runtime = (await db.Runtimes.FindAsync(runtimeId))!;
                 var runtimeWorkers = await db.Workers.Where(x => x.RuntimeId == runtimeId).Select(x => x.Id).ToListAsync();
                 if (worker.Role == SessionRoles.Worker && (occupied.Count >= options.Value.GlobalCapacity || runtimeWorkers.Count(occupied.Contains) >= runtime.Capacity)) continue;
+                if (runtime.ConnectionKind == RuntimeConnections.ControlHttp)
+                {
+                    var nativeBusy = await db.Workers.Where(x => x.RuntimeId == runtimeId && x.Activity != "Idle" && x.Activity != "Unknown" && x.Activity != "MissingSession").Select(x => x.Id).ToListAsync();
+                    var occupiedControl = nativeBusy.Concat(inFlight.Where(x => x.RuntimeId == runtimeId).Select(x => x.WorkerId!)).Distinct().Count();
+                    if (occupiedControl >= runtime.Capacity) continue;
+                }
                 if (!await ControlStore.ProviderDispatchAllowed(db, worker, command)) continue;
                 command.ProviderPoolId = ControlStore.PoolId(worker, command);
             }
@@ -309,6 +319,18 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                         record.State = Delivery.Finished; record.Detail = "Workspace verified and provider/model discovery completed.";
                         ControlStore.Event(db, "WorkspaceInspected", runtime.Id, commandId: command.Id); return true;
                     });
+                    break;
+                case "CreateControlSession":
+                    var binding = await store.Read(db => db.ControlSessions.AsNoTracking().SingleAsync(x => x.CreationCommandId == command.Id, token));
+                    var controlModels = await api.Models(ControlStore.ControlDirectory, token);
+                    var existingControl = await FindControlSession(api, binding, token);
+                    if (existingControl is { } foundControl) await store.BindControlSession(command.Id, foundControl, controlModels);
+                    else
+                    {
+                        mutationStarted = true;
+                        var createdControl = await api.CreateSession(ControlStore.ControlDirectory, binding.Title, token);
+                        await store.BindControlSession(command.Id, createdControl, controlModels);
+                    }
                     break;
                 case "CreateWorker":
                     var input = Json.Read<CreateWorkerInput>(command.Payload);

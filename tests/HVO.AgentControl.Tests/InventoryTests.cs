@@ -180,7 +180,14 @@ public sealed class InventoryTests
         {
             var previous = db.Database.GetMigrations().TakeWhile(x => !x.EndsWith("HostProjectInventory", StringComparison.Ordinal)).Last();
             await db.GetService<IMigrator>().MigrateAsync(previous);
-            db.Runtimes.Add(runtime); db.Workers.Add(worker); db.Commands.Add(command);
+            // Seed the historical schema without asking today's EF model to insert later columns.
+            var properties = db.Entry(runtime).Metadata.GetProperties().Where(x => x.Name != nameof(RuntimeRecord.ConnectionKind)).ToArray();
+            var columns = string.Join(",", properties.Select(x => "\"" + x.Name + "\""));
+            var placeholders = string.Join(",", properties.Select((_, index) => "{" + index + "}"));
+            var values = properties.Select(x => x.PropertyInfo!.GetValue(runtime)!).ToArray();
+            var historicalInsert = "INSERT INTO Runtimes (" + columns + ") VALUES (" + placeholders + ")";
+            await db.Database.ExecuteSqlRawAsync(historicalInsert, values);
+            db.Workers.Add(worker); db.Commands.Add(command);
             db.Messages.Add(new TranscriptMessage { WorkerId = worker.Id, NativeId = "msg_legacy", Role = "user", Json = "{\"legacy\":true}" });
             await db.SaveChangesAsync();
         }
@@ -195,6 +202,7 @@ public sealed class InventoryTests
             Pending = await db.Database.GetPendingMigrationsAsync()
         });
         Assert.Equal(runtime.CredentialReference, saved.Runtime!.CredentialReference);
+        Assert.Equal(RuntimeConnections.Ssh, saved.Runtime.ConnectionKind);
         Assert.Equal(worker.NativeSessionId, saved.Worker!.NativeSessionId);
         Assert.Equal(worker.Directory, saved.Worker.Directory);
         Assert.Equal(worker.Project, saved.Worker.Project);
