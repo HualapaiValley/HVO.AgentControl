@@ -23,6 +23,11 @@ public sealed class ControlOptions
     public int HistoryLimit { get; set; } = 200;
     public int PollMilliseconds { get; set; } = 750;
     public int CoordinationIdleReassessmentMinutes { get; set; } = 5;
+    public int CoordinatorQueueWaitBudgetMinutes { get; set; } = 15;
+    public int CoordinatorInferenceBudgetMinutes { get; set; } = 120;
+    public int CoordinatorNativeRetryBudgetMinutes { get; set; } = 30;
+    public int CoordinatorCompactionBudgetMinutes { get; set; } = 120;
+    public int CoordinatorDecisionTotalBudgetMinutes { get; set; } = 240;
     public int MaxPromptCharacters { get; set; } = 64000;
     public int MaxCommandRecords { get; set; } = 10000;
     public int MaxRuntimes { get; set; } = 32;
@@ -388,6 +393,10 @@ public sealed record DecisionReceipt(string Summary, int Round, string DecisionC
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
 public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
+public sealed record CoordinatorDecisionCheckpoint(string CommandId, string CoordinatorWorkerId, long CoordinatorRevision,
+    string RuntimeId, int RuntimeGeneration, string NativeSessionId, string Directory, string? ControlSessionId,
+    int? ControlSessionGeneration, string? ControlProcessIncarnation, string? NativeCallerId, string Phase,
+    long StartedAt, long PhaseStartedAt, long LastEvidenceAt, string? RecoveryIntentId = null, string? RecoveryHold = null);
 public sealed record CoordinatorNativeFailure(string CommandId, string? CallerId, string? SessionId, string? AssistantId,
     string Category, int? Status, long? RetryAt, string ProviderId, string ModelId, string Agent, string Variant,
     string ProviderPoolId, long? ProviderPoolRevision, bool HasText, bool HasTools, bool Held = true,
@@ -400,7 +409,7 @@ public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Worke
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
     CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null,
     IdlePlanningReview? IdleReview = null, CoordinatorGitHubAccess[]? GitHubAccess = null, string? PlanningObservationKey = null,
-    CoordinatorNativeFailure? NativeFailure = null);
+    CoordinatorNativeFailure? NativeFailure = null, CoordinatorDecisionCheckpoint? DecisionCheckpoint = null);
 
 public sealed class OperatorUpdateSchedule
 {

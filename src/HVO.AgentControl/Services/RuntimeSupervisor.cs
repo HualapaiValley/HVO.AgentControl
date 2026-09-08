@@ -572,6 +572,12 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             var retired = command.State is Delivery.Cancelled or Delivery.Failed or Delivery.Finished;
             var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             var assistants = user ? NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId) : [];
+            var compacting = user && activity != "Idle" && NativeTurnEvidence.IsAutomaticCompactionInProgress(snapshot.Messages,
+                command.NativeMessageId, worker.NativeSessionId);
+            if (compacting && worker.CurrentAction != "Automatic compaction in progress.")
+            { worker.CurrentAction = "Automatic compaction in progress."; changed = true; }
+            else if (!compacting && worker.CurrentAction == "Automatic compaction in progress.")
+            { worker.CurrentAction = ""; changed = true; }
             var compactionFailure = user && activity == "Idle"
                 ? NativeTurnEvidence.CompletedAutomaticCompactionFailure(snapshot.Messages, command.NativeMessageId, worker.NativeSessionId) : null;
             // Preserve scoped failure evidence even when the same snapshot settles an abort.

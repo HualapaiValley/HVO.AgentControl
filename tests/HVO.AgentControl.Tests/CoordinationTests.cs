@@ -199,6 +199,127 @@ public sealed partial class CoordinationTests
     });
 
     [Fact]
+    public async Task LongCompactionIsObservedWithoutHoldingOrExhaustingTheProvider()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        await app.Store.CoordinationTick();
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            var context = Json.Read<CoordinatorContext>(saved.InputJson);
+            var command = (await db.Commands.FindAsync(saved.DecisionCommandId!))!;
+            command.State = Delivery.Running;
+            var worker = (await db.Workers.FindAsync(coordinator.Id))!;
+            worker.Activity = "Active"; worker.CurrentAction = "Automatic compaction is continuing.";
+            saved.InputJson = Json.Write(context with
+            {
+                DecisionCheckpoint = context.DecisionCheckpoint! with
+                {
+                    Phase = "Compaction",
+                    StartedAt = ControlStore.Now - 829_000,
+                    PhaseStartedAt = ControlStore.Now - 829_000,
+                    LastEvidenceAt = ControlStore.Now - 829_000
+                }
+            });
+            return true;
+        });
+
+        Assert.False(await app.Store.CoordinationTick());
+        var saved = (await app.Store.Coordinations()).Single();
+        var checkpoint = Json.Read<CoordinatorContext>(saved.InputJson).DecisionCheckpoint!;
+        Assert.Equal("Compaction", checkpoint.Phase);
+        Assert.Null(checkpoint.RecoveryIntentId);
+        Assert.Equal("Deciding", saved.State);
+        Assert.Equal(Delivery.Running, (await app.Store.Snapshot()).Commands.Single(x => x.Id == saved.DecisionCommandId).State);
+        await app.Store.Read(async db =>
+        {
+            Assert.Equal(0, await db.Events.CountAsync(x => x.Type == "CoordinatorDecisionRecoveryHeld"));
+            Assert.Equal(0, await db.Events.CountAsync(x => x.Type.StartsWith("Provider") && x.CommandId == saved.DecisionCommandId));
+            return true;
+        });
+    }
+
+    [Fact]
+    public async Task ExpiredDecisionRecordsOneFencedHoldWithoutCancellationOrReplacement()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        await app.Store.CoordinationTick();
+        var commandId = (await app.Store.Coordinations()).Single().DecisionCommandId!;
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            var context = Json.Read<CoordinatorContext>(saved.InputJson);
+            var command = (await db.Commands.FindAsync(commandId))!;
+            command.State = Delivery.Running;
+            (await db.Workers.FindAsync(coordinator.Id))!.Activity = "Active";
+            saved.InputJson = Json.Write(context with
+            {
+                DecisionCheckpoint = context.DecisionCheckpoint! with
+                {
+                    Phase = "Inference",
+                    StartedAt = ControlStore.Now - 14_400_001,
+                    PhaseStartedAt = ControlStore.Now - 7_200_001,
+                    LastEvidenceAt = ControlStore.Now - 7_200_001
+                }
+            });
+            return true;
+        });
+
+        Assert.True(await app.Store.CoordinationTick());
+        var held = (await app.Store.Coordinations()).Single();
+        var checkpoint = Json.Read<CoordinatorContext>(held.InputJson).DecisionCheckpoint!;
+        Assert.NotNull(checkpoint.RecoveryIntentId);
+        Assert.Contains("cannot prove caller-attributed cancellation", checkpoint.RecoveryHold);
+        Assert.Contains("Next expected event", held.Detail);
+        Assert.Equal(commandId, held.DecisionCommandId);
+        Assert.Equal(Delivery.Running, (await app.Store.Snapshot()).Commands.Single(x => x.Id == commandId).State);
+        Assert.False(await app.Store.CoordinationTick());
+        await app.Store.Read(async db =>
+        {
+            Assert.Equal(1, await db.Events.CountAsync(x => x.Type == "CoordinatorDecisionRecoveryHeld" && x.CommandId == commandId));
+            return true;
+        });
+    }
+
+    [Fact]
+    public async Task ChangedNativeSessionFencesAnExpiredDecisionInsteadOfCancellingIt()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await Seed(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Task", [a.Id]));
+        await app.Store.CoordinationTick();
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.CoordinationRuns.FindAsync(run.Id))!;
+            var context = Json.Read<CoordinatorContext>(saved.InputJson);
+            (await db.Commands.FindAsync(saved.DecisionCommandId!))!.State = Delivery.Running;
+            var worker = (await db.Workers.FindAsync(coordinator.Id))!;
+            worker.Activity = "Active"; worker.NativeSessionId = "successor-session";
+            saved.InputJson = Json.Write(context with
+            {
+                DecisionCheckpoint = context.DecisionCheckpoint! with
+                {
+                    Phase = "Inference",
+                    StartedAt = ControlStore.Now - 14_400_001,
+                    PhaseStartedAt = ControlStore.Now - 7_200_001
+                }
+            });
+            return true;
+        });
+
+        Assert.True(await app.Store.CoordinationTick());
+        var saved = (await app.Store.Coordinations()).Single();
+        var checkpoint = Json.Read<CoordinatorContext>(saved.InputJson).DecisionCheckpoint!;
+        Assert.Contains("fence changed", checkpoint.RecoveryHold);
+        Assert.Equal("Deciding", saved.State);
+        Assert.Equal(1, (await app.Store.Snapshot()).Commands.Count(x => x.Origin == "coordinator-decision:" + run.Id));
+    }
+
+    [Fact]
     public async Task FormatCorrectionRefreshesObservationAndDispatchesOnlyOnce()
     {
         await using var app = new TestApp();

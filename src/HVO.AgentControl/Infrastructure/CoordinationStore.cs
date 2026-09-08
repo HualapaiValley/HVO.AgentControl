@@ -237,13 +237,14 @@ public sealed partial class ControlStore
             {
                 if (!run.ContinuousSupervision && run.Round >= run.MaxRounds) { PauseCoordination(run, "Configured coordinator turn limit reached after a failed decision."); return true; }
                 Event(db, "CoordinatorDecisionRejected", commandId: decisionId, payload: new { run.Id, reason = "FailedCoordinatorTurn" });
+                run.InputJson = Json.Write(ReadRecoveryContext(run) with { DecisionCheckpoint = null });
                 run.DecisionCommandId = null; run.LastObservation = "";
                 ScheduleCoordinationRecovery(db, run, "The coordinator turn failed. No routing actions were applied.");
                 return true;
             }
             if (command.State is Delivery.Unknown or Delivery.Cancelled)
             { PauseCoordination(run, "Coordinator delivery needs attention: " + command.State + ". Inspect its conversation and stop this run before retrying."); return true; }
-            if (command.State != Delivery.Finished) return false;
+            if (command.State != Delivery.Finished) return await ObserveDecisionCheckpoint(db, run, command);
             var context = Json.Read<CoordinatorContext>(run.InputJson);
             if (ReadNativeDecisionFailure(command.ResultJson) is { } nativeFailure)
             {
@@ -252,6 +253,7 @@ public sealed partial class ControlStore
             }
             if (context.Instruction != run.Instruction)
             {
+                run.InputJson = Json.Write(context with { DecisionCheckpoint = null });
                 run.DecisionCommandId = null; run.LastObservation = ""; run.State = "Ready"; run.Revision++;
                 run.Detail = "Earlier decision superseded by the owner's follow-up; requesting a fresh decision.";
                 return true;
@@ -269,7 +271,7 @@ public sealed partial class ControlStore
                 }
                 // Persist the budget before requesting a fresh observation. Never resend the rejected
                 // native command, salvage its prose, or carry a stale worker revision into recovery.
-                run.InputJson = Json.Write(context with { Repair = new(attempted + 1, decisionId) });
+                run.InputJson = Json.Write(context with { Repair = new(attempted + 1, decisionId), DecisionCheckpoint = null });
                 run.DecisionCommandId = null; run.LastObservation = ""; run.State = "Ready"; run.Revision++;
                 if (attempted >= 2)
                 {
@@ -290,7 +292,7 @@ public sealed partial class ControlStore
                 return true;
             }
             run.DecisionJson = Json.Write(decision);
-            run.InputJson = Json.Write(context with { Repair = null, Recovery = null });
+            run.InputJson = Json.Write(context with { Repair = null, Recovery = null, DecisionCheckpoint = null });
             var receiptActions = new List<DecisionActionReceipt>(decision.Actions.Length);
             foreach (var action in decision.Actions)
             {
@@ -441,10 +443,101 @@ public sealed partial class ControlStore
         if (idleReviewDue)
             Event(db, "CoordinatorIdlePlanningReviewRequested", commandId: decisionCommand.Id,
                 payload: new { run.Id, triggerCommandId = lastDecision!.DecisionCommandId, availableWorkerIds = availableIds, planningKey });
-        run.InputJson = contextJson; run.LastObservation = observation; run.DecisionCommandId = decisionCommand.Id;
+        var checkpoint = await CreateDecisionCheckpoint(db, coordinator, decisionCommand);
+        run.InputJson = Json.Write(contextInput with { DecisionCheckpoint = checkpoint }); run.LastObservation = observation; run.DecisionCommandId = decisionCommand.Id;
         run.LastDecisionAt = Now; run.Round++; run.Revision++; run.State = "Deciding"; run.Detail = "Waiting for coordinator response.";
         return true;
     });
+
+    private async Task<bool> ObserveDecisionCheckpoint(ControlDb db, CoordinationRun run, CommandRecord command)
+    {
+        var context = ReadRecoveryContext(run);
+        var coordinator = await db.Workers.FindAsync(run.CoordinatorWorkerId);
+        if (coordinator is null) { PauseCoordination(run, "Coordinator worker is missing; the pending decision was not cancelled."); return true; }
+        var checkpoint = context.DecisionCheckpoint?.CommandId == command.Id
+            ? context.DecisionCheckpoint
+            : await CreateDecisionCheckpoint(db, coordinator, command, command.CreatedAt);
+        var phase = DecisionPhase(command, coordinator);
+        var changed = checkpoint != context.DecisionCheckpoint;
+        if (checkpoint.Phase != phase)
+        {
+            checkpoint = checkpoint with { Phase = phase, PhaseStartedAt = Now, LastEvidenceAt = Now };
+            changed = true;
+        }
+        if (checkpoint.NativeCallerId != command.NativeMessageId)
+        {
+            checkpoint = checkpoint with { NativeCallerId = command.NativeMessageId, LastEvidenceAt = Now };
+            changed = true;
+        }
+        if (checkpoint.RecoveryIntentId is not null)
+        {
+            if (changed) run.InputJson = Json.Write(context with { DecisionCheckpoint = checkpoint });
+            return changed;
+        }
+        var phaseBudget = DecisionBudgetMilliseconds(phase);
+        var totalBudget = BudgetMilliseconds(options.Value.CoordinatorDecisionTotalBudgetMinutes);
+        if (Now - checkpoint.PhaseStartedAt < phaseBudget && Now - checkpoint.StartedAt < totalBudget)
+        {
+            if (changed) run.InputJson = Json.Write(context with { DecisionCheckpoint = checkpoint });
+            return changed;
+        }
+        var fenceMatches = await DecisionFenceMatches(db, run, command, checkpoint);
+        var reason = fenceMatches
+            ? "Automatic recovery is held: the native transport cannot prove caller-attributed cancellation and process incarnation."
+            : "Automatic recovery is held: the coordinator, session, runtime, or native caller fence changed.";
+        checkpoint = checkpoint with { RecoveryIntentId = Guid.NewGuid().ToString("N"), RecoveryHold = reason };
+        run.InputJson = Json.Write(context with { DecisionCheckpoint = checkpoint });
+        run.Detail = $"Coordinator {phase} budget exceeded. {reason} Next expected event: matching terminal native evidence.";
+        run.Revision++;
+        Event(db, "CoordinatorDecisionRecoveryHeld", commandId: command.Id,
+            payload: new { run.Id, checkpoint.CommandId, checkpoint.Phase, checkpoint.RecoveryIntentId, checkpoint.StartedAt, checkpoint.PhaseStartedAt, fenceMatches, reason });
+        return true;
+    }
+
+    private async Task<CoordinatorDecisionCheckpoint> CreateDecisionCheckpoint(ControlDb db, WorkerRecord coordinator,
+        CommandRecord command, long? startedAt = null)
+    {
+        var runtime = await db.Runtimes.FindAsync(coordinator.RuntimeId);
+        var binding = await db.ControlSessions.SingleOrDefaultAsync(x => x.WorkerId == coordinator.Id && x.IsCurrent);
+        var process = binding is null ? null : await db.ControlServices.Where(x => x.Id == binding.ControlServiceId)
+            .Select(x => x.IncarnationId).SingleOrDefaultAsync();
+        var began = startedAt ?? Now;
+        return new(command.Id, coordinator.Id, coordinator.Revision, coordinator.RuntimeId, runtime?.Generation ?? -1,
+            coordinator.NativeSessionId, coordinator.Directory, binding?.Id, binding?.Generation, process, command.NativeMessageId,
+            DecisionPhase(command, coordinator), began, began, began);
+    }
+
+    private async Task<bool> DecisionFenceMatches(ControlDb db, CoordinationRun run, CommandRecord command,
+        CoordinatorDecisionCheckpoint checkpoint)
+    {
+        if (run.DecisionCommandId != checkpoint.CommandId || command.Id != checkpoint.CommandId || command.WorkerId != checkpoint.CoordinatorWorkerId)
+            return false;
+        var coordinator = await db.Workers.FindAsync(checkpoint.CoordinatorWorkerId);
+        if (coordinator is null || coordinator.Revision != checkpoint.CoordinatorRevision || coordinator.RuntimeId != checkpoint.RuntimeId ||
+            coordinator.NativeSessionId != checkpoint.NativeSessionId || coordinator.Directory != checkpoint.Directory ||
+            checkpoint.NativeCallerId != command.NativeMessageId) return false;
+        var runtime = await db.Runtimes.FindAsync(checkpoint.RuntimeId);
+        if (runtime is null || runtime.Generation != checkpoint.RuntimeGeneration) return false;
+        var binding = await db.ControlSessions.SingleOrDefaultAsync(x => x.WorkerId == checkpoint.CoordinatorWorkerId && x.IsCurrent);
+        if (binding?.Id != checkpoint.ControlSessionId || binding?.Generation != checkpoint.ControlSessionGeneration) return false;
+        var process = binding is null ? null : await db.ControlServices.Where(x => x.Id == binding.ControlServiceId)
+            .Select(x => x.IncarnationId).SingleOrDefaultAsync();
+        return process == checkpoint.ControlProcessIncarnation;
+    }
+
+    private long DecisionBudgetMilliseconds(string phase) => BudgetMilliseconds(phase switch
+    {
+        "QueueWait" => options.Value.CoordinatorQueueWaitBudgetMinutes,
+        "NativeRetry" => options.Value.CoordinatorNativeRetryBudgetMinutes,
+        "Compaction" => options.Value.CoordinatorCompactionBudgetMinutes,
+        _ => options.Value.CoordinatorInferenceBudgetMinutes
+    });
+
+    private static long BudgetMilliseconds(int minutes) => Math.Clamp(minutes, 1, 24 * 60) * 60_000L;
+
+    private static string DecisionPhase(CommandRecord command, WorkerRecord coordinator) => command.State is Delivery.Queued or Delivery.Dispatching
+        ? "QueueWait" : coordinator.Activity == "Retrying" ? "NativeRetry" :
+        coordinator.CurrentAction.Contains("compaction", StringComparison.OrdinalIgnoreCase) ? "Compaction" : "Inference";
 
     private static void PauseCoordination(CoordinationRun run, string detail)
     {
