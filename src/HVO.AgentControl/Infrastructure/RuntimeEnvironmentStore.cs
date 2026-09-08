@@ -54,6 +54,9 @@ public sealed partial class ControlStore
                     throw InventoryConflict("resource_archived", "Unarchive the configuration project before using it.");
                 if (input.Kind == RuntimeEnvironmentKind.ManagedDevcontainer && await db.Workers.CountAsync(x => x.RuntimeId == id) > 1)
                     throw InventoryConflict("worker_limit", "Managed devcontainers allow one worker/coordinator registration, including archived workers. Resolve extra registrations first.");
+                if (input.Kind == RuntimeEnvironmentKind.ManagedDevcontainer &&
+                await db.WorkerSlots.CountAsync(x => x.RuntimeId == id) + await db.Workers.CountAsync(x => x.RuntimeId == id) > 1)
+                    throw InventoryConflict("worker_limit", "Managed devcontainers allow one worker slot or legacy worker/coordinator registration.");
                 environment ??= NewEnvironment(db, runtime);
                 environment.HostId = hostId; environment.Kind = input.Kind;
                 environment.ConfigurationProjectId = projectId; environment.DevcontainerPath = path;
@@ -132,6 +135,7 @@ public sealed partial class ControlStore
     {
         if (!await db.RuntimeEnvironments.AnyAsync(x => x.RuntimeId == runtime.Id && x.Kind == RuntimeEnvironmentKind.ManagedDevcontainer)) return;
         if (await db.Workers.AnyAsync(x => x.RuntimeId == runtime.Id) ||
+            await db.WorkerSlots.AnyAsync(x => x.RuntimeId == runtime.Id) ||
             await db.WorkspaceClaims.AnyAsync(x => x.RuntimeId == runtime.Id && x.WorkerId == null) ||
             await db.Commands.AnyAsync(x => x.RuntimeId == runtime.Id && x.Kind == "CreateWorker" &&
                 (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)))

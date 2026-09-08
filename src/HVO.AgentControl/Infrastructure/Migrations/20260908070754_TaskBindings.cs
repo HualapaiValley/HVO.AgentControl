@@ -31,12 +31,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                 {
                     table.PrimaryKey("PK_WorkerSlots", x => x.Sequence);
                     table.UniqueConstraint("AK_WorkerSlots_Id", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_WorkerSlots_Runtimes_RuntimeId",
-                        column: x => x.RuntimeId,
-                        principalTable: "Runtimes",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateTable(
@@ -65,12 +59,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         name: "FK_TaskWorkspaces_Projects_ProjectId",
                         column: x => x.ProjectId,
                         principalTable: "Projects",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Restrict);
-                    table.ForeignKey(
-                        name: "FK_TaskWorkspaces_Runtimes_RuntimeId",
-                        column: x => x.RuntimeId,
-                        principalTable: "Runtimes",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
@@ -167,12 +155,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         principalTable: "WorkerSlots",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Restrict);
-                    table.ForeignKey(
-                        name: "FK_TaskSessionBindings_Workers_LegacyWorkerId",
-                        column: x => x.LegacyWorkerId,
-                        principalTable: "Workers",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Restrict);
                 });
 
             migrationBuilder.CreateIndex(
@@ -214,27 +196,17 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_TaskSessionBindings_LegacyWorkerId",
-                table: "TaskSessionBindings",
-                column: "LegacyWorkerId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_TaskSessionBindings_NativeSessionId",
-                table: "TaskSessionBindings",
-                column: "NativeSessionId",
-                unique: true,
-                filter: "NativeSessionId <> ''");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_TaskSessionBindings_TaskBindingId",
                 table: "TaskSessionBindings",
                 column: "TaskBindingId",
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_TaskSessionBindings_WorkerSlotId",
+                name: "IX_TaskSessionBindings_WorkerSlotId_NativeSessionId",
                 table: "TaskSessionBindings",
-                column: "WorkerSlotId");
+                columns: new[] { "WorkerSlotId", "NativeSessionId" },
+                unique: true,
+                filter: "NativeSessionId <> ''");
 
             migrationBuilder.CreateIndex(
                 name: "IX_TaskWorkspaces_Id",

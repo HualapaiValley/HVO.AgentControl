@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -8,6 +10,20 @@ namespace HVO.AgentControl.Tests;
 public sealed class TaskBindingTests
 {
     private static string Id() => Guid.NewGuid().ToString("N");
+
+    [Fact]
+    public async Task BindingApiRoutesRequireOwnerAndCsrf()
+    {
+        await using var app = new TestApp();
+        using var anonymous = app.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync("/api/v1/worker-slots")).StatusCode);
+        using var owner = await app.SignIn();
+        owner.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        Assert.Equal(HttpStatusCode.BadRequest, (await owner.PostAsJsonAsync("/api/v1/worker-slots", new { requestId = Id(), id = Id(), runtimeId = Id(), name = "slot" })).StatusCode);
+        using var authorized = await app.SignIn();
+        Assert.Equal(HttpStatusCode.OK, (await authorized.GetAsync("/api/v1/worker-slots")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await authorized.GetAsync("/api/v1/task-bindings")).StatusCode);
+    }
 
     [Fact]
     public async Task BindingCreatesFreshCrossRepositoryWorkspaceAndUnboundSession()
@@ -77,7 +93,7 @@ public sealed class TaskBindingTests
         var wrong = NewBinding(setup, "legacy-task", "legacy-workspace") with { LegacyWorkerId = setup.LegacyWorker.Id, NativeSessionId = "wrong" };
         var error = await Assert.ThrowsAsync<InventoryException>(() => app.Store.CreateTaskBinding(wrong));
         Assert.Equal("legacy_session_mismatch", error.Code);
-        var right = wrong with { RequestId = Id(), Id = Id(), WorkspaceId = Id(), SessionBindingId = Id(), NativeSessionId = setup.LegacyWorker.NativeSessionId, Directory = "/work/legacy-right" };
+        var right = wrong with { RequestId = Id(), Id = Id(), WorkspaceId = Id(), SessionBindingId = Id(), NativeSessionId = setup.LegacyWorker.NativeSessionId, Directory = setup.LegacyWorker.Directory };
         var binding = await app.Store.CreateTaskBinding(right);
         Assert.Equal(TaskSessionBindingState.Bound, binding.Session.State);
         Assert.Equal(setup.LegacyWorker.NativeSessionId, binding.Session.NativeSessionId);
@@ -138,7 +154,7 @@ public sealed class TaskBindingTests
         var host = await app.Store.CreateHost(new(Id(), Id(), "host"));
         await app.Store.ConfigureRuntimeEnvironment(runtime.Id, new(Id(), 0, runtime.Revision, host.Id, RuntimeEnvironmentKind.ExistingMachine));
         var project = await app.Store.CreateProject(new(Id(), Id(), "project", repository));
-        var worker = new WorkerRecord { Id = Id(), RuntimeId = runtime.Id, ManagedServerId = runtime.ManagedServerId, NativeSessionId = "native-" + Id() };
+        var worker = new WorkerRecord { Id = Id(), RuntimeId = runtime.Id, ManagedServerId = runtime.ManagedServerId, NativeSessionId = "native-" + Id(), Directory = "/work/legacy", Branch = branch };
         await app.Store.Write(async db => { db.Workers.Add(worker); return true; });
         var work = await app.Store.CreateWorkItem(new("work-" + Id(), null, "task", branch, project.RepositoryUrl, worker.Id));
         var slot = await app.Store.CreateWorkerSlot(new(Id(), Id(), runtime.Id, "slot-" + Id()));

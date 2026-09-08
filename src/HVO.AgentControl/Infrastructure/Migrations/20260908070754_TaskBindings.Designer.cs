@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260908063503_TaskBindings")]
+    [Migration("20260908070754_TaskBindings")]
     partial class TaskBindings
     {
         /// <inheritdoc />
@@ -1043,16 +1043,12 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasIndex("Id")
                         .IsUnique();
 
-                    b.HasIndex("LegacyWorkerId");
-
-                    b.HasIndex("NativeSessionId")
-                        .IsUnique()
-                        .HasFilter("NativeSessionId <> ''");
-
                     b.HasIndex("TaskBindingId")
                         .IsUnique();
 
-                    b.HasIndex("WorkerSlotId");
+                    b.HasIndex("WorkerSlotId", "NativeSessionId")
+                        .IsUnique()
+                        .HasFilter("NativeSessionId <> ''");
 
                     b.ToTable("TaskSessionBindings");
                 });
@@ -1787,11 +1783,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
             modelBuilder.Entity("HVO.AgentControl.Core.TaskSessionBindingRecord", b =>
                 {
-                    b.HasOne("HVO.AgentControl.Core.WorkerRecord", null)
-                        .WithMany()
-                        .HasForeignKey("LegacyWorkerId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("HVO.AgentControl.Core.TaskBindingRecord", null)
                         .WithOne()
                         .HasForeignKey("HVO.AgentControl.Core.TaskSessionBindingRecord", "TaskBindingId")
@@ -1816,12 +1807,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("HVO.AgentControl.Core.RuntimeRecord", null)
-                        .WithMany()
-                        .HasForeignKey("RuntimeId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
                     b.HasOne("HVO.AgentControl.Core.WorkItem", null)
                         .WithMany()
                         .HasForeignKey("WorkItemId")
@@ -1832,15 +1817,6 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .WithMany()
                         .HasForeignKey("WorkerSlotId")
                         .HasPrincipalKey("Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.WorkerSlotRecord", b =>
-                {
-                    b.HasOne("HVO.AgentControl.Core.RuntimeRecord", null)
-                        .WithMany()
-                        .HasForeignKey("RuntimeId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });

@@ -11,6 +11,7 @@ public static class TaskBindingApiEndpoints
             store.WorkerSlots(after ?? 0, take ?? 50, includeArchived ?? false));
         group.MapGet("/worker-slots/{id}", (string id, ControlStore store) => store.WorkerSlot(id));
         group.MapPost("/worker-slots", (CreateWorkerSlotInput input, ControlStore store) => store.CreateWorkerSlot(input));
+        group.MapPost("/worker-slots/{id}/archive", (string id, ArchiveInventoryInput input, ControlStore store) => store.ArchiveWorkerSlot(id, input));
         group.MapGet("/task-bindings", (long? after, int? take, bool? includeReleased, ControlStore store) =>
             store.TaskBindings(after ?? 0, take ?? 50, includeReleased ?? false));
         group.MapGet("/task-bindings/{id}", (string id, ControlStore store) => store.TaskBinding(id));

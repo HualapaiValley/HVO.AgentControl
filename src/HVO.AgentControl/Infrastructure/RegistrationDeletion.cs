@@ -35,6 +35,7 @@ public sealed partial class ControlStore
             throw new ControlException("Disable GitHub credential renewal before deleting this runtime.");
         var count = await db.Workers.CountAsync(x => x.RuntimeId == id);
         if (count > 0) throw new ControlException($"Runtime is in use by {count} worker/coordinator registration(s), including archived workers. Delete those registrations first.");
+        await TaskBindingLifecycleGuards.RequireRuntimeDeletionAllowed(db, id);
         if (activeTerminals.GetValueOrDefault(id) > 0) throw new ControlException("Close this runtime's admin terminals before deleting it.");
         if (runtime.DesiredConnected || runtime.Transport != "Disconnected") throw new ControlException("Disconnect this runtime before deleting its registration.");
         if (await Unresolved(db, id, null) || await db.WorkspaceClaims.AnyAsync(x => x.RuntimeId == id))
@@ -65,6 +66,7 @@ public sealed partial class ControlStore
             throw new ControlException("This session belongs to an unfinished coordination. Stop or finish the run before deleting.");
         if (await db.WorkItems.AnyAsync(x => x.OwnerWorkerId == id && x.State != WorkItemState.Released && x.State != WorkItemState.Abandoned))
             throw new ControlException("Release or abandon active work item ownership before deleting this worker.");
+        await TaskBindingLifecycleGuards.RequireWorkerDeletionAllowed(db, id);
         var command = await Record(db, input.Id, worker.RuntimeId, id, "DeleteWorker", payload);
         command.State = Delivery.Finished; command.Detail = "Worker registration deleted and workspace claim released. No remote process was stopped; detached work may continue. Remote files, native conversation, runtime registration and command audit retained.";
         await db.WorkspaceClaims.Where(x => x.WorkerId == id).ExecuteDeleteAsync();

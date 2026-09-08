@@ -35,7 +35,10 @@ public sealed partial class ControlStore
             if (await db.WorkerSlots.AnyAsync(x => x.RuntimeId == runtimeId && x.Name == name)) throw Conflict("identity_exists", "A worker slot with this name already exists on the runtime.");
             var environment = await db.RuntimeEnvironments.FindAsync(runtimeId);
             if (environment?.Kind == RuntimeEnvironmentKind.ManagedDevcontainer &&
-                (await db.WorkerSlots.AnyAsync(x => x.RuntimeId == runtimeId && !x.Archived) || await db.Workers.AnyAsync(x => x.RuntimeId == runtimeId)))
+                (await db.WorkerSlots.AnyAsync(x => x.RuntimeId == runtimeId) || await db.Workers.AnyAsync(x => x.RuntimeId == runtimeId) ||
+                 await db.WorkspaceClaims.AnyAsync(x => x.RuntimeId == runtimeId && x.WorkerId == null) ||
+                 await db.Commands.AnyAsync(x => x.RuntimeId == runtimeId && x.Kind == "CreateWorker" &&
+                     (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown))))
                 throw Conflict("worker_limit", "A managed devcontainer permits one reusable worker slot or legacy worker registration.");
             var slot = new WorkerSlotRecord
             {
@@ -60,8 +63,9 @@ public sealed partial class ControlStore
         var rows = await db.TaskBindings.AsNoTracking()
             .Where(x => x.Sequence > after && (includeReleased || x.State == TaskBindingState.Active))
             .OrderBy(x => x.Sequence).Take(take + 1).ToListAsync();
-        var page = rows.Take(take).Select(x => LoadView(db, x)).ToArray();
-        return new TaskBindingPage((await Task.WhenAll(page)).ToList(), rows.Count > take ? rows[take - 1].Sequence : null);
+        var page = new List<TaskBindingView>();
+        foreach (var row in rows.Take(take)) page.Add(await LoadView(db, row));
+        return new TaskBindingPage(page, rows.Count > take ? rows[take - 1].Sequence : null);
     });
 
     public Task<TaskBindingView> TaskBinding(string id) => Read(async db =>
@@ -114,8 +118,10 @@ public sealed partial class ControlStore
                 throw Validation("Work item repository does not identify the selected project unambiguously.");
             if (workItem.Branch != branch) throw Validation("Workspace branch must match the work item branch.");
             if (slot.RuntimeId != runtime.Id || slot.Archived) throw Conflict("slot_unavailable", "Worker slot is not available on its runtime.");
-            if (environment.Kind == RuntimeEnvironmentKind.ManagedDevcontainer && await db.WorkerSlots.CountAsync(x => x.RuntimeId == runtime.Id && !x.Archived) > 1)
+            if (environment.Kind == RuntimeEnvironmentKind.ManagedDevcontainer && await db.WorkerSlots.CountAsync(x => x.RuntimeId == runtime.Id) > 1)
                 throw Conflict("worker_limit", "Managed devcontainers do not support multiple worker slots in this slice.");
+            if (slot.Role == SessionRoles.Coordinator)
+                throw Conflict("slot_role", "Coordinator slots cannot own development task bindings.");
             if (await db.TaskBindings.AnyAsync(x => x.WorkItemId == workItemId && x.State == TaskBindingState.Active))
                 throw Conflict("task_in_use", "The work item already has an active task binding.");
             if (await db.TaskBindings.AnyAsync(x => x.WorkerSlotId == slotId && x.State == TaskBindingState.Active))
@@ -128,9 +134,11 @@ public sealed partial class ControlStore
                 if (string.IsNullOrWhiteSpace(input.LegacyWorkerId) || nativeSession.Length == 0)
                     throw Validation("A legacy session binding requires both the legacy worker ID and exact native session ID.");
                 legacyWorker = await db.Workers.FindAsync(input.LegacyWorkerId) ?? throw new InventoryException("not_found", "Legacy worker not found.", 404);
-                if (legacyWorker.RuntimeId != runtime.Id || legacyWorker.NativeSessionId != nativeSession)
+                if (legacyWorker.Role != SessionRoles.Worker || legacyWorker.RuntimeId != runtime.Id ||
+                    legacyWorker.ManagedServerId != runtime.ManagedServerId || legacyWorker.NativeSessionId != nativeSession ||
+                    legacyWorker.Directory != directory || legacyWorker.Branch != branch)
                     throw Conflict("legacy_session_mismatch", "The supplied native session is not the exact session recorded for the legacy worker.");
-                if (await db.TaskSessionBindings.AnyAsync(x => x.NativeSessionId == nativeSession))
+                if (await db.TaskSessionBindings.AnyAsync(x => x.WorkerSlotId == slot.Id && x.NativeSessionId == nativeSession))
                     throw Conflict("session_in_use", "The native session is already explicitly bound to another task.");
             }
             var now = Now;
@@ -194,6 +202,21 @@ public sealed partial class ControlStore
             Event(db, "TaskBindingReleased", binding.RuntimeId, payload: new { binding.Id }, provenance: "user");
             await db.SaveChangesAsync();
             return await LoadView(db, binding);
+        });
+    });
+
+    public Task<WorkerSlotRecord> ArchiveWorkerSlot(string id, ArchiveInventoryInput input) => Write(async db =>
+    {
+        var slotId = BindingId(id);
+        return await MutateBinding(db, input.RequestId, "WorkerSlot", slotId, "Archive", new { input.ExpectedRevision, input.Archived }, async () =>
+        {
+            var slot = await db.WorkerSlots.SingleOrDefaultAsync(x => x.Id == slotId) ?? throw new InventoryException("not_found", "Worker slot not found.", 404);
+            if (slot.Revision != input.ExpectedRevision) throw Conflict("revision_conflict", "Worker slot changed; refresh before archiving it.");
+            if (input.Archived && await db.TaskBindings.AnyAsync(x => x.WorkerSlotId == slot.Id && x.State == TaskBindingState.Active))
+                throw Conflict("resource_in_use", "Release the active task binding before archiving this worker slot.");
+            slot.Archived = input.Archived; slot.Revision++; slot.UpdatedAt = Now;
+            Event(db, "WorkerSlotArchived", slot.RuntimeId, payload: new { slot.Id, slot.Archived }, provenance: "user");
+            return slot;
         });
     });
 
