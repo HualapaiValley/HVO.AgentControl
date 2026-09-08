@@ -127,6 +127,8 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         ValidateRuntime(input);
         var existing = await db.Runtimes.FindAsync(input.Id);
+        if (input.Capacity != 1 && await db.RuntimeEnvironments.AnyAsync(x => x.RuntimeId == input.Id && x.Kind == RuntimeEnvironmentKind.ManagedDevcontainer))
+            throw new ControlException("Managed devcontainers allow one active task. Keep capacity at one or explicitly change the environment configuration first.");
         if (existing is null && await db.Runtimes.CountAsync() >= options.Value.MaxRuntimes)
             throw new ControlException("Runtime registration limit reached.");
         if (activeTerminals.GetValueOrDefault(input.Id) > 0) throw new ControlException("Close this runtime’s admin terminals before changing its connection profile.");
@@ -216,6 +218,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var runtime = await db.Runtimes.FindAsync(input.RuntimeId) ?? throw new ControlException("Runtime not found.", 404);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, input.RuntimeId, null, "CreateWorker", Json.Write(input));
+        await RequireManagedWorkerSlot(db, runtime);
         ValidatePath(input.Directory);
         if (input.Role is not (SessionRoles.Worker or SessionRoles.Coordinator)) throw new ControlException("Choose Worker or Coordinator role.", 400);
         if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Length > 120 || input.Project.Length > 120)

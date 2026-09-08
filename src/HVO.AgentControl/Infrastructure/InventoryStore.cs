@@ -78,6 +78,8 @@ public sealed partial class ControlStore
         {
             var host = await RequireHost(db, id);
             RequireInventoryRevision(host.Revision, input.ExpectedRevision);
+            if (input.Archived && await db.RuntimeEnvironments.AnyAsync(x => x.HostId == id))
+                throw InventoryConflict("resource_in_use", "Reset or reassign this host's runtime environment associations before archiving it.");
             host.Archived = input.Archived; host.Revision++; host.UpdatedAt = Now;
             return host;
         });
@@ -132,6 +134,8 @@ public sealed partial class ControlStore
         {
             var project = await RequireProject(db, id);
             RequireInventoryRevision(project.Revision, input.ExpectedRevision);
+            if (input.Archived && await db.RuntimeEnvironments.AnyAsync(x => x.ConfigurationProjectId == id))
+                throw InventoryConflict("resource_in_use", "Reset or change runtime configuration sources referencing this project before archiving it.");
             project.Archived = input.Archived; project.Revision++; project.UpdatedAt = Now;
             return project;
         });

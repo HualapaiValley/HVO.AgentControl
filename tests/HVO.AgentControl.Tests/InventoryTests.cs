@@ -178,7 +178,7 @@ public sealed class InventoryTests
         var options = new DbContextOptionsBuilder<ControlDb>().UseSqlite($"Data Source={database}").Options;
         await using (var db = new ControlDb(options))
         {
-            var previous = db.Database.GetMigrations().Last(x => !x.EndsWith("HostProjectInventory", StringComparison.Ordinal));
+            var previous = db.Database.GetMigrations().TakeWhile(x => !x.EndsWith("HostProjectInventory", StringComparison.Ordinal)).Last();
             await db.GetService<IMigrator>().MigrateAsync(previous);
             db.Runtimes.Add(runtime); db.Workers.Add(worker); db.Commands.Add(command);
             db.Messages.Add(new TranscriptMessage { WorkerId = worker.Id, NativeId = "msg_legacy", Role = "user", Json = "{\"legacy\":true}" });
