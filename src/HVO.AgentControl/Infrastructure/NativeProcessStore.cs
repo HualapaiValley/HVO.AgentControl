@@ -9,7 +9,41 @@ public sealed partial class ControlStore
     private const long NativeProcessFreshnessMilliseconds = 60000;
     internal const string NativeProcessInterruptedDetail = "A proven native-process replacement crossed this unresolved prompt. Delivery is uncertain; inspect retained artifacts and choose an explicit linked recovery. The original prompt was not replayed.";
 
-    public Task<NativeProcessObservationResult> ObserveNativeProcess(string runtimeId, NativeProcessObservation observation) => Write<NativeProcessObservationResult>(async db =>
+    public Task<NativeProcessObservationResult> ObserveNativeProcess(string runtimeId, NativeProcessObservation observation) =>
+        Write(db => ObserveNativeProcess(db, runtimeId, observation));
+
+    internal Task<bool> CompleteNativeProcessReinspection(string commandId, NativeProcessReinspectionRequest request,
+        NativeProcessObservation observation) => Write(async db =>
+    {
+        var command = await db.Commands.FindAsync(commandId);
+        var runtime = command is null ? null : await db.Runtimes.FindAsync(command.RuntimeId);
+        if (command is not { Kind: "ReinspectNativeProcess", State: Delivery.Dispatching } || runtime is null ||
+            command.ExecutionPayload != Json.Write(request) || runtime.Revision != request.Input.ExpectedRuntimeRevision ||
+            runtime.ManagedServerId != request.Input.ManagedServerId || runtime.ConnectionKind != RuntimeConnections.Ssh ||
+            !runtime.DesiredConnected || runtime.Transport != "Connected" || observation.ManagedServerId != request.Input.ManagedServerId ||
+            observation.State != NativeProcessObservationState.Observed || observation.ProcessId != request.ExpectedProcessId ||
+            observation.Incarnation != request.Input.ExpectedIncarnation ||
+            observation.ObservedAt < Now - NativeProcessFreshnessMilliseconds || observation.ObservedAt > Now + 5000)
+        {
+            if (command is { State: Delivery.Dispatching })
+            {
+                command.State = Delivery.Cancelled;
+                command.Detail = "Native-process reinspection was superseded by changed runtime identity; no observation was recorded.";
+                command.UpdatedAt = Now;
+                Event(db, "NativeProcessReinspectionSuperseded", command.RuntimeId, commandId: command.Id);
+            }
+            return false;
+        }
+        await ObserveNativeProcess(db, command.RuntimeId, observation);
+        command.State = Delivery.Finished;
+        command.Detail = "Live native-process identity was re-inspected without changing runtime lifecycle.";
+        command.ResultJson = Json.Write(new { state = "Confirmed", observation.ObservedAt });
+        command.UpdatedAt = Now;
+        Event(db, "NativeProcessReinspected", command.RuntimeId, commandId: command.Id, provenance: "observed");
+        return true;
+    });
+
+    private async Task<NativeProcessObservationResult> ObserveNativeProcess(ControlDb db, string runtimeId, NativeProcessObservation observation)
     {
         var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
         ValidateNativeProcessObservation(runtime, observation);
@@ -87,7 +121,7 @@ public sealed partial class ControlStore
             interrupted++;
         }
         return new(freshness, unseen.Count, interrupted);
-    });
+    }
 
     public Task<List<NativeProcessObservationEvidence>> NativeProcessObservations(string runtimeId, int take = 20) => Read(async db =>
     {

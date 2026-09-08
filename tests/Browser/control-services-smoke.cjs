@@ -34,8 +34,7 @@ module.exports = async ({ page, context, base, expect }) => {
   expect(updated.worker.nativeSessionId).toBe('ses_browser_persistent_control');
   const queued = updated.commands.find(x => x.id === 'control-browser-queued-prompt');
   expect(queued.state).toBe('Queued');
-  expect(JSON.parse(queued.executionPayload).modelId).toBe('original');
-  expect(JSON.parse(queued.executionPayload).variant).toBe('medium');
+  expect(queued.executionPayload).toBeUndefined();
   await page.reload();
   await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
   await expect(pending).toContainText('Needs reconciliation');
