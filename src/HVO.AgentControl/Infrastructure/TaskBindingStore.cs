@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using HVO.AgentControl.Core;
 using Microsoft.EntityFrameworkCore;
 
@@ -116,6 +117,8 @@ public sealed partial class ControlStore
             if (workItem.State is WorkItemState.Released or WorkItemState.Abandoned) throw Conflict("work_item_closed", "The work item is no longer active.");
             if (workItem.Revision != input.ExpectedWorkItemRevision || project.Revision != input.ExpectedProjectRevision || slot.Revision != input.ExpectedSlotRevision)
                 throw Conflict("revision_conflict", "Work item, project or worker slot changed; refresh all three before binding.");
+            if (workItem.OwnerWorkerSlotId is not null && workItem.OwnerWorkerSlotId != slot.Id)
+                throw Conflict("work_item_slot_mismatch", "The work item belongs to a different reusable worker slot.");
             if (!string.Equals(CanonicalProjectRepository(workItem.Repository), project.RepositoryUrl, StringComparison.Ordinal))
                 throw Validation("Work item repository does not identify the selected project unambiguously.");
             if (workItem.Branch != branch) throw Validation("Workspace branch must match the work item branch.");
@@ -189,6 +192,101 @@ public sealed partial class ControlStore
         });
     });
 
+    public Task<CommandRecord> CreateTaskSession(string id, CreateTaskSessionInput input) => Write(async db =>
+    {
+        var bindingId = BindingId(id); var workerId = BindingId(input.WorkerId);
+        ValidateRequestId(input.Id);
+        if (input.ExpectedHead.Length is not (40 or 64) || input.ExpectedHead.Any(x => !char.IsAsciiHexDigit(x) || char.IsAsciiLetterUpper(x)))
+            throw Validation("Expected HEAD must be an exact lowercase commit identity.");
+        if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, prior.RuntimeId, workerId, "CreateTaskSession", prior.Payload);
+        var binding = await db.TaskBindings.SingleOrDefaultAsync(x => x.Id == bindingId) ?? throw new InventoryException("not_found", "Task binding not found.", 404);
+        var workspace = await db.TaskWorkspaces.SingleAsync(x => x.Id == binding.WorkspaceId);
+        var session = await db.TaskSessionBindings.SingleAsync(x => x.Id == binding.SessionBindingId);
+        var work = await db.WorkItems.FindAsync(binding.WorkItemId) ?? throw new InventoryException("not_found", "Work item not found.", 404);
+        var project = await db.Projects.SingleAsync(x => x.Id == binding.ProjectId);
+        var slot = await db.WorkerSlots.SingleAsync(x => x.Id == binding.WorkerSlotId);
+        var runtime = await db.Runtimes.FindAsync(binding.RuntimeId) ?? throw new InventoryException("not_found", "Runtime not found.", 404);
+        var environment = await db.RuntimeEnvironments.FindAsync(runtime.Id) ?? throw Conflict("runtime_environment_required", "Configure the runtime environment before activating a task session.");
+        if (runtime.ConnectionKind != RuntimeConnections.Ssh || environment.Kind != RuntimeEnvironmentKind.ExistingMachine)
+            throw Conflict("unsupported_runtime_environment", "Fresh task sessions require a configured ExistingMachine SSH runtime.");
+        if (binding.State != TaskBindingState.Active || workspace.State != TaskBindingState.Active || session.State != TaskSessionBindingState.Unbound ||
+            work.OwnerWorkerSlotId != slot.Id || !string.IsNullOrEmpty(work.OwnerWorkerId) || project.Archived || slot.Archived)
+            throw Conflict("session_unavailable", "The exact slot-owned task binding is not available for activation.");
+        if (binding.Revision != input.ExpectedBindingRevision || workspace.Revision != input.ExpectedWorkspaceRevision || session.Revision != input.ExpectedSessionRevision ||
+            work.Revision != input.ExpectedWorkItemRevision || project.Revision != input.ExpectedProjectRevision || slot.Revision != input.ExpectedSlotRevision ||
+            runtime.Revision != input.ExpectedRuntimeRevision || environment.Revision != input.ExpectedEnvironmentRevision)
+            throw Conflict("revision_conflict", "Task-session activation inputs changed; refresh before retrying.");
+        if (await db.Workers.AnyAsync(x => x.Id == workerId)) throw Conflict("identity_exists", "Task execution worker identity already exists.");
+        var generation = session.Generation + 1;
+        var intent = new TaskSessionCreationIntent(binding.Id, input with { WorkerId = workerId }, generation, $"HVO task {binding.Id} generation {generation}");
+        var command = await Record(db, input.Id, runtime.Id, workerId, "CreateTaskSession", Json.Write(intent));
+        db.Workers.Add(new WorkerRecord
+        {
+            Id = workerId,
+            RuntimeId = runtime.Id,
+            ManagedServerId = runtime.ManagedServerId,
+            NativeSessionId = "pending:" + command.Id,
+            Name = $"{slot.Name} task {generation}",
+            Project = project.Name,
+            Directory = workspace.Directory,
+            Branch = workspace.Branch,
+            ProviderId = slot.ProviderId,
+            ModelId = slot.ModelId,
+            Role = SessionRoles.Worker,
+            Archived = true,
+            Stale = true
+        });
+        session.WorkerId = workerId; session.CreationCommandId = command.Id; session.Generation = generation;
+        session.State = TaskSessionBindingState.ActivationPending; session.Revision++; session.UpdatedAt = Now;
+        binding.Revision++; binding.UpdatedAt = Now;
+        Event(db, "TaskSessionActivationRecorded", runtime.Id, workerId, command.Id, new { bindingId = binding.Id, sessionId = session.Id, generation }, "user");
+        return command;
+    });
+
+    public Task<VerifyPreparedCheckoutInput> TaskSessionCheckout(string commandId) => Read(async db =>
+    {
+        var command = await db.Commands.SingleAsync(x => x.Id == commandId && x.Kind == "CreateTaskSession");
+        var intent = Json.Read<TaskSessionCreationIntent>(command.Payload);
+        var binding = await db.TaskBindings.SingleAsync(x => x.Id == intent.TaskBindingId);
+        var workspace = await db.TaskWorkspaces.SingleAsync(x => x.Id == binding.WorkspaceId);
+        var project = await db.Projects.SingleAsync(x => x.Id == binding.ProjectId);
+        return new VerifyPreparedCheckoutInput(command.Id, binding.RuntimeId, intent.Input.ExpectedRuntimeRevision, workspace.Directory, project.RepositoryUrl, workspace.Branch, intent.Input.ExpectedHead);
+    });
+
+    public Task<bool> BindTaskSession(string commandId, JsonElement nativeSession, List<ModelChoice> models) => Write(async db =>
+    {
+        var command = await db.Commands.SingleAsync(x => x.Id == commandId && x.Kind == "CreateTaskSession");
+        var intent = Json.Read<TaskSessionCreationIntent>(command.Payload);
+        var binding = await db.TaskBindings.SingleAsync(x => x.Id == intent.TaskBindingId);
+        var workspace = await db.TaskWorkspaces.SingleAsync(x => x.Id == binding.WorkspaceId);
+        var session = await db.TaskSessionBindings.SingleAsync(x => x.Id == binding.SessionBindingId);
+        var work = await db.WorkItems.FindAsync(binding.WorkItemId) ?? throw new InventoryException("not_found", "Work item not found.", 404);
+        var worker = await db.Workers.FindAsync(command.WorkerId) ?? throw new ControlException("Reserved task worker is missing.");
+        var nativeId = nativeSession.GetProperty("id").GetString();
+        if (nativeSession.GetProperty("directory").GetString() != workspace.Directory || string.IsNullOrWhiteSpace(nativeId))
+            throw Conflict("native_session_mismatch", "Created session directory or identity differs from the verified task workspace.");
+        worker.NativeSessionId = nativeId; worker.ModelsJson = Json.Write(models); worker.Archived = false; worker.Revision++;
+        session.NativeSessionId = nativeId; session.State = TaskSessionBindingState.Bound; session.Revision++; session.UpdatedAt = Now;
+        work.OwnerWorkerId = worker.Id; work.OwnerWorkerSlotId = null; work.Revision++; work.UpdatedAt = Now;
+        foreach (var phase in await db.WorkItemPhases.Where(x => x.WorkItemId == work.Id && x.State == WorkItemPhaseState.Active).ToListAsync())
+        { phase.OwnerWorkerId = worker.Id; phase.OwnerWorkerSlotId = null; }
+        command.ResultId = worker.Id; command.State = Delivery.Finished; command.Detail = "Task session created and bound."; command.UpdatedAt = Now;
+        return true;
+    });
+
+    internal static async Task RequireActiveTaskTuple(ControlDb db, WorkerRecord worker)
+    {
+        var session = await db.TaskSessionBindings.SingleOrDefaultAsync(x => x.WorkerId == worker.Id);
+        if (session is null) return;
+        var binding = await db.TaskBindings.SingleOrDefaultAsync(x => x.Id == session.TaskBindingId);
+        var workspace = binding is null ? null : await db.TaskWorkspaces.SingleOrDefaultAsync(x => x.Id == binding.WorkspaceId);
+        var work = binding is null ? null : await db.WorkItems.FindAsync(binding.WorkItemId);
+        if (binding is null || workspace is null || work is null || binding.State != TaskBindingState.Active || workspace.State != TaskBindingState.Active ||
+            session.State != TaskSessionBindingState.Bound || session.NativeSessionId != worker.NativeSessionId || workspace.Directory != worker.Directory ||
+            workspace.Branch != worker.Branch || work.OwnerWorkerId != worker.Id || work.OwnerWorkerSlotId is not null)
+            throw new ControlException("Task execution worker is not the exact active binding, session and workspace owner.");
+    }
+
     public Task<TaskBindingView> ReleaseTaskBinding(string id, ReleaseTaskBindingInput input) => Write(async db =>
     {
         var bindingId = BindingId(id);
@@ -199,9 +297,23 @@ public sealed partial class ControlStore
             if (binding.State == TaskBindingState.Released) throw Conflict("already_released", "Task binding is already released.");
             var workspace = (await db.TaskWorkspaces.SingleOrDefaultAsync(x => x.Id == binding.WorkspaceId))!;
             var session = (await db.TaskSessionBindings.SingleOrDefaultAsync(x => x.Id == binding.SessionBindingId))!;
+            if (session.State is TaskSessionBindingState.ActivationPending or TaskSessionBindingState.Creating)
+                throw Conflict("session_in_flight", "Reconcile task-session activation before release.");
+            if (session.WorkerId is not null)
+            {
+                var worker = await db.Workers.FindAsync(session.WorkerId) ?? throw Conflict("worker_missing", "Task worker projection is missing.");
+                var work = await db.WorkItems.FindAsync(binding.WorkItemId) ?? throw new InventoryException("not_found", "Work item not found.", 404);
+                await RequireActiveTaskTuple(db, worker);
+                if (work.State is not (WorkItemState.Completed or WorkItemState.Released or WorkItemState.Abandoned)) throw Conflict("task_not_terminal", "Task ownership must be terminal before release.");
+                if (worker.Stale || worker.Activity != "Idle" || worker.LastObservedAt < Now - 60000) throw Conflict("worker_not_idle", "Fresh native idle evidence is required.");
+                if (await db.Commands.AnyAsync(x => x.WorkerId == worker.Id && x.State != Delivery.Finished && x.State != Delivery.Failed && x.State != Delivery.Cancelled)) throw Conflict("commands_pending", "Drain task commands before release.");
+                if (await db.Requests.AnyAsync(x => x.WorkerId == worker.Id && (x.State == "Pending" || x.State == "ReplyUnknown"))) throw Conflict("requests_pending", "Resolve task requests before release.");
+                if ((await db.CoordinationRuns.Where(x => x.State != "Completed" && x.State != "Stopped").ToListAsync()).Any(x => x.CoordinatorWorkerId == worker.Id || Json.Read<string[]>(x.WorkerIdsJson).Contains(worker.Id))) throw Conflict("coordination_pending", "Finish coordination before release.");
+                worker.Archived = true; worker.Revision++;
+            }
             binding.State = TaskBindingState.Released; binding.Revision++; binding.UpdatedAt = Now;
             workspace!.State = TaskBindingState.Released; workspace.Revision++; workspace.UpdatedAt = Now;
-            session!.State = TaskSessionBindingState.Released; session.UpdatedAt = Now;
+            session!.State = TaskSessionBindingState.Released; session.Revision++; session.UpdatedAt = Now;
             Event(db, "TaskBindingReleased", binding.RuntimeId, payload: new { binding.Id }, provenance: "user");
             await db.SaveChangesAsync();
             return await LoadView(db, binding);

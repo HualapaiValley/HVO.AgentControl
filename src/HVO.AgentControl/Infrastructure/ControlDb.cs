@@ -93,7 +93,10 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
             .IsUnique()
             .HasFilter("State NOT IN ('Released', 'Abandoned')");
         model.Entity<WorkItem>().HasIndex(x => x.OwnerWorkerId);
+        model.Entity<WorkItem>().HasIndex(x => x.OwnerWorkerSlotId).IsUnique().HasFilter("OwnerWorkerSlotId IS NOT NULL AND State NOT IN ('Released', 'Abandoned')");
+        model.Entity<WorkItem>().HasOne<WorkerSlotRecord>().WithMany().HasForeignKey(x => x.OwnerWorkerSlotId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<WorkItemPhase>().HasIndex(x => new { x.WorkItemId, x.Name }).IsUnique();
+        model.Entity<WorkItemPhase>().HasOne<WorkerSlotRecord>().WithMany().HasForeignKey(x => x.OwnerWorkerSlotId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<ParticipantEnrollment>().HasIndex(x => x.AdapterType);
         model.Entity<ParticipantEnrollment>().HasIndex(x => x.State);
         model.Entity<CommandAuthority>().HasIndex(x => x.CommandId).IsUnique();
@@ -122,7 +125,11 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<TaskSessionBindingRecord>().HasIndex(x => x.Id).IsUnique();
         model.Entity<TaskSessionBindingRecord>().HasIndex(x => x.TaskBindingId).IsUnique();
         model.Entity<TaskSessionBindingRecord>().HasIndex(x => new { x.WorkerSlotId, x.NativeSessionId }).IsUnique().HasFilter("NativeSessionId <> ''");
+        model.Entity<TaskSessionBindingRecord>().HasIndex(x => x.WorkerId).IsUnique().HasFilter("WorkerId IS NOT NULL");
+        model.Entity<TaskSessionBindingRecord>().HasIndex(x => x.CreationCommandId).IsUnique().HasFilter("CreationCommandId IS NOT NULL");
+        model.Entity<TaskSessionBindingRecord>().Property(x => x.Revision).IsConcurrencyToken();
         model.Entity<TaskSessionBindingRecord>().HasOne<WorkerSlotRecord>().WithMany().HasForeignKey(x => x.WorkerSlotId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<TaskSessionBindingRecord>().HasOne<WorkerRecord>().WithMany().HasForeignKey(x => x.WorkerId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<TaskBindingRecord>().HasKey(x => x.Sequence);
         model.Entity<TaskBindingRecord>().HasIndex(x => x.Id).IsUnique();
         model.Entity<TaskBindingRecord>().HasIndex(x => x.WorkItemId).IsUnique().HasFilter("State = 'Active'");

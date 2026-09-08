@@ -13,8 +13,20 @@ public sealed partial class ControlStore
             throw new ControlException("Work item branch is required and must be 200 characters or fewer.", 400);
         if (string.IsNullOrWhiteSpace(input.Repository) || input.Repository.Length > 500)
             throw new ControlException("Repository identifier is required and must be 500 characters or fewer.", 400);
-        var owner = await db.Workers.FindAsync(input.WorkerId) ?? throw new ControlException("Owner worker not found.", 404);
-        if (owner.Archived) throw new ControlException("Cannot assign work to an archived worker.", 400);
+        if (string.IsNullOrEmpty(input.WorkerId) == string.IsNullOrEmpty(input.WorkerSlotId))
+            throw new ControlException("Choose exactly one owner worker or reusable worker slot.", 400);
+        WorkerRecord? owner = null;
+        WorkerSlotRecord? slot = null;
+        if (!string.IsNullOrEmpty(input.WorkerId))
+        {
+            owner = await db.Workers.FindAsync(input.WorkerId) ?? throw new ControlException("Owner worker not found.", 404);
+            if (owner.Archived) throw new ControlException("Cannot assign work to an archived worker.", 400);
+        }
+        else
+        {
+            slot = await db.WorkerSlots.SingleOrDefaultAsync(x => x.Id == input.WorkerSlotId) ?? throw new ControlException("Owner worker slot not found.", 404);
+            if (slot.Archived || slot.Role != SessionRoles.Worker) throw new ControlException("Cannot assign work to an unavailable worker slot.", 409);
+        }
         var existing = await db.WorkItems.FindAsync(input.Id);
         if (existing is not null) throw new ControlException("Work item ID already exists.", 409);
         var liveConflict = await db.WorkItems.FirstOrDefaultAsync(x =>
@@ -29,7 +41,8 @@ public sealed partial class ControlStore
             Title = input.Title,
             Branch = input.Branch,
             Repository = input.Repository,
-            OwnerWorkerId = input.WorkerId,
+            OwnerWorkerId = owner?.Id ?? "",
+            OwnerWorkerSlotId = slot?.Id,
             State = WorkItemState.Active,
             CurrentPhase = input.PhaseName ?? "implementation"
         };
@@ -40,10 +53,11 @@ public sealed partial class ControlStore
             WorkItemId = input.Id,
             Name = phaseName,
             State = WorkItemPhaseState.Active,
-            OwnerWorkerId = input.WorkerId,
+            OwnerWorkerId = owner?.Id ?? "",
+            OwnerWorkerSlotId = slot?.Id,
             StartedAt = ControlStore.Now
         });
-        Event(db, "WorkItemCreated", payload: new { workItem.Id, workItem.IssueNumber, workItem.Title, workItem.Branch, workItem.Repository, workItem.OwnerWorkerId }, provenance: "user");
+        Event(db, "WorkItemCreated", slot?.RuntimeId, payload: new { workItem.Id, workItem.OwnerWorkerId, workItem.OwnerWorkerSlotId }, provenance: "user");
         return workItem;
     });
 

@@ -184,6 +184,7 @@ public sealed class WorkItem
     public string Branch { get; set; } = "";
     public string Repository { get; set; } = "";
     public string OwnerWorkerId { get; set; } = "";
+    public string? OwnerWorkerSlotId { get; set; }
     public string State { get; set; } = WorkItemState.Active;
     public string CurrentPhase { get; set; } = "implementation";
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -198,6 +199,7 @@ public sealed class WorkItemPhase
     public string Name { get; set; } = "";
     public string State { get; set; } = WorkItemPhaseState.Pending;
     public string OwnerWorkerId { get; set; } = "";
+    public string? OwnerWorkerSlotId { get; set; }
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     public long? StartedAt { get; set; }
     public long? CompletedAt { get; set; }
@@ -206,7 +208,8 @@ public sealed class WorkItemPhase
 
 public sealed record WorkItemClaimInput(string WorkItemId, string WorkerId, string? PhaseName = null);
 public sealed record WorkItemReleaseInput(string WorkItemId, string WorkerId, string? PhaseName = null, string? Evidence = null);
-public sealed record CreateWorkItemInput(string Id, string? IssueNumber, string Title, string Branch, string Repository, string WorkerId, string? PhaseName = null);
+public sealed record CreateWorkItemInput(string Id, string? IssueNumber, string Title, string Branch, string Repository,
+    string WorkerId, string? PhaseName = null, string? WorkerSlotId = null);
 public sealed record TransitionWorkItemInput(string Id, long ExpectedRevision, string WorkerId, string State, string? PhaseName = null, string? Evidence = null);
 public sealed record AdvancePhaseInput(string WorkItemId, string WorkerId, string FromPhase, string ToPhase, string? Evidence = null);
 

@@ -41,4 +41,32 @@ public sealed partial class RuntimeSupervisor
                 });
         }
     }
+
+    private async Task ReconcileTaskSessionCreation(RuntimeRecord runtime, IRuntimeTransport transport, CancellationToken token)
+    {
+        var pending = await store.Read(db => db.Commands.AsNoTracking()
+            .Where(x => x.RuntimeId == runtime.Id && x.Kind == "CreateTaskSession" && x.State == Delivery.Unknown)
+            .ToListAsync(token));
+        foreach (var command in pending)
+        {
+            var intent = Json.Read<TaskSessionCreationIntent>(command.Payload);
+            var context = await store.Read(async db =>
+            {
+                var binding = await db.TaskBindings.AsNoTracking().SingleAsync(x => x.Id == intent.TaskBindingId, token);
+                var workspace = await db.TaskWorkspaces.AsNoTracking().SingleAsync(x => x.Id == binding.WorkspaceId, token);
+                return (workspace.Directory, binding.SessionBindingId);
+            });
+            var sessions = await transport.Api.Get(OpenCodeClient.Scope("/session?limit=1000", context.Directory), token, 2_000_000);
+            var matches = sessions.EnumerateArray().Where(x => x.GetProperty("title").GetString() == intent.Title &&
+                x.GetProperty("directory").GetString() == context.Directory).ToArray();
+            if (matches.Length > 1)
+            {
+                await Complete(command.Id, Delivery.Unknown, "Multiple native sessions match the task title and directory; no create was replayed.");
+                continue;
+            }
+            if (matches.Length == 1)
+                await store.BindTaskSession(command.Id, matches[0], await transport.Api.Models(context.Directory, token));
+            // Missing evidence after an uncertain POST is never authorization to replay it.
+        }
+    }
 }

@@ -9,7 +9,7 @@ public static class TaskBindingState
 
 public static class TaskSessionBindingState
 {
-    public const string Unbound = "Unbound", Bound = "Bound", Released = "Released";
+    public const string Unbound = "Unbound", ActivationPending = "ActivationPending", Creating = "Creating", Bound = "Bound", Released = "Released";
 }
 
 public sealed class WorkerSlotRecord
@@ -50,9 +50,12 @@ public sealed class TaskSessionBindingRecord
     public string TaskBindingId { get; set; } = "";
     public string WorkerSlotId { get; set; } = "";
     public string? LegacyWorkerId { get; set; }
+    public string? WorkerId { get; set; }
+    public string? CreationCommandId { get; set; }
     public string NativeSessionId { get; set; } = "";
     public int Generation { get; set; }
     public string State { get; set; } = TaskSessionBindingState.Unbound;
+    public long Revision { get; set; } = 1;
     public long CreatedAt { get; set; }
     public long UpdatedAt { get; set; }
 }
@@ -86,6 +89,12 @@ public sealed record CreateTaskBindingInput(string RequestId, string Id, string 
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ReleaseTaskBindingInput(string RequestId, long ExpectedRevision);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record CreateTaskSessionInput(string Id, string WorkerId, string ExpectedHead, long ExpectedBindingRevision,
+    long ExpectedWorkspaceRevision, long ExpectedSessionRevision, long ExpectedWorkItemRevision, long ExpectedProjectRevision,
+    long ExpectedSlotRevision, long ExpectedRuntimeRevision, long ExpectedEnvironmentRevision);
+public sealed record TaskSessionCreationIntent(string TaskBindingId, CreateTaskSessionInput Input, int Generation, string Title);
 
 public sealed record WorkerSlotPage(List<WorkerSlotRecord> Items, long? NextAfter);
 public sealed record TaskBindingPage(List<TaskBindingView> Items, long? NextAfter);

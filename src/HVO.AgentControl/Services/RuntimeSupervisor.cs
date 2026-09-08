@@ -212,6 +212,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     await FinishRuntimeCommands(id, "EnsureServer");
                     if (!historyUnavailable) await FinishRuntimeCommands(id, "RefreshState");
                     await ReconcileControlCreation(runtime, transport, token);
+                    await ReconcileTaskSessionCreation(runtime, transport, token);
                     await ReconcileCreation(runtime, transport, token);
                     var next = await Claim(id);
                     if (next is not null) await Dispatch(next, runtime, transport, token);
@@ -374,6 +375,17 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     await CreationProgress(command.Id, "Creating the persistent OpenCode conversation.");
                     var session = await api.CreateSession(workspace.Directory, input.Name + " [hvo:" + command.Id + "]", token);
                     await SaveCreated(command, runtime, input, workspace, session, models);
+                    break;
+                case "CreateTaskSession":
+                    var intent = Json.Read<TaskSessionCreationIntent>(command.Payload);
+                    var checkout = await store.TaskSessionCheckout(command.Id);
+                    var taskVerification = await transport.VerifyPreparedCheckout(runtime, checkout, token);
+                    if (taskVerification.Status != PreparedCheckoutStatus.Verified)
+                        throw new ControlException(taskVerification.Detail);
+                    var taskModels = await api.Models(checkout.Directory, token);
+                    mutationStarted = true;
+                    var taskSession = await api.CreateSession(checkout.Directory, intent.Title, token);
+                    await store.BindTaskSession(command.Id, taskSession, taskModels);
                     break;
                 case "Prompt":
                     if ((worker!.Role == SessionRoles.Coordinator) != command.Origin.StartsWith("coordinator-decision:", StringComparison.Ordinal))

@@ -16,6 +16,7 @@ public static class TaskBindingApiEndpoints
             await Execute(() => store.TaskBindings(after ?? 0, take ?? 50, includeReleased ?? false)));
         group.MapGet("/task-bindings/{id}", async (string id, ControlStore store) => await Execute(() => store.TaskBinding(id)));
         group.MapPost("/task-bindings", async (CreateTaskBindingInput input, ControlStore store) => await Execute(() => store.CreateTaskBinding(input)));
+        group.MapPost("/task-bindings/{id}/sessions", async (string id, CreateTaskSessionInput input, ControlStore store) => await Execute(() => store.CreateTaskSession(id, input)));
         group.MapPost("/task-bindings/{id}/release", async (string id, ReleaseTaskBindingInput input, ControlStore store) => await Execute(() => store.ReleaseTaskBinding(id, input)));
     }
 
