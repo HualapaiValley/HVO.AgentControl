@@ -136,6 +136,8 @@ public sealed partial class ControlStore
             RequireInventoryRevision(project.Revision, input.ExpectedRevision);
             if (input.Archived && await db.RuntimeEnvironments.AnyAsync(x => x.ConfigurationProjectId == id))
                 throw InventoryConflict("resource_in_use", "Reset or change runtime configuration sources referencing this project before archiving it.");
+            if (input.Archived && await db.TaskBindings.AnyAsync(x => x.ProjectId == id && x.State == TaskBindingState.Active))
+                throw InventoryConflict("resource_in_use", "Release active task bindings referencing this project before archiving it.");
             project.Archived = input.Archived; project.Revision++; project.UpdatedAt = Now;
             return project;
         });
