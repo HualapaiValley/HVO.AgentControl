@@ -9,6 +9,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<HostRecord> Hosts => Set<HostRecord>();
     public DbSet<ProjectRecord> Projects => Set<ProjectRecord>();
     public DbSet<InventoryMutationReceipt> InventoryMutations => Set<InventoryMutationReceipt>();
+    public DbSet<RuntimeEnvironmentRecord> RuntimeEnvironments => Set<RuntimeEnvironmentRecord>();
     public DbSet<HVO.AgentControl.GitHub.GitHubAccess> GitHubAccess => Set<HVO.AgentControl.GitHub.GitHubAccess>();
     public DbSet<CoordinationRun> CoordinationRuns => Set<CoordinationRun>();
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
@@ -43,6 +44,11 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<ProjectRecord>().HasIndex(x => x.RepositoryUrl).IsUnique();
         model.Entity<ProjectRecord>().Property(x => x.Revision).IsConcurrencyToken();
         model.Entity<InventoryMutationReceipt>().HasKey(x => x.RequestId);
+        model.Entity<RuntimeEnvironmentRecord>().HasKey(x => x.RuntimeId);
+        model.Entity<RuntimeEnvironmentRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<RuntimeEnvironmentRecord>().HasOne<RuntimeRecord>().WithOne().HasForeignKey<RuntimeEnvironmentRecord>(x => x.RuntimeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<RuntimeEnvironmentRecord>().HasOne<HostRecord>().WithMany().HasForeignKey(x => x.HostId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<RuntimeEnvironmentRecord>().HasOne<ProjectRecord>().WithMany().HasForeignKey(x => x.ConfigurationProjectId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<ProviderPool>();
         model.Entity<ProviderFailureReceipt>();
         model.Entity<ProviderFallbackReceipt>().HasIndex(x => x.SourceCommandId).IsUnique();
