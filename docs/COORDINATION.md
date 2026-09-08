@@ -20,6 +20,8 @@ The coordinator may answer task questions from established instructions. Native 
 
 ## Dedicated demo coordinator
 
+The owner has selected a [host-owned OpenCode sidecar](CONTROL_SIDECAR.md) as the replacement architecture (#140). Its image/deployment foundation is independent of the web service, with direct private-network HTTP and no SSH/tmux. Direct adapter/session bindings and migration are subsequent work; the following SSH setup remains the current live path.
+
 The owner demo has a dedicated `hvo-agentcontrol-coordinator` Docker container, registered runtime **AgentControl coordinator**, and a persistent coordinator session of the same name. Its OpenCode process is owned by tmux, independently of the web container. OpenCode 1.18.29 is bootstrapped by the existing verified installation path. The selected demo model is `opencode/big-pickle`; advertised availability is not a guarantee of future inference access.
 
 Recreate the supporting container/key setup, when needed, from the SSH host:
