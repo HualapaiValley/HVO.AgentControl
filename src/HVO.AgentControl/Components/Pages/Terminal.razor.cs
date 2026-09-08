@@ -22,9 +22,10 @@ public partial class Terminal
     {
         try
         {
+            connected = true; status = "Loading terminal assets…";
             module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Terminal.razor.js");
             self ??= DotNetObjectReference.Create(this);
-            connected = true; status = "Connecting…";
+            status = "Connecting…";
             await module.InvokeVoidAsync("open", host, runtimeId, self);
         }
         catch (JSException) { connected = false; status = "Unable to open terminal. Check runtime SSH access and sign-in."; }

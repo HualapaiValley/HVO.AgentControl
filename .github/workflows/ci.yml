@@ -93,6 +93,9 @@ jobs:
       - name: Setup fixture ownership regressions
         working-directory: tests/Browser
         run: node --test setup-recovery-ownership.test.cjs
+      - name: Terminal asset loader regressions
+        working-directory: tests/Browser
+        run: node --test terminal-assets.test.cjs
       - name: Publish application
         run: dotnet publish src/HVO.AgentControl --configuration Release --output artifacts/published-ui
       - name: Test published desktop and mobile UI
