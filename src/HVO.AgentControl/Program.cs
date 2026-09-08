@@ -38,20 +38,36 @@ builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubAccessService>();
 builder.Services.AddSingleton<HVO.AgentControl.GitHub.GitHubCredentialDelivery>();
 builder.Services.AddHostedService<HVO.AgentControl.GitHub.GitHubCredentialSupervisor>();
 builder.Services.AddDataProtection().PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.DataDirectory, "keys"))).SetApplicationName("HVO.AgentControl");
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie(options =>
-{
-    options.LoginPath = "/login";
-    options.Cookie.Name = "HvoAgentControl"; options.Cookie.HttpOnly = true; options.Cookie.SameSite = SameSiteMode.Strict;
-    options.Cookie.SecurePolicy = settings.AllowInsecureLocalHttp ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
-    options.ExpireTimeSpan = TimeSpan.FromHours(12); options.SlidingExpiration = false;
-    options.Events.OnRedirectToLogin = context =>
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
     {
-        if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/hubs")) context.Response.StatusCode = 401;
-        else context.Response.Redirect(context.RedirectUri);
-        return Task.CompletedTask;
-    };
+        options.LoginPath = "/login";
+        options.Cookie.Name = "HvoAgentControl"; options.Cookie.HttpOnly = true; options.Cookie.SameSite = SameSiteMode.Strict;
+        options.Cookie.SecurePolicy = settings.AllowInsecureLocalHttp ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+        options.ExpireTimeSpan = TimeSpan.FromHours(12); options.SlidingExpiration = false;
+        options.Events.OnRedirectToLogin = context =>
+        {
+            if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/hubs")) context.Response.StatusCode = 401;
+            else context.Response.Redirect(context.RedirectUri);
+            return Task.CompletedTask;
+        };
+    })
+    .AddScheme<AuthenticationSchemeOptions, HostExecutorAuthenticationHandler>(HostExecutorAuthenticationDefaults.Scheme, _ => { });
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(HostExecutorAuthenticationDefaults.EnrollmentPolicy, policy =>
+    {
+        policy.AuthenticationSchemes.Add(HostExecutorAuthenticationDefaults.Scheme);
+        policy.RequireAuthenticatedUser();
+        policy.RequireClaim(HostExecutorAuthenticationDefaults.StateClaim, HostExecutorState.Pending, HostExecutorState.Active);
+    });
+    options.AddPolicy(HostExecutorAuthenticationDefaults.ActivePolicy, policy =>
+    {
+        policy.AuthenticationSchemes.Add(HostExecutorAuthenticationDefaults.Scheme);
+        policy.RequireAuthenticatedUser();
+        policy.RequireClaim(HostExecutorAuthenticationDefaults.StateClaim, HostExecutorState.Active);
+    });
 });
-builder.Services.AddAuthorization();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
@@ -139,6 +155,7 @@ app.MapGet("/health/ready", async (IDbContextFactory<ControlDb> factory) =>
     return await db.Database.CanConnectAsync() ? Results.Ok(new { status = "ready", scope = "control-plane database" }) : Results.StatusCode(503);
 });
 app.MapGet("/api/v1/runtimes/{id}/terminal", (HttpContext context, string id, TerminalService terminal, IAntiforgery antiforgery) => terminal.Connect(context, id, antiforgery)).RequireAuthorization();
+app.MapHostExecutorApi();
 app.MapControlApi();
 app.MapStaticAssets();
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode().RequireAuthorization();

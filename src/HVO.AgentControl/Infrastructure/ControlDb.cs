@@ -12,6 +12,11 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<ProjectRecord> Projects => Set<ProjectRecord>();
     public DbSet<InventoryMutationReceipt> InventoryMutations => Set<InventoryMutationReceipt>();
     public DbSet<RuntimeEnvironmentRecord> RuntimeEnvironments => Set<RuntimeEnvironmentRecord>();
+    public DbSet<HostExecutorEnrollment> HostExecutors => Set<HostExecutorEnrollment>();
+    public DbSet<HostResourcePolicy> HostResourcePolicies => Set<HostResourcePolicy>();
+    public DbSet<HostResourceObservation> HostResourceObservations => Set<HostResourceObservation>();
+    public DbSet<HostResourceReservation> HostResourceReservations => Set<HostResourceReservation>();
+    public DbSet<HostResourceMutationReceipt> HostResourceMutations => Set<HostResourceMutationReceipt>();
     public DbSet<HVO.AgentControl.GitHub.GitHubAccess> GitHubAccess => Set<HVO.AgentControl.GitHub.GitHubAccess>();
     public DbSet<CoordinationRun> CoordinationRuns => Set<CoordinationRun>();
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
@@ -64,6 +69,35 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<RuntimeEnvironmentRecord>().HasOne<RuntimeRecord>().WithOne().HasForeignKey<RuntimeEnvironmentRecord>(x => x.RuntimeId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<RuntimeEnvironmentRecord>().HasOne<HostRecord>().WithMany().HasForeignKey(x => x.HostId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
         model.Entity<RuntimeEnvironmentRecord>().HasOne<ProjectRecord>().WithMany().HasForeignKey(x => x.ConfigurationProjectId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostExecutorEnrollment>().HasIndex(x => x.RequestId).IsUnique();
+        model.Entity<HostExecutorEnrollment>().HasIndex(x => x.EndpointId).IsUnique();
+        model.Entity<HostExecutorEnrollment>().HasIndex(x => x.EngineId);
+        model.Entity<HostExecutorEnrollment>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<HostExecutorEnrollment>().HasOne<HostRecord>().WithMany().HasForeignKey(x => x.HostId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourcePolicy>().HasKey(x => new { x.Id, x.Revision });
+        model.Entity<HostResourcePolicy>().HasIndex(x => x.RequestId).IsUnique();
+        model.Entity<HostResourcePolicy>().HasIndex(x => new { x.PhysicalHostId, x.Revision }).IsUnique();
+        model.Entity<HostResourcePolicy>().HasOne<HostExecutorEnrollment>().WithMany().HasForeignKey(x => x.EnrollmentId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceObservation>().HasIndex(x => new { x.EnrollmentId, x.Sequence }).IsUnique();
+        model.Entity<HostResourceObservation>().HasIndex(x => new { x.PhysicalHostId, x.PhysicalRevision }).IsUnique();
+        model.Entity<HostResourceObservation>().HasIndex(x => new { x.EnrollmentId, x.WorkspaceId, x.Sequence });
+        model.Entity<HostResourceObservation>().HasOne<HostExecutorEnrollment>().WithMany().HasForeignKey(x => x.EnrollmentId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceReservation>().HasIndex(x => x.RequestId).IsUnique();
+        model.Entity<HostResourceReservation>().HasIndex(x => new { x.PhysicalHostId, x.CanonicalWorkspaceIdentity }).IsUnique()
+            .HasFilter("State IN ('Held', 'EffectCommitted', 'Unknown')");
+        model.Entity<HostResourceReservation>().HasIndex(x => new { x.PhysicalHostId, x.Port }).IsUnique()
+            .HasFilter("Port IS NOT NULL AND State IN ('Held', 'EffectCommitted', 'Unknown')");
+        model.Entity<HostResourceReservation>().HasIndex(x => new { x.PhysicalHostId, x.SharedResourceKey }).IsUnique()
+            .HasFilter("SharedResourceKey IS NOT NULL AND State IN ('Held', 'EffectCommitted', 'Unknown')");
+        model.Entity<HostResourceReservation>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<HostResourceReservation>().HasOne<HostExecutorEnrollment>().WithMany().HasForeignKey(x => x.EnrollmentId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceReservation>().HasOne<HostResourcePolicy>().WithMany()
+            .HasForeignKey(x => new { x.PolicyId, x.PolicyRevision }).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceReservation>().HasOne<HostResourceObservation>().WithMany()
+            .HasForeignKey(x => x.ObservationId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceReservation>().HasOne<HostResourceObservation>().WithMany()
+            .HasForeignKey(x => x.ReleaseObservationId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceMutationReceipt>().HasKey(x => x.RequestId);
         model.Entity<ProviderPool>();
         model.Entity<ProviderFailureReceipt>();
         model.Entity<ProviderFallbackReceipt>().HasIndex(x => x.SourceCommandId).IsUnique();
