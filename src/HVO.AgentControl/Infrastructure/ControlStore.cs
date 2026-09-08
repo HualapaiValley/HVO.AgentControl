@@ -388,6 +388,8 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             }
         }
         command.UpdatedAt = Now;
+        if (action == "cancel" && command.State == Delivery.Cancelled && command.Kind == "Prompt")
+            await ObserveProviderCompletion(db, command, false);
         if (command.State == Delivery.Cancelled && await db.Assignments.FindAsync(id) is { } assignment) assignment.Outcome = "Cancelled";
         if (command.State == Delivery.Cancelled && command.Kind == "CreateWorker")
             await db.WorkspaceClaims.Where(x => x.CommandId == id && x.WorkerId == null).ExecuteDeleteAsync();

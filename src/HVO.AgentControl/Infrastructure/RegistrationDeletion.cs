@@ -93,5 +93,6 @@ public sealed partial class ControlStore
 
     private static Task<bool> Unresolved(ControlDb db, string runtimeId, string? workerId) => db.Commands.AnyAsync(x =>
         x.RuntimeId == runtimeId && (workerId == null || x.WorkerId == workerId) &&
-        (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown));
+        (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown ||
+         db.Set<ProviderPool>().Any(p => p.RecoveryCommandId == x.Id)));
 }

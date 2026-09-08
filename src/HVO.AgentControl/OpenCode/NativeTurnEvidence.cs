@@ -2,6 +2,16 @@ using System.Text.Json;
 
 namespace HVO.AgentControl.OpenCode;
 
+public sealed record AutomaticCompactionFailure(
+    JsonElement Summary,
+    string CompactionMessageId,
+    string SummaryMessageId,
+    string SessionId,
+    string? ProviderId,
+    string? ModelId,
+    string? ErrorName,
+    JsonElement Error);
+
 public static class NativeTurnEvidence
 {
     public static JsonElement[] AssistantMessages(JsonElement[] messages, string? callerId)
@@ -36,6 +46,56 @@ public static class NativeTurnEvidence
                 result.Add(message);
         }
         return result.ToArray();
+    }
+
+    public static AutomaticCompactionFailure? CompletedAutomaticCompactionFailure(JsonElement[] messages, string? callerId,
+        string expectedSessionId)
+    {
+        if (string.IsNullOrEmpty(callerId) || string.IsNullOrEmpty(expectedSessionId)) return null;
+        var ordered = messages.OrderBy(x => x.GetProperty("info").GetProperty("time").GetProperty("created").GetInt64())
+            .ThenBy(x => x.GetProperty("info").GetProperty("id").GetString(), StringComparer.Ordinal).ToArray();
+        var start = Array.FindIndex(ordered, x => x.GetProperty("info").GetProperty("id").GetString() == callerId);
+        if (start < 0) return null;
+        var caller = ordered[start].GetProperty("info");
+        var session = BoundedText(caller, "sessionID");
+        if (caller.GetProperty("role").GetString() != "user" || session != expectedSessionId) return null;
+        string? compactionId = null;
+        AutomaticCompactionFailure? failure = null;
+        foreach (var message in ordered.Skip(start + 1))
+        {
+            var info = message.GetProperty("info");
+            if (session is not null && (!info.TryGetProperty("sessionID", out var currentSession) || currentSession.GetString() != session)) continue;
+            if (info.GetProperty("role").GetString() == "user")
+            {
+                var parts = message.GetProperty("parts").EnumerateArray().ToArray();
+                if (parts.Length > 0 && parts.All(x => x.GetProperty("type").GetString() == "compaction" && IsTrue(x, "auto")))
+                {
+                    compactionId = BoundedText(info, "id");
+                    failure = null;
+                    continue;
+                }
+                if (compactionId is not null && parts.Length > 0 && parts.All(x => x.GetProperty("type").GetString() == "text" &&
+                    IsTrue(x, "synthetic") && x.TryGetProperty("metadata", out var metadata) && IsTrue(metadata, "compaction_continue")))
+                {
+                    compactionId = null;
+                    failure = null;
+                    continue;
+                }
+                break;
+            }
+            if (compactionId is null || info.GetProperty("role").GetString() != "assistant" || !IsTrue(info, "summary") ||
+                !info.TryGetProperty("parentID", out var parent) || parent.GetString() != compactionId ||
+                !info.GetProperty("time").TryGetProperty("completed", out var completed) || completed.ValueKind != JsonValueKind.Number ||
+                !info.TryGetProperty("error", out var error) || error.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) continue;
+            var summaryId = BoundedText(info, "id");
+            var summarySession = BoundedText(info, "sessionID");
+            if (summaryId is null || summarySession is null) continue;
+            var providerId = ConsistentRoute(info, "providerID", "providerID");
+            var modelId = ConsistentRoute(info, "modelID", "id");
+            failure = new(message, compactionId, summaryId, summarySession, providerId, modelId,
+                error.ValueKind == JsonValueKind.Object ? BoundedText(error, "name") : null, error);
+        }
+        return failure;
     }
 
     public static bool IsTerminalAssistantResponse(JsonElement message)
@@ -83,4 +143,20 @@ public static class NativeTurnEvidence
 
     private static bool IsTrue(JsonElement value, string property) =>
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(property, out var found) && found.ValueKind == JsonValueKind.True;
+
+    private static string? ConsistentRoute(JsonElement info, string topLevelName, string nestedName)
+    {
+        var direct = BoundedText(info, topLevelName);
+        var nested = info.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.Object
+            ? BoundedText(model, nestedName) : null;
+        return direct is not null && nested is not null && direct != nested ? null : direct ?? nested;
+    }
+
+    private static string? BoundedText(JsonElement value, string property)
+    {
+        if (!value.TryGetProperty(property, out var found) || found.ValueKind != JsonValueKind.String) return null;
+        var text = found.GetString();
+        return text is { Length: > 0 and <= 200 } && !string.IsNullOrWhiteSpace(text) && text.All(x => !char.IsControl(x))
+            ? text : null;
+    }
 }
