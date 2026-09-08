@@ -354,10 +354,18 @@ public sealed partial class ControlStore
             !requests.Any(request => request.WorkerId == x.Id)).Select(x => x.Id).Order().ToArray();
         var runtimeIds = participants.Select(x => x.RuntimeId).Distinct().ToArray();
         var grants = await db.Set<HVO.AgentControl.GitHub.GitHubAccess>().AsNoTracking().Where(x => runtimeIds.Contains(x.Id)).ToArrayAsync();
+        var githubRuntimes = await db.Runtimes.AsNoTracking().Where(x => runtimeIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id);
+        var nativeByRuntime = new Dictionary<string, NativeProcessObservationEvidence>();
+        foreach (var id in runtimeIds)
+        {
+            var observed = await db.Events.AsNoTracking().Where(x => x.RuntimeId == id && x.Type == "NativeProcessObserved")
+                .OrderByDescending(x => x.Sequence).FirstOrDefaultAsync();
+            if (observed is not null) nativeByRuntime[id] = Json.Read<NativeProcessObservationEvidence>(observed.Payload);
+        }
         var github = runtimeIds.Order().Select(id =>
         {
             var grant = grants.SingleOrDefault(x => x.Id == id);
-            return new CoordinatorGitHubAccess(id, grant?.ExactCiInspectionState ?? "NotConfigured",
+            return new CoordinatorGitHubAccess(id, grant?.CiInspectionState(Now, githubRuntimes.GetValueOrDefault(id), nativeByRuntime.GetValueOrDefault(id)) ?? "NotConfigured",
                 grant?.ChecksPermission ?? "Unknown", grant?.CommitStatusesPermission ?? "Unknown",
                 grant?.ActionsPermission ?? "Unknown", grant?.PermissionsVerifiedAt);
         }).ToArray();

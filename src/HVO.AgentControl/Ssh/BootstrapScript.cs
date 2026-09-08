@@ -1,10 +1,25 @@
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Infrastructure;
 
 namespace HVO.AgentControl.Ssh;
 
 public static class BootstrapScript
 {
     public const string Version = "1.18.29";
+
+    public static string ManagedGitHubConfigDirectory(RuntimeRecord runtime)
+    {
+        ControlStore.ValidatePath(runtime.StateDirectory);
+        var state = runtime.StateDirectory.TrimEnd('/');
+        if (state.Length == 0) throw new ControlException("Bootstrap state must not be the filesystem root.", 400);
+        return state + "/gh-config";
+    }
+
+    public static string ServerEnvironment(RuntimeRecord runtime, string password) =>
+        "export OPENCODE_SERVER_USERNAME=opencode\n" +
+        "export OPENCODE_SERVER_PASSWORD=" + Quote(password) + "\n" +
+        "export GH_CONFIG_DIR=" + Quote(ManagedGitHubConfigDirectory(runtime)) + "\n";
+
     public static string Quote(string value)
     {
         if (value.Contains('\0')) throw new ControlException("NUL is not a shell argument.", 400);
