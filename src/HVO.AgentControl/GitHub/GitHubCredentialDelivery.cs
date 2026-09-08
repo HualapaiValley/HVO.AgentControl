@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Ssh;
@@ -9,7 +8,8 @@ namespace HVO.AgentControl.GitHub;
 
 public sealed class GitHubCredentialDelivery(Secrets secrets)
 {
-    internal Task<GitHubProcessEnvironmentEvidence> Deliver(RuntimeRecord runtime, GitHubInstallationToken credential, CancellationToken token) =>
+    internal Task<GitHubProcessEnvironmentEvidence> Deliver(RuntimeRecord runtime, GitHubInstallationToken credential,
+        CancellationToken token, string? previousConfigurationFingerprint = null) =>
         WithSsh(runtime, token, async (ssh, connection) =>
         {
             var directory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
@@ -42,6 +42,9 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
                 var hosts = Read(sftp, hostsPath);
                 if (!IsExclusivelyManagedHosts(hosts, credential.Actor))
                     throw new ControlException("Existing GitHub configuration contains accounts or hosts outside AgentControl; refusing replacement.");
+                if (!string.IsNullOrEmpty(previousConfigurationFingerprint) &&
+                    GitHubProcessEnvironment.CredentialFingerprint(hosts) != previousConfigurationFingerprint)
+                    throw new ControlException("Existing managed GitHub credential changed after delivery; refusing replacement.");
             }
             Write(sftp, directory + "/.agentcontrol-owner", runtime.ManagedServerId);
             // JSON strings are valid YAML scalars. Credentials travel over SFTP, never shell arguments.
@@ -96,46 +99,16 @@ public sealed class GitHubCredentialDelivery(Secrets secrets)
 
     public static string HostsYaml(GitHubInstallationToken credential)
     {
-        var actor = System.Text.Json.JsonSerializer.Serialize(credential.Actor);
-        var value = System.Text.Json.JsonSerializer.Serialize(credential.Value);
         // Supply the bot identity and both legacy/current token locations. Otherwise gh's
         // multi-account migration calls /user, which installation tokens cannot satisfy.
-        return $"github.com:\n    user: {actor}\n    oauth_token: {value}\n    git_protocol: https\n    users:\n        {actor}:\n            oauth_token: {value}\n";
+        return ManagedGitHubHosts.Format(credential.Actor, credential.Value);
     }
 
-    public static bool IsExclusivelyManagedHosts(string hosts, string actor)
-    {
-        var actorYaml = JsonSerializer.Serialize(actor);
-        var lines = hosts.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-        if (hosts.Contains('\r') || lines.Length != 8 || lines[7].Length != 0 ||
-            lines[0] != "github.com:" ||
-            lines[1] != "    user: " + actorYaml ||
-            lines[3] != "    git_protocol: https" ||
-            lines[4] != "    users:" ||
-            lines[5] != "        " + actorYaml + ":") return false;
-
-        const string primaryPrefix = "    oauth_token: ";
-        const string userPrefix = "            oauth_token: ";
-        if (!lines[2].StartsWith(primaryPrefix, StringComparison.Ordinal) ||
-            !lines[6].StartsWith(userPrefix, StringComparison.Ordinal)) return false;
-        var primary = lines[2][primaryPrefix.Length..];
-        var user = lines[6][userPrefix.Length..];
-        return JsonScalarIsCanonical(primary) && primary == user;
-    }
+    public static bool IsExclusivelyManagedHosts(string hosts, string actor) =>
+        ManagedGitHubHosts.TryCanonicalize(hosts, actor, out _);
 
     public static bool IsManagedConfigurationReplacementAllowed(bool hostsExist, string? owner, string managedServerId) =>
         hostsExist ? owner == managedServerId : owner is null;
-
-    private static bool JsonScalarIsCanonical(string value)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(value);
-            return document.RootElement.ValueKind == JsonValueKind.String &&
-                JsonSerializer.Serialize(document.RootElement.GetString()) == value;
-        }
-        catch (JsonException) { return false; }
-    }
 
     private static void Write(SftpClient sftp, string path, string text)
     {
