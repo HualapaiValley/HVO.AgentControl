@@ -8,6 +8,33 @@ public static class NativeProcessProbe
 {
     public const string Provenance = "SshBootstrap";
 
+    public static string LiveScript(RuntimeRecord runtime) => $$"""
+        test "$(uname -s)" = Linux || { printf 'OBSERVATION\tUnsupported\tUnknown\t\t\n'; exit 0; }
+        test "$(cat {{BootstrapScript.Quote(runtime.StateDirectory + "/owner")}})" = {{BootstrapScript.Quote(runtime.ManagedServerId + ":" + runtime.ApiPort)}} || exit 33
+        test "$(tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} show-option -v -t managed @hvo-owner)" = {{BootstrapScript.Quote(runtime.ManagedServerId)}} || exit 33
+        pane=$(tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} display-message -p -t managed '#{pane_pid} #{pane_dead}') || exit 33
+        set -- $pane
+        test "$#" = 2 && test "$2" = 0 || exit 33
+        pid=$1
+        case "$pid" in ''|*[!0-9]*) exit 33;; esac
+        live_marker() {
+          test -r "/proc/$pid/stat" && test -r /proc/sys/kernel/random/boot_id && kill -0 "$pid" || return 33
+          stat=$(cat "/proc/$pid/stat") || return 33
+          rest=${stat##*) }; index=1; start=''
+          process_state=${rest%% *}
+          test "$process_state" != Z && test "$process_state" != X || return 33
+          for field in $rest; do [ "$index" = 20 ] && start=$field; index=$((index+1)); done
+          case "$start" in ''|*[!0-9]*) return 33;; esac
+          boot=$(cat /proc/sys/kernel/random/boot_id) || return 33
+          printf '%s:%s' "$boot" "$start"
+        }
+        marker=$(live_marker) || exit 33
+        test "$(tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} display-message -p -t managed '#{pane_pid} #{pane_dead}')" = "$pane" || exit 33
+        test "$(tmux -L {{BootstrapScript.Quote(runtime.TmuxName)}} show-option -v -t managed @hvo-owner)" = {{BootstrapScript.Quote(runtime.ManagedServerId)}} || exit 33
+        current=$(live_marker) && test "$current" = "$marker" || exit 33
+        printf 'OBSERVATION\tObserved\tLinux\t%s\t%s\n' "$pid" "$marker"
+        """;
+
     public static string ReadScript(RuntimeRecord runtime) => $$"""
         test "$(cat {{BootstrapScript.Quote(runtime.StateDirectory + "/owner")}})" = {{BootstrapScript.Quote(runtime.ManagedServerId + ":" + runtime.ApiPort)}} || { echo OWNERSHIP_CONFLICT; exit 33; }
         if test -r {{BootstrapScript.Quote(runtime.StateDirectory + "/native-process-current")}}; then

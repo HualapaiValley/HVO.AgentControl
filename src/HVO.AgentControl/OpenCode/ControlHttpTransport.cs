@@ -28,6 +28,11 @@ public sealed class ControlHttpTransport(OpenCodeClient api, ControlServiceRecor
     public OpenCodeClient Api => api;
     public bool Connected => true; // HTTP health/SSE observation establishes reachability; no invented SSH process.
     public string Platform => "OpenCode control sidecar";
+    public async Task<RuntimeProcessIdentity?> ProbeProcessIdentity(CancellationToken token)
+    {
+        var identity = await ReadIdentity(api, service.InstanceId, token);
+        return new(RuntimeConnections.ControlHttp, identity.InstanceId, identity.IncarnationId, null, ControlStore.Now);
+    }
     public async Task ValidateConnection(CancellationToken token)
     {
         var identity = await ReadIdentity(api, service.InstanceId, token);

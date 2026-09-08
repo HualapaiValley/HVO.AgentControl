@@ -59,6 +59,7 @@ public sealed class ProviderKeyTests
         await service.Save(new(Key, 0));
         var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
         Assert.Equal(expected, Assert.Single(status.Deliveries).State);
+        Assert.Equal(fail ? "Unknown" : "RefreshCompleted", Assert.Single(status.Readiness).State);
         Assert.Equal(1, native.Calls);
         Assert.DoesNotContain(Key, Json.Write(status));
         Assert.DoesNotContain(Key, Json.Write(await app.Store.Read(db => db.Events.ToListAsync())));
@@ -67,6 +68,194 @@ public sealed class ProviderKeyTests
         await Assert.ThrowsAsync<ControlException>(() => service.Apply(runtime.Id, new(1), CancellationToken.None));
         Assert.Equal(1, native.Calls);
         Assert.Equal(1, Assert.Single((await service.Status()).Deliveries).KeyRevision);
+    }
+
+    [Theory]
+    [InlineData(false, "RefreshCompleted", 1)]
+    [InlineData(true, "RefreshRequired", 0)]
+    public async Task ApplyingKeyRefreshesOnlyIdleAffectedWorkspaceInstances(bool activeSession, string expectedState, int expectedDisposals)
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_root",
+                Directory = "/workspace",
+                ProviderId = ProviderKeyService.ProviderId,
+                ModelId = "go-model",
+                Activity = "Idle",
+                Stale = false
+            });
+            return Task.FromResult(true);
+        });
+        var native = new RefreshHandler(activeSession);
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(native));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        var readiness = Assert.Single(status.Readiness);
+        Assert.Equal(expectedState, readiness.State);
+        Assert.Equal(1, native.AuthCalls);
+        Assert.Equal(expectedDisposals, native.DisposeCalls);
+        Assert.All(native.DisposePaths, path => Assert.Equal("/instance/dispose", path));
+        Assert.DoesNotContain(Key, Json.Write(status));
+        Assert.DoesNotContain(Key, Json.Write(await app.Store.Read(db => db.Events.ToListAsync())));
+    }
+
+    [Theory]
+    [InlineData(true, false, "Unknown")]
+    [InlineData(false, true, "Unknown")]
+    public async Task LostOrMismatchedDisposalCompletionRetainsAllProviderHold(bool lostEvent, bool mismatchedDirectory, string expected)
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_root",
+                Directory = "/workspace",
+                ProviderId = ProviderKeyService.ProviderId,
+                ModelId = "go-model",
+                Activity = "Idle",
+                Stale = false
+            });
+            return Task.FromResult(true);
+        });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(new RefreshHandler(false, false, lostEvent, mismatchedDirectory)));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        Assert.Equal(expected, Assert.Single(status.Readiness).State);
+        await Assert.ThrowsAsync<ControlException>(() => service.AttestReady(runtime.Id, new(1, true)));
+    }
+
+    [Fact]
+    public async Task SavingV2WithoutApplyingItRejectsV1ReadinessAttestation()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db => { db.Runtimes.Add(runtime); return Task.FromResult(true); });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new Factory(new Handler(false)));
+        await service.Save(new(Key, 0));
+        await service.Apply(runtime.Id, new(1), CancellationToken.None);
+        await service.Save(new("v2-fixture-key", 1));
+
+        await Assert.ThrowsAsync<ControlException>(() => service.AttestReady(runtime.Id, new(1, true)));
+        Assert.Equal(2, (await service.Status()).Revision);
+    }
+
+    [Fact]
+    public async Task LostCredentialDeliveryResponseParksReadinessWithoutDisposingInstances()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db => { db.Runtimes.Add(runtime); return Task.FromResult(true); });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new Factory(new Handler(true)));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        var readiness = Assert.Single(status.Readiness);
+        Assert.Equal("Unknown", readiness.State);
+        Assert.DoesNotContain(Key, readiness.Detail);
+    }
+
+    [Fact]
+    public async Task ExternalCanaryAttestationTransitionsRefreshCompletedToReady()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db => { db.Runtimes.Add(runtime); return Task.FromResult(true); });
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new Factory(new Handler(false)));
+        await service.Save(new(Key, 0));
+        await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        var status = await service.AttestReady(runtime.Id, new(1, true));
+
+        Assert.Equal("Ready", Assert.Single(status.Readiness).State);
+        await Assert.ThrowsAsync<ControlException>(() => service.AttestReady(runtime.Id, new(1, false)));
+    }
+
+    [Fact]
+    public async Task OutstandingManagedDeliveryPreventsScopedDisposal()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        var worker = new WorkerRecord
+        {
+            RuntimeId = runtime.Id,
+            ManagedServerId = runtime.ManagedServerId,
+            NativeSessionId = "ses_root",
+            Directory = "/workspace",
+            ProviderId = ProviderKeyService.ProviderId,
+            ModelId = "go-model",
+            Activity = "Idle",
+            Stale = false
+        };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(worker);
+            db.Commands.Add(new CommandRecord
+            {
+                RuntimeId = runtime.Id,
+                WorkerId = worker.Id,
+                Kind = "Prompt",
+                State = Delivery.Accepted,
+                Payload = Json.Write(new PromptInput("pending", "Task", worker.Revision))
+            });
+            return Task.FromResult(true);
+        });
+        var native = new RefreshHandler(false);
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(native));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        Assert.Equal("RefreshRequired", Assert.Single(status.Readiness).State);
+        Assert.Equal(0, native.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task ActiveStatusOutsideSessionListingPreventsScopedDisposal()
+    {
+        await using var app = new TestApp();
+        var runtime = new RuntimeRecord { DesiredConnected = true, Health = "Healthy" };
+        await app.Store.Write(db =>
+        {
+            db.Runtimes.Add(runtime);
+            db.Workers.Add(new WorkerRecord
+            {
+                RuntimeId = runtime.Id,
+                ManagedServerId = runtime.ManagedServerId,
+                NativeSessionId = "ses_root",
+                Directory = "/workspace",
+                ProviderId = ProviderKeyService.ProviderId,
+                ModelId = "go-model",
+                Activity = "Idle",
+                Stale = false
+            });
+            return Task.FromResult(true);
+        });
+        var native = new RefreshHandler(false, unlistedActive: true);
+        var service = new ProviderKeyService(app.Store, app.Services.GetRequiredService<Secrets>(), new RefreshFactory(native));
+        await service.Save(new(Key, 0));
+
+        var status = await service.Apply(runtime.Id, new(1), CancellationToken.None);
+
+        Assert.Equal("RefreshRequired", Assert.Single(status.Readiness).State);
+        Assert.Equal(0, native.DisposeCalls);
     }
 
     private sealed class Handler(bool fail) : HttpMessageHandler
@@ -85,11 +274,66 @@ public sealed class ProviderKeyTests
     private sealed class Factory(Handler handler) : IRuntimeTransportFactory
     {
         public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
-            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") })));
+            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") }), runtime.ManagedServerId));
     }
-    private sealed class Transport(OpenCodeClient api) : IRuntimeTransport
+    private sealed class RefreshHandler(bool activeSession, bool unlistedActive = false, bool lostEvent = false, bool mismatchedDirectory = false) : HttpMessageHandler
+    {
+        public int AuthCalls { get; private set; }
+        public int DisposeCalls { get; private set; }
+        public List<string> DisposePaths { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Put && path == "/auth/opencode-go")
+            {
+                AuthCalls++;
+                return Json(true);
+            }
+            if (request.Method == HttpMethod.Get && path == "/session")
+                return Json(new[] { new { id = "ses_root", parentID = (string?)null }, new { id = "ses_child", parentID = (string?)"ses_root" } });
+            if (request.Method == HttpMethod.Get && path == "/session/status")
+                return Json(activeSession ? new Dictionary<string, object> { ["ses_child"] = new { type = "busy" } } :
+                    unlistedActive ? new Dictionary<string, object> { ["ses_external"] = new { type = "busy" } } : new Dictionary<string, object>());
+            if (request.Method == HttpMethod.Post && path == "/instance/dispose")
+            {
+                DisposeCalls++;
+                DisposePaths.Add(path);
+                return Json(true);
+            }
+            if (request.Method == HttpMethod.Get && path == "/global/event")
+            {
+                var eventData = lostEvent ? "" : "data: {\"directory\":\"/workspace\",\"payload\":{\"type\":\"server.instance.disposed\",\"properties\":{\"directory\":\"" +
+                    (mismatchedDirectory ? "/other" : "/workspace") + "\"}}}\n\n";
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(eventData)
+                };
+                response.Content.Headers.ContentType = new("text/event-stream");
+                return Task.FromResult(response);
+            }
+            if (request.Method == HttpMethod.Get && path == "/provider")
+                return Json(new { connected = new[] { ProviderKeyService.ProviderId }, all = new[] { new { id = ProviderKeyService.ProviderId, models = new Dictionary<string, object> { ["go-model"] = new { } } } } });
+            throw new Xunit.Sdk.XunitException("Unexpected native request: " + request.Method + " " + request.RequestUri);
+        }
+
+        private static Task<HttpResponseMessage> Json<T>(T value) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(value)
+        });
+    }
+    private sealed class RefreshFactory(RefreshHandler handler) : IRuntimeTransportFactory
+    {
+        public Task<IRuntimeTransport> Connect(RuntimeRecord runtime, CancellationToken cancellationToken) =>
+            Task.FromResult<IRuntimeTransport>(new Transport(new(new HttpClient(handler) { BaseAddress = new("http://localhost") }), runtime.ManagedServerId));
+    }
+    private sealed class Transport(OpenCodeClient api, string ownerId) : IRuntimeTransport
     {
         public OpenCodeClient Api => api;
+        public NativeProcessObservation? NativeProcess { get; } = new("server", NativeProcessObservationState.Observed,
+            "fixture", 7, "fixture-incarnation", ControlStore.Now, "SyntheticTest", "fixture", []);
+        public Task<RuntimeProcessIdentity?> ProbeProcessIdentity(CancellationToken token) =>
+            Task.FromResult<RuntimeProcessIdentity?>(new(RuntimeConnections.Ssh, ownerId, "fixture-incarnation", 7, ControlStore.Now));
         public bool Connected => true;
         public string Platform => "fixture";
         public Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken) => throw new NotSupportedException();
