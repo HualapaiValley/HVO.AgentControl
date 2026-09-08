@@ -235,6 +235,12 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 var key = await db.Set<ProviderCredential>().FindAsync(ProviderId) ?? throw new ControlException("Save the OpenCode Go key first.");
                 if (key.Revision != input.ExpectedRevision) throw new ControlException("The saved key changed. Refresh before recording evidence.");
                 var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync(ProviderId + ":" + runtimeId) ?? throw new ControlException("Apply and refresh the saved key before recording evidence.");
+                var delivery = await db.Set<ProviderKeyDelivery>().FindAsync(ProviderId + ":" + runtimeId);
+                var instance = await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + runtimeId);
+                if (receipt.KeyRevision != key.Revision || receipt.State != "RefreshCompleted" ||
+                    delivery?.KeyRevision != key.Revision || delivery.State != "StoredOnRuntime" ||
+                    instance?.KeyRevision != key.Revision || instance.State != "RefreshCompleted")
+                    throw new ControlException("Apply and complete a refresh of this exact key revision before recording evidence.");
                 receipt.State = "Ready"; receipt.Detail = "External canary evidence recorded; model access was not inferred from catalogue data."; receipt.UpdatedAt = ControlStore.Now;
                 ControlStore.Event(db, "ProviderReadinessChanged", runtimeId, payload: new { ProviderId, key.Revision, state = receipt.State }, provenance: "user");
                 return true;
