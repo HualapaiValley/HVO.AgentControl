@@ -116,7 +116,8 @@ jobs:
           export HVO_OWNER_PASSWORD_FILE="$PWD/artifacts/ui-secrets/owner-password"
           python3 tests/Browser/seed-provider-pool.py artifacts/ui-data/agentcontrol.db
           python3 tests/Browser/seed-coordination-supervision.py artifacts/ui-data/agentcontrol.db
-          HVO_PROVIDER_POOL_FIXTURE=1 HVO_PROVIDER_KEY_FIXTURE=1 HVO_COORDINATION_SUPERVISION_FIXTURE=1 node tests/Browser/package-smoke.cjs
+          python3 tests/Browser/seed-conversation-race.py artifacts/ui-data/agentcontrol.db
+          HVO_PROVIDER_POOL_FIXTURE=1 HVO_PROVIDER_KEY_FIXTURE=1 HVO_COORDINATION_SUPERVISION_FIXTURE=1 HVO_CONVERSATION_RACE_FIXTURE=1 node tests/Browser/package-smoke.cjs
       - name: Upload UI diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
