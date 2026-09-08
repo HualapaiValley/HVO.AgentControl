@@ -37,6 +37,7 @@ public sealed class ProviderReadinessReceipt
 
 public sealed record SaveProviderKey(string Key, long ExpectedRevision);
 public sealed record ApplyProviderKey(long ExpectedRevision);
+public sealed record AttestProviderReady(long ExpectedRevision, bool ExternalCanaryObserved);
 public sealed record ProviderKeyStatus(string ProviderId, bool Saved, long Revision, long? UpdatedAt,
     List<ProviderKeyDelivery> Deliveries, List<ProviderReadinessReceipt> Readiness);
 
@@ -105,6 +106,11 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 receipt.KeyRevision = key.Revision; receipt.State = "RefreshRequired";
                 receipt.Detail = "Credential delivery is pending; native provider state was not refreshed.";
                 receipt.UpdatedAt = ControlStore.Now;
+                var instance = await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + runtimeId);
+                if (instance is null) { instance = new() { Id = "instance:" + runtimeId, RuntimeId = runtimeId, ProviderId = "instance" }; db.Add(instance); }
+                instance.KeyRevision = key.Revision; instance.State = "RefreshRequired";
+                instance.Detail = "Credential delivery is pending; affected native instances are not safe to dispatch.";
+                instance.UpdatedAt = ControlStore.Now;
                 ControlStore.Event(db, "ProviderKeyDeliveryChanged", runtimeId, payload: new { ProviderId, revision = key.Revision, state = delivery.State }, provenance: "user");
                 ControlStore.Event(db, "ProviderReadinessChanged", runtimeId, payload: new { ProviderId, revision = key.Revision, state = receipt.State }, provenance: "user");
                 return (runtime, key.SecretReference, key.Revision);
@@ -159,21 +165,27 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                 return true;
             });
 
+            Task<bool> InstanceReadiness(string state, string detail) => store.Write(async db =>
+            {
+                var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + runtimeId);
+                if (receipt is null) { receipt = new() { Id = "instance:" + runtimeId, RuntimeId = runtimeId, ProviderId = "instance" }; db.Add(receipt); }
+                receipt.KeyRevision = revision; receipt.State = state; receipt.Detail = detail; receipt.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "ProviderInstanceRefreshChanged", runtimeId, payload: new { revision, state }, provenance: "user");
+                return true;
+            });
+
             async Task Refresh(OpenCode.OpenCodeClient api, string id, CancellationToken cancellation)
             {
-                var directories = await store.Read(async db => await db.Workers.Where(x => x.RuntimeId == id && !x.Archived)
-                    .Select(x => x.Directory).Distinct().ToListAsync());
-                if (directories.Count == 0)
-                {
-                    await Readiness("RefreshCompleted", "No managed workspace has cached provider state; model access is not yet tested.");
-                    return;
-                }
+                var directories = (await store.Read(async db => await db.Workers.Where(x => x.RuntimeId == id && !x.Archived)
+                    .Select(x => x.Directory).Distinct().ToListAsync())).Concat(ControlStore.Roots(runtime)).Distinct().ToList();
                 await Readiness("Refreshing", "Waiting for fresh idle evidence before scoped native refresh.");
+                await InstanceReadiness("Refreshing", "Waiting for all affected native instances to become idle.");
                 var outstanding = await store.Read(db => db.Commands.AnyAsync(x => x.RuntimeId == id && x.Kind == "Prompt" &&
                     (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)));
                 if (outstanding)
                 {
                     await Readiness("RefreshRequired", "A managed delivery is outstanding; no instance was disposed.");
+                    await InstanceReadiness("RefreshRequired", "A managed delivery is outstanding; no instance was disposed.");
                     return;
                 }
                 foreach (var directory in directories)
@@ -181,6 +193,7 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                     if (!await SessionsIdle(directory))
                     {
                         await Readiness("RefreshRequired", "A managed or child native session is active or cannot be observed; no instance was disposed.");
+                        await InstanceReadiness("RefreshRequired", "A managed or child native session is active or cannot be observed; no instance was disposed.");
                         return;
                     }
                 }
@@ -189,23 +202,44 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                     if (!await SessionsIdle(directory))
                     {
                         await Readiness("RefreshRequired", "A managed or child native session became active; no further instance was disposed.");
+                        await InstanceReadiness("RefreshRequired", "A managed or child native session became active; no further instance was disposed.");
                         return;
                     }
                     await api.DisposeInstance(directory, cancellation);
                     await api.Models(directory, cancellation);
                 }
                 await Readiness("RefreshCompleted", "Scoped native provider caches were refreshed after fresh idle evidence; model access is not yet tested.");
+                await InstanceReadiness("RefreshCompleted", "Affected native caches were refreshed; model access remains untested.");
 
                 async Task<bool> SessionsIdle(string directory)
                 {
                     var sessions = await api.Sessions(directory, cancellation);
                     var statuses = await api.SessionStatuses(directory, cancellation);
                     return sessions.ValueKind == System.Text.Json.JsonValueKind.Array && statuses.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                        sessions.EnumerateArray().All(session => session.TryGetProperty("id", out var sessionId) && sessionId.ValueKind == System.Text.Json.JsonValueKind.String &&
-                            statuses.TryGetProperty(sessionId.GetString()!, out var status) && status.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                                status.TryGetProperty("type", out var type) && type.GetString() == "idle");
+                        statuses.EnumerateObject().All(status => status.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                            status.Value.TryGetProperty("type", out var type) && type.GetString() == "idle");
                 }
             }
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task<ProviderKeyStatus> AttestReady(string runtimeId, AttestProviderReady input)
+    {
+        if (!input.ExternalCanaryObserved) throw new ControlException("Record external canary evidence before enabling provider dispatch.");
+        await gate.WaitAsync();
+        try
+        {
+            await store.Write(async db =>
+            {
+                var key = await db.Set<ProviderCredential>().FindAsync(ProviderId) ?? throw new ControlException("Save the OpenCode Go key first.");
+                if (key.Revision != input.ExpectedRevision) throw new ControlException("The saved key changed. Refresh before recording evidence.");
+                var receipt = await db.Set<ProviderReadinessReceipt>().FindAsync(ProviderId + ":" + runtimeId) ?? throw new ControlException("Apply and refresh the saved key before recording evidence.");
+                receipt.State = "Ready"; receipt.Detail = "External canary evidence recorded; model access was not inferred from catalogue data."; receipt.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "ProviderReadinessChanged", runtimeId, payload: new { ProviderId, key.Revision, state = receipt.State }, provenance: "user");
+                return true;
+            });
+            return await Status();
         }
         finally { gate.Release(); }
     }
