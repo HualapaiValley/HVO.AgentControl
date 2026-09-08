@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260908070754_TaskBindings")]
+    partial class TaskBindings
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -164,94 +167,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("State", "QueueOrder");
 
                     b.ToTable("Commands");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.ControlServiceRecord", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Endpoint")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("IncarnationId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("InstanceId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("LastObservedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("Revision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("StartedAt")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("InstanceId")
-                        .IsUnique();
-
-                    b.ToTable("ControlServices");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.ControlSessionBinding", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ControlServiceId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CreationCommandId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Detail")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("NativeSessionId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("Revision")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ScopeId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ScopeKind")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("State")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("WorkerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ControlServiceId");
-
-                    b.HasIndex("WorkerId")
-                        .IsUnique();
-
-                    b.HasIndex("ScopeKind", "ScopeId")
-                        .IsUnique();
-
-                    b.ToTable("ControlSessions");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.CoordinationRun", b =>
@@ -895,12 +810,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<int>("Capacity")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("ConnectionKind")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT")
-                        .HasDefaultValue("Ssh");
-
                     b.Property<string>("CredentialReference")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -1461,8 +1370,7 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasKey("Id");
 
                     b.HasIndex("RuntimeId", "Directory")
-                        .IsUnique()
-                        .HasFilter("Role != 'Coordinator'");
+                        .IsUnique();
 
                     b.HasIndex("RuntimeId", "ManagedServerId", "NativeSessionId")
                         .IsUnique();
@@ -1820,24 +1728,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("RuntimeId", "ObservedAt", "Sequence");
 
                     b.ToTable("TelemetryHistory");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.ControlServiceRecord", b =>
-                {
-                    b.HasOne("HVO.AgentControl.Core.RuntimeRecord", null)
-                        .WithOne()
-                        .HasForeignKey("HVO.AgentControl.Core.ControlServiceRecord", "Id")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.ControlSessionBinding", b =>
-                {
-                    b.HasOne("HVO.AgentControl.Core.ControlServiceRecord", null)
-                        .WithMany()
-                        .HasForeignKey("ControlServiceId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.RuntimeEnvironmentRecord", b =>
