@@ -242,7 +242,7 @@ public sealed class RuntimeLifecycleOwnershipTests
                 stream.Headers.ContentType = new MediaTypeHeaderValue("text/event-stream");
                 return new(HttpStatusCode.OK) { Content = stream };
             }
-            if (path == "/doc") return Reply(new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" }.ToDictionary(x => x, _ => new { }) });
+            if (path == "/doc") return Reply(new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/{sessionID}/message/{messageID}", "/session/status", "/provider", "/path" }.ToDictionary(x => x, _ => new { }) });
             if (path is "/global/health" or "/session/status") return Reply(new { healthy = true, version = BootstrapScript.Version });
             if (path == "/provider") return Reply(new { connected = Array.Empty<string>(), all = Array.Empty<object>() });
             if (path == "/session/" + worker.NativeSessionId)
