@@ -85,9 +85,26 @@ docker compose -f compose.control.yaml ps
 
 The secret creation intentionally refuses to overwrite an existing key. Keep it stable across recreation. Provider registration follows through the Control services page using existing AgentControl credential policy; this infrastructure command does not copy credentials, call a model or migrate a session. `CONTROL_OPENCODE_MEMORY_LIMIT` overrides the initial `2g` guardrail.
 
-For the forthcoming direct adapter, the web service joins this same bridge and uses `http://opencode-control:4096` with the same secret reference. Current `compose.demo.yaml` uses `network_mode: bridge` for saved SSH worker IPs; attaching the web container needs an explicit tested Compose/network change. This slice leaves that deployment intact. A browser continues to reach AgentControl through its existing host IP/port, not OpenCode.
+The direct adapter uses `http://opencode-control:4096` with the same secret reference. For the demo's saved SSH worker IPs, use the optional web overlay and host deployment helper described below to retain `network_mode: bridge` while adding the private connection. A browser continues to reach AgentControl through its existing host IP/port, not OpenCode.
 
 Native upgrades/recreation must be drained or classified as interruption. Back up the state volume while OpenCode is stopped, or use a verified native-consistent backup method; copying a live SQLite file alone is insufficient. Never run `down --volumes` as routine deployment. Retained session history is not proof that an interrupted turn resumed or that a tool had no side effect.
+
+## Transitional web deployment on the legacy Docker bridge
+
+The demo's saved SSH runtime addresses currently belong to Docker's built-in `bridge`. Compose 5.5.0 cannot declaratively attach that bridge alongside a user-defined network: clearing `network_mode` with `!reset` and declaring external network `bridge` fails container creation because Compose adds network aliases that the built-in bridge rejects. Keeping `network_mode: bridge` together with service `networks` is also invalid. This was reproduced with disposable containers; it is not a reason to change working SSH runtime addresses during the control-service cutover. [Compose networking reference](https://docs.docker.com/reference/compose-file/services/#network_mode), [Compose 5.5.0 alias construction](https://github.com/docker/compose/blob/v5.5.0/pkg/compose/create.go#L439).
+
+`compose.control.web.yaml` therefore declares an opt-in `com.hvo.agentcontrol.control-network` label while preserving the demo's network mode, data mounts and published UI port. The host-only `scripts/connect-control-network.py` resolves the web container and control network by exact Compose ownership labels, checks the sidecar's private DNS alias, and attaches the captured web container ID to the captured network ID. The new connection uses gateway priority `-1`, preserving the built-in bridge's gateway preference. Missing opt-in labels, ambiguous resources and mismatched expected identities fail before attachment. An already-correct attachment is a verified no-op; no container receives a Docker socket or Docker CLI.
+
+After starting the independent sidecar, use this deployment sequence, including any usual image override and `DEMO_BIND_ADDRESS` setting:
+
+```bash
+docker compose -f compose.demo.yaml -f compose.control.web.yaml up -d --no-deps agentcontrol
+python3 scripts/connect-control-network.py
+```
+
+The deployment workflow must invoke the helper automatically after **every** web create/recreate and before declaring deployment ready. Include the opt-in overlay in later deployments. A standalone manual `docker network connect` is insufficient because Compose recreation removes that attachment. The helper accepts `--expected-container-id` and `--expected-network-id` for deployment identity checks; these are Docker IDs, not credentials. Custom Compose project names use `--project` and `--control-project`; set `CONTROL_OPENCODE_NETWORK` to the actual control network name when rendering the overlay. It never creates or deletes a network, changes an SSH worker, stops the sidecar, or publishes its port. Membership verification is followed by the application's own authenticated service-identity and readiness checks; network membership alone does not establish native service continuity.
+
+Run `python3 tests/control_web_network_smoke.py` to exercise this transition with isolated disposable resources. It verifies legacy worker IP access and `opencode-control` DNS access from the same web container, the published loopback UI port, idempotence, web recreation followed by reconciliation, unchanged sidecar process identity, and rejection of missing labels/wrong identities without changing unrelated memberships. Tiny HTTP services stand in for the applications; this fixture does not claim real model inference or a live deployment. A later migration of all worker addresses to managed user-defined networks can replace this transitional helper with ordinary Compose network declarations.
 
 ## Restart and migration behavior
 
