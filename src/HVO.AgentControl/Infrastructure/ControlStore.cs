@@ -380,10 +380,11 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             .Union(db.Commands.AsNoTracking().Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)).ToListAsync(),
         await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync()));
 
-    public Task<WorkerDetail> Detail(string id, long? before = null) => Read(async db => new WorkerDetail(
+    public Task<WorkerDetail> Detail(string id, long? before = null, string? beforeId = null) => Read(async db => new WorkerDetail(
         await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404),
-        await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before))
-            .OrderByDescending(x => x.NativeCreatedAt).Take(options.Value.HistoryLimit).ToListAsync(),
+        await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before ||
+            beforeId != null && x.NativeCreatedAt == before && x.NativeId.CompareTo(beforeId) < 0))
+            .OrderByDescending(x => x.NativeCreatedAt).ThenByDescending(x => x.NativeId).Take(options.Value.HistoryLimit).ToListAsync(),
         await db.Commands.Where(x => x.WorkerId == id).OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync(),
         await db.Requests.Where(x => x.WorkerId == id).ToListAsync(),
         await db.Assignments.Where(x => x.WorkerId == id).ToListAsync()));
