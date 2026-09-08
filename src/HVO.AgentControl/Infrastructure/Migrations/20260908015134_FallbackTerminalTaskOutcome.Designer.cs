@@ -10,8 +10,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260908004018_FallbackFailureProvenance")]
-    partial class FallbackFailureProvenance
+    [Migration("20260908015134_FallbackTerminalTaskOutcome")]
+    partial class FallbackTerminalTaskOutcome
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -51,17 +51,39 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
             modelBuilder.Entity("HVO.AgentControl.Core.CommandAuthority", b =>
                 {
-                    b.Property<string>("Id").HasColumnType("TEXT");
-                    b.Property<long?>("AcknowledgedAt").HasColumnType("INTEGER");
-                    b.Property<string>("AcknowledgementData").HasColumnType("TEXT");
-                    b.Property<int>("Attempt").HasColumnType("INTEGER");
-                    b.Property<int>("AuthorityGeneration").HasColumnType("INTEGER");
-                    b.Property<string>("CommandId").IsRequired().HasColumnType("TEXT");
-                    b.Property<long>("CreatedAt").HasColumnType("INTEGER");
-                    b.Property<string>("EnrollmentId").IsRequired().HasColumnType("TEXT");
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("AcknowledgedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AcknowledgementData")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Attempt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("AuthorityGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CommandId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EnrollmentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
-                    b.HasIndex("CommandId").IsUnique();
+
+                    b.HasIndex("CommandId")
+                        .IsUnique();
+
                     b.HasIndex("EnrollmentId");
+
                     b.ToTable("CommandAuthorities");
                 });
 
@@ -221,14 +243,32 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
             modelBuilder.Entity("HVO.AgentControl.Core.EvidenceCursor", b =>
                 {
-                    b.Property<string>("Id").HasColumnType("TEXT");
-                    b.Property<string>("CursorName").IsRequired().HasColumnType("TEXT");
-                    b.Property<string>("CursorValue").IsRequired().HasColumnType("TEXT");
-                    b.Property<string>("EnrollmentId").IsRequired().HasColumnType("TEXT");
-                    b.Property<long?>("LastAcknowledgedAt").HasColumnType("INTEGER");
-                    b.Property<long>("LastConsumedAt").HasColumnType("INTEGER");
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CursorName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CursorValue")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EnrollmentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastAcknowledgedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastConsumedAt")
+                        .HasColumnType("INTEGER");
+
                     b.HasKey("Id");
-                    b.HasIndex("EnrollmentId", "CursorName").IsUnique();
+
+                    b.HasIndex("EnrollmentId", "CursorName")
+                        .IsUnique();
+
                     b.ToTable("EvidenceCursors");
                 });
 
@@ -457,17 +497,39 @@ namespace HVO.AgentControl.Infrastructure.Migrations
 
             modelBuilder.Entity("HVO.AgentControl.Core.ParticipantEnrollment", b =>
                 {
-                    b.Property<string>("Id").HasColumnType("TEXT");
-                    b.Property<string>("AdapterType").IsRequired().HasColumnType("TEXT");
-                    b.Property<int>("AuthorityGeneration").HasColumnType("INTEGER");
-                    b.Property<string>("DisplayName").IsRequired().HasColumnType("TEXT");
-                    b.Property<long>("EnrolledAt").HasColumnType("INTEGER");
-                    b.Property<long>("LastSeenAt").HasColumnType("INTEGER");
-                    b.Property<long>("Revision").HasColumnType("INTEGER");
-                    b.Property<string>("State").IsRequired().HasColumnType("TEXT");
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AdapterType")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AuthorityGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("EnrolledAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastSeenAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
+
                     b.HasIndex("AdapterType");
+
                     b.HasIndex("State");
+
                     b.ToTable("Enrollments");
                 });
 
@@ -1048,6 +1110,10 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourcePoolId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceTaskOutcome")
                         .IsRequired()
                         .HasColumnType("TEXT");
 

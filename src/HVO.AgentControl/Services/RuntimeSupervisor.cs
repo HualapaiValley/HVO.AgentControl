@@ -523,11 +523,10 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             { worker.CapabilityReport = progress; worker.CapabilityReportedAt = ControlStore.Now; }
             if (activity == "Idle" && ended) command.ResultJson = Json.Write(new { messages = assistants });
             if (activity == "Idle" && ended) await ControlStore.ObserveProviderCompletion(db, command, !failed && progress.Length > 0);
-            var state = activity == "Idle" && ended ? failed ? Delivery.Failed : Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
+            var state = activity == "Idle" && ended ? Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
-            command.Detail = state == Delivery.Failed ? "Native provider error ended the turn." :
-                state == Delivery.Finished ? "Native turn ended. Assignment outcome requires evidence and owner review." : "Native caller message identity found in retained history.";
+            command.Detail = state == Delivery.Finished ? "Native turn ended. Assignment outcome requires evidence and owner review." : "Native caller message identity found in retained history.";
             worker.Outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
             if (await db.Assignments.FindAsync(command.Id) is { } assignment) assignment.Outcome = worker.Outcome;
             ControlStore.Event(db, "CommandReconciled", worker.RuntimeId, workerId, command.Id, new { state }); changed = true;

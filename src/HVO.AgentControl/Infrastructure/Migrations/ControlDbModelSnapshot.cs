@@ -1110,6 +1110,10 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("SourceTaskOutcome")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("SourceTerminalState")
                         .IsRequired()
                         .HasColumnType("TEXT");

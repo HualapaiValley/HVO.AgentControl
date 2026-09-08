@@ -232,6 +232,9 @@ public sealed class SshIntegrationTests
             var failed = await Prompt(store, w1, "native error is not success [error]");
             await Finished(store, failed);
             Assert.Equal("Failed", (await store.Detail(w1.Id)).Worker.Outcome);
+            var failedDetail = await store.Detail(w1.Id);
+            Assert.Equal(Delivery.Finished, failedDetail.Commands.Single(x => x.Id == failed.Id).State);
+            Assert.Equal("Failed", failedDetail.Assignments.Single(x => x.Id == failed.Id).Outcome);
             var snapshot = await store.Snapshot();
             Assert.All(snapshot.Commands.Where(x => x.Kind == "Prompt" && x.State != Delivery.Cancelled), x => Assert.Equal(1, x.Attempts));
             Assert.Equal(3, snapshot.Workers.Count);

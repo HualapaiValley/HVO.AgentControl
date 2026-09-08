@@ -40,6 +40,7 @@ public sealed class ProviderFallbackReceipt
     public string SourceFailureReceiptId { get; set; } = "";
     public string SourceFailureCategory { get; set; } = "";
     public string SourceTerminalState { get; set; } = "";
+    public string SourceTaskOutcome { get; set; } = "";
     public long CreatedAt { get; set; }
 }
 
@@ -133,8 +134,14 @@ public sealed partial class ControlStore
             return prior;
         }
         var source = await db.Commands.FindAsync(input.SourceCommandId) ?? throw new ControlException("Source command not found.", 404);
-        if (source.WorkerId is null || source.State is not (Delivery.Failed or Delivery.Finished))
-            throw new ControlException("Reconcile the source command to a terminal provider failure before proposing fallback.");
+        if (source.Kind != "Prompt" || source.WorkerId is null || source.State is not (Delivery.Finished or Delivery.Cancelled))
+            throw new ControlException("Reconcile the source prompt to a completed or cancelled turn before proposing fallback.");
+        var assignment = await db.Assignments.FindAsync(source.Id);
+        // Delivery completion and historical retry receipts do not prove task failure.
+        // Worker.Outcome can describe later work; only this command's assignment qualifies.
+        if (assignment is null || assignment.WorkerId != source.WorkerId ||
+            assignment.Outcome != (source.State == Delivery.Cancelled ? "Cancelled" : "Failed"))
+            throw new ControlException("The source prompt has no matching terminal failed or cancelled assignment outcome.");
         if (await db.Set<ProviderFallbackReceipt>().FirstOrDefaultAsync(x => x.SourceCommandId == source.Id) is not null)
             throw new ControlException("A fallback recommendation is already recorded for this source command.");
         var worker = await db.Workers.FindAsync(source.WorkerId) ?? throw new ControlException("Source worker not found.", 404);
@@ -148,12 +155,11 @@ public sealed partial class ControlStore
         var sourcePool = await db.Set<ProviderPool>().FindAsync(sourcePoolId);
         if (sourcePool is null || sourcePool.State == "Available")
             throw new ControlException("The source provider pool is not held by a recorded provider failure.");
-        var failure = await db.Set<ProviderFailureReceipt>().Where(x => x.CommandId == source.Id && x.PoolId == sourcePoolId)
+        var failure = await db.Set<ProviderFailureReceipt>().Where(x => x.CommandId == source.Id && x.PoolId == sourcePoolId &&
+                (source.State != Delivery.Cancelled || x.Category == "Exhausted"))
             .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Id).FirstOrDefaultAsync();
         if (failure is null)
-            throw new ControlException("The source command has no recorded provider failure for its held pool.");
-        if (source.State == Delivery.Finished && failure.CommandId != source.Id)
-            throw new ControlException("A finished source command requires its own provider failure provenance.");
+            throw new ControlException("The source prompt needs its own provider failure receipt; cancellation requires proven quota exhaustion.");
         var targetPoolId = "provider:" + input.ProviderId;
         if (targetPoolId == sourcePoolId) throw new ControlException("Fallback must use a different provider pool.");
         var targetPool = await db.Set<ProviderPool>().FindAsync(targetPoolId);
@@ -172,6 +178,7 @@ public sealed partial class ControlStore
             SourceFailureReceiptId = failure.Id,
             SourceFailureCategory = failure.Category,
             SourceTerminalState = source.State,
+            SourceTaskOutcome = assignment.Outcome,
             CreatedAt = Now
         };
         db.Add(receipt);
@@ -184,6 +191,7 @@ public sealed partial class ControlStore
                 receipt.SourceFailureReceiptId,
                 receipt.SourceFailureCategory,
                 receipt.SourceTerminalState,
+                receipt.SourceTaskOutcome,
                 receipt.ProviderId,
                 receipt.ModelId,
                 receipt.TargetPoolId
