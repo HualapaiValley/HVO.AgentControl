@@ -87,6 +87,42 @@ public sealed class TerminalTests
         Assert.Null(GetModule(terminal));
     }
 
+    [Fact]
+    public async Task StaleImportFailureAfterReopenDoesNotResetConnectedState()
+    {
+        var js = new DelayedImportRuntime();
+        var terminal = CreateTerminal(js);
+
+        var firstOpen = Invoke(terminal, "Open");
+        await js.WaitForImportsAsync(1);
+        await Invoke(terminal, "Close");
+        var secondOpen = Invoke(terminal, "Open");
+        await js.WaitForImportsAsync(2);
+
+        js.CompleteImport(1);
+        await secondOpen;
+        js.FailImport(0);
+        await firstOpen;
+
+        Assert.True(Get<bool>(terminal, "connected"));
+        Assert.Equal("Connecting…", Get<string>(terminal, "status"));
+    }
+
+    [Fact]
+    public async Task StaleImportFailureAfterDisposeDoesNotResetStateOrEscape()
+    {
+        var js = new DelayedImportRuntime();
+        var terminal = CreateTerminal(js);
+
+        var opening = Invoke(terminal, "Open");
+        await js.WaitForImportsAsync(1);
+        await terminal.DisposeAsync();
+        js.FailImport(0);
+
+        await opening;
+        Assert.True(Get<bool>(terminal, "connected"));
+    }
+
     private static Terminal CreateTerminal(IJSRuntime js)
     {
         var terminal = new Terminal();
@@ -114,8 +150,11 @@ public sealed class TerminalTests
             Assert.Equal("import", identifier);
             var completion = new TaskCompletionSource<IJSObjectReference>(TaskCreationOptions.RunContinuationsAsynchronously);
             imports.Add(completion);
-            return new ValueTask<TValue>(completion.Task.ContinueWith(static task => (TValue)task.Result, cancellationToken));
+            return new ValueTask<TValue>(AwaitImport<TValue>(completion.Task, cancellationToken));
         }
+
+        private static async Task<TValue> AwaitImport<TValue>(Task<IJSObjectReference> import, CancellationToken cancellationToken)
+            => (TValue)(object)await import.WaitAsync(cancellationToken);
 
         public Task WaitForImportsAsync(int count)
         {
@@ -129,6 +168,8 @@ public sealed class TerminalTests
             imports[index].SetResult(module);
             return module;
         }
+
+        public void FailImport(int index) => imports[index].SetException(new JSException("import failed"));
     }
 
     private sealed class FailingImportRuntime : IJSRuntime

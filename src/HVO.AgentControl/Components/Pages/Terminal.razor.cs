@@ -38,7 +38,14 @@ public partial class Terminal
             status = "Connecting…";
             await module.InvokeVoidAsync("open", host, runtimeId, self);
         }
-        catch (JSException) { connected = false; status = "Unable to open terminal. Check runtime SSH access and sign-in."; }
+        catch (JSException)
+        {
+            if (!disposed && operation == opening)
+            {
+                connected = false;
+                status = "Unable to open terminal. Check runtime SSH access and sign-in.";
+            }
+        }
     }
     [JSInvokable] public Task TerminalState(bool active, string message) => InvokeAsync(() => { connected = active; status = message; StateHasChanged(); });
     private async Task Close() { opening++; if (module is not null) await module.InvokeVoidAsync("close"); connected = false; status = "Terminal closed."; }
