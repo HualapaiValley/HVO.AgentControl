@@ -18,6 +18,7 @@ public sealed class DevContainerCliOperationAdapterTests
         var result = adapter.Execute(Request());
         Assert.Equal("Unsupported", result.Status); Assert.Equal("missing_provisioner_authority", result.Receipt);
         Assert.NotNull(result.Requested); Assert.Equal("0.89.0", result.Resolved!.CliVersion);
+        Assert.NotSame(result.Requested, result.Resolved); Assert.Empty(result.Requested.Labels);
         Assert.Null(result.Observed); Assert.Contains("not invoked", result.Output);
     }
 
@@ -43,6 +44,6 @@ public sealed class DevContainerCliOperationAdapterTests
             Environment = Request().Environment with { ConfigurationProjectId = "other-project" }
         });
         Assert.Equal("Failed", result.Status); Assert.Equal("configuration_project_identity_mismatch", result.Receipt);
-        Assert.Null(result.Resolved); Assert.Null(result.Observed);
+        Assert.NotNull(result.Requested); Assert.Null(result.Resolved); Assert.Null(result.Observed);
     }
 }

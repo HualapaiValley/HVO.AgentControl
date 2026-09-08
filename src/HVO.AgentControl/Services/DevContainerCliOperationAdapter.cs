@@ -15,25 +15,31 @@ public sealed class DevContainerCliOperationAdapter : IDevContainerCliOperationA
 
     public DevContainerCliOperationResult Execute(DevContainerCliOperationRequest request)
     {
+        var requested = Requested(request);
         var resolved = Resolve(request, out var error);
         return error is not null
-            ? Result(request.RequestId, "Failed", error, null, null, error)
-            : Result(request.RequestId, "Unsupported", "missing_provisioner_authority", resolved, null,
+            ? Result(request.RequestId, "Failed", error, requested, null, null, error)
+            : Result(request.RequestId, "Unsupported", "missing_provisioner_authority", requested, resolved, null,
                 "No provisioner authority is configured; the Dev Container CLI was not invoked.");
     }
 
     public DevContainerCliOperationResult Reconcile(DevContainerCliOperationRequest request, DevContainerCliObservation? observation)
     {
+        var requested = Requested(request);
         var resolved = Resolve(request, out var error);
-        if (error is not null) return Result(request.RequestId, "Failed", error, null, observation, error);
-        if (observation is null) return Result(request.RequestId, "Uncertain", "observation_missing", resolved, null, "No host observation was supplied.");
+        if (error is not null) return Result(request.RequestId, "Failed", error, requested, null, observation, error);
+        if (observation is null) return Result(request.RequestId, "Uncertain", "observation_missing", requested, resolved, null, "No host observation was supplied.");
 
         var matches = resolved!.Labels.All(pair => observation.Labels.TryGetValue(pair.Key, out var value) && value == pair.Value);
         if (!matches || string.IsNullOrWhiteSpace(observation.ContainerId))
-            return Result(request.RequestId, "Uncertain", "labels_not_observed", resolved, observation, observation.Output);
+            return Result(request.RequestId, "Uncertain", "labels_not_observed", requested, resolved, observation, observation.Output);
 
-        return Result(request.RequestId, "Observed", "labels_observed", resolved, observation, observation.Output);
+        return Result(request.RequestId, "Observed", "labels_observed", requested, resolved, observation, observation.Output);
     }
+
+    private static DevContainerCliEvidence Requested(DevContainerCliOperationRequest request) => new(
+        request.Host.Id, request.Project.Id, request.Environment.RuntimeId, request.Environment.ConfigurationProjectId ?? "",
+        request.Environment.DevcontainerPath ?? "", request.CliVersion, new Dictionary<string, string>(StringComparer.Ordinal));
 
     private static DevContainerCliEvidence? Resolve(DevContainerCliOperationRequest request, out string? error)
     {
@@ -60,8 +66,8 @@ public sealed class DevContainerCliOperationAdapter : IDevContainerCliOperationA
     }
 
     private static DevContainerCliOperationResult Result(string requestId, string status, string receipt,
-        DevContainerCliEvidence? resolved, DevContainerCliObservation? observed, string output) =>
-        new(requestId, status, receipt, resolved, resolved, observed, Bound(output));
+        DevContainerCliEvidence requested, DevContainerCliEvidence? resolved, DevContainerCliObservation? observed, string output) =>
+        new(requestId, status, receipt, requested, resolved, observed, Bound(output));
 
     private static string Bound(string output) => output.Length <= MaxOutputLength ? output : output[..MaxOutputLength];
 }
