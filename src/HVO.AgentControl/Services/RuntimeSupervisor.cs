@@ -164,13 +164,15 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     var workers = await store.Read(db => db.Workers.Where(x => x.RuntimeId == id).AsNoTracking().ToListAsync(token));
                     var pendingPrompts = await store.Read(db => db.Commands.Where(x => x.RuntimeId == id && x.Kind == "Prompt" &&
                         (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running))
-                        .Select(x => x.WorkerId).ToListAsync(token));
+                        .Select(x => new { x.WorkerId, x.NativeMessageId }).ToListAsync(token));
                     var historyUnavailable = false;
                     foreach (var worker in workers)
                     {
                         try
                         {
-                            var snapshot = await transport.Api.Snapshot(worker, options.Value.HistoryLimit, token, pendingPrompts.Contains(worker.Id));
+                            var workerPending = pendingPrompts.Where(x => x.WorkerId == worker.Id).Select(x => x.NativeMessageId)
+                                .Where(x => x is not null).Select(x => x!).ToArray();
+                            var snapshot = await transport.Api.Snapshot(worker, options.Value.HistoryLimit, token, workerPending.Length > 0, workerPending);
                             await Reconcile(worker.Id, snapshot);
                         }
                         catch (NativeHistoryObservationException)
