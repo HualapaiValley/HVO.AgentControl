@@ -104,7 +104,7 @@ public sealed class NativeHistoryIsolationTests
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
             }
             if (path == "/global/health") return Reply(new { healthy = true, version = BootstrapScript.Version });
-            if (path == "/doc") return Reply(new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" }.ToDictionary(x => x, _ => new { }) });
+            if (path == "/doc") return Reply(new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/{sessionID}/message/{messageID}", "/session/status", "/provider", "/path" }.ToDictionary(x => x, _ => new { }) });
             if (path == "/provider") return Reply(new { connected = Array.Empty<string>(), all = Array.Empty<object>() });
             if (path == "/session/status") return Reply(new { });
             if (path == "/session/ses_bad/message")
