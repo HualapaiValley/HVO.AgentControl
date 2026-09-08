@@ -156,12 +156,18 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                     var pendingPrompts = await store.Read(db => db.Commands.Where(x => x.RuntimeId == id && x.Kind == "Prompt" &&
                         (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running))
                         .Select(x => x.WorkerId).ToListAsync(token));
+                    var historyUnavailable = false;
                     foreach (var worker in workers)
                     {
                         try
                         {
                             var snapshot = await transport.Api.Snapshot(worker, options.Value.HistoryLimit, token, pendingPrompts.Contains(worker.Id));
                             await Reconcile(worker.Id, snapshot);
+                        }
+                        catch (NativeHistoryObservationException)
+                        {
+                            historyUnavailable = true;
+                            await MarkHistoryUnavailable(worker.Id);
                         }
                         catch (NativeRejectedException ex) when (ex.Status == 404)
                         {
@@ -174,22 +180,23 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                             });
                         }
                     }
-                    if (ControlStore.Now - lastHealth > 15000)
+                    if (ControlStore.Now - lastHealth > 15000 || !historyUnavailable && runtime.Diagnostic == HistoryUnavailableDetail)
                     {
                         _ = await transport.Api.Get("/global/health", token);
                         var models = await transport.Api.Models(ControlStore.Roots(runtime)[0], token);
                         await store.Write(async db =>
                         {
                             var record = (await db.Runtimes.FindAsync(id))!;
-                            record.Health = "Healthy"; record.LastHealthyAt = ControlStore.Now;
+                            record.Health = historyUnavailable ? "Degraded" : "Healthy";
+                            if (!historyUnavailable) record.LastHealthyAt = ControlStore.Now;
                             record.ModelsJson = Json.Write(models); record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
-                            record.Diagnostic = models.Count == 0 ? "Provider setup required in the remote runtime." : "SSH, API and session reconciliation are healthy.";
+                            record.Diagnostic = historyUnavailable ? HistoryUnavailableDetail : models.Count == 0 ? "Provider setup required in the remote runtime." : "SSH, API and session reconciliation are healthy.";
                             return true;
                         });
                         lastHealth = ControlStore.Now;
                     }
                     await FinishRuntimeCommands(id, "EnsureServer");
-                    await FinishRuntimeCommands(id, "RefreshState");
+                    if (!historyUnavailable) await FinishRuntimeCommands(id, "RefreshState");
                     await ReconcileCreation(runtime, transport, token);
                     var next = await Claim(id);
                     if (next is not null) await Dispatch(next, runtime, transport, token);
@@ -439,6 +446,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         var worker = await db.Workers.FindAsync(workerId);
         if (worker is null) return false;
         var changed = worker.Stale;
+        if (worker.CurrentAction == HistoryUnavailableDetail) worker.CurrentAction = "";
         foreach (var message in snapshot.Messages)
         {
             var info = message.GetProperty("info"); var nativeId = info.GetProperty("id").GetString()!;
@@ -547,6 +555,24 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         return true;
     });
 
+    private const string HistoryUnavailableDetail = "Native history could not be read within validated observation limits. SSH remains connected; affected worker activity is unknown until history can be refreshed.";
+
+    private Task<bool> MarkHistoryUnavailable(string workerId) => store.Write(async db =>
+    {
+        var worker = await db.Workers.FindAsync(workerId);
+        if (worker is null) return false;
+        var changed = !worker.Stale || worker.Activity != "Unknown" || worker.CurrentAction != HistoryUnavailableDetail;
+        worker.Stale = true; worker.HistoryGap = true; worker.Activity = "Unknown"; worker.CurrentAction = HistoryUnavailableDetail;
+        if (await db.Runtimes.FindAsync(worker.RuntimeId) is { } runtime)
+        { runtime.Health = "Degraded"; runtime.Diagnostic = HistoryUnavailableDetail; }
+        if (changed)
+        {
+            worker.Revision++;
+            ControlStore.Event(db, "HistoryObservationUnavailable", worker.RuntimeId, workerId);
+        }
+        return true;
+    });
+
     private Task<bool> ObserveEvents(string runtimeId, List<JsonElement> events) => store.Write(async db =>
     {
         var runtime = (await db.Runtimes.FindAsync(runtimeId))!; runtime.LastEventAt = ControlStore.Now;
@@ -618,6 +644,7 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
     {
         ControlException => exception.Message,
         NativeRejectedException => exception.Message,
+        NativeHistoryObservationException => HistoryUnavailableDetail,
         OperationCanceledException => "Request timed out or the backend stopped; reconcile delivery before retrying any mutation.",
         _ => "Connection or native operation failed (" + exception.GetType().Name + "). Verify trusted host key, mounted credentials, SSH reachability, prerequisites and owned process health."
     };
