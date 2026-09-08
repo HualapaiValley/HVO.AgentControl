@@ -23,6 +23,47 @@ public sealed class RuntimeEnvironmentTests
         Assert.Equal(409, error.Status); Assert.Equal(code, error.Code);
     }
 
+    [Fact]
+    public async Task ManagedRuntimeDraftIsAtomicVisibleAndIdempotentAcrossRestart()
+    {
+        string data, secrets;
+        ManagedRuntimeDraftView draft;
+        CreateManagedRuntimeDraftInput input;
+        await using (var app = new TestApp())
+        {
+            var host = await Host(app.Store); var project = await Project(app.Store);
+            input = new(Id(), Id(), "Managed draft", host.Id, project.Id, ".devcontainer/devcontainer.json", host.Revision, project.Revision);
+            draft = await app.Store.CreateManagedRuntimeDraft(input);
+            Assert.Equal(RuntimeConnections.ManagedDraft, (await app.Store.Read(async db => (await db.Runtimes.FindAsync(draft.Environment.RuntimeId))!)).ConnectionKind);
+            Assert.Equal("PendingEnrollment", draft.State);
+            Assert.Equal("PendingEnrollment", draft.Environment.State);
+            Assert.Equal(host.Id, draft.Environment.RequestedHostId);
+            Assert.Equal(project.Id, draft.Environment.ConfigurationProjectId);
+            Assert.Equal(draft, await app.Store.CreateManagedRuntimeDraft(input));
+            Assert.Equal(1, await app.Store.Read(db => db.Runtimes.CountAsync()));
+            Assert.Equal(1, await app.Store.Read(db => db.RuntimeEnvironments.CountAsync()));
+            Assert.Equal(draft.Environment.RuntimeId, (await app.Store.InventoryMutation(input.RequestId)).ResourceId);
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        Assert.Equal(draft, await restarted.Store.CreateManagedRuntimeDraft(input));
+        await Assert.ThrowsAsync<ControlException>(() => restarted.Store.RuntimeCommand(draft.Environment.RuntimeId, "EnsureServer", Id()));
+        await Assert.ThrowsAsync<ControlException>(() => restarted.Store.CreateWorker(new(Id(), draft.Environment.RuntimeId, "worker", "", "/workspace", "p", "m")));
+    }
+
+    [Fact]
+    public async Task ManagedRuntimeDraftRejectsStaleArchivedAndCollidingIntentWithoutPartialRecords()
+    {
+        await using var app = new TestApp();
+        var host = await Host(app.Store); var project = await Project(app.Store);
+        var input = new CreateManagedRuntimeDraftInput(Id(), Id(), "Draft", host.Id, project.Id, ".devcontainer/devcontainer.json", host.Revision + 1, project.Revision);
+        await Conflict(() => app.Store.CreateManagedRuntimeDraft(input), "revision_conflict");
+        Assert.Equal(0, await app.Store.Read(db => db.Runtimes.CountAsync()));
+        await app.Store.ArchiveHost(host.Id, new(Id(), host.Revision));
+        await Conflict(() => app.Store.CreateManagedRuntimeDraft(input with { RequestId = Id(), ExpectedHostRevision = host.Revision + 1 }), "resource_archived");
+        Assert.Equal(0, await app.Store.Read(db => db.Runtimes.CountAsync()));
+    }
+
     private static async Task<ActiveBindingSetup> ActiveBinding(TestApp app)
     {
         var worker = await PersistenceTests.SeedWorker(app.Store);

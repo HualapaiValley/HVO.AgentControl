@@ -13,6 +13,20 @@
   else
   {
     <div class="section-heading"><h2>Runtimes</h2><button @onclick="NewRuntime">Add runtime</button></div>
+    @if (ManagedDrafts.Any())
+    {
+      <section class="panel" aria-label="Managed runtime drafts">
+        <h2>Managed runtime drafts</h2>
+        @foreach (var draft in ManagedDrafts)
+        {
+          <article class="notice" @key="draft.Id">
+            <strong>@draft.Name</strong> · <span class="badge">Pending enrollment</span>
+            <p>Host-owned placement and transport are not verified. This runtime is unschedulable until authenticated enrollment supplies verified ownership evidence.</p>
+            <p class="mono">@draft.Id</p>
+          </article>
+        }
+      </section>
+    }
     @if (!DevelopmentRuntimes.Any()) { <div class="empty">Add an SSH host and login, then use Verify to check access and prepare your runtime.</div> }
     @if (runtimeEdit is not null)
     {

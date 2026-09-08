@@ -11,6 +11,7 @@ public partial class Runtimes
 {
     [Inject] private RuntimeVerificationService Verification { get; set; } = default!;
     private IEnumerable<RuntimeRecord> DevelopmentRuntimes => (snapshot?.Runtimes ?? []).Where(x => x.ConnectionKind == RuntimeConnections.Ssh);
+    private IEnumerable<RuntimeRecord> ManagedDrafts => (snapshot?.Runtimes ?? []).Where(x => x.ConnectionKind == RuntimeConnections.ManagedDraft);
     private RuntimeRecord? runtimeEdit;
     private string? deletingRuntimeId;
     private RuntimeVerification? runtimeVerification;

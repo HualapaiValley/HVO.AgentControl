@@ -221,9 +221,11 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
         if (await db.Commands.FindAsync(id) is { } prior) return Same(prior, runtimeId, null, kind, prior.Payload);
-        if (kind == "StopManagedServer") RequireDevelopmentRuntime(runtime);
         if (kind is not ("EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer"))
             throw new ControlException("Unsupported runtime lifecycle command.", 400);
+        if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft && kind is not "DisconnectRuntime")
+            throw new ControlException("Managed runtime enrollment is pending; transport lifecycle commands are unavailable until ownership is verified.");
+        if (kind == "StopManagedServer") RequireDevelopmentRuntime(runtime);
         runtime.DesiredConnected = kind is "EnsureServer" or "RefreshState";
         runtime.Revision++;
         OwnedNativeProcess? owned = null;
