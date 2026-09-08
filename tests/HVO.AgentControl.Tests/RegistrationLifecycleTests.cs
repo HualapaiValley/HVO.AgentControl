@@ -71,6 +71,12 @@ public sealed class RegistrationLifecycleTests
     {
         await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
         var input = new DeleteRegistrationInput(Guid.NewGuid().ToString(), worker.SettingsRevision);
+        await app.Store.Write(async db =>
+        {
+            var runtime = (await db.Runtimes.FindAsync(worker.RuntimeId))!;
+            runtime.DesiredConnected = true; runtime.Transport = "Connecting";
+            return true;
+        });
         await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id, input));
         var run = new CoordinationRun { Id = Guid.NewGuid().ToString(), WorkerIdsJson = Json.Write(new[] { worker.Id }) };
         await app.Store.Write(async db =>
@@ -90,6 +96,129 @@ public sealed class RegistrationLifecycleTests
         Assert.Empty((await app.Store.Snapshot()).Workers);
         Assert.False(await app.Store.Read(db => db.WorkspaceClaims.AnyAsync()));
         Assert.Contains((await app.Store.Snapshot()).Commands, x => x.Id == queued.Id);
+    }
+
+    [Fact]
+    public async Task WorkerDeletionAllowsStaleRegistrationWhenRuntimeIsExplicitlyDisconnected()
+    {
+        await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(async db =>
+        {
+            var runtime = (await db.Runtimes.FindAsync(worker.RuntimeId))!;
+            runtime.DesiredConnected = false; runtime.Transport = "Disconnected";
+            db.WorkspaceClaims.Add(new() { Id = "offline-claim", WorkerId = worker.Id, RuntimeId = worker.RuntimeId, Directory = worker.Directory });
+            db.Messages.Add(new() { WorkerId = worker.Id, NativeId = "cached", Role = "assistant" });
+            db.Assignments.Add(new() { Id = "cached-assignment", WorkerId = worker.Id });
+            db.Requests.Add(new() { WorkerId = worker.Id, NativeId = "answered", Kind = "question", State = "Answered" });
+            return true;
+        });
+        var input = new DeleteRegistrationInput(Guid.NewGuid().ToString(), worker.SettingsRevision);
+
+        var deleted = await app.Store.DeleteWorker(worker.Id, input);
+        var retried = await app.Store.DeleteWorker(worker.Id, input);
+
+        Assert.Equal(deleted.Id, retried.Id);
+        Assert.Equal(Delivery.Finished, deleted.State);
+        Assert.Contains("detached work may continue", deleted.Detail);
+        Assert.Empty((await app.Store.Snapshot()).Workers);
+        Assert.NotNull(await app.Store.Read(db => db.Runtimes.FindAsync(worker.RuntimeId).AsTask()));
+        Assert.False(await app.Store.Read(db => db.WorkspaceClaims.AnyAsync(x => x.WorkerId == worker.Id)));
+        Assert.False(await app.Store.Read(db => db.Messages.AnyAsync(x => x.WorkerId == worker.Id)));
+        Assert.False(await app.Store.Read(db => db.Assignments.AnyAsync(x => x.WorkerId == worker.Id)));
+        Assert.False(await app.Store.Read(db => db.Requests.AnyAsync(x => x.WorkerId == worker.Id)));
+        Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Kind is "Abort" or "StopManagedServer");
+    }
+
+    [Theory]
+    [InlineData(Delivery.Queued)]
+    [InlineData(Delivery.Dispatching)]
+    [InlineData(Delivery.Accepted)]
+    [InlineData(Delivery.Running)]
+    [InlineData(Delivery.Unknown)]
+    public async Task OfflineWorkerDeletionStillRejectsUnresolvedDelivery(string state)
+    {
+        await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(db =>
+        {
+            db.Commands.Add(new() { Id = Guid.NewGuid().ToString(), RuntimeId = worker.RuntimeId, WorkerId = worker.Id, Kind = "Prompt", State = state });
+            return Task.FromResult(true);
+        });
+
+        var failure = await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id,
+            new(Guid.NewGuid().ToString(), worker.SettingsRevision)));
+
+        Assert.Contains("queued work", failure.Message);
+        Assert.NotNull(await app.Store.Read(db => db.Workers.FindAsync(worker.Id).AsTask()));
+    }
+
+    [Theory]
+    [InlineData("Pending")]
+    [InlineData("ReplyUnknown")]
+    public async Task OfflineWorkerDeletionStillRejectsPendingInteractions(string state)
+    {
+        await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(db =>
+        {
+            db.Requests.Add(new() { WorkerId = worker.Id, NativeId = Guid.NewGuid().ToString(), Kind = "question", State = state });
+            return Task.FromResult(true);
+        });
+
+        var failure = await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id,
+            new(Guid.NewGuid().ToString(), worker.SettingsRevision)));
+
+        Assert.Contains("pending requests", failure.Message);
+    }
+
+    [Fact]
+    public async Task OfflineWorkerDeletionStillRejectsUnfinishedCoordination()
+    {
+        await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(db =>
+        {
+            db.CoordinationRuns.Add(new() { Id = Guid.NewGuid().ToString(), WorkerIdsJson = Json.Write(new[] { worker.Id }) });
+            return Task.FromResult(true);
+        });
+
+        var failure = await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id,
+            new(Guid.NewGuid().ToString(), worker.SettingsRevision)));
+
+        Assert.Contains("unfinished coordination", failure.Message);
+    }
+
+    [Fact]
+    public async Task WorkerDeletionRejectsActiveWorkItemOwnershipButAllowsTerminalHistory()
+    {
+        await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
+        var workItem = await app.Store.CreateWorkItem(new("offline-owned", "113", "Offline ownership", "fix/offline", "HVO.AgentControl", worker.Id));
+        var input = new DeleteRegistrationInput(Guid.NewGuid().ToString(), worker.SettingsRevision);
+
+        var failure = await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id, input));
+        Assert.Contains("active work item ownership", failure.Message);
+
+        await app.Store.TransitionWorkItem(new(workItem.Id, workItem.Revision, worker.Id, WorkItemState.Abandoned));
+        await app.Store.DeleteWorker(worker.Id, input);
+        Assert.Equal(WorkItemState.Abandoned, (await app.Store.GetWorkItem(workItem.Id))!.State);
+    }
+
+    [Theory]
+    [InlineData(true, "Disconnected")]
+    [InlineData(true, "Connecting")]
+    [InlineData(false, "Connecting")]
+    [InlineData(false, "Connected")]
+    public async Task WorkerDeletionStillRequiresFreshIdleStateUnlessRuntimeIsExplicitlyDisconnected(bool desiredConnected, string transport)
+    {
+        await using var app = new TestApp(); var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(async db =>
+        {
+            var runtime = (await db.Runtimes.FindAsync(worker.RuntimeId))!;
+            runtime.DesiredConnected = desiredConnected; runtime.Transport = transport;
+            return true;
+        });
+
+        var failure = await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id,
+            new(Guid.NewGuid().ToString(), worker.SettingsRevision)));
+
+        Assert.Contains("fresh idle observation", failure.Message);
     }
 
     [Fact]
