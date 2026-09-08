@@ -1774,6 +1774,20 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<string>("OperationId")
                         .HasColumnType("TEXT");
 
+                    b.Property<long>("AuthorityRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CapacityFingerprint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CapacityReservationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CapacityRevision")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
@@ -1785,13 +1799,28 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("IntentJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("WorkspaceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkspaceIdentity")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.HasKey("OperationId");
 
-                    b.HasIndex("HostId", "WorkspaceId")
+                    b.HasIndex("HostId", "WorkspaceIdentity")
                         .IsUnique();
 
                     b.ToTable("ProvisionAttempts");
@@ -1806,12 +1835,13 @@ namespace HVO.AgentControl.Infrastructure
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ResourceId")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<long>("StartedAt")
                         .HasColumnType("INTEGER");
 
-                    b.HasKey("OperationId", "Effect", "ResourceId");
+                    b.HasKey("OperationId", "Effect");
 
                     b.ToTable("ProvisionEffects");
                 });
@@ -1823,6 +1853,10 @@ namespace HVO.AgentControl.Infrastructure
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("ApprovedIntentJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ApprovedWorkspaceIdentity")
                         .IsRequired()
                         .HasColumnType("TEXT");
 

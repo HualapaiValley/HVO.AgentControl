@@ -140,10 +140,11 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<ProvisionOperationRecord>().HasIndex(x => new { x.HostId, x.State });
         model.Entity<ProvisionOperationRecord>().Property(x => x.Revision).IsConcurrencyToken();
         model.Entity<ProvisionAttemptRecord>().HasKey(x => x.OperationId);
-        model.Entity<ProvisionAttemptRecord>().HasIndex(x => new { x.HostId, x.WorkspaceId }).IsUnique();
+        model.Entity<ProvisionAttemptRecord>().HasIndex(x => new { x.HostId, x.WorkspaceIdentity }).IsUnique();
+        model.Entity<ProvisionAttemptRecord>().Property(x => x.Revision).IsConcurrencyToken();
         model.Entity<ProvisionAttemptRecord>().HasOne<ProvisionOperationRecord>().WithOne()
             .HasForeignKey<ProvisionAttemptRecord>(x => x.OperationId).HasPrincipalKey<ProvisionOperationRecord>(x => x.Id).OnDelete(DeleteBehavior.Restrict);
-        model.Entity<ProvisionEffectRecord>().HasKey(x => new { x.OperationId, x.Effect, x.ResourceId });
+        model.Entity<ProvisionEffectRecord>().HasKey(x => new { x.OperationId, x.Effect });
         model.Entity<ProvisionEffectRecord>().HasOne<ProvisionAttemptRecord>().WithMany()
             .HasForeignKey(x => x.OperationId).OnDelete(DeleteBehavior.Restrict);
     }

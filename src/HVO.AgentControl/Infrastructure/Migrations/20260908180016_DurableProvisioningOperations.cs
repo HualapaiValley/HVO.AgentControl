@@ -32,6 +32,7 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     SourceRevision = table.Column<string>(type: "TEXT", nullable: false),
                     ConfigurationPath = table.Column<string>(type: "TEXT", nullable: false),
                     ConfigurationSha256 = table.Column<string>(type: "TEXT", nullable: false),
+                    ApprovedWorkspaceIdentity = table.Column<string>(type: "TEXT", nullable: false),
                     ColdBuild = table.Column<bool>(type: "INTEGER", nullable: false),
                     RequestedBuildCpuMillis = table.Column<long>(type: "INTEGER", nullable: false),
                     RequestedBuildMemoryBytes = table.Column<long>(type: "INTEGER", nullable: false),
@@ -70,9 +71,17 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                 {
                     OperationId = table.Column<string>(type: "TEXT", nullable: false),
                     IntentDigest = table.Column<string>(type: "TEXT", nullable: false),
+                    IntentJson = table.Column<string>(type: "TEXT", nullable: false),
                     HostId = table.Column<string>(type: "TEXT", nullable: false),
                     WorkspaceId = table.Column<string>(type: "TEXT", nullable: false),
-                    CreatedAt = table.Column<long>(type: "INTEGER", nullable: false)
+                    WorkspaceIdentity = table.Column<string>(type: "TEXT", nullable: false),
+                    AuthorityRevision = table.Column<long>(type: "INTEGER", nullable: false),
+                    CapacityReservationId = table.Column<string>(type: "TEXT", nullable: false),
+                    CapacityRevision = table.Column<long>(type: "INTEGER", nullable: true),
+                    CapacityFingerprint = table.Column<string>(type: "TEXT", nullable: false),
+                    Revision = table.Column<long>(type: "INTEGER", nullable: false),
+                    CreatedAt = table.Column<long>(type: "INTEGER", nullable: false),
+                    UpdatedAt = table.Column<long>(type: "INTEGER", nullable: false)
                 },
                 constraints: table =>
                 {
@@ -96,7 +105,7 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_ProvisionEffects", x => new { x.OperationId, x.Effect, x.ResourceId });
+                    table.PrimaryKey("PK_ProvisionEffects", x => new { x.OperationId, x.Effect });
                     table.ForeignKey(
                         name: "FK_ProvisionEffects_ProvisionAttempts_OperationId",
                         column: x => x.OperationId,
@@ -106,9 +115,9 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_ProvisionAttempts_HostId_WorkspaceId",
+                name: "IX_ProvisionAttempts_HostId_WorkspaceIdentity",
                 table: "ProvisionAttempts",
-                columns: new[] { "HostId", "WorkspaceId" },
+                columns: new[] { "HostId", "WorkspaceIdentity" },
                 unique: true);
 
             migrationBuilder.CreateIndex(

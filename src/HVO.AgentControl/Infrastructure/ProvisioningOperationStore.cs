@@ -103,11 +103,22 @@ public sealed partial class ControlStore
     {
         var operation = await RequireProvisionOperation(db, id);
         RequireProvisionRevision(operation, input.ExpectedRevision);
-        if (!await db.ProvisionEffects.AnyAsync(x => x.OperationId == operation.Id))
-            throw InventoryConflict("reconciliation_not_required", "No external effect was committed for this operation.");
         operation.ReconcileRequested = true;
-        operation.State = ProvisionOperationState.Unknown;
-        operation.Code = "reconciliation_requested_external_effect_unresolved";
+        if (await db.ProvisionEffects.AnyAsync(x => x.OperationId == operation.Id))
+        {
+            operation.State = ProvisionOperationState.Unknown;
+            operation.Code = "reconciliation_requested_external_effect_unresolved";
+        }
+        else
+        {
+            ClearProvisionCapacity(operation);
+            operation.State = operation.ApprovedIntentJson.Length == 0
+                ? ProvisionOperationState.AwaitingHostAuthority
+                : ProvisionOperationState.AwaitingCapacity;
+            operation.Code = operation.ApprovedIntentJson.Length == 0
+                ? "reconciliation_awaiting_trusted_host_executor"
+                : "reconciliation_awaiting_verified_capacity";
+        }
         operation.Revision++;
         operation.UpdatedAt = Now;
         Event(db, "ProvisionOperationReconciliationRequested", operation.RuntimeId, payload: new { operationId = operation.Id, operation.State }, provenance: "user");
@@ -118,6 +129,12 @@ public sealed partial class ControlStore
     {
         var operation = await RequireProvisionOperation(db, id);
         var project = await RequireProject(db, operation.ProjectId);
+        if (operation.ApprovedIntentJson.Length != 0)
+        {
+            if (!SameProvisionIntent(intent, JsonSerializer.Deserialize<ProvisionIntent>(operation.ApprovedIntentJson)!))
+                throw new ProvisionIntentConflictException();
+            return await ProvisionView(db, operation);
+        }
         if (operation.CancelRequested || operation.EffectStarted) throw new ProvisionAdmissionException("operation_not_eligible_for_authority");
         if (InventoryId(intent.OperationId) != operation.Id || intent.HostId != operation.HostId || intent.Workspace.Id != operation.WorkspaceId ||
             intent.AuthorityRevision < 1 || intent.Workspace.SourceRevision != operation.SourceRevision ||
@@ -129,6 +146,7 @@ public sealed partial class ControlStore
         operation.ApprovedIntentJson = JsonSerializer.Serialize(intent);
         operation.IntentDigest = intent.Digest;
         operation.AuthorityRevision = intent.AuthorityRevision;
+        operation.ApprovedWorkspaceIdentity = CanonicalProvisionWorkspace(intent.Workspace.Directory);
         ClearProvisionCapacity(operation);
         operation.State = ProvisionOperationState.AwaitingCapacity;
         operation.Code = "verified_capacity_reservation_required";
@@ -153,6 +171,7 @@ public sealed partial class ControlStore
         operation.ReservedBuildMemoryBytes = grant.BuildMemoryBytes;
         operation.ReservedRuntimeCpuMillis = grant.RuntimeCpuMillis;
         operation.ReservedRuntimeMemoryBytes = grant.RuntimeMemoryBytes;
+        operation.ReconcileRequested = false;
         operation.State = ProvisionOperationState.AwaitingExecution;
         operation.Code = "trusted_executor_may_acquire";
         operation.Revision++;
@@ -310,6 +329,33 @@ public sealed partial class ControlStore
         left.Tools.Zip(right.Tools).All(x => x.First.Name == x.Second.Name && x.First.ExpectedOutput == x.Second.ExpectedOutput &&
             x.First.Command.SequenceEqual(x.Second.Command));
 
+    internal static string CanonicalProvisionWorkspace(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Length > 2048 || !Path.IsPathFullyQualified(path) || path.Any(char.IsControl))
+            throw new ProvisionAdmissionException("invalid_workspace_identity");
+        try
+        {
+            var canonical = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+            return canonical.Length == 0 ? Path.DirectorySeparatorChar.ToString() : canonical;
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new ProvisionAdmissionException("invalid_workspace_identity");
+        }
+    }
+
+    internal static string ProvisionCapacityFingerprint(ProvisionOperationRecord operation) => Convert.ToHexString(SHA256.HashData(
+        Encoding.UTF8.GetBytes(Json.Write(new
+        {
+            operation.CapacityReservationId,
+            operation.CapacityRevision,
+            operation.CapacityValidUntil,
+            operation.ReservedBuildCpuMillis,
+            operation.ReservedBuildMemoryBytes,
+            operation.ReservedRuntimeCpuMillis,
+            operation.ReservedRuntimeMemoryBytes
+        }))));
+
     private static void ClearProvisionCapacity(ProvisionOperationRecord operation)
     {
         operation.CapacityReservationId = "";
@@ -327,12 +373,13 @@ public sealed class DbProvisionAttemptLedger(ControlStore store) : IProvisionAtt
     public async Task<IProvisionAttempt> Acquire(ProvisionIntent intent, ProvisionAction action, CancellationToken token)
     {
         var operationId = NormalizeOperationId(intent.OperationId);
-        var admissionKey = intent.HostId + ":" + intent.Workspace.Id;
+        var workspaceIdentity = ControlStore.CanonicalProvisionWorkspace(intent.Workspace.Directory);
+        var admissionKey = intent.HostId + ":" + workspaceIdentity;
         var admission = ControlStore.ProvisionAdmissions.GetOrAdd(admissionKey, _ => new SemaphoreSlim(1, 1));
         await admission.WaitAsync(token);
         try
         {
-            await store.Write(async db =>
+            var snapshot = await store.Write(async db =>
             {
                 var operation = await db.ProvisionOperations.SingleOrDefaultAsync(x => x.Id == operationId)
                     ?? throw new ProvisionAdmissionException("durable_operation_required");
@@ -340,8 +387,10 @@ public sealed class DbProvisionAttemptLedger(ControlStore store) : IProvisionAtt
                 if (operation.ApprovedIntentJson.Length == 0 || operation.IntentDigest != intent.Digest ||
                     !ControlStore.SameProvisionIntent(intent, JsonSerializer.Deserialize<ProvisionIntent>(operation.ApprovedIntentJson)!))
                     throw new ProvisionIntentConflictException();
+                if (operation.ApprovedWorkspaceIdentity != workspaceIdentity)
+                    throw new ProvisionIntentConflictException();
                 if (action == ProvisionAction.Remove) throw new ProvisionAdmissionException("drained_removal_authority_required");
-                var prior = await db.ProvisionAttempts.SingleOrDefaultAsync(x => x.HostId == intent.HostId && x.WorkspaceId == intent.Workspace.Id);
+                var prior = await db.ProvisionAttempts.SingleOrDefaultAsync(x => x.HostId == intent.HostId && x.WorkspaceIdentity == workspaceIdentity);
                 var effectStarted = await db.ProvisionEffects.AnyAsync(x => x.OperationId == operationId && x.Effect == "up", token);
                 if (action == ProvisionAction.CreateOrObserve && !effectStarted && (operation.State != ProvisionOperationState.AwaitingExecution ||
                     operation.CapacityRevision is null || operation.CapacityValidUntil <= ControlStore.Now || operation.CapacityReservationId.Length == 0 ||
@@ -351,18 +400,41 @@ public sealed class DbProvisionAttemptLedger(ControlStore store) : IProvisionAtt
                 if (action == ProvisionAction.Observe && !effectStarted)
                     throw new ProvisionAdmissionException("external_effect_evidence_required");
                 if (prior is not null && prior.OperationId != operationId) throw new ProvisionAdmissionException("workspace_admission_held_for_reconciliation");
-                if (prior is not null && prior.IntentDigest != intent.Digest) throw new ProvisionIntentConflictException();
-                if (prior is null) db.ProvisionAttempts.Add(new()
+                if (prior is not null && (prior.IntentDigest != intent.Digest || prior.IntentJson != operation.ApprovedIntentJson ||
+                    prior.AuthorityRevision != operation.AuthorityRevision || prior.WorkspaceId != intent.Workspace.Id))
+                    throw new ProvisionIntentConflictException();
+                if (prior is null)
                 {
-                    OperationId = operationId,
-                    IntentDigest = intent.Digest,
-                    HostId = intent.HostId,
-                    WorkspaceId = intent.Workspace.Id,
-                    CreatedAt = ControlStore.Now
-                });
-                return true;
+                    prior = new()
+                    {
+                        OperationId = operationId,
+                        IntentDigest = intent.Digest,
+                        IntentJson = operation.ApprovedIntentJson,
+                        HostId = intent.HostId,
+                        WorkspaceId = intent.Workspace.Id,
+                        WorkspaceIdentity = workspaceIdentity,
+                        AuthorityRevision = operation.AuthorityRevision!.Value,
+                        CapacityReservationId = operation.CapacityReservationId,
+                        CapacityRevision = operation.CapacityRevision,
+                        CapacityFingerprint = ControlStore.ProvisionCapacityFingerprint(operation),
+                        Revision = 1,
+                        CreatedAt = ControlStore.Now,
+                        UpdatedAt = ControlStore.Now
+                    };
+                    db.ProvisionAttempts.Add(prior);
+                }
+                else if (!effectStarted)
+                {
+                    prior.CapacityReservationId = operation.CapacityReservationId;
+                    prior.CapacityRevision = operation.CapacityRevision;
+                    prior.CapacityFingerprint = ControlStore.ProvisionCapacityFingerprint(operation);
+                    prior.Revision++;
+                    prior.UpdatedAt = ControlStore.Now;
+                }
+                return new AdmissionSnapshot(prior.Revision, prior.IntentJson, prior.WorkspaceId, prior.WorkspaceIdentity,
+                    prior.AuthorityRevision, prior.CapacityReservationId, prior.CapacityRevision, prior.CapacityFingerprint);
             });
-            return new Attempt(store, admission, operationId, action);
+            return new Attempt(store, admission, operationId, action, snapshot);
         }
         catch
         {
@@ -371,42 +443,108 @@ public sealed class DbProvisionAttemptLedger(ControlStore store) : IProvisionAtt
         }
     }
 
-    private sealed class Attempt(ControlStore store, SemaphoreSlim admission, string operationId, ProvisionAction action) : IProvisionAttempt
+    private sealed record AdmissionSnapshot(long Revision, string IntentJson, string WorkspaceId, string WorkspaceIdentity,
+        long AuthorityRevision, string CapacityReservationId, long? CapacityRevision, string CapacityFingerprint);
+
+    private sealed class Attempt(ControlStore store, SemaphoreSlim admission, string operationId, ProvisionAction action,
+        AdmissionSnapshot snapshot) : IProvisionAttempt
     {
+        private readonly SemaphoreSlim useGate = new(1, 1);
         private bool disposed;
 
-        public Task<bool> HasEffect(string effect, string resourceId, CancellationToken token)
+        public async Task<bool> HasEffect(string effect, string resourceId, CancellationToken token)
         {
-            token.ThrowIfCancellationRequested();
-            return store.Read(db => db.ProvisionEffects.AnyAsync(x => x.OperationId == operationId && x.Effect == effect && x.ResourceId == resourceId, token));
-        }
-
-        public Task<bool> TryBeginEffect(string effect, string resourceId, CancellationToken token)
-        {
-            if (effect == "up" && action != ProvisionAction.CreateOrObserve || effect == "remove" && action != ProvisionAction.Remove)
-                throw new ProvisionAdmissionException("effect_not_authorized_for_action");
-            if (effect is not ("up" or "remove") || string.IsNullOrWhiteSpace(resourceId) || resourceId.Length > 200 || resourceId.Any(char.IsControl))
-                throw new ProvisionAdmissionException("invalid_effect_identity");
-            token.ThrowIfCancellationRequested();
-            return store.Write(async db =>
+            ValidateEffectIdentity(effect, resourceId);
+            await useGate.WaitAsync(token);
+            try
             {
-                var operation = await db.ProvisionOperations.SingleAsync(x => x.Id == operationId);
-                if (operation.CancelRequested) throw new OperationCanceledException(token);
-                if (await db.ProvisionEffects.AnyAsync(x => x.OperationId == operationId && x.Effect == effect && x.ResourceId == resourceId, token)) return false;
-                db.ProvisionEffects.Add(new() { OperationId = operationId, Effect = effect, ResourceId = resourceId, StartedAt = ControlStore.Now });
-                operation.EffectStarted = true;
-                operation.State = ProvisionOperationState.Unknown;
-                operation.Code = "external_effect_started_result_pending";
-                operation.Revision++;
-                operation.UpdatedAt = ControlStore.Now;
-                return true;
-            });
+                ThrowIfDisposed();
+                return await store.Read(db => db.ProvisionEffects.AnyAsync(
+                    x => x.OperationId == operationId && x.Effect == effect && x.ResourceId == resourceId, token));
+            }
+            finally
+            {
+                useGate.Release();
+            }
         }
 
-        public ValueTask DisposeAsync()
+        public async Task<bool> TryBeginEffect(string effect, string resourceId, CancellationToken token)
         {
-            if (!disposed) { disposed = true; admission.Release(); }
-            return ValueTask.CompletedTask;
+            ValidateEffect(effect, resourceId);
+            await useGate.WaitAsync(token);
+            try
+            {
+                ThrowIfDisposed();
+                return await store.Write(async db =>
+                {
+                    var operation = await db.ProvisionOperations.SingleAsync(x => x.Id == operationId);
+                    var attempt = await db.ProvisionAttempts.SingleOrDefaultAsync(x => x.OperationId == operationId)
+                        ?? throw new ProvisionAdmissionException("durable_attempt_required");
+                    if (attempt.Revision != snapshot.Revision || attempt.IntentJson != snapshot.IntentJson || attempt.WorkspaceId != snapshot.WorkspaceId ||
+                        attempt.WorkspaceIdentity != snapshot.WorkspaceIdentity || attempt.AuthorityRevision != snapshot.AuthorityRevision ||
+                        attempt.CapacityReservationId != snapshot.CapacityReservationId || attempt.CapacityRevision != snapshot.CapacityRevision ||
+                        attempt.CapacityFingerprint != snapshot.CapacityFingerprint)
+                        throw new ProvisionAdmissionException("attempt_authority_changed");
+                    if (operation.ApprovedIntentJson != snapshot.IntentJson || operation.ApprovedWorkspaceIdentity != snapshot.WorkspaceIdentity ||
+                        operation.AuthorityRevision != snapshot.AuthorityRevision)
+                        throw new ProvisionAdmissionException("attempt_authority_changed");
+                    if (await db.ProvisionEffects.AnyAsync(x => x.OperationId == operationId && x.Effect == effect, token)) return false;
+                    if (operation.CancelRequested) throw new OperationCanceledException(token);
+                    if (operation.ReconcileRequested || operation.State != ProvisionOperationState.AwaitingExecution ||
+                        operation.CapacityReservationId != snapshot.CapacityReservationId || operation.CapacityRevision != snapshot.CapacityRevision ||
+                        operation.CapacityValidUntil <= ControlStore.Now || operation.CapacityReservationId.Length == 0 ||
+                        ControlStore.ProvisionCapacityFingerprint(operation) != snapshot.CapacityFingerprint)
+                        throw new ProvisionAdmissionException("fresh_capacity_reservation_required");
+                    db.ProvisionEffects.Add(new() { OperationId = operationId, Effect = effect, ResourceId = resourceId, StartedAt = ControlStore.Now });
+                    operation.EffectStarted = true;
+                    operation.State = ProvisionOperationState.Unknown;
+                    operation.Code = "external_effect_started_result_pending";
+                    operation.Revision++;
+                    operation.UpdatedAt = ControlStore.Now;
+                    return true;
+                });
+            }
+            finally
+            {
+                useGate.Release();
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await useGate.WaitAsync();
+            try
+            {
+                if (!disposed)
+                {
+                    disposed = true;
+                    admission.Release();
+                }
+            }
+            finally
+            {
+                useGate.Release();
+            }
+        }
+
+        private void ValidateEffect(string effect, string resourceId)
+        {
+            if (effect != "up" || action != ProvisionAction.CreateOrObserve)
+                throw new ProvisionAdmissionException("effect_not_authorized_for_action");
+            ValidateEffectIdentity(effect, resourceId);
+        }
+
+        private void ValidateEffectIdentity(string effect, string resourceId)
+        {
+            if (effect != "up")
+                throw new ProvisionAdmissionException("invalid_effect_identity");
+            if (resourceId != snapshot.WorkspaceId || resourceId.Length > 200 || resourceId.Any(char.IsControl))
+                throw new ProvisionAdmissionException("invalid_effect_identity");
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (disposed) throw new ObjectDisposedException(nameof(IProvisionAttempt));
         }
     }
 

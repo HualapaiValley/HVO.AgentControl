@@ -33,6 +33,7 @@ public sealed class ProvisionOperationRecord
     public string SourceRevision { get; set; } = "";
     public string ConfigurationPath { get; set; } = "";
     public string ConfigurationSha256 { get; set; } = "";
+    public string ApprovedWorkspaceIdentity { get; set; } = "";
     public bool ColdBuild { get; set; }
     public long RequestedBuildCpuMillis { get; set; }
     public long RequestedBuildMemoryBytes { get; set; }
@@ -64,9 +65,17 @@ public sealed class ProvisionAttemptRecord
 {
     public string OperationId { get; set; } = "";
     public string IntentDigest { get; set; } = "";
+    public string IntentJson { get; set; } = "";
     public string HostId { get; set; } = "";
     public string WorkspaceId { get; set; } = "";
+    public string WorkspaceIdentity { get; set; } = "";
+    public long AuthorityRevision { get; set; }
+    public string CapacityReservationId { get; set; } = "";
+    public long? CapacityRevision { get; set; }
+    public string CapacityFingerprint { get; set; } = "";
+    public long Revision { get; set; }
     public long CreatedAt { get; set; }
+    public long UpdatedAt { get; set; }
 }
 
 public sealed class ProvisionEffectRecord

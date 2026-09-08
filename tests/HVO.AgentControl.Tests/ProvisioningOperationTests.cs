@@ -7,6 +7,7 @@ using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Provisioning;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -40,8 +41,10 @@ public sealed class ProvisioningOperationTests
         Assert.Equal("trusted_host_executor_required", operation.Code);
         Assert.False(operation.EffectStarted);
         var prematureReconciliation = await owner.PostAsJsonAsync(route + "/" + operation.Id + "/reconcile", new ProvisionOperationControlInput(operation.Revision));
-        Assert.Equal(HttpStatusCode.Conflict, prematureReconciliation.StatusCode);
-        Assert.Equal("reconciliation_not_required", (await prematureReconciliation.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        Assert.Equal(HttpStatusCode.OK, prematureReconciliation.StatusCode);
+        var held = (await prematureReconciliation.Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        Assert.Equal(ProvisionOperationState.AwaitingHostAuthority, held.State);
+        Assert.True(held.ReconcileRequested);
 
         Assert.Equal(HttpStatusCode.Accepted, (await owner.PostAsJsonAsync(route, setup.Input)).StatusCode);
         var conflict = await owner.PostAsJsonAsync(route, setup.Input with { SourceRevision = new string('c', 40) });
@@ -183,6 +186,140 @@ public sealed class ProvisioningOperationTests
     }
 
     [Fact]
+    public async Task ClearedCapacityCannotAuthorizeAnAlreadyAcquiredAttempt()
+    {
+        await using var app = new TestApp();
+        var ready = await Ready(app, "capacity-clear");
+        var ledger = new DbProvisionAttemptLedger(app.Store);
+        await using var admission = await ledger.Acquire(ready.Intent, ProvisionAction.CreateOrObserve, default);
+
+        var secondStore = SeparateStore(app);
+        var current = await secondStore.ProvisionOperation(ready.Operation.Id);
+        var held = await secondStore.RequestProvisionReconciliation(current.Id, new(current.Revision));
+        Assert.Equal(ProvisionOperationState.AwaitingCapacity, held.State);
+        var denied = await Assert.ThrowsAsync<ProvisionAdmissionException>(() =>
+            admission.TryBeginEffect("up", ready.Input.WorkspaceId, default));
+        Assert.Equal("fresh_capacity_reservation_required", denied.Code);
+        await secondStore.ApproveProvisionCapacity(current.Id,
+            new("capacity-replaced", 2, ControlStore.Now + 60000, 2000, BuildMemory, 1000, RuntimeMemory));
+        var stale = await Assert.ThrowsAsync<ProvisionAdmissionException>(() =>
+            admission.TryBeginEffect("up", ready.Input.WorkspaceId, default));
+        Assert.Equal("fresh_capacity_reservation_required", stale.Code);
+    }
+
+    [Fact]
+    public async Task ExpiredCapacityCannotAuthorizeAnAlreadyAcquiredAttempt()
+    {
+        await using var app = new TestApp();
+        var ready = await Ready(app, "capacity-expired");
+        var ledger = new DbProvisionAttemptLedger(app.Store);
+        await using var admission = await ledger.Acquire(ready.Intent, ProvisionAction.CreateOrObserve, default);
+
+        var secondStore = SeparateStore(app);
+        await secondStore.Write(async db =>
+        {
+            var operation = await db.ProvisionOperations.SingleAsync(x => x.Id == ready.Operation.Id);
+            operation.CapacityValidUntil = ControlStore.Now - 1;
+            return true;
+        });
+        var denied = await Assert.ThrowsAsync<ProvisionAdmissionException>(() =>
+            admission.TryBeginEffect("up", ready.Input.WorkspaceId, default));
+        Assert.Equal("fresh_capacity_reservation_required", denied.Code);
+    }
+
+    [Fact]
+    public async Task DisposedAttemptCannotAuthorizeAnEffect()
+    {
+        await using var app = new TestApp();
+        var ready = await Ready(app, "capacity-disposed");
+        var admission = await new DbProvisionAttemptLedger(app.Store).Acquire(ready.Intent, ProvisionAction.CreateOrObserve, default);
+        await admission.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            admission.TryBeginEffect("up", ready.Input.WorkspaceId, default));
+        Assert.Empty((await app.Store.ProvisionOperation(ready.Operation.Id)).Effects);
+    }
+
+    [Fact]
+    public async Task ChangedResourceIdCannotAuthorizeAnotherUpEffect()
+    {
+        await using var app = new TestApp();
+        var ready = await Ready(app, "capacity-resource");
+        await using var admission = await new DbProvisionAttemptLedger(app.Store)
+            .Acquire(ready.Intent, ProvisionAction.CreateOrObserve, default);
+        Assert.True(await admission.TryBeginEffect("up", ready.Input.WorkspaceId, default));
+
+        var denied = await Assert.ThrowsAsync<ProvisionAdmissionException>(() =>
+            admission.TryBeginEffect("up", Id(), default));
+        Assert.Equal("invalid_effect_identity", denied.Code);
+        Assert.Single((await app.Store.ProvisionOperation(ready.Operation.Id)).Effects);
+    }
+
+    [Fact]
+    public async Task ApprovedIntentIsImmutableAcrossReplayAndRestart()
+    {
+        string data;
+        string secrets;
+        ProvisionIntent intent;
+        string operationId;
+        await using (var app = new TestApp())
+        {
+            var ready = await Ready(app, "capacity-authority");
+            intent = ready.Intent;
+            operationId = ready.Operation.Id;
+            var replay = await app.Store.ApproveProvisionAuthority(operationId, intent);
+            Assert.Equal(ProvisionOperationState.AwaitingExecution, replay.State);
+            Assert.Equal("capacity-authority", replay.CapacityReservationId);
+            Assert.Equal(ready.Operation.Revision, replay.Revision);
+            await using var admission = await new DbProvisionAttemptLedger(app.Store)
+                .Acquire(intent, ProvisionAction.CreateOrObserve, default);
+            var changedWhileHeld = intent with { AuthorityRevision = intent.AuthorityRevision + 1, Digest = new string('e', 64) };
+            await Assert.ThrowsAsync<ProvisionIntentConflictException>(() =>
+                app.Store.ApproveProvisionAuthority(operationId, changedWhileHeld));
+            Assert.True(await admission.TryBeginEffect("up", ready.Input.WorkspaceId, default));
+            data = app.DataPath;
+            secrets = app.SecretPath;
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var changed = intent with { AuthorityRevision = intent.AuthorityRevision + 1, Digest = new string('e', 64) };
+        await Assert.ThrowsAsync<ProvisionIntentConflictException>(() =>
+            restarted.Store.ApproveProvisionAuthority(operationId, changed));
+        var persisted = await restarted.Store.ProvisionOperation(operationId);
+        Assert.Equal(intent.AuthorityRevision, persisted.AuthorityRevision);
+        Assert.Equal(intent.Digest, persisted.IntentDigest);
+        Assert.Equal("capacity-authority", persisted.CapacityReservationId);
+    }
+
+    [Fact]
+    public async Task DifferentWorkspaceIdsForSameCanonicalDirectoryShareDurableAdmission()
+    {
+        await using var app = new TestApp();
+        var first = await Ready(app, "capacity-directory");
+        var secondInput = first.Input with { RequestId = Id(), WorkspaceId = Id() };
+        var secondOperation = await app.Store.CreateProvisionOperation(secondInput);
+        var secondIntent = Intent(secondOperation, secondInput) with
+        {
+            Workspace = Intent(secondOperation, secondInput).Workspace with { Directory = first.Intent.Workspace.Directory + "/." },
+            Digest = new string('e', 64)
+        };
+        await app.Store.ApproveProvisionAuthority(secondOperation.Id, secondIntent);
+        await app.Store.ApproveProvisionCapacity(secondOperation.Id,
+            new("capacity-directory-2", 1, ControlStore.Now + 60000, 2000, BuildMemory, 1000, RuntimeMemory));
+
+        var firstLedger = new DbProvisionAttemptLedger(app.Store);
+        var firstAdmission = await firstLedger.Acquire(first.Intent, ProvisionAction.CreateOrObserve, default);
+        var secondLedger = new DbProvisionAttemptLedger(SeparateStore(app));
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                secondLedger.Acquire(secondIntent, ProvisionAction.CreateOrObserve, timeout.Token));
+        await firstAdmission.DisposeAsync();
+        var denied = await Assert.ThrowsAsync<ProvisionAdmissionException>(() =>
+            secondLedger.Acquire(secondIntent, ProvisionAction.CreateOrObserve, default));
+        Assert.Equal("workspace_admission_held_for_reconciliation", denied.Code);
+    }
+
+    [Fact]
     public async Task DurableProgressAndResultExcludeRawCliOutputAndResolvedConfiguration()
     {
         await using var app = new TestApp();
@@ -227,5 +364,22 @@ public sealed class ProvisioningOperationTests
             new string('d', 64), ImmutableDictionary<string, string>.Empty);
     }
 
+    private static async Task<ReadyResult> Ready(TestApp app, string reservationId)
+    {
+        var setup = await Setup(app);
+        var operation = await app.Store.CreateProvisionOperation(setup.Input);
+        var intent = Intent(operation, setup.Input);
+        await app.Store.ApproveProvisionAuthority(operation.Id, intent);
+        operation = await app.Store.ApproveProvisionCapacity(operation.Id,
+            new(reservationId, 1, ControlStore.Now + 60000, 2000, BuildMemory, 1000, RuntimeMemory));
+        return new(setup.Input, operation, intent);
+    }
+
+    private static ControlStore SeparateStore(TestApp app) => new(
+        app.Services.GetRequiredService<IDbContextFactory<ControlDb>>(),
+        app.Services.GetRequiredService<IOptions<ControlOptions>>(),
+        app.Services.GetRequiredService<Secrets>());
+
     private sealed record SetupResult(CreateProvisionOperationInput Input);
+    private sealed record ReadyResult(CreateProvisionOperationInput Input, ProvisionOperationView Operation, ProvisionIntent Intent);
 }

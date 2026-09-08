@@ -12,9 +12,9 @@ All routes are below `/api/v1/provisioning/operations`, require owner cookie aut
 | `GET` | `?after=0&take=50` | Returns a sequence-cursor page; `take` is 1-100. |
 | `GET` | `/{operationId}` | Returns one durable operation view. |
 | `POST` | `/{operationId}/cancel` | Requires `expectedRevision`; records cancellation without claiming a remote effect stopped. |
-| `POST` | `/{operationId}/reconcile` | Requires `expectedRevision` and a committed effect; records owner demand for reconciliation without granting host access. |
+| `POST` | `/{operationId}/reconcile` | Requires `expectedRevision`; revokes unconsumed capacity or records owner demand to reconcile a committed effect, without granting host access. |
 
-The create body binds the UUID to the selected host, runtime environment and project revisions, workspace UUID, source SHA, repository-relative `devcontainer.json` path, configuration SHA-256, cold-build choice, and requested build/runtime CPU and memory. Unknown fields are rejected. In particular, callers cannot submit executable paths, Docker socket/context, mount authority, credentials, probe commands or a claimed result.
+The create body binds the UUID to the selected host, runtime environment and project revisions, workspace UUID, source SHA, repository-relative `devcontainer.json` path, configuration SHA-256, cold-build choice, and requested build/runtime CPU and memory. The referenced host, runtime, managed-devcontainer environment and project inventory must already exist; this slice does not create that prerequisite inventory. Unknown fields are rejected. In particular, callers cannot submit executable paths, Docker socket/context, mount authority, credentials, probe commands or a claimed result.
 
 API UUIDs are normalized to lowercase `N` form. The host runner continues to receive the same UUID in `D` form because that is its validated request contract; the ledger compares their parsed UUID identity rather than formatting.
 
@@ -28,7 +28,7 @@ The web process registers the database ledger but not `LocalDevContainerRunner` 
 
 ## Persistence and recovery
 
-`ProvisionOperations` stores immutable requested identity, separately approved intent/capacity evidence, state and revision. `ProvisionAttempts` holds the durable operation/workspace admission identity. `ProvisionEffects` commits the exact effect/resource identity before returning permission to the runner. The unique host/workspace admission remains held for reconciliation; an uncertain or disconnected result never authorizes a second `up` under another operation.
+`ProvisionOperations` stores immutable requested identity, separately approved intent/capacity evidence, state and revision. Full approved intent is immutable: an identical trusted approval is an idempotent replay, while any changed approval conflicts. `ProvisionAttempts` binds the durable admission to that intent, its authority revision, the exact capacity generation and the canonical approved host directory. Effect start atomically revalidates that the admission is live and that its unchanged capacity grant remains current. `ProvisionEffects` commits one exact effect/resource identity before returning permission to the runner. The unique host/canonical-directory admission remains held after disposal and across restart for reconciliation; an uncertain or disconnected result never authorizes a second `up` under another operation or workspace UUID.
 
 Runner reconstruction and web restart read the committed effect before checking vanished CLI/source inputs. An identical operation/intent can observe but cannot repeat `up`; changed intent is rejected. Removal remains rejected until separate drained retirement authority and retained-state disposition are modeled.
 
