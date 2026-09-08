@@ -240,6 +240,45 @@ public sealed class ControlServiceTests
         Assert.Equal(3, native.CreationPosts); Assert.Equal(2, native.CreateCalls);
     }
 
+    [Fact]
+    public async Task TwoControlTurnsHaveIndependentCapacityWhileThirdWaitsForNativeIdle()
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var bindings = new List<ControlSessionBinding>();
+        for (var index = 0; index < 3; index++)
+            bindings.Add(await app.Store.CreateControlSession(service.Id, new(Guid.NewGuid().ToString(), "Workgroup", "group-" + index, "Group " + index, "opencode", "big-pickle")));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.CountAsync(x => x.RuntimeId == service.Id && !x.Stale && x.Activity == "Idle")) == 4, "Four control conversations observed");
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+        var developer = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(developer.Id))!.Activity = "Active"; return true; });
+        foreach (var binding in bindings)
+            await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), binding.WorkerId, "Observe the occupied worker", [developer.Id]));
+        await app.Store.CoordinationTick();
+        using var supervisor = new RuntimeSupervisor(app.Store, null!,
+            Microsoft.Extensions.Options.Options.Create(new ControlOptions { GlobalCapacity = 1 }),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<RuntimeSupervisor>.Instance);
+        var method = typeof(RuntimeSupervisor).GetMethod("Claim", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        Task<CommandRecord?> Claim() => (Task<CommandRecord?>)method.Invoke(supervisor, [service.Id, null])!;
+        var claims = await Task.WhenAll(Claim(), Claim(), Claim());
+        Assert.Equal(2, claims.Count(x => x is not null));
+        Assert.Single(claims, x => x is null);
+        var settled = claims.First(x => x is not null)!;
+        await app.Store.Write(async db =>
+        {
+            (await db.Commands.FindAsync(settled.Id))!.State = Delivery.Finished;
+            (await db.Workers.FindAsync(settled.WorkerId))!.Activity = "Active";
+            return true;
+        });
+        Assert.Null(await Claim()); // Native activity still occupies the slot after a managed receipt settles.
+        await app.Store.Write(async db => { (await db.Workers.FindAsync(settled.WorkerId))!.Activity = "Idle"; return true; });
+        Assert.NotNull(await Claim());
+        Assert.Equal("Active", await app.Store.Read(async db => (await db.Workers.FindAsync(developer.Id))!.Activity));
+        Assert.Equal(0, native.UnexpectedMutations);
+    }
+
     private static async Task<ControlServiceRecord> Register(TestApp app, HttpClient owner, NativeControlFixture native)
     {
         File.WriteAllText(Path.Combine(app.SecretPath, "sidecar-password"), NativeControlFixture.Password);

@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test isolated OpenCode sidecar lifecycle without provider credentials
         run: python3 tests/control_sidecar_smoke.py
+      - name: Test demo lifecycle retains control network configuration
+        run: python3 tests/demo_lifecycle_smoke.py
       - name: Test private control network across web recreation
         run: python3 tests/control_web_network_smoke.py
 

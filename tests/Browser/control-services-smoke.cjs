@@ -57,6 +57,11 @@ module.exports = async ({ page, context, base, expect }) => {
   const fleet = await (await context.request.get(base + '/api/v1/snapshot')).json();
   const expectedRuntimes = fleet.runtimes.filter(x => x.connectionKind === 'Ssh').length;
   await expect(page.getByRole('region', { name: 'Fleet overview', exact: true }).locator('small').first()).toHaveText('/ ' + expectedRuntimes);
+  await page.goto(base + '/?worker=control-browser-host');
+  await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+  const reserved = page.getByText('This conversation is reserved for host operations.', { exact: false });
+  await expect(reserved).toBeVisible();
+  await expect(reserved.getByRole('link', { name: 'Control services', exact: true })).toHaveAttribute('href', '/control-services');
   await page.goto(base + '/coordination');
   await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
   await expect(page.getByLabel('Coordinator', { exact: true }).locator('option[value="control-browser-host"]')).toHaveCount(0);
