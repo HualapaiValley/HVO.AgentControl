@@ -48,15 +48,17 @@ public static class NativeTurnEvidence
         return result.ToArray();
     }
 
-    public static AutomaticCompactionFailure? CompletedAutomaticCompactionFailure(JsonElement[] messages, string? callerId)
+    public static AutomaticCompactionFailure? CompletedAutomaticCompactionFailure(JsonElement[] messages, string? callerId,
+        string expectedSessionId)
     {
-        if (string.IsNullOrEmpty(callerId)) return null;
+        if (string.IsNullOrEmpty(callerId) || string.IsNullOrEmpty(expectedSessionId)) return null;
         var ordered = messages.OrderBy(x => x.GetProperty("info").GetProperty("time").GetProperty("created").GetInt64())
             .ThenBy(x => x.GetProperty("info").GetProperty("id").GetString(), StringComparer.Ordinal).ToArray();
         var start = Array.FindIndex(ordered, x => x.GetProperty("info").GetProperty("id").GetString() == callerId);
         if (start < 0) return null;
         var caller = ordered[start].GetProperty("info");
-        var session = caller.TryGetProperty("sessionID", out var sessionId) ? sessionId.GetString() : null;
+        var session = BoundedText(caller, "sessionID");
+        if (caller.GetProperty("role").GetString() != "user" || session != expectedSessionId) return null;
         string? compactionId = null;
         AutomaticCompactionFailure? failure = null;
         foreach (var message in ordered.Skip(start + 1))
@@ -154,6 +156,7 @@ public static class NativeTurnEvidence
     {
         if (!value.TryGetProperty(property, out var found) || found.ValueKind != JsonValueKind.String) return null;
         var text = found.GetString();
-        return text is { Length: > 0 and <= 200 } ? text : null;
+        return text is { Length: > 0 and <= 200 } && !string.IsNullOrWhiteSpace(text) && text.All(x => !char.IsControl(x))
+            ? text : null;
     }
 }

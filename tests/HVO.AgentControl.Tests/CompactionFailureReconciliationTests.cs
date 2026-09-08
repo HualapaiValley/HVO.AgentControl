@@ -1,5 +1,8 @@
+using System.Net;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
@@ -72,6 +75,24 @@ public sealed class CompactionFailureReconciliationTests
         Assert.Contains("Verified task result", command.ResultJson, StringComparison.Ordinal);
         Assert.DoesNotContain("Internal summary", command.ResultJson, StringComparison.Ordinal);
         Assert.Empty(await app.Store.Read(db => db.Events.Where(x => x.Type == "AutomaticCompactionFailed").ToListAsync()));
+    }
+
+    [Fact]
+    public async Task FailedSummaryFollowedByMarkedSuccessfulContinuationIsNotTerminalFailure()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await Setup(app);
+        var snapshot = Snapshot(worker, Error("APIError"), continueSuccessfully: true,
+            providerId: "summary-provider", modelId: "summary-model");
+
+        await Invoke(Supervisor(app), "Reconcile", worker.Id, snapshot);
+
+        var detail = await app.Store.Detail(worker.Id);
+        Assert.Equal(Delivery.Finished, Assert.Single(detail.Commands).State);
+        Assert.Equal("NeedsReview", detail.Worker.Outcome);
+        Assert.Contains("Verified task result", detail.Commands[0].ResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("msg_summary", detail.Commands[0].ResultJson, StringComparison.Ordinal);
+        Assert.Empty(await app.Store.Read(db => db.Set<ProviderFailureReceipt>().ToListAsync()));
     }
 
     [Fact]
@@ -167,6 +188,46 @@ public sealed class CompactionFailureReconciliationTests
         Assert.Empty(await app.Store.Read(db => db.Set<ProviderFailureReceipt>().ToListAsync()));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RealWireMissingOrForeignCallerSessionCannotSettleFromForeignCompaction(bool foreignCaller)
+    {
+        await using var app = new TestApp();
+        var (worker, command) = await Setup(app);
+        await app.Store.Write(db =>
+        {
+            db.Add(new ProviderPool
+            {
+                Id = "provider:original",
+                ProviderId = "original",
+                State = "Recovering",
+                RecoveryCommandId = command.Id
+            });
+            return Task.FromResult(true);
+        });
+        var snapshot = Edit(Snapshot(worker, Error("APIError"), false, "original", "task-model"), 0, node =>
+        {
+            if (foreignCaller) node["info"]!["sessionID"] = "ses_foreign";
+            else node["info"]!.AsObject().Remove("sessionID");
+        });
+        snapshot = Edit(snapshot, 1, node => node["info"]!["sessionID"] = "ses_foreign");
+        snapshot = Edit(snapshot, 2, node => node["info"]!["sessionID"] = "ses_foreign");
+        using var api = new OpenCodeClient(new HttpClient(new Wire(worker, snapshot)) { BaseAddress = new("http://review.invalid") });
+
+        var observed = await api.Snapshot(worker, 200, default, pendingMessageIds: [command.NativeMessageId!]);
+        await Invoke(Supervisor(app), "Reconcile", worker.Id, observed);
+
+        var saved = Assert.Single((await app.Store.Detail(worker.Id)).Commands);
+        Assert.NotEqual(Delivery.Finished, saved.State);
+        var pool = await app.Store.Read(async db => (await db.Set<ProviderPool>().FindAsync("provider:original"))!);
+        Assert.Equal("Recovering", pool.State);
+        Assert.Equal(command.Id, pool.RecoveryCommandId);
+        Assert.False(pool.RecoveryOwnershipUnknown);
+        Assert.Empty(await app.Store.Read(db => db.Set<ProviderFailureReceipt>().ToListAsync()));
+        Assert.Empty(await app.Store.Read(db => db.Events.Where(x => x.Type == "AutomaticCompactionFailed").ToListAsync()));
+    }
+
     private static async Task<(WorkerRecord Worker, CommandRecord Command)> Setup(TestApp app)
     {
         var worker = await PersistenceTests.SeedWorker(app.Store);
@@ -242,7 +303,89 @@ public sealed class CompactionFailureReconciliationTests
             JsonSerializer.SerializeToElement(new { }), [], []);
     }
 
+    private static NativeSnapshot Edit(NativeSnapshot snapshot, int index, Action<JsonNode> change)
+    {
+        var messages = snapshot.Messages.ToArray();
+        var node = JsonNode.Parse(messages[index].GetRawText())!;
+        change(node);
+        messages[index] = JsonSerializer.SerializeToElement(node);
+        return snapshot with { Messages = messages };
+    }
+
     private static RuntimeSupervisor Supervisor(TestApp app) => new(app.Store, null!, Options.Create(new ControlOptions()), NullLogger<RuntimeSupervisor>.Instance);
     private static Task<bool> Invoke(RuntimeSupervisor supervisor, string name, params object[] args) =>
         (Task<bool>)typeof(RuntimeSupervisor).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(supervisor, args)!;
+
+    private sealed class Wire(WorkerRecord worker, NativeSnapshot snapshot) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            object content = request.RequestUri!.AbsolutePath switch
+            {
+                "/session/status" => new { },
+                var path when path.EndsWith("/message", StringComparison.Ordinal) => snapshot.Messages,
+                var path when path == "/session/" + worker.NativeSessionId => new { id = worker.NativeSessionId, directory = worker.Directory },
+                _ => throw new InvalidOperationException(request.RequestUri.AbsolutePath)
+            };
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(content), Encoding.UTF8, "application/json")
+            });
+        }
+    }
+}
+
+public sealed partial class CoordinationTests
+{
+    [Fact]
+    public async Task AutomaticCompactionHoldRetainsActualRouteAndCannotReleaseFromOriginalRouteChange()
+    {
+        await using var app = new TestApp();
+        var (run, coordinator, _) = await NativeDecisionRun(app.Store);
+        var command = await app.Store.Write(async db =>
+        {
+            var saved = (await db.Commands.FindAsync(run.DecisionCommandId))!;
+            saved.State = Delivery.Accepted;
+            saved.NativeMessageId = "msg_caller";
+            saved.ProviderPoolId = "provider:fixture";
+            db.Add(new ProviderPool { Id = "provider:fixture", ProviderId = "fixture", State = "Available" });
+            return saved;
+        });
+        var error = JsonSerializer.SerializeToElement(new
+        {
+            name = "APIError",
+            data = new { statusCode = 401, message = "Authentication failed" }
+        });
+        var snapshot = new NativeSnapshot(JsonSerializer.SerializeToElement(new { }),
+        [
+            JsonSerializer.SerializeToElement(new { info = new { id = command.NativeMessageId, role = "user", sessionID = coordinator.NativeSessionId, time = new { created = 1L } }, parts = Array.Empty<object>() }),
+            JsonSerializer.SerializeToElement(new { info = new { id = "msg_compaction", role = "user", sessionID = coordinator.NativeSessionId, time = new { created = 2L } }, parts = new[] { new { type = "compaction", auto = true } } }),
+            JsonSerializer.SerializeToElement(new { info = new { id = "msg_summary", role = "assistant", parentID = "msg_compaction", sessionID = coordinator.NativeSessionId,
+                providerID = "compaction-provider", modelID = "compaction-model", summary = true, time = new { created = 3L, completed = 4L }, finish = "error", error }, parts = Array.Empty<object>() })
+        ], "idle", JsonSerializer.SerializeToElement(new { }), [], []);
+        var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions()), NullLogger<RuntimeSupervisor>.Instance);
+
+        await (Task<bool>)typeof(RuntimeSupervisor).GetMethod("Reconcile", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(supervisor, [coordinator.Id, snapshot])!;
+        await app.Store.CoordinationTick();
+
+        var held = (await app.Store.Coordinations()).Single();
+        var checkpoint = Json.Read<CoordinatorContext>(held.InputJson).NativeFailure!;
+        Assert.True(checkpoint.Held);
+        Assert.True(checkpoint.AutomaticCompaction);
+        Assert.Equal("fixture", checkpoint.ProviderId);
+        Assert.Equal("compaction-provider", checkpoint.ActualProviderId);
+        Assert.Equal("compaction-model", checkpoint.ActualModelId);
+        Assert.Equal("Waiting", held.State);
+        var original = await app.Store.Read(async db => (await db.Set<ProviderPool>().FindAsync("provider:fixture"))!);
+        await app.Store.ResumePool(original.Id, new(original.Revision, true));
+        await ChangeNativeDecisionRoute(app.Store, coordinator.Id);
+        for (var i = 0; i < 3; i++) Assert.False(await app.Store.CoordinationTick());
+        var retained = (await app.Store.Coordinations()).Single();
+        Assert.True(Json.Read<CoordinatorContext>(retained.InputJson).NativeFailure!.Held);
+        Assert.Equal("Waiting", retained.State);
+        Assert.Equal("AuthenticationRequired", await app.Store.Read(async db =>
+            (await db.Set<ProviderPool>().FindAsync("provider:compaction-provider"))!.State));
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator-decision:" + run.Id);
+    }
 }

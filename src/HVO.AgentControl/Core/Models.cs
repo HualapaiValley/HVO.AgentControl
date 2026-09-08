@@ -391,7 +391,8 @@ public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reas
 public sealed record CoordinatorNativeFailure(string CommandId, string? CallerId, string? SessionId, string? AssistantId,
     string Category, int? Status, long? RetryAt, string ProviderId, string ModelId, string Agent, string Variant,
     string ProviderPoolId, long? ProviderPoolRevision, bool HasText, bool HasTools, bool Held = true,
-    string? PreviousCommandId = null);
+    string? PreviousCommandId = null, string? ActualProviderId = null, string? ActualModelId = null,
+    bool AutomaticCompaction = false);
 public sealed record IdlePlanningReview(string ObservationKey, string TriggerCommandId, long RequestedAt);
 public sealed record CoordinatorGitHubAccess(string RuntimeId, string CiInspectionState,
     string ChecksPermission, string CommitStatusesPermission, string ActionsPermission, long? ObservedAt);
