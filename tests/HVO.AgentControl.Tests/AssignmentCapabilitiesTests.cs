@@ -1,7 +1,11 @@
+using System.Reflection;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Services;
 using HVO.AgentControl.Ssh;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -104,6 +108,32 @@ public sealed class AssignmentCapabilitiesTests
         Assert.Equal(Delivery.Finished, replayed.State);
         Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
         Assert.Single(await restarted.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == coalescedId).ToListAsync()));
+    }
+
+    [Fact]
+    public async Task CoalescedCapabilityReceiptSurvivesEventRetentionBeforeReplay()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var first = await app.Store.DiscoverCapabilities(worker.Id, new(Guid.NewGuid().ToString()));
+        var coalescedId = Guid.NewGuid().ToString();
+        await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId));
+        await app.Store.Write(async db =>
+        {
+            (await db.Commands.FindAsync(first.Id))!.State = Delivery.Finished;
+            for (var index = 0; index < 110; index++) ControlStore.Event(db, "RetentionFixture", payload: new { index });
+            return true;
+        });
+        var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions { EventRetention = 100 }), NullLogger<RuntimeSupervisor>.Instance);
+        var retain = typeof(RuntimeSupervisor).GetMethod("Retain", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        await (Task<bool>)retain.Invoke(supervisor, null)!;
+
+        var replayed = await app.Store.DiscoverCapabilities(worker.Id, new(coalescedId));
+
+        Assert.Equal(first.Id, replayed.Id);
+        Assert.Equal(Delivery.Finished, replayed.State);
+        Assert.Single((await app.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
+        Assert.Single(await app.Store.Read(db => db.Events.Where(x => x.Type == "CapabilityInquiryCoalesced" && x.CommandId == coalescedId).ToListAsync()));
     }
 
     [Fact]

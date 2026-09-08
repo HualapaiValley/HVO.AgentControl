@@ -719,10 +719,10 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
         var threshold = await db.Events.OrderByDescending(x => x.Sequence).Skip(options.Value.EventRetention).Select(x => (long?)x.Sequence).FirstOrDefaultAsync();
         if (threshold is not null)
         {
-            // Confirmed replacements are durable provenance; only the current baseline is needed per runtime.
+            // Confirmed replacements and accepted coalesced receipts must remain replayable.
             var currentProcessObservations = db.Events.Where(x => x.Type == "NativeProcessObserved")
                 .GroupBy(x => x.RuntimeId).Select(x => x.Max(y => y.Sequence));
-            await db.Events.Where(x => x.Sequence <= threshold && x.Type != "NativeProcessReplaced" &&
+            await db.Events.Where(x => x.Sequence <= threshold && x.Type != "NativeProcessReplaced" && x.Type != "CapabilityInquiryCoalesced" &&
                 !currentProcessObservations.Contains(x.Sequence)).ExecuteDeleteAsync();
         }
         return true;
