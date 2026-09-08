@@ -19,15 +19,43 @@ public sealed class AssignmentCapabilitiesTests
             var command = await app.Store.Prompt(worker.Id, input);
             rendered = Json.Read<PromptInput>(command.ExecutionPayload).Text;
             Assert.Contains("every 5 minutes", rendered); Assert.EndsWith(input.Text, rendered);
+            var paths = AssignmentGuidance.ManagedPaths(worker.Directory, input.Id);
+            Assert.Contains("Verified session directory: " + paths.SessionDirectory, rendered);
+            Assert.Contains("Managed task directory: " + paths.TaskDirectory, rendered);
+            Assert.Contains("Managed scratch directory: " + paths.ScratchDirectory, rendered);
+            Assert.Contains("one-time approval", rendered);
+            Assert.Contains("Do not select sibling worktrees, /tmp paths", rendered);
             Assert.Equal(input.Text, Json.Read<PromptInput>(command.Payload).Text);
             Assert.Equal(AssignmentGuidance.Version, (await app.Store.Detail(worker.Id)).Assignments.Single().TemplateVersion);
         }
         await using var restarted = new TestApp(data, secrets);
         Assert.Equal(rendered, Json.Read<PromptInput>((await restarted.Store.Prompt(workerId, input)).ExecutionPayload).Text);
         Assert.Single((await restarted.Store.Snapshot()).Commands, x => x.Kind == "Prompt");
-        Assert.Throws<ControlException>(() => AssignmentGuidance.Render(input with { IncludeGuidance = false }));
-        Assert.Equal(input.Text, AssignmentGuidance.Render(input with { IncludeGuidance = false, ProgressMinutes = null }));
+        Assert.Throws<ControlException>(() => AssignmentGuidance.Render(input with { IncludeGuidance = false }, "/workspace"));
+        Assert.Equal(input.Text, AssignmentGuidance.Render(input with { IncludeGuidance = false, ProgressMinutes = null }, "/workspace"));
     }
+
+    [Theory]
+    [InlineData("/work/session", "/work/session")]
+    [InlineData("/work//session/", "/work/session")]
+    public void ManagedTaskPathsStayWithinCanonicalSessionDirectory(string session, string expected)
+    {
+        const string assignmentId = "65af8853-b47a-48e9-9a06-70273c905ece";
+        var paths = AssignmentGuidance.ManagedPaths(session, assignmentId);
+        Assert.Equal(expected, paths.SessionDirectory);
+        Assert.Equal(expected + "/.agentcontrol/tasks/65af8853b47a48e99a0670273c905ece", paths.TaskDirectory);
+        Assert.Equal(expected + "/.agentcontrol/scratch/65af8853b47a48e99a0670273c905ece", paths.ScratchDirectory);
+        Assert.DoesNotContain("/work/sibling", paths.TaskDirectory);
+        Assert.DoesNotContain("/tmp/", paths.ScratchDirectory);
+    }
+
+    [Theory]
+    [InlineData("relative/session")]
+    [InlineData("/work/session/../sibling")]
+    [InlineData("/work/./session")]
+    [InlineData("/work/session\0outside")]
+    public void ManagedTaskPathsRejectUnverifiedOrTraversingSessionDirectories(string session) =>
+        Assert.Throws<ControlException>(() => AssignmentGuidance.ManagedPaths(session, Guid.NewGuid().ToString()));
 
     [Fact]
     public async Task CapabilityInquiryDeduplicatesAndKeepsActiveWorkIndependent()
