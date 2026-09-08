@@ -267,9 +267,13 @@ public sealed record DecisionReceipt(string Summary, int Round, string DecisionC
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
 public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
+public sealed record IdlePlanningReview(string ObservationKey, string TriggerCommandId, long RequestedAt);
+public sealed record CoordinatorGitHubAccess(string RuntimeId, string CiInspectionState,
+    string ChecksPermission, string CommitStatusesPermission, string ActionsPermission, long? ObservedAt);
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
-    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null);
+    CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null,
+    IdlePlanningReview? IdleReview = null, CoordinatorGitHubAccess[]? GitHubAccess = null, string? PlanningObservationKey = null);
 
 public sealed class OperatorUpdateSchedule
 {
