@@ -431,10 +431,15 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             throw new ControlException("Invalid assignment outcome.", 400);
         if (string.IsNullOrWhiteSpace(input.Evidence) || input.Evidence.Length > 16000) throw new ControlException("Record bounded supporting evidence.", 400);
         var worker = await db.Workers.FindAsync(workerId) ?? throw new ControlException("Worker not found.", 404);
+        if (worker.Revision != input.ExpectedRevision) throw new ControlException("Worker changed; refresh the reviewed assignment before recording its outcome.");
+        var command = await db.Commands.SingleOrDefaultAsync(x => x.Id == input.CommandId && x.WorkerId == workerId && x.Kind == "Prompt")
+            ?? throw new ControlException("Reviewed prompt command was not found for this worker.", 404);
+        if (command.State is not (Delivery.Finished or Delivery.Failed or Delivery.Cancelled))
+            throw new ControlException("Only a settled prompt delivery can receive a reviewed outcome.");
+        var assignment = await db.Assignments.FindAsync(command.Id);
+        if (assignment is null || assignment.WorkerId != workerId) throw new ControlException("Reviewed assignment was not found for this worker.", 404);
         worker.Outcome = input.Outcome; worker.Revision++;
-        var command = await db.Commands.Where(x => x.WorkerId == workerId && x.Kind == "Prompt").OrderByDescending(x => x.CreatedAt).FirstOrDefaultAsync();
-        if (command is not null && await db.Assignments.FindAsync(command.Id) is { } assignment)
-        { assignment.Outcome = input.Outcome; assignment.Evidence = input.Evidence; }
+        assignment.Outcome = input.Outcome; assignment.Evidence = input.Evidence;
         Event(db, "AssignmentOutcomeRecorded", worker.RuntimeId, workerId, command?.Id, input, "user");
         return true;
     });
