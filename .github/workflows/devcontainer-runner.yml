@@ -1,0 +1,40 @@
+name: Dev Container runner
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  official-cli-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/DevContainerCli/package-lock.json
+      - name: Install exact official CLI without lifecycle scripts
+        run: npm ci --prefix tests/DevContainerCli --ignore-scripts --no-audit --no-fund
+      - name: Exercise owned cold and independent warm containers
+        env:
+          HVO_DEVCONTAINER_CLI_ACCEPTANCE: '1'
+          HVO_DEVCONTAINER_REPOSITORY: ${{ github.workspace }}
+          HVO_DEVCONTAINER_RECEIPT: ${{ github.workspace }}/artifacts/devcontainer-acceptance.json
+        run: dotnet test tests/HVO.AgentControl.Tests/HVO.AgentControl.Tests.csproj --configuration Release --filter 'FullyQualifiedName~DevContainerCliAcceptanceTests|FullyQualifiedName~LocalDevContainerRunnerTests'
+      - name: Retain exact ownership and cleanup receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devcontainer-runner-receipts
+          path: artifacts/devcontainer-acceptance.json
+          if-no-files-found: warn
