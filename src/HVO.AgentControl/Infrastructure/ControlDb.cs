@@ -14,6 +14,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<AssignmentRecord> Assignments => Set<AssignmentRecord>();
     public DbSet<JournalEvent> Events => Set<JournalEvent>();
     public DbSet<EvidenceConsumerCursor> EvidenceConsumerCursors => Set<EvidenceConsumerCursor>();
+    public DbSet<EvidenceReadReceipt> EvidenceReadReceipts => Set<EvidenceReadReceipt>();
     public DbSet<TranscriptMessage> Messages => Set<TranscriptMessage>();
     public DbSet<ModelUsageRecord> ModelUsage => Set<ModelUsageRecord>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
@@ -39,6 +40,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<CommandRecord>().HasIndex(x => new { x.State, x.QueueOrder });
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
         model.Entity<EvidenceConsumerCursor>().HasKey(x => x.ConsumerId);
+        model.Entity<EvidenceReadReceipt>().HasIndex(x => new { x.ConsumerId, x.AcknowledgedAt });
         model.Entity<RuntimeTelemetryHistoryRecord>().HasKey(x => x.Sequence);
         model.Entity<RuntimeTelemetryHistoryRecord>().HasIndex(x => new { x.RuntimeId, x.ObservedAt, x.Sequence });
         model.Entity<OperatorUpdateSchedule>().HasIndex(x => x.CoordinationRunId).IsUnique();
