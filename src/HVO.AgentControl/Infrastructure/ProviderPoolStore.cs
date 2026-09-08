@@ -27,7 +27,22 @@ public sealed class ProviderFailureReceipt
     public long? RetryAt { get; set; }
 }
 
+// A validated advisory route only. A later receipt-aware continuation owns dispatch.
+public sealed class ProviderFallbackReceipt
+{
+    public string Id { get; set; } = "";
+    public string SourceCommandId { get; set; } = "";
+    public string SourcePoolId { get; set; } = "";
+    public string WorkerId { get; set; } = "";
+    public string ProviderId { get; set; } = "";
+    public string ModelId { get; set; } = "";
+    public string TargetPoolId { get; set; } = "";
+    public long CreatedAt { get; set; }
+}
+
 public sealed record ResumeProviderPool(long ExpectedRevision, bool RecoveryVerified);
+public sealed record ProviderFallbackRecommendation(string Id, string SourceCommandId, long ExpectedWorkerRevision,
+    string ProviderId, string ModelId);
 public sealed record ProviderFailure(string Category, int? Status, long? RetryAt)
 {
     // Only native assistant provider errors qualify. OpenCode HTTP authentication and
@@ -98,6 +113,60 @@ public sealed record NativeRetryFailure(int Attempt, string ProviderId, long? Ne
 public sealed partial class ControlStore
 {
     public Task<List<ProviderPool>> ProviderPools() => Read(db => db.Set<ProviderPool>().AsNoTracking().OrderBy(x => x.Id).ToListAsync());
+
+    public Task<List<ProviderFallbackReceipt>> ProviderFallbacks(string sourceCommandId) => Read(db =>
+        db.Set<ProviderFallbackReceipt>().AsNoTracking().Where(x => x.SourceCommandId == sourceCommandId).ToListAsync());
+
+    public Task<ProviderFallbackReceipt> RecordFallbackRecommendation(ProviderFallbackRecommendation input) => Write(async db =>
+    {
+        ValidateRequestId(input.Id);
+        if (string.IsNullOrWhiteSpace(input.SourceCommandId) || string.IsNullOrWhiteSpace(input.ProviderId) ||
+            string.IsNullOrWhiteSpace(input.ModelId) || input.ProviderId.Length > 200 || input.ModelId.Length > 200)
+            throw new ControlException("Provide a source command and configured replacement provider/model.", 400);
+        if (await db.Set<ProviderFallbackReceipt>().FindAsync(input.Id) is { } prior)
+        {
+            if (prior.SourceCommandId != input.SourceCommandId || prior.ProviderId != input.ProviderId || prior.ModelId != input.ModelId)
+                throw new ControlException("Fallback recommendation ID belongs to a different proposal.");
+            return prior;
+        }
+        var source = await db.Commands.FindAsync(input.SourceCommandId) ?? throw new ControlException("Source command not found.", 404);
+        if (source.WorkerId is null || source.State is not (Delivery.Failed or Delivery.Cancelled))
+            throw new ControlException("Reconcile the source command to a terminal failed or cancelled receipt before proposing fallback.");
+        if (await db.Set<ProviderFallbackReceipt>().FirstOrDefaultAsync(x => x.SourceCommandId == source.Id) is not null)
+            throw new ControlException("A fallback recommendation is already recorded for this source command.");
+        var worker = await db.Workers.FindAsync(source.WorkerId) ?? throw new ControlException("Source worker not found.", 404);
+        if (worker.Archived || worker.Stale || worker.Revision != input.ExpectedWorkerRevision || worker.Activity != "Idle")
+            throw new ControlException("Refresh the source worker before proposing fallback; it is unavailable or changed.");
+        if (await db.Commands.AnyAsync(x => x.WorkerId == worker.Id && x.Id != source.Id &&
+            (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted ||
+             x.State == Delivery.Running || x.State == Delivery.Unknown)))
+            throw new ControlException("Source worker still has outstanding work; reconcile it before proposing fallback.");
+        var sourcePoolId = source.ProviderPoolId.Length > 0 ? source.ProviderPoolId : PoolId(worker, source);
+        var sourcePool = await db.Set<ProviderPool>().FindAsync(sourcePoolId);
+        if (sourcePool is null || sourcePool.State == "Available")
+            throw new ControlException("The source provider pool is not held by a recorded provider failure.");
+        var targetPoolId = "provider:" + input.ProviderId;
+        if (targetPoolId == sourcePoolId) throw new ControlException("Fallback must use a different provider pool.");
+        var targetPool = await db.Set<ProviderPool>().FindAsync(targetPoolId);
+        if (targetPool is not null && targetPool.State != "Available")
+            throw new ControlException("The replacement provider pool is unavailable.");
+        ValidateModelOptions(Json.Read<List<ModelChoice>>(worker.ModelsJson), input.ProviderId, input.ModelId, "", "");
+        var receipt = new ProviderFallbackReceipt
+        {
+            Id = input.Id,
+            SourceCommandId = source.Id,
+            SourcePoolId = sourcePoolId,
+            WorkerId = worker.Id,
+            ProviderId = input.ProviderId,
+            ModelId = input.ModelId,
+            TargetPoolId = targetPoolId,
+            CreatedAt = Now
+        };
+        db.Add(receipt);
+        Event(db, "ProviderFallbackRecommended", worker.RuntimeId, worker.Id, source.Id,
+            new { receipt.Id, receipt.SourceCommandId, receipt.SourcePoolId, receipt.ProviderId, receipt.ModelId, receipt.TargetPoolId }, provenance: "advisor");
+        return receipt;
+    });
 
     internal static string PoolId(WorkerRecord worker, CommandRecord command)
     {

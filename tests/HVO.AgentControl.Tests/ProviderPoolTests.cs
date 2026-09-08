@@ -291,4 +291,68 @@ public sealed class ProviderPoolTests
         owner.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
         Assert.False((await owner.PostAsJsonAsync(url, new ResumeProviderPool(pool.Revision + 1, true))).IsSuccessStatusCode);
     }
+
+    [Fact]
+    public async Task SafeFallbackRecommendationIsPersistedIdempotentlyWithoutDispatch()
+    {
+        string data, secrets, commandId, receiptId;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var command = Command(worker); command.State = Delivery.Failed;
+            receiptId = Guid.NewGuid().ToString(); commandId = command.Id;
+            await app.Store.Write(async db =>
+            {
+                var saved = (await db.Workers.FindAsync(worker.Id))!;
+                saved.Stale = false; saved.Activity = "Idle";
+                saved.ModelsJson = Json.Write(new List<ModelChoice> { new("openai", "luna", "Luna") });
+                db.Commands.Add(command);
+                db.Add(new ProviderPool { Id = command.ProviderPoolId, ProviderId = "opencode-go", State = "Exhausted" });
+                return true;
+            });
+            worker = (await app.Store.Snapshot()).Workers.Single(x => x.Id == worker.Id);
+            var input = new ProviderFallbackRecommendation(receiptId, command.Id, worker.Revision, "openai", "luna");
+            var receipt = await app.Store.RecordFallbackRecommendation(input);
+            Assert.Equal("provider:opencode-go", receipt.SourcePoolId);
+            Assert.Equal("provider:openai", receipt.TargetPoolId);
+            Assert.Equal(receipt.Id, (await app.Store.RecordFallbackRecommendation(input)).Id);
+            Assert.Single(await app.Store.ProviderFallbacks(command.Id));
+            Assert.Single((await app.Store.Snapshot()).Commands);
+            Assert.Equal(Delivery.Failed, await app.Store.Read(async db => (await db.Commands.FindAsync(command.Id))!.State));
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+        await using var restarted = new TestApp(data, secrets);
+        var workerAfterRestart = (await restarted.Store.Snapshot()).Workers.Single();
+        var retry = new ProviderFallbackRecommendation(receiptId, commandId, workerAfterRestart.Revision, "openai", "luna");
+        Assert.Equal(receiptId, (await restarted.Store.RecordFallbackRecommendation(retry)).Id);
+        Assert.Single(await restarted.Store.ProviderFallbacks(commandId));
+    }
+
+    [Fact]
+    public async Task FallbackRecommendationRejectsUnsafeRoutesAndUnreconciledWork()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = Command(worker); command.State = Delivery.Failed;
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Workers.FindAsync(worker.Id))!;
+            saved.Stale = false; saved.Activity = "Idle";
+            saved.ModelsJson = Json.Write(new List<ModelChoice> { new("openai", "luna", "Luna"), new("opencode-go", "model", "Original") });
+            db.Commands.Add(command);
+            db.Add(new ProviderPool { Id = command.ProviderPoolId, ProviderId = "opencode-go", State = "Exhausted" });
+            db.Add(new ProviderPool { Id = "provider:blocked", ProviderId = "blocked", State = "Exhausted" });
+            return true;
+        });
+        worker = (await app.Store.Snapshot()).Workers.Single(x => x.Id == worker.Id);
+        Task Recommend(string provider, string model, long revision = -1) => app.Store.RecordFallbackRecommendation(
+            new(Guid.NewGuid().ToString(), command.Id, revision < 0 ? worker.Revision : revision, provider, model));
+        await Assert.ThrowsAsync<ControlException>(() => Recommend("opencode-go", "model"));
+        await Assert.ThrowsAsync<ControlException>(() => Recommend("blocked", "model"));
+        await Assert.ThrowsAsync<ControlException>(() => Recommend("openai", "missing"));
+        await Assert.ThrowsAsync<ControlException>(() => Recommend("openai", "luna", worker.Revision + 1));
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.State = Delivery.Running; return true; });
+        await Assert.ThrowsAsync<ControlException>(() => Recommend("openai", "luna"));
+        Assert.Empty(await app.Store.ProviderFallbacks(command.Id));
+    }
 }
