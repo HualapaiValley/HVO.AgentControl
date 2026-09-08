@@ -24,6 +24,7 @@ public static class ApiEndpoints
         group.MapPost("/control-services", (RegisterControlServiceInput input, ControlServiceRegistration registration, CancellationToken token) => registration.Register(input, token));
         group.MapPost("/control-services/{id}/sessions", (string id, CreateControlSessionInput input, ControlStore store) => store.CreateControlSession(id, input));
         group.MapPost("/control-services/{id}/sessions/{sessionId}/retry", (string id, string sessionId, RetryControlSessionInput input, ControlStore store) => store.RetryControlSession(id, sessionId, input));
+        group.MapPost("/control-services/{id}/sessions/{sessionId}/renew", (string id, string sessionId, RenewControlSessionInput input, ControlStore store) => store.RenewControlSession(id, sessionId, input));
         group.MapPost("/coordinations/{id}/control-session", (string id, MigrateControlSessionInput input, ControlStore store) => store.MigrateControlSession(id, input));
         group.MapGet("/providers/opencode-go/key", (ProviderKeyService keys) => keys.Status());
         group.MapPost("/providers/opencode-go/key", (SaveProviderKey input, ProviderKeyService keys) => keys.Save(input));

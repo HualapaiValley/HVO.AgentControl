@@ -132,6 +132,8 @@ public sealed partial class ControlStore
             throw new ControlException("Finish or stop this coordinator session's current coordination before starting another.");
         if (await db.ControlSessions.AnyAsync(x => x.WorkerId == input.CoordinatorWorkerId && x.ScopeKind == "HostOperations"))
             throw new ControlException("Host operations is reserved for the host. Choose a workgroup control session for development coordination.", 400);
+        if (await db.ControlSessions.AnyAsync(x => x.WorkerId == input.CoordinatorWorkerId && !x.IsCurrent))
+            throw new ControlException("Choose the current workgroup control-session generation. A successor becomes current only through paused migration.", 409);
         var ids = input.WorkerIds.Append(input.CoordinatorWorkerId).ToArray();
         var workers = await db.Workers.Where(x => ids.Contains(x.Id) && !x.Archived).ToListAsync();
         if (workers.Count != ids.Length) throw new ControlException("All participants must be available, unarchived workers.");
