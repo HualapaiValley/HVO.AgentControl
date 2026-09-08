@@ -202,8 +202,8 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                     var statuses = await api.SessionStatuses(directory, cancellation);
                     return sessions.ValueKind == System.Text.Json.JsonValueKind.Array && statuses.ValueKind == System.Text.Json.JsonValueKind.Object &&
                         sessions.EnumerateArray().All(session => session.TryGetProperty("id", out var sessionId) && sessionId.ValueKind == System.Text.Json.JsonValueKind.String &&
-                            (!statuses.TryGetProperty(sessionId.GetString()!, out var status) || status.ValueKind == System.Text.Json.JsonValueKind.Object &&
-                                status.TryGetProperty("type", out var type) && type.GetString() == "idle"));
+                            statuses.TryGetProperty(sessionId.GetString()!, out var status) && status.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                                status.TryGetProperty("type", out var type) && type.GetString() == "idle");
                 }
             }
         }
