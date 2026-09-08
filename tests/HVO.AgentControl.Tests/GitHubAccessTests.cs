@@ -362,7 +362,7 @@ public sealed class GitHubAccessTests
             Assert.True(process.ExitCode == 0, await error);
             return await output;
         }
-        await Docker("printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh && mkdir -p /home/agent/.config/gh && printf personal-login > /home/agent/.config/gh/hosts.yml");
+        await Docker("rm -rf " + runtime.StateDirectory + " && printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/gh && chmod 755 /usr/local/bin/gh && mkdir -p /home/agent/.config/gh && printf personal-login > /home/agent/.config/gh/hosts.yml");
         try
         {
             var managedDirectory = BootstrapScript.ManagedGitHubConfigDirectory(runtime);
