@@ -96,6 +96,10 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ProviderPoolId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("QueueOrder")
                         .HasColumnType("INTEGER");
 

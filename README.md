@@ -77,6 +77,8 @@ The original repository's [Dev Container and Docker context instructions](docs/D
 
 ## Validation
 
+CI and Dev Container acceptance finish an already-running `main` validation when another PR merges. GitHub keeps the newest pending run for that workflow and branch; superseded PR runs are still cancelled. Release checks must match the deployed commit in both workflows, since each queue progresses independently.
+
 ```bash
 dotnet test HVO.AgentControl.slnx --configuration Release --no-restore
 ./tests/Fixtures/start.sh
