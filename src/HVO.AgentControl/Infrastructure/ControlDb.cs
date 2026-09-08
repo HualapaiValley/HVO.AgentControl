@@ -13,6 +13,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<CommandRecord> Commands => Set<CommandRecord>();
     public DbSet<AssignmentRecord> Assignments => Set<AssignmentRecord>();
     public DbSet<JournalEvent> Events => Set<JournalEvent>();
+    public DbSet<EvidenceConsumerCursor> EvidenceConsumerCursors => Set<EvidenceConsumerCursor>();
+    public DbSet<EvidenceReadReceipt> EvidenceReadReceipts => Set<EvidenceReadReceipt>();
     public DbSet<TranscriptMessage> Messages => Set<TranscriptMessage>();
     public DbSet<ModelUsageRecord> ModelUsage => Set<ModelUsageRecord>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
@@ -42,6 +44,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<PendingRequest>().HasIndex(x => new { x.WorkerId, x.Kind, x.NativeId }).IsUnique();
         model.Entity<CommandRecord>().HasIndex(x => new { x.State, x.QueueOrder });
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
+        model.Entity<EvidenceConsumerCursor>().HasKey(x => x.ConsumerId);
+        model.Entity<EvidenceReadReceipt>().HasIndex(x => new { x.ConsumerId, x.AcknowledgedAt });
         model.Entity<WorkItem>().HasIndex(x => x.IssueNumber);
         model.Entity<WorkItem>().HasIndex(x => x.Branch);
         model.Entity<WorkItem>().HasIndex(x => new { x.Repository, x.Branch })

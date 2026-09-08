@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260908001616_DurableEvidenceCursors")]
+    partial class DurableEvidenceCursors
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -286,38 +289,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsUnique();
 
                     b.ToTable("EvidenceCursors");
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.EvidenceReadReceipt", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("AcknowledgedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("AfterSequence")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ConsumerId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("NextSequence")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("PageJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ConsumerId", "AcknowledgedAt");
-
-                    b.ToTable("EvidenceReadReceipts");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.JournalEvent", b =>
