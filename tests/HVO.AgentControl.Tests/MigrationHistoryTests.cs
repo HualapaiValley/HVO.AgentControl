@@ -1,3 +1,4 @@
+using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -47,5 +48,23 @@ public sealed class MigrationHistoryTests
         Assert.True(differences.Count == 0, latest.Key + " differs from the snapshot: " +
             string.Join(", ", differences.Select(operation => operation.GetType().Name)));
         Assert.False(db.Database.HasPendingModelChanges(), "The model snapshot differs from the current application model.");
+    }
+
+    [Fact]
+    public async Task TaskSessionActivationSchemaPersistsOwnersIntentAndConcurrency()
+    {
+        await using var app = new TestApp();
+        await using var db = await app.Services.GetRequiredService<IDbContextFactory<ControlDb>>().CreateDbContextAsync();
+        var model = db.Model;
+        var work = model.FindEntityType(typeof(WorkItem))!;
+        var phase = model.FindEntityType(typeof(WorkItemPhase))!;
+        var session = model.FindEntityType(typeof(TaskSessionBindingRecord))!;
+
+        Assert.NotNull(work.FindProperty("OwnerWorkerSlotId"));
+        Assert.NotNull(phase.FindProperty("OwnerWorkerSlotId"));
+        Assert.NotNull(session.FindProperty("WorkerId"));
+        Assert.NotNull(session.FindProperty("CreationCommandId"));
+        Assert.True(session.FindProperty("Revision")!.IsConcurrencyToken);
+        Assert.Contains(session.GetIndexes(), index => index.Properties.Select(x => x.Name).SequenceEqual(["CreationCommandId"]) && index.IsUnique);
     }
 }

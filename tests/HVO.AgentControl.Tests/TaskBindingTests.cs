@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
@@ -296,6 +297,106 @@ public sealed class TaskBindingTests
         Assert.Equal(runtimeId, slot.RuntimeId);
         Assert.Equal(runtimeId, (await app.Store.RuntimeEnvironment(runtimeId)).RuntimeId);
     }
+
+    [Fact]
+    public async Task FreshTaskSessionReservationAndBindingTransferExactOwnership()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.Activation.git", "feature/activation");
+        var binding = await SlotOwnedBinding(app, setup, "activation");
+        var environment = await app.Store.RuntimeEnvironment(setup.Runtime.Id);
+        var current = await CurrentActivationInputs(app, setup);
+        var workerId = Id();
+        var input = new CreateTaskSessionInput(Id(), workerId, new string('a', 40), binding.Binding.Revision,
+            binding.Workspace.Revision, binding.Session.Revision, current.WorkRevision,
+            current.ProjectRevision, current.SlotRevision, current.RuntimeRevision, environment.Revision);
+
+        var command = await app.Store.CreateTaskSession(binding.Binding.Id, input);
+        var pending = await app.Store.TaskBinding(binding.Binding.Id);
+        var reserved = (await app.Store.Detail(workerId)).Worker;
+        Assert.Equal(TaskSessionBindingState.ActivationPending, pending.Session.State);
+        Assert.Equal(workerId, pending.Session.WorkerId);
+        Assert.True(reserved.Archived);
+        Assert.Equal("pending:" + command.Id, reserved.NativeSessionId);
+        Assert.Equal(binding.Workspace.Directory, (await app.Store.TaskSessionCheckout(command.Id)).Directory);
+
+        using var native = JsonDocument.Parse($$"""{"id":"native-task","directory":"{{binding.Workspace.Directory}}"}""");
+        await app.Store.BindTaskSession(command.Id, native.RootElement, []);
+        var bound = await app.Store.TaskBinding(binding.Binding.Id);
+        var work = await app.Store.Read(db => db.WorkItems.SingleAsync(x => x.Id == setup.Work.Id));
+        Assert.Equal(TaskSessionBindingState.Bound, bound.Session.State);
+        Assert.Equal("native-task", bound.Session.NativeSessionId);
+        Assert.Equal(workerId, work.OwnerWorkerId);
+        Assert.Null(work.OwnerWorkerSlotId);
+        Assert.False((await app.Store.Detail(workerId)).Worker.Archived);
+    }
+
+    [Fact]
+    public async Task TaskTupleAndReleaseGuardsFailClosedThenArchiveTerminalIdleWorker()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.Release.git", "feature/release");
+        var binding = await SlotOwnedBinding(app, setup, "release");
+        var environment = await app.Store.RuntimeEnvironment(setup.Runtime.Id);
+        var current = await CurrentActivationInputs(app, setup);
+        var workerId = Id();
+        var command = await app.Store.CreateTaskSession(binding.Binding.Id, new(Id(), workerId, new string('b', 40),
+            binding.Binding.Revision, binding.Workspace.Revision, binding.Session.Revision,
+            current.WorkRevision, current.ProjectRevision, current.SlotRevision,
+            current.RuntimeRevision, environment.Revision));
+        using var native = JsonDocument.Parse($$"""{"id":"native-release","directory":"{{binding.Workspace.Directory}}"}""");
+        await app.Store.BindTaskSession(command.Id, native.RootElement, []);
+        var active = await app.Store.TaskBinding(binding.Binding.Id);
+        var notTerminal = await Assert.ThrowsAsync<InventoryException>(() => app.Store.ReleaseTaskBinding(active.Binding.Id, new(Id(), active.Binding.Revision)));
+        Assert.Equal("task_not_terminal", notTerminal.Code);
+
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(workerId))!;
+            worker.Directory = "/wrong";
+            return true;
+        });
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(workerId, new(Id(), "work", 1)));
+
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(workerId))!;
+            worker.Directory = binding.Workspace.Directory;
+            worker.Activity = "Idle";
+            worker.Stale = false;
+            worker.LastObservedAt = ControlStore.Now;
+            (await db.WorkItems.FindAsync(setup.Work.Id))!.State = WorkItemState.Completed;
+            return true;
+        });
+        var released = await app.Store.ReleaseTaskBinding(active.Binding.Id, new(Id(), active.Binding.Revision));
+        Assert.Equal(TaskBindingState.Released, released.Binding.State);
+        Assert.Equal(TaskSessionBindingState.Released, released.Session.State);
+        Assert.True((await app.Store.Detail(workerId)).Worker.Archived);
+    }
+
+    private static async Task<TaskBindingView> SlotOwnedBinding(TestApp app, SeedData setup, string suffix)
+    {
+        var work = await app.Store.Write(async db =>
+        {
+            var record = (await db.WorkItems.FindAsync(setup.Work.Id))!;
+            record.OwnerWorkerId = "";
+            record.OwnerWorkerSlotId = setup.Slot.Id;
+            record.Revision++;
+            return record;
+        });
+        return await app.Store.CreateTaskBinding(new(Id(), Id(), work.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(),
+            "/work/" + suffix, work.Branch, work.Revision, setup.Project.Revision, setup.Slot.Revision));
+    }
+
+    private static Task<(long WorkRevision, long ProjectRevision, long SlotRevision, long RuntimeRevision)> CurrentActivationInputs(TestApp app, SeedData setup) =>
+        app.Store.Read(async db =>
+        {
+            var work = (await db.WorkItems.FindAsync(setup.Work.Id))!;
+            var project = await db.Projects.SingleAsync(x => x.Id == setup.Project.Id);
+            var slot = await db.WorkerSlots.SingleAsync(x => x.Id == setup.Slot.Id);
+            var runtime = await db.Runtimes.SingleAsync(x => x.Id == setup.Runtime.Id);
+            return (work.Revision, project.Revision, slot.Revision, runtime.Revision);
+        });
 
     private static CreateTaskBindingInput NewBinding(SeedData data, string task, string workspace) =>
         new(Id(), Id(), data.Work.Id, data.Project.Id, data.Slot.Id, Id(), Id(), "/work/" + workspace, data.Work.Branch,
