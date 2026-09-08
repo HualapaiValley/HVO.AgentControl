@@ -53,6 +53,26 @@ public static class NativeTurnEvidence
             part.GetProperty("type").GetString() != "tool" || IsSettledTerminalTool(part));
     }
 
+    public static string? CompletedToolFailureId(JsonElement[] messages)
+    {
+        var latest = messages.OrderBy(x => x.GetProperty("info").GetProperty("time").GetProperty("created").GetInt64())
+            .ThenBy(x => x.GetProperty("info").GetProperty("id").GetString(), StringComparer.Ordinal).LastOrDefault();
+        return latest.ValueKind == JsonValueKind.Object && IsCompletedToolFailure(latest)
+            ? latest.GetProperty("info").GetProperty("id").GetString() : null;
+    }
+
+    public static bool IsCompletedToolFailure(JsonElement message)
+    {
+        var info = message.GetProperty("info");
+        if (info.GetProperty("role").GetString() != "assistant" || IsTrue(info, "summary") ||
+            !info.GetProperty("time").TryGetProperty("completed", out var completed) || completed.ValueKind != JsonValueKind.Number ||
+            IsTerminalAssistantResponse(message)) return false;
+        var tools = message.GetProperty("parts").EnumerateArray().Where(x => x.GetProperty("type").GetString() == "tool").ToArray();
+        return tools.Any(x => x.TryGetProperty("state", out var state) && state.TryGetProperty("status", out var status) && status.GetString() == "error") &&
+            tools.All(x => x.TryGetProperty("state", out var state) && state.TryGetProperty("status", out var status) &&
+                status.GetString() is "completed" or "error" or "cancelled");
+    }
+
     private static bool IsSettledTerminalTool(JsonElement part)
     {
         if (!part.TryGetProperty("state", out var state) || !state.TryGetProperty("status", out var status) ||

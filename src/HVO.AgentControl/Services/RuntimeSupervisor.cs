@@ -153,11 +153,14 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
                     while (events.Count < 512 && incoming.Reader.TryRead(out var item)) events.Add(item);
                     if (events.Count > 0) await ObserveEvents(id, events);
                     var workers = await store.Read(db => db.Workers.Where(x => x.RuntimeId == id).AsNoTracking().ToListAsync(token));
+                    var pendingPrompts = await store.Read(db => db.Commands.Where(x => x.RuntimeId == id && x.Kind == "Prompt" &&
+                        (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running))
+                        .Select(x => x.WorkerId).ToListAsync(token));
                     foreach (var worker in workers)
                     {
                         try
                         {
-                            var snapshot = await transport.Api.Snapshot(worker, options.Value.HistoryLimit, token);
+                            var snapshot = await transport.Api.Snapshot(worker, options.Value.HistoryLimit, token, pendingPrompts.Contains(worker.Id));
                             await Reconcile(worker.Id, snapshot);
                         }
                         catch (NativeRejectedException ex) when (ex.Status == 404)
@@ -506,7 +509,10 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             if (!user) continue;
             var assistants = NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId);
-            var ended = assistants.Length > 0 && NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]);
+            var stoppedToolFailure = activity == "Idle" && assistants.Length > 0 &&
+                snapshot.IdleToolFailureMessageId == assistants[^1].GetProperty("info").GetProperty("id").GetString() &&
+                NativeTurnEvidence.IsCompletedToolFailure(assistants[^1]);
+            var ended = assistants.Length > 0 && (NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]) || stoppedToolFailure);
             var failed = assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
             foreach (var assistant in assistants)
             {
@@ -526,7 +532,9 @@ public sealed class RuntimeSupervisor(ControlStore store, IRuntimeTransportFacto
             var state = activity == "Idle" && ended ? Delivery.Finished : activity == "Idle" ? Delivery.Accepted : Delivery.Running;
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
-            command.Detail = state == Delivery.Finished ? "Native turn ended. Assignment outcome requires evidence and owner review." : "Native caller message identity found in retained history.";
+            command.Detail = state == Delivery.Finished
+                ? stoppedToolFailure ? "Native idle and a refreshed failed tool step confirm the turn stopped. Task completion remains unverified." : "Native turn ended. Assignment outcome requires evidence and owner review."
+                : "Native caller message identity found in retained history.";
             worker.Outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
             if (await db.Assignments.FindAsync(command.Id) is { } assignment) assignment.Outcome = worker.Outcome;
             ControlStore.Event(db, "CommandReconciled", worker.RuntimeId, workerId, command.Id, new { state }); changed = true;

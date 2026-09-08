@@ -13,6 +13,67 @@ namespace HVO.AgentControl.Tests;
 public sealed class RuntimeSupervisorReconciliationTests
 {
     [Fact]
+    public async Task DeniedToolRequiresOrderedIdleRecheckAndFinishesAfterRestart()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var command = await AddPrompt(app, worker);
+            await Reconcile(app, worker, Snapshot(worker, command, DeniedTool(worker, command)));
+            Assert.Equal(Delivery.Accepted, (await app.Store.Detail(worker.Id)).Commands.Single().State);
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        var savedWorker = (await restarted.Store.Snapshot()).Workers.Single();
+        var savedCommand = (await restarted.Store.Detail(savedWorker.Id)).Commands.Single();
+        await Reconcile(restarted, savedWorker, Snapshot(savedWorker, savedCommand, DeniedTool(savedWorker, savedCommand)) with
+        {
+            IdleToolFailureMessageId = "msg_denied"
+        });
+        var detail = await restarted.Store.Detail(savedWorker.Id);
+        Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
+        Assert.Equal("NeedsReview", detail.Worker.Outcome);
+        Assert.Contains("Permission was rejected", detail.Commands.Single().ResultJson);
+    }
+
+    [Theory]
+    [InlineData("busy", "msg_denied")]
+    [InlineData("idle", "a-different-turn")]
+    public async Task ContinuedOrUnmatchedDenialCannotFinishFromRecheck(string status, string boundary)
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = await AddPrompt(app, worker);
+        await Reconcile(app, worker, Snapshot(worker, command, DeniedTool(worker, command)) with
+        {
+            Status = status,
+            IdleToolFailureMessageId = boundary
+        });
+
+        Assert.NotEqual(Delivery.Finished, (await app.Store.Detail(worker.Id)).Commands.Single().State);
+    }
+
+    [Fact]
+    public async Task LaterFinalAfterContinuedDenialWinsOverEarlierStoppedToolCandidate()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = await AddPrompt(app, worker);
+        var denied = Snapshot(worker, command, DeniedTool(worker, command));
+        await Reconcile(app, worker, denied with
+        {
+            Messages = [.. denied.Messages, FinalAssistant(5, "Final response after permission denial")],
+            IdleToolFailureMessageId = "msg_denied"
+        });
+
+        var result = (await app.Store.Detail(worker.Id)).Commands.Single();
+        Assert.Equal(Delivery.Finished, result.State);
+        Assert.Contains("Final response after permission denial", ControlStore.ResponseText(result.ResultJson));
+    }
+
+    [Fact]
     public async Task ToolBoundaryWithoutFinalMessageStaysActiveAcrossRestartUntilFinalArrives()
     {
         string data, secrets;
@@ -175,6 +236,12 @@ public sealed class RuntimeSupervisorReconciliationTests
             ? new Dictionary<string, object> { ["id"] = "msg_final", ["role"] = "assistant", ["parentID"] = "msg_user", ["sessionID"] = "ses_fixture", ["time"] = new { created = 3L, completed }, ["finish"] = "stop" }
             : new Dictionary<string, object> { ["id"] = "msg_final", ["role"] = "assistant", ["parentID"] = "msg_user", ["sessionID"] = "ses_fixture", ["time"] = new { created = 3L } },
         parts = new[] { new { type = "text", text } }
+    });
+
+    private static JsonElement DeniedTool(WorkerRecord worker, CommandRecord command) => JsonSerializer.SerializeToElement(new
+    {
+        info = new { id = "msg_denied", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId, time = new { created = 3L, completed = 4L }, finish = "tool-calls" },
+        parts = new[] { new { type = "tool", tool = "bash", state = new { status = "error", error = "Permission was rejected" } } }
     });
 
     private static Task<bool> Reconcile(TestApp app, WorkerRecord worker, NativeSnapshot snapshot)
