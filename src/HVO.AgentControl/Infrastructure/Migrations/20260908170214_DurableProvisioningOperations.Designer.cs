@@ -1590,9 +1590,34 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("CredentialConfigurationFingerprint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CredentialState")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Detail")
                         .IsRequired()
                         .HasColumnType("TEXT");
+
+                    b.Property<string>("EnvironmentPolicyFingerprint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("EnvironmentPolicyVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("EnvironmentProcessId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EnvironmentProcessIncarnation")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EnvironmentVerifiedAt")
+                        .HasColumnType("INTEGER");
 
                     b.Property<long?>("ExpiresAt")
                         .HasColumnType("INTEGER");
