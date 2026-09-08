@@ -2,6 +2,8 @@
 
 Owner clarification, 2026-09-07. This is a proposed extension, not implemented automatic provisioning.
 
+See [managed project and worker conventions](PROVISIONING_CONVENTIONS.md) for the initial `HVO Development` workgroup, immutable project/task identities, managed host paths, container configuration precedence and required multi-project lifecycle verification.
+
 ## Current behavior
 
 A runtime is the reusable SSH execution environment and managed OpenCode server. A worker binds one persistent native conversation to one canonical directory. Its `Project` string is a label, not a repository registration or scheduler policy. Coordination selects existing worker IDs; it does not select a bare runtime and provision a project session.
