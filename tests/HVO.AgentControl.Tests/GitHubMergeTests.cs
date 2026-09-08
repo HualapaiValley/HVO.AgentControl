@@ -527,6 +527,28 @@ public sealed class GitHubMergeTests
     }
 
     [Fact]
+    public async Task PostCommitStartAttemptExceptionRetainsExactAttemptLeaseWithoutSendingAgain()
+    {
+        await using var fixture = await Fixture.Create();
+        var writes = 0;
+        fixture.App.Store.Changed += () =>
+        {
+            if (Interlocked.Increment(ref writes) == 3)
+                throw new DbUpdateException("Simulated notification after the attempt transaction committed.");
+        };
+
+        var held = await fixture.Service.Merge("intent", new("intent", 0));
+
+        Assert.Equal("Attempted", held.State);
+        Assert.Equal(0, fixture.Remote.MergeCalls);
+        var attempt = await fixture.App.Store.Read(db => db.GitHubMergeAttempts.AsNoTracking().SingleAsync());
+        var lease = await fixture.App.Store.Read(db => db.GitHubMergeLeases.AsNoTracking().SingleAsync());
+        Assert.Equal("Attempted", attempt.State);
+        Assert.Equal(attempt.Id, lease.Id);
+        Assert.Equal(attempt.IntentId, lease.IntentId);
+    }
+
+    [Fact]
     public async Task PolicyChangedAfterObservationFencesFinalEffectAdmission()
     {
         await using var fixture = await Fixture.Create();

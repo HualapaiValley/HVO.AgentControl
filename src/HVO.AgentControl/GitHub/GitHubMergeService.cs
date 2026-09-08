@@ -256,7 +256,7 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
         }
         if (!started)
         {
-            await ReleaseLease(id, leaseId);
+            await ReleaseUnusedLease(id, leaseId);
             await Observe(id);
             return await GetIntent(id);
         }
@@ -439,6 +439,14 @@ public sealed class GitHubMergeService(ControlStore store, Secrets secrets, GitH
     private Task ReleaseLease(string intentId, string leaseId) => store.Write(async db =>
     {
         db.GitHubMergeLeases.RemoveRange(await db.GitHubMergeLeases.Where(x => x.Id == leaseId && x.IntentId == intentId).ToListAsync());
+        return true;
+    });
+
+    private Task ReleaseUnusedLease(string intentId, string leaseId) => store.Write(async db =>
+    {
+        var lease = await db.GitHubMergeLeases.SingleOrDefaultAsync(x => x.Id == leaseId && x.IntentId == intentId);
+        if (lease is not null && !await db.GitHubMergeAttempts.AnyAsync(x => x.Id == leaseId && x.IntentId == intentId))
+            db.GitHubMergeLeases.Remove(lease);
         return true;
     });
 
