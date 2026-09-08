@@ -7,6 +7,7 @@ using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
 using HVO.AgentControl.Services;
+using HVO.AgentControl.Ssh;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -15,6 +16,35 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class ControlServiceTests
 {
+    [Theory]
+    [InlineData("version")]
+    [InlineData("health")]
+    [InlineData("schema")]
+    public async Task ChangedNativeServerIsRejectedBeforeObservationOrProviderConnection(string failure)
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        await Register(app, owner, native);
+        await TestApp.Wait(async () => (await app.Store.ControlServices()).Single().Sessions.Single().State == "Ready", "Host scope ready");
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+        var view = (await app.Store.ControlServices()).Single();
+        var factory = app.Services.GetRequiredService<IRuntimeTransportFactory>();
+        await using var existing = await factory.Connect(view.Connection, CancellationToken.None);
+        if (failure == "version") native.Version = "99.0.0";
+        else if (failure == "health") native.Healthy = false;
+        else
+        {
+            native.Identity = native.Identity with { IncarnationId = Guid.NewGuid().ToString() };
+            native.MissingCoreRoute = true;
+        }
+        await Assert.ThrowsAsync<ControlException>(() => existing.ValidateConnection(CancellationToken.None));
+        await Assert.ThrowsAsync<ControlException>(() => factory.Connect(view.Connection, CancellationToken.None));
+        Assert.Equal(view.Service.IncarnationId, (await app.Store.ControlServices()).Single().Service.IncarnationId);
+        Assert.Equal(1, native.CreateCalls);
+        Assert.Equal(0, native.UnexpectedMutations);
+    }
+
     [Fact]
     public async Task DirectHttpProvisioningKeepsHostAndWorkgroupConversationsAcrossBackendRestart()
     {
@@ -298,7 +328,10 @@ public sealed class ControlServiceTests
         private readonly List<Task> requests = [];
         public string Endpoint { get; }
         public string InstanceId { get; } = Guid.NewGuid().ToString();
-        public ControlServiceIdentity Identity { get; }
+        public ControlServiceIdentity Identity { get; set; }
+        public string Version { get; set; } = "1.18.29";
+        public bool Healthy { get; set; } = true;
+        public bool MissingCoreRoute { get; set; }
         public volatile bool HideSessions;
         public bool LoseCreationResponse { get; set; }
         public bool RejectCreation { get; set; }
@@ -339,8 +372,8 @@ public sealed class ControlServiceTests
                     if (RedirectIdentity) { context.Response.Redirect(Endpoint + "redirect-target"); return; }
                     body = new { type = "text", content = Json.Write(Identity) };
                 }
-                else if (path == "/global/health") body = new { healthy = true, version = "1.18.29" };
-                else if (path == "/doc") body = new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" }.ToDictionary(x => x, _ => new { }) };
+                else if (path == "/global/health") body = new { healthy = Healthy, version = Version };
+                else if (path == "/doc") body = new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" }.Where(x => !MissingCoreRoute || x != "/session").ToDictionary(x => x, _ => new { }) };
                 else if (path == "/provider") body = new { connected = new[] { "opencode" }, all = new[] { new { id = "opencode", models = new Dictionary<string, object> { ["big-pickle"] = new { name = "Big Pickle" } } } } };
                 else if (path == "/path") body = new { directory = ControlStore.ControlDirectory };
                 else if (path == "/session" && context.Request.HttpMethod == "POST")

@@ -24,12 +24,21 @@ public sealed class RuntimeTransportFactory(SshRuntimeTransportFactory ssh, Cont
 
 public sealed class ControlHttpTransport(OpenCodeClient api, ControlServiceRecord service, ControlStore store) : IRuntimeTransport
 {
+    private string? verifiedIncarnation;
     public OpenCodeClient Api => api;
     public bool Connected => true; // HTTP health/SSE observation establishes reachability; no invented SSH process.
     public string Platform => "OpenCode control sidecar";
     public async Task ValidateConnection(CancellationToken token)
     {
         var identity = await ReadIdentity(api, service.InstanceId, token);
+        // Provider delivery also uses this factory, so validate before returning a connection.
+        // A replacement process must re-establish its schema before any dispatch resumes.
+        if (identity.IncarnationId != verifiedIncarnation)
+        {
+            await api.Verify(token);
+            verifiedIncarnation = identity.IncarnationId;
+        }
+        else await api.VerifyHealth(token);
         await store.ObserveControlService(service.Id, identity);
     }
     public Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken token) =>

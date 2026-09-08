@@ -40,12 +40,18 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
                Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(7));
     }
 
-    public async Task<string> Verify(CancellationToken token)
+    public async Task<string> VerifyHealth(CancellationToken token)
     {
-        var health = await Get("/global/health", token);
+        var health = await Get("/global/health", token, 8192);
         var version = health.GetProperty("version").GetString() ?? "unknown";
         if (!health.GetProperty("healthy").GetBoolean() || version != BootstrapScript.Version)
             throw new ControlException($"Incompatible OpenCode version {version}; this adapter requires {BootstrapScript.Version}.");
+        return version;
+    }
+
+    public async Task<string> Verify(CancellationToken token)
+    {
+        var version = await VerifyHealth(token);
         var schema = await Get("/doc", token, 12_000_000);
         var paths = schema.GetProperty("paths");
         foreach (var route in new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" })
