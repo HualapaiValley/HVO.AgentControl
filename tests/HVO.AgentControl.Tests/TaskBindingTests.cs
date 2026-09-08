@@ -299,7 +299,7 @@ public sealed class TaskBindingTests
     }
 
     [Fact]
-    public async Task FreshTaskSessionReservationAndBindingTransferExactOwnership()
+    public async Task FreshTaskSessionReservationAndUnknownReconciliationTransferExactOwnership()
     {
         await using var app = new TestApp();
         var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.Activation.git", "feature/activation");
@@ -320,6 +320,11 @@ public sealed class TaskBindingTests
         Assert.Equal("pending:" + command.Id, reserved.NativeSessionId);
         Assert.Equal(binding.Workspace.Directory, (await app.Store.TaskSessionCheckout(command.Id)).Directory);
 
+        await app.Store.Write(async db =>
+        {
+            (await db.Commands.FindAsync(command.Id))!.State = Delivery.Unknown;
+            return true;
+        });
         using var native = JsonDocument.Parse($$"""{"id":"native-task","directory":"{{binding.Workspace.Directory}}"}""");
         await app.Store.BindTaskSession(command.Id, native.RootElement, []);
         var bound = await app.Store.TaskBinding(binding.Binding.Id);
@@ -329,6 +334,7 @@ public sealed class TaskBindingTests
         Assert.Equal(workerId, work.OwnerWorkerId);
         Assert.Null(work.OwnerWorkerSlotId);
         Assert.False((await app.Store.Detail(workerId)).Worker.Archived);
+        Assert.Equal(Delivery.Finished, await app.Store.Read(db => db.Commands.Where(x => x.Id == command.Id).Select(x => x.State).SingleAsync()));
     }
 
     [Fact]
