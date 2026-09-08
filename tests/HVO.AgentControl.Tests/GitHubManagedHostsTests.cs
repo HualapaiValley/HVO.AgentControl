@@ -29,6 +29,18 @@ public sealed class GitHubManagedHostsTests
         }
     }
 
+    [Theory]
+    [InlineData('a')]
+    [InlineData('é')]
+    public void MaximumValidatedInstallationResponseRemainsReadableAfterDelivery(char character)
+    {
+        var actor = new string(character, 200) + "[bot]";
+        var canonical = GitHubCredentialDelivery.HostsYaml(new(new string(character, 8192),
+            DateTimeOffset.UtcNow.AddHours(1), actor));
+        Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(canonical, actor));
+        Assert.Equal(RawHash(canonical), GitHubProcessEnvironment.CredentialFingerprint(canonical));
+    }
+
     [Fact]
     public void ExtraIdentityChangedTokensAndUnsupportedScalarsCannotBecomeManagedCredentials()
     {
@@ -91,6 +103,14 @@ public sealed class GitHubManagedHostsTests
             {
                 await File.WriteAllTextAsync(Path.Combine(directory, "hosts.yml"), invalid);
                 Assert.NotEqual(expected, await PortableFingerprint(directory));
+            }
+            foreach (var character in new[] { 'a', 'é' })
+            {
+                var actor = new string(character, 200) + "[bot]";
+                var maximum = GitHubCredentialDelivery.HostsYaml(new(new string(character, 8192),
+                    DateTimeOffset.UtcNow.AddHours(1), actor));
+                await File.WriteAllTextAsync(Path.Combine(directory, "hosts.yml"), maximum);
+                Assert.Equal(RawHash(maximum), await PortableFingerprint(directory));
             }
             // Plain YAML booleans/numbers are not equivalent to quoted token strings.
             foreach (var ambiguous in new[] { "true", "FALSE", "null", "Yes", "123" })

@@ -22,7 +22,9 @@ internal static class ManagedGitHubHosts
     public static bool TryCanonicalize(string hosts, string? expectedActor, out string canonical)
     {
         canonical = "";
-        if (hosts.Length > 16384 || hosts.Contains('\r')) return false;
+        // Cover two 8192-character tokens and two 205-character actors,
+        // including the writer's worst-case six-character JSON escaping.
+        if (hosts.Length > 128 * 1024 || hosts.Contains('\r')) return false;
         var lines = hosts.Split('\n');
         if (lines.Length != 8 || lines[7].Length != 0 || lines[0] != "github.com:" ||
             lines[3] != "    git_protocol: https" || lines[4] != "    users:" ||
