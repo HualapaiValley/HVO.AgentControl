@@ -1,5 +1,7 @@
 # HVO.AgentControl — Implementation Handoff
 
+Owner decision, 2026-09-08: use one lightweight, independently deployed OpenCode sidecar per AgentControl installation for host/workgroup control sessions, reached directly over a private Docker network without SSH or tmux. C# retains scheduling and recovery authority. [Control sidecar design and implementation status](CONTROL_SIDECAR.md) supersedes the coordinator-only SSH placement described below; development runtimes retain their existing transport until separately migrated. The initial image/acceptance slice does not yet wire or migrate the live coordinator.
+
 Owner reference reviewed 2026-09-07: [SkyMonitor coordination prototype adoption](PROTOTYPE_COORDINATION_REVIEW.md) maps the existing multi-harness GitHub workflow to AgentControl's central service/database. Keep its receipts, enrollment, ownership and evidence practices; move timers and command authority into deterministic service components. The review records proposals and acceptance tests, not completed features.
 
 
