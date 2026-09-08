@@ -126,7 +126,7 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
         if (session.GetProperty("directory").GetString() != worker.Directory) throw new ControlException("Native session directory changed; dispatch is blocked.");
         var history = await History(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token);
         var messages = history.EnumerateArray().ToArray();
-        messages = await AddMissingCallers(sessionPath, worker.Directory, messages, pendingMessageIds, token);
+        messages = await AddMissingCallers(sessionPath, worker.Directory, worker.NativeSessionId, messages, pendingMessageIds, token);
         var toolFailure = verifyToolFailureStop ? NativeTurnEvidence.CompletedToolFailureId(messages) : null;
         var statuses = await Get(Scope("/session/status", worker.Directory), token);
         var statusDetail = statuses.TryGetProperty(worker.NativeSessionId, out var item) ? item.Clone() : default;
@@ -139,7 +139,7 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
             // Re-read after idle so a continuing turn's later final response cannot be missed.
             history = await History(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token);
             messages = history.EnumerateArray().ToArray();
-            messages = await AddMissingCallers(sessionPath, worker.Directory, messages, pendingMessageIds, token);
+            messages = await AddMissingCallers(sessionPath, worker.Directory, worker.NativeSessionId, messages, pendingMessageIds, token);
             idleToolFailureMessageId = toolFailure;
         }
         var permissions = Capabilities.CanReplyToPermissions ? await Get(Scope("/permission", worker.Directory), token) : default;
@@ -152,7 +152,7 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
             await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token), idleToolFailureMessageId);
     }
 
-    private async Task<JsonElement[]> AddMissingCallers(string sessionPath, string directory, JsonElement[] messages,
+    private async Task<JsonElement[]> AddMissingCallers(string sessionPath, string directory, string expectedSessionId, JsonElement[] messages,
         IReadOnlyCollection<string>? pendingMessageIds, CancellationToken token)
     {
         if (pendingMessageIds is null || pendingMessageIds.Count == 0) return messages;
@@ -163,8 +163,14 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
             try
             {
                 var caller = await Get(Scope($"{sessionPath}/message/{Id(messageId)}", directory), token, 2_000_000);
-                if (caller.ValueKind == JsonValueKind.Object && caller.GetProperty("info").GetProperty("id").GetString() == messageId)
-                    messages = [.. messages, caller];
+                if (caller.ValueKind != JsonValueKind.Object) throw new InvalidDataException("OpenCode caller response is not an object.");
+                var info = caller.GetProperty("info");
+                var actualId = info.GetProperty("id").GetString();
+                var actualSessionId = info.GetProperty("sessionID").GetString();
+                var role = info.GetProperty("role").GetString();
+                if (actualId != messageId || actualSessionId != expectedSessionId || role != "user")
+                    throw new InvalidDataException("OpenCode caller response identity does not match the requested worker message.");
+                messages = [.. messages, caller];
             }
             catch (NativeRejectedException ex) when (ex.Status == 404) { }
             catch (Exception ex) when (ex is JsonException or InvalidDataException or InvalidOperationException or KeyNotFoundException)
