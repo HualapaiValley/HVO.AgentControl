@@ -41,6 +41,7 @@ public sealed class GitHubAccessService(ControlStore store, Secrets secrets, Git
         try
         {
             var runtime = await store.Read(async db => await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404));
+            if (runtime.ConnectionKind != RuntimeConnections.Ssh) throw new ControlException("Control services do not receive worker GitHub credentials or use SSH credential delivery.");
             var previous = await store.Read(async db => await db.GitHubAccess.FindAsync(runtimeId));
             if (input.ExpectedRevision != (previous?.Revision ?? 0)) throw new ControlException("GitHub access changed; refresh before saving.");
             var enteredKey = input.PrivateKey ?? "";

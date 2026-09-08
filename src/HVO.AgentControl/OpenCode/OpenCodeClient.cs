@@ -21,6 +21,7 @@ public sealed class NativeHistoryObservationException(Exception inner)
 
 public sealed class OpenCodeClient(HttpClient http) : IDisposable
 {
+    private const int MaxMissingCallerReads = 8;
     private bool hasAgents;
     public AdapterCapabilities Capabilities { get; private set; } = new(false, false, false, false);
     public static string Scope(string path, string directory) => path + (path.Contains('?') ? "&" : "?") + "directory=" + Uri.EscapeDataString(directory);
@@ -40,15 +41,21 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
                Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(7));
     }
 
-    public async Task<string> Verify(CancellationToken token)
+    public async Task<string> VerifyHealth(CancellationToken token)
     {
-        var health = await Get("/global/health", token);
+        var health = await Get("/global/health", token, 8192);
         var version = health.GetProperty("version").GetString() ?? "unknown";
         if (!health.GetProperty("healthy").GetBoolean() || version != BootstrapScript.Version)
             throw new ControlException($"Incompatible OpenCode version {version}; this adapter requires {BootstrapScript.Version}.");
+        return version;
+    }
+
+    public async Task<string> Verify(CancellationToken token)
+    {
+        var version = await VerifyHealth(token);
         var schema = await Get("/doc", token, 12_000_000);
         var paths = schema.GetProperty("paths");
-        foreach (var route in new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" })
+        foreach (var route in new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/{sessionID}/message/{messageID}", "/session/status", "/provider", "/path" })
             if (!paths.TryGetProperty(route, out _)) throw new ControlException("OpenCode schema is missing a core route: " + route);
         hasAgents = paths.TryGetProperty("/agent", out _);
         Capabilities = new(paths.TryGetProperty("/session/{sessionID}/abort", out _),
@@ -117,13 +124,15 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
         return Send(HttpMethod.Post, Scope(route, worker.Directory), body, token);
     }
 
-    public async Task<NativeSnapshot> Snapshot(WorkerRecord worker, int limit, CancellationToken token, bool verifyToolFailureStop = false)
+    public async Task<NativeSnapshot> Snapshot(WorkerRecord worker, int limit, CancellationToken token, bool verifyToolFailureStop = false,
+        IReadOnlyCollection<string>? pendingMessageIds = null)
     {
         var sessionPath = $"/session/{Id(worker.NativeSessionId)}";
         var session = await Get(Scope(sessionPath, worker.Directory), token);
         if (session.GetProperty("directory").GetString() != worker.Directory) throw new ControlException("Native session directory changed; dispatch is blocked.");
         var history = await History(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token);
         var messages = history.EnumerateArray().ToArray();
+        messages = await AddMissingCallers(sessionPath, worker.Directory, worker.NativeSessionId, messages, pendingMessageIds, token);
         var toolFailure = verifyToolFailureStop ? NativeTurnEvidence.CompletedToolFailureId(messages) : null;
         var statuses = await Get(Scope("/session/status", worker.Directory), token);
         var statusDetail = statuses.TryGetProperty(worker.NativeSessionId, out var item) ? item.Clone() : default;
@@ -136,6 +145,7 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
             // Re-read after idle so a continuing turn's later final response cannot be missed.
             history = await History(Scope(sessionPath + $"/message?limit={limit}", worker.Directory), token);
             messages = history.EnumerateArray().ToArray();
+            messages = await AddMissingCallers(sessionPath, worker.Directory, worker.NativeSessionId, messages, pendingMessageIds, token);
             idleToolFailureMessageId = toolFailure;
         }
         var permissions = Capabilities.CanReplyToPermissions ? await Get(Scope("/permission", worker.Directory), token) : default;
@@ -146,6 +156,33 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
             (id, cancellation) => Get(Scope($"/session/{Id(id)}", worker.Directory), cancellation));
         return new(session, messages, status, statusDetail,
             await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token), idleToolFailureMessageId);
+    }
+
+    private async Task<JsonElement[]> AddMissingCallers(string sessionPath, string directory, string expectedSessionId, JsonElement[] messages,
+        IReadOnlyCollection<string>? pendingMessageIds, CancellationToken token)
+    {
+        if (pendingMessageIds is null || pendingMessageIds.Count == 0) return messages;
+        var known = messages.Select(x => x.GetProperty("info").GetProperty("id").GetString()).ToHashSet(StringComparer.Ordinal);
+        foreach (var messageId in pendingMessageIds.Where(x => !string.IsNullOrWhiteSpace(x) && !known.Contains(x))
+            .Distinct(StringComparer.Ordinal).Take(MaxMissingCallerReads))
+        {
+            try
+            {
+                var caller = await Get(Scope($"{sessionPath}/message/{Id(messageId)}", directory), token, 2_000_000);
+                if (caller.ValueKind != JsonValueKind.Object) throw new InvalidDataException("OpenCode caller response is not an object.");
+                var info = caller.GetProperty("info");
+                var actualId = info.GetProperty("id").GetString();
+                var actualSessionId = info.GetProperty("sessionID").GetString();
+                var role = info.GetProperty("role").GetString();
+                if (actualId != messageId || actualSessionId != expectedSessionId || role != "user")
+                    throw new InvalidDataException("OpenCode caller response identity does not match the requested worker message.");
+                messages = [.. messages, caller];
+            }
+            catch (NativeRejectedException ex) when (ex.Status == 404) { }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException or InvalidOperationException or KeyNotFoundException)
+            { throw new NativeHistoryObservationException(ex); }
+        }
+        return messages;
     }
 
     public Task<HttpResponseMessage> Subscribe(CancellationToken token) => SubscribeCore(token);

@@ -66,7 +66,7 @@ Errors use the inventory `{error, code}` shape: `validation` (400), `not_found` 
 | --- | --- |
 | Declared host/type/configuration-source association, REST reads/mutations, CAS/retry receipts, legacy compatibility, per-managed-registration defaults | Implemented in this slice |
 | Verified host/container binding, current placement evidence, lifecycle authority and shared physical capacity | #121/#6 follow-up; configuration alone cannot authorize remote effects |
-| Reusable worker slots independent of legacy conversations, project-owned task/workspace/session identities | Remaining #121 work |
+| Reusable worker slots independent of legacy conversations, project-owned task/workspace/session identities | The additive local binding contract is implemented in [TASK_BINDINGS_API.md](TASK_BINDINGS_API.md); native session creation and verified placement remain follow-up work |
 | Configuration resolution and official Dev Container CLI build, isolated repository preparation and fresh task sessions | #42/#43 |
 | UI wizard, durable provision/drain/restart/retire operations and complete disposable lifecycle automation | #43; no new UI or lifecycle adapter in this slice |
 | Multi-project scheduling and progressive live worker transition | #98 after provisioning/recovery acceptance |

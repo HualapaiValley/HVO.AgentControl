@@ -13,14 +13,14 @@
   {
     <section class="panel" aria-label="Coordinator settings"><h2>Coordinators</h2>
       <p>Dedicated routing sessions do not participate in worker tasks.</p>
-      @foreach (var coordinator in snapshot.Workers.Where(x => x.Role == SessionRoles.Coordinator))
-      { <p><strong>@coordinator.Name</strong> · @coordinator.Activity · @coordinator.ProviderId/@coordinator.ModelId · <a href="@ConversationUrl(coordinator.Id)">Conversation</a> · <a href="@("/workers?edit=" + coordinator.Id)">Edit coordinator and model</a></p> }
-      <a href="/workers?new=true&amp;role=Coordinator">Create a coordinator session</a>
+      @foreach (var coordinator in snapshot.Workers.Where(x => x.Role == SessionRoles.Coordinator && !hostOperationsIds.Contains(x.Id)))
+      { <p><strong>@coordinator.Name</strong> · @coordinator.Activity · @coordinator.ProviderId/@coordinator.ModelId · <a href="@ConversationUrl(coordinator.Id)">Conversation</a> · <a href="@(snapshot.Runtimes.Any(x => x.Id == coordinator.RuntimeId && x.ConnectionKind == RuntimeConnections.ControlHttp) ? "/control-services" : "/workers?edit=" + coordinator.Id)">Edit coordinator and model</a></p> }
+      <a href="/control-services">Manage workgroup control sessions</a>
     </section>
     <section class="panel" aria-label="Start coordination">
       <h2>New coordination</h2>
       <p>Choose a coordinator to plan assignments and route responses. It delegates task execution to the agents below.</p>
-      <label>Coordinator<select aria-label="Coordinator" @bind="coordinatorId"><option value="">Choose coordinator</option>@foreach (var worker in snapshot.Workers.Where(x => !x.Archived && x.Role == SessionRoles.Coordinator)) { <option value="@worker.Id">@worker.Name · @worker.ProviderId/@worker.ModelId</option> }</select></label>
+      <label>Coordinator<select aria-label="Coordinator" @bind="coordinatorId"><option value="">Choose coordinator</option>@foreach (var worker in snapshot.Workers.Where(x => !x.Archived && x.Role == SessionRoles.Coordinator && !hostOperationsIds.Contains(x.Id))) { <option value="@worker.Id">@worker.Name · @worker.ProviderId/@worker.ModelId</option> }</select></label>
       <fieldset><legend>Agents it can contact</legend>@foreach (var worker in snapshot.Workers.Where(x => !x.Archived && x.Role == SessionRoles.Worker))
       { <label class="participant"><input type="checkbox" checked="@selected.Contains(worker.Id)" @onchange="e => Select(worker.Id, e.Value is true)" /> @worker.Name @(worker.Description.Length > 0 ? "· " + worker.Description : "")</label> }</fieldset>
       <label>Instruction<textarea rows="5" maxlength="16000" @bind="instruction" placeholder="Ask Agent 1 what time it is, then tell the other agents what Agent 1 reported."></textarea></label>

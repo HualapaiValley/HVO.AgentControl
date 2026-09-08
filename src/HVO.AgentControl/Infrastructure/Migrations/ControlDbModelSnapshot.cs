@@ -166,6 +166,94 @@ namespace HVO.AgentControl.Infrastructure
                     b.ToTable("Commands");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.ControlServiceRecord", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IncarnationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("InstanceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastObservedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("StartedAt")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstanceId")
+                        .IsUnique();
+
+                    b.ToTable("ControlServices");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.ControlSessionBinding", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ControlServiceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreationCommandId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NativeSessionId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ScopeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ScopeKind")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ControlServiceId");
+
+                    b.HasIndex("WorkerId")
+                        .IsUnique();
+
+                    b.HasIndex("ScopeKind", "ScopeId")
+                        .IsUnique();
+
+                    b.ToTable("ControlSessions");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.CoordinationRun", b =>
                 {
                     b.Property<string>("Id")
@@ -807,6 +895,12 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<int>("Capacity")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("ConnectionKind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("Ssh");
+
                     b.Property<string>("CredentialReference")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -923,6 +1017,197 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasKey("Id");
 
                     b.ToTable("Runtimes");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.TaskBindingRecord", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Id")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("PlacementVerified")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionBindingId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkItemId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkerSlotId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkspaceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("Id")
+                        .IsUnique();
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("WorkItemId")
+                        .IsUnique()
+                        .HasFilter("State = 'Active'");
+
+                    b.HasIndex("WorkerSlotId")
+                        .IsUnique()
+                        .HasFilter("State = 'Active'");
+
+                    b.HasIndex("WorkspaceId")
+                        .IsUnique()
+                        .HasFilter("State = 'Active'");
+
+                    b.ToTable("TaskBindings");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.TaskSessionBindingRecord", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Generation")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LegacyWorkerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NativeSessionId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TaskBindingId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkerSlotId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("Id")
+                        .IsUnique();
+
+                    b.HasIndex("TaskBindingId")
+                        .IsUnique();
+
+                    b.HasIndex("WorkerSlotId", "NativeSessionId")
+                        .IsUnique()
+                        .HasFilter("NativeSessionId <> ''");
+
+                    b.ToTable("TaskSessionBindings");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.TaskWorkspaceRecord", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Branch")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Directory")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Id")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkItemId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkerSlotId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("Id")
+                        .IsUnique();
+
+                    b.HasIndex("ProjectId");
+
+                    b.HasIndex("WorkItemId");
+
+                    b.HasIndex("WorkerSlotId");
+
+                    b.HasIndex("RuntimeId", "Directory")
+                        .IsUnique()
+                        .HasFilter("State = 'Active'");
+
+                    b.ToTable("TaskWorkspaces");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.TranscriptMessage", b =>
@@ -1176,12 +1461,67 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasKey("Id");
 
                     b.HasIndex("RuntimeId", "Directory")
-                        .IsUnique();
+                        .IsUnique()
+                        .HasFilter("Role != 'Coordinator'");
 
                     b.HasIndex("RuntimeId", "ManagedServerId", "NativeSessionId")
                         .IsUnique();
 
                     b.ToTable("Workers");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.WorkerSlotRecord", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Archived")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Id")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ModelId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProviderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RuntimeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("Id")
+                        .IsUnique();
+
+                    b.HasIndex("RuntimeId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("WorkerSlots");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.WorkspaceClaim", b =>
@@ -1482,6 +1822,24 @@ namespace HVO.AgentControl.Infrastructure
                     b.ToTable("TelemetryHistory");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.ControlServiceRecord", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.RuntimeRecord", null)
+                        .WithOne()
+                        .HasForeignKey("HVO.AgentControl.Core.ControlServiceRecord", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.ControlSessionBinding", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.ControlServiceRecord", null)
+                        .WithMany()
+                        .HasForeignKey("ControlServiceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.RuntimeEnvironmentRecord", b =>
                 {
                     b.HasOne("HVO.AgentControl.Core.ProjectRecord", null)
@@ -1500,6 +1858,76 @@ namespace HVO.AgentControl.Infrastructure
                         .WithOne()
                         .HasForeignKey("HVO.AgentControl.Core.RuntimeEnvironmentRecord", "RuntimeId")
                         .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.TaskBindingRecord", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.ProjectRecord", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.WorkItem", null)
+                        .WithMany()
+                        .HasForeignKey("WorkItemId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.WorkerSlotRecord", null)
+                        .WithMany()
+                        .HasForeignKey("WorkerSlotId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.TaskWorkspaceRecord", null)
+                        .WithMany()
+                        .HasForeignKey("WorkspaceId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.TaskSessionBindingRecord", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.TaskBindingRecord", null)
+                        .WithOne()
+                        .HasForeignKey("HVO.AgentControl.Core.TaskSessionBindingRecord", "TaskBindingId")
+                        .HasPrincipalKey("HVO.AgentControl.Core.TaskBindingRecord", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.WorkerSlotRecord", null)
+                        .WithMany()
+                        .HasForeignKey("WorkerSlotId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.TaskWorkspaceRecord", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.ProjectRecord", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.WorkItem", null)
+                        .WithMany()
+                        .HasForeignKey("WorkItemId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.WorkerSlotRecord", null)
+                        .WithMany()
+                        .HasForeignKey("WorkerSlotId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 #pragma warning restore 612, 618

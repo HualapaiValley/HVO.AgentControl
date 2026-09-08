@@ -4,6 +4,7 @@ using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
+using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Components.Pages;
 
@@ -14,7 +15,7 @@ public partial class Home
     private IJSObjectReference? module;
     private WorkerDetail? detail;
     private string? selectedId, appliedWorkerId, promptRequestId;
-    private bool includeGuidance;
+    private bool includeGuidance, hostOperations;
     private int progressMinutes = 5;
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
     private readonly ConversationSelection selection = new();
@@ -27,7 +28,7 @@ public partial class Home
     protected override async Task OnParametersSetAsync()
     {
         if (appliedWorkerId == WorkerId) return;
-        appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null;
+        appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = "";
         olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; promptRequestId = null;
         await Refresh();
@@ -44,7 +45,9 @@ public partial class Home
         try
         {
             var loaded = await ReadDetail(current.WorkerId!);
-            if (selection.IsCurrent(current)) detail = loaded;
+            var isHostOperations = loaded.Worker.Role == SessionRoles.Coordinator &&
+                await Store.Read(db => db.ControlSessions.AnyAsync(x => x.WorkerId == loaded.Worker.Id && x.ScopeKind == "HostOperations"));
+            if (selection.IsCurrent(current)) { detail = loaded; hostOperations = isHostOperations; }
         }
         catch when (!selection.IsCurrent(current)) { }
     }
