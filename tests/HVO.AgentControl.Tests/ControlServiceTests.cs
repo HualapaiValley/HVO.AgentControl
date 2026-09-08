@@ -373,7 +373,7 @@ public sealed class ControlServiceTests
                     body = new { type = "text", content = Json.Write(Identity) };
                 }
                 else if (path == "/global/health") body = new { healthy = Healthy, version = Version };
-                else if (path == "/doc") body = new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/status", "/provider", "/path" }.Where(x => !MissingCoreRoute || x != "/session").ToDictionary(x => x, _ => new { }) };
+                else if (path == "/doc") body = new { paths = new[] { "/global/event", "/session", "/session/{sessionID}/prompt_async", "/session/{sessionID}/message", "/session/{sessionID}/message/{messageID}", "/session/status", "/provider", "/path" }.Where(x => !MissingCoreRoute || x != "/session").ToDictionary(x => x, _ => new { }) };
                 else if (path == "/provider") body = new { connected = new[] { "opencode" }, all = new[] { new { id = "opencode", models = new Dictionary<string, object> { ["big-pickle"] = new { name = "Big Pickle" } } } } };
                 else if (path == "/path") body = new { directory = ControlStore.ControlDirectory };
                 else if (path == "/session" && context.Request.HttpMethod == "POST")
