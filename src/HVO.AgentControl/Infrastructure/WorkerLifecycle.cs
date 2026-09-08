@@ -66,6 +66,7 @@ public sealed partial class ControlStore
             if (await db.Commands.AnyAsync(x => x.WorkerId == id && (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)) ||
                 await db.Requests.AnyAsync(x => x.WorkerId == id && (x.State == "Pending" || x.State == "ReplyUnknown")))
                 throw new ControlException("Resolve queued work, uncertain delivery, and pending requests before archiving.");
+            await TaskBindingLifecycleGuards.RequireWorkerArchiveAllowed(db, id);
         }
         worker.Archived = input.Archived; worker.SettingsRevision++; worker.Revision++;
         var command = await Record(db, input.Id, worker.RuntimeId, id, "ArchiveWorker", payload);
