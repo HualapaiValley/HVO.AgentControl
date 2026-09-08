@@ -20,7 +20,7 @@ public sealed class GitHubCredentialSupervisor(ControlStore store, Secrets secre
                     {
                         var current = await store.Read(async db => await db.GitHubAccess.FindAsync(grant.Id));
                         var runtime = await store.Read(async db => await db.Runtimes.FindAsync(grant.Id));
-                        if (current is null || current.Revision != grant.Revision || runtime is null || !runtime.DesiredConnected || runtime.Health != "Healthy") continue;
+                        if (current is null || current.Revision != grant.Revision || runtime is null || runtime.ConnectionKind != RuntimeConnections.Ssh || !runtime.DesiredConnected || runtime.Health != "Healthy") continue;
                         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                         deadline.CancelAfter(TimeSpan.FromSeconds(60));
                         GitHubInstallationToken? credential = null;

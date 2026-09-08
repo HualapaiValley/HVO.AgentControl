@@ -1,0 +1,7 @@
+# Transitional demo overlay: Docker Compose cannot declare its built-in bridge
+# alongside service networks. The host deployment helper reconciles this opt-in
+# requirement after each web create/recreate; see docs/CONTROL_SIDECAR.md.
+services:
+  agentcontrol:
+    labels:
+      com.hvo.agentcontrol.control-network: ${CONTROL_OPENCODE_NETWORK:-hvo-agentcontrol-control_control}

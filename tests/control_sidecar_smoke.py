@@ -7,6 +7,7 @@ AgentControl deployment, worker registration, existing volume or provider is con
 """
 
 import base64
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,8 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 LABEL = "com.hvo.agentcontrol.sidecar-smoke"
 DIRECTORY = "/var/lib/opencode/workspaces/control"
+MANIFEST_PATH = "/file/content?path=.agentcontrol-service.json&directory=" + DIRECTORY
+INSTANCE_FILE = "/var/lib/opencode/state/agentcontrol-instance-id"
 
 
 def docker(*args, **kwargs):
@@ -68,15 +71,19 @@ def run():
             docker("start", identity)
             return identity
 
-        def server():
+        def server(wait_ready=True):
             # These are rendered production settings, not separate fixture defaults.
-            arguments = ["--network", network, "--network-alias", "opencode-control",
+            arguments = ["--network", network,
                          "--user", service["user"], "--read-only", "--init",
                          "--cpus", str(service["cpus"]), "--memory", str(service["mem_limit"]),
                          "--pids-limit", str(service["pids_limit"]),
-                         "--restart", service["restart"],
+                         "--restart", service["restart"] if wait_ready else "no",
                          "--mount", f"type=volume,src={volume},dst=/var/lib/opencode",
                          "--mount", f"type=bind,src={password_file},dst=/run/secrets/opencode-server-password,readonly"]
+            # Failed-start probes must not alter DNS for the healthy service or be
+            # restarted forever by the production unless-stopped policy.
+            if wait_ready:
+                arguments += ["--network-alias", "opencode-control"]
             for value in service["cap_drop"]:
                 arguments += ["--cap-drop", value]
             for value in service["security_opt"]:
@@ -84,6 +91,8 @@ def run():
             for value in service["tmpfs"]:
                 arguments += ["--tmpfs", value]
             identity = create(*arguments, image)
+            if not wait_ready:
+                return identity
             deadline = time.monotonic() + 100
             while time.monotonic() < deadline:
                 state = inspect("container", identity)["State"]
@@ -122,6 +131,27 @@ def run():
             docker("rm", "-f", identity)
             containers.remove(identity)
 
+        def manifest(client_id):
+            response = request(client_id, MANIFEST_PATH)
+            assert response["type"] == "text" and isinstance(response["content"], str)
+            value = json.loads(response["content"])
+            assert set(value) == {"schemaVersion", "instanceId", "incarnationId", "startedAt", "directory"}
+            assert value["schemaVersion"] == 1 and value["directory"] == DIRECTORY
+            for field in ["instanceId", "incarnationId"]:
+                assert str(uuid.UUID(value[field])) == value[field]
+            started = datetime.fromisoformat(value["startedAt"].replace("Z", "+00:00"))
+            assert started.tzinfo == timezone.utc and started <= datetime.now(timezone.utc)
+            return value
+
+        def volume_command(command):
+            identity = create("--network", "none", "--user", service["user"], "--read-only",
+                              "--mount", f"type=volume,src={volume},dst=/var/lib/opencode",
+                              "--entrypoint", "/bin/sh", image, "-c", command)
+            assert docker("wait", identity, timeout=20) == "0"
+            result = docker("logs", identity)
+            remove(identity)
+            return result
+
         try:
             # Fail closed before listening when the secret is absent.
             missing = create("--network", "none", image)
@@ -149,10 +179,21 @@ def run():
             assert health == {"healthy": True, "version": "1.18.29"}
             schema = request(first_client, "/doc")
             for route in ["/global/event", "/session", "/session/{sessionID}/prompt_async",
-                          "/session/{sessionID}/message", "/session/status", "/provider", "/path"]:
+                          "/session/{sessionID}/message", "/session/status", "/provider", "/path", "/file/content"]:
                 assert route in schema["paths"]
             path = request(first_client, "/path")
             assert path["directory"] == DIRECTORY
+            request(first_client, MANIFEST_PATH, authenticated=False, expected=401)
+            original_manifest = manifest(first_client)
+
+            # Exercise actual entrypoint -> exec OpenCode descriptor inheritance.
+            # A second real sidecar must fail before replacing the active manifest.
+            competing = server(wait_ready=False)
+            assert docker("wait", competing, timeout=20) != "0"
+            assert "state is already owned by another process" in docker("logs", competing, stderr=subprocess.STDOUT)
+            assert manifest(first_client) == original_manifest
+            assert inspect("container", native)["State"]["Pid"] == original["State"]["Pid"]
+            remove(competing)
 
             stream = subprocess.Popen(["docker", "exec", "-i", first_client, "curl", "-N", "--config", "-"],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -181,6 +222,7 @@ def run():
             second_client = client()
             after = inspect("container", native)["State"]
             assert (after["Pid"], after["StartedAt"]) == (original["State"]["Pid"], original["State"]["StartedAt"])
+            assert manifest(second_client) == original_manifest
             for identity, title, history in sessions:
                 assert request(second_client, f"/session/{identity}")["title"] == title
                 assert request(second_client, f"/session/{identity}/message") == history
@@ -190,14 +232,43 @@ def run():
             remove(native)
             replacement = server()
             assert replacement != native
+            replacement_manifest = manifest(second_client)
+            assert replacement_manifest["instanceId"] == original_manifest["instanceId"]
+            assert replacement_manifest["incarnationId"] != original_manifest["incarnationId"]
             for identity, title, history in sessions:
                 assert request(second_client, f"/session/{identity}")["title"] == title
                 assert request(second_client, f"/session/{identity}/message") == history
             assert request(second_client, "/session/status") == {}
+
+            # Corruption is an operator repair boundary, never silent reidentity.
+            # Stop the sole writer before deliberately changing this owned fixture.
+            docker("stop", "--timeout", "15", replacement)
+            remove(replacement)
+            volume_command("printf 'corrupted-identity\\n' > " + INSTANCE_FILE)
+            corrupted = server(wait_ready=False)
+            assert docker("wait", corrupted, timeout=20) != "0"
+            assert "instance identity is invalid" in docker("logs", corrupted, stderr=subprocess.STDOUT)
+            remove(corrupted)
+            assert json.loads(volume_command("cat " + DIRECTORY + "/.agentcontrol-service.json")) == replacement_manifest
+            volume_command("rm " + INSTANCE_FILE)
+            missing_identity = server(wait_ready=False)
+            assert docker("wait", missing_identity, timeout=20) != "0"
+            assert "identity is missing for existing state" in docker("logs", missing_identity, stderr=subprocess.STDOUT)
+            remove(missing_identity)
+            # Restoring the original identity permits restart with the same native
+            # history, proving the failed starts did not rewrite the native state.
+            volume_command("printf '%s\\n' '" + original_manifest["instanceId"] + "' > " + INSTANCE_FILE)
+            repaired = server()
+            assert manifest(second_client)["instanceId"] == original_manifest["instanceId"]
+            for identity, title, history in sessions:
+                assert request(second_client, f"/session/{identity}/message") == history
             print(json.dumps({"version": health["version"], "architecture": inspect("image", image)["Architecture"],
                               "imageBytes": inspect("image", image)["Size"], "sessionCount": len(sessions),
                               "authenticatedHttpAndSse": True, "clientReplacementPreservedProcess": True,
-                              "containerRecreationPreservedHistory": True, "modelInferenceExercised": False}))
+                              "containerRecreationPreservedHistory": True,
+                              "authenticatedIdentityManifest": True, "restartChangedIncarnationOnly": True,
+                              "exclusiveStateWriter": True, "identityCorruptionFailedClosed": True,
+                              "modelInferenceExercised": False}))
         finally:
             failures = []
             if stream is not None:
