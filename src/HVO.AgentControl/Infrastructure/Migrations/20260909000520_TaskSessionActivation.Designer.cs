@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    [Migration("20260908231839_TaskSessionActivation")]
+    [Migration("20260909000520_TaskSessionActivation")]
     partial class TaskSessionActivation
     {
         /// <inheritdoc />
@@ -764,6 +764,97 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.ToTable("GitHubReviewReceipts");
                 });
 
+            modelBuilder.Entity("HVO.AgentControl.Core.HostExecutorEnrollment", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ActivatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AuthorityDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AuthorityGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BootId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("BuilderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CliBundleDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CredentialDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EndpointId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EngineId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IncarnationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastSeenAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PhysicalHostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProtectedRootDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EndpointId")
+                        .IsUnique();
+
+                    b.HasIndex("EngineId");
+
+                    b.HasIndex("HostId");
+
+                    b.HasIndex("RequestId")
+                        .IsUnique();
+
+                    b.ToTable("HostExecutors");
+                });
+
             modelBuilder.Entity("HVO.AgentControl.Core.HostRecord", b =>
                 {
                     b.Property<long>("Sequence")
@@ -805,6 +896,402 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("Hosts");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourceMutationReceipt", b =>
+                {
+                    b.Property<string>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResourceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResultJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("RequestId");
+
+                    b.ToTable("HostResourceMutations");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourceObservation", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Architecture")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AuthorityGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("AvailableCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("AvailableMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BootId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("BuildSlots")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BuilderId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CanonicalWorkspaceIdentity")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CollectedFrom")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CollectedTo")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("CompilerPeakBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool?>("DockerAvailable")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DockerAvailableBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DockerAvailableInodes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DockerFilesystemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EffectiveCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("EffectiveMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EndpointId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EngineId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EnrollmentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EvidenceDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ExternalOwnershipIntentDigest")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ExternalOwnershipState")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IncarnationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("MemoryPressureEvents")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("NativeSessionBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PhysicalHostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("PhysicalRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ReceivedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SchemaVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("SwapLimitBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("SwapUsedBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("WorkspaceAvailableBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("WorkspaceAvailableInodes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkspaceFilesystemId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkspaceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EnrollmentId", "Sequence")
+                        .IsUnique();
+
+                    b.HasIndex("PhysicalHostId", "PhysicalRevision")
+                        .IsUnique();
+
+                    b.HasIndex("EnrollmentId", "WorkspaceId", "Sequence");
+
+                    b.ToTable("HostResourceObservations");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourcePolicy", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("BuildSlots")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ControllerReserveCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ControllerReserveDiskBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ControllerReserveMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EnrollmentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("GrantLifetimeSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("MaxCpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("MaxDiskBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("MaxMemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ObservationMaxAgeSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PhysicalHostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id", "Revision");
+
+                    b.HasIndex("EnrollmentId");
+
+                    b.HasIndex("RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("PhysicalHostId", "Revision")
+                        .IsUnique();
+
+                    b.ToTable("HostResourcePolicies");
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourceReservation", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("AuthorityGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("BuildSlots")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CanonicalWorkspaceIdentity")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CpuMillis")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("DiskBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DockerFilesystemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EffectCommittedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EndpointId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EnrollmentId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("GrantExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("GrantGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("GrantedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IncarnationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IntentDigest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("MemoryBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ObservationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OperationId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PhysicalHostId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PolicyId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("PolicyRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("Port")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ReleaseEvidence")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReleaseObservationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ReleasedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SharedResourceKey")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkspaceFilesystemId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("WorkspaceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EnrollmentId");
+
+                    b.HasIndex("ObservationId");
+
+                    b.HasIndex("ReleaseObservationId");
+
+                    b.HasIndex("RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("PhysicalHostId", "CanonicalWorkspaceIdentity")
+                        .IsUnique()
+                        .HasFilter("State IN ('Held', 'EffectCommitted', 'Unknown')");
+
+                    b.HasIndex("PhysicalHostId", "Port")
+                        .IsUnique()
+                        .HasFilter("Port IS NOT NULL AND State IN ('Held', 'EffectCommitted', 'Unknown')");
+
+                    b.HasIndex("PhysicalHostId", "SharedResourceKey")
+                        .IsUnique()
+                        .HasFilter("SharedResourceKey IS NOT NULL AND State IN ('Held', 'EffectCommitted', 'Unknown')");
+
+                    b.HasIndex("PolicyId", "PolicyRevision");
+
+                    b.ToTable("HostResourceReservations");
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Core.InventoryMutationReceipt", b =>
@@ -2530,6 +3017,60 @@ namespace HVO.AgentControl.Infrastructure.Migrations
                     b.HasOne("HVO.AgentControl.Core.ControlServiceRecord", null)
                         .WithMany()
                         .HasForeignKey("ControlServiceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostExecutorEnrollment", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.HostRecord", null)
+                        .WithMany()
+                        .HasForeignKey("HostId")
+                        .HasPrincipalKey("Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourceObservation", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.HostExecutorEnrollment", null)
+                        .WithMany()
+                        .HasForeignKey("EnrollmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourcePolicy", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.HostExecutorEnrollment", null)
+                        .WithMany()
+                        .HasForeignKey("EnrollmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("HVO.AgentControl.Core.HostResourceReservation", b =>
+                {
+                    b.HasOne("HVO.AgentControl.Core.HostExecutorEnrollment", null)
+                        .WithMany()
+                        .HasForeignKey("EnrollmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.HostResourceObservation", null)
+                        .WithMany()
+                        .HasForeignKey("ObservationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("HVO.AgentControl.Core.HostResourceObservation", null)
+                        .WithMany()
+                        .HasForeignKey("ReleaseObservationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("HVO.AgentControl.Core.HostResourcePolicy", null)
+                        .WithMany()
+                        .HasForeignKey("PolicyId", "PolicyRevision")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
