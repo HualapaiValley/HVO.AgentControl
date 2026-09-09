@@ -47,6 +47,13 @@ public sealed class ProvisionOperationRecord
     public long? ReservedBuildMemoryBytes { get; set; }
     public long? ReservedRuntimeCpuMillis { get; set; }
     public long? ReservedRuntimeMemoryBytes { get; set; }
+    public string SelectedEnrollmentId { get; set; } = "";
+    public int SelectedAuthorityGeneration { get; set; }
+    public string SelectedIncarnationId { get; set; } = "";
+    public long ClaimGeneration { get; set; }
+    public long LastAppliedResultSequence { get; set; }
+    public long? TerminalSuccessSequence { get; set; }
+    public long? TerminalSuccessAt { get; set; }
     public string State { get; set; } = ProvisionOperationState.AwaitingHostAuthority;
     public string Code { get; set; } = "trusted_host_executor_required";
     public bool CancelRequested { get; set; }
@@ -73,6 +80,12 @@ public sealed class ProvisionAttemptRecord
     public string CapacityReservationId { get; set; } = "";
     public long? CapacityRevision { get; set; }
     public string CapacityFingerprint { get; set; } = "";
+    public long ClaimGeneration { get; set; }
+    public string EnrollmentId { get; set; } = "";
+    public int ExecutorAuthorityGeneration { get; set; }
+    public string IncarnationId { get; set; } = "";
+    public long ReservationGrantGeneration { get; set; }
+    public long ClaimedAt { get; set; }
     public long Revision { get; set; }
     public long CreatedAt { get; set; }
     public long UpdatedAt { get; set; }
@@ -83,7 +96,33 @@ public sealed class ProvisionEffectRecord
     public string OperationId { get; set; } = "";
     public string Effect { get; set; } = "";
     public string ResourceId { get; set; } = "";
+    public string? ReservationId { get; set; }
+    public long? ReservationRevision { get; set; }
+    public long? ReservationGrantGeneration { get; set; }
+    public long? ClaimGeneration { get; set; }
+    public string? EnrollmentId { get; set; }
+    public int? AuthorityGeneration { get; set; }
+    public string? IncarnationId { get; set; }
+    public string? IntentDigest { get; set; }
+    public string? WorkspaceId { get; set; }
+    public string? CanonicalWorkspaceIdentity { get; set; }
+    public string? ObservationId { get; set; }
+    public string? PolicyId { get; set; }
+    public long? PolicyRevision { get; set; }
     public long StartedAt { get; set; }
+}
+
+public sealed class ProvisionExecutorReportRecord
+{
+    public string ReportId { get; set; } = "";
+    public string OperationId { get; set; } = "";
+    public long ClaimGeneration { get; set; }
+    public long Sequence { get; set; }
+    public string Kind { get; set; } = "";
+    public string RequestHash { get; set; } = "";
+    public string PayloadJson { get; set; } = "";
+    public string Disposition { get; set; } = "";
+    public long ReceivedAt { get; set; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -109,12 +148,43 @@ public sealed record ProvisionOperationView(long Sequence, string Id, string Hos
     IReadOnlyList<ProvisionEffectView> Effects, string? ObservedContainerId, string? ObservedImageId);
 public sealed record ProvisionOperationPage(List<ProvisionOperationView> Items, long? NextAfter);
 
+public sealed record HostProvisioningAssignment(ProvisionOperationView Operation, ProvisionIntent Intent,
+    string CapacityReservationId, long CapacityRevision, long CapacityValidUntil,
+    long BuildCpuMillis, long BuildMemoryBytes, long RuntimeCpuMillis, long RuntimeMemoryBytes,
+    long ClaimGeneration, string EnrollmentId, int AuthorityGeneration, string IncarnationId,
+    long ReservationGrantGeneration);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record ApproveHostProvisionAuthorityInput(ProvisionIntent Intent);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record BindProvisionCapacityInput(long ExpectedRevision, string ReservationId);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record ClaimHostProvisioningInput(string ReservationId);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record BeginHostProvisionEffectInput(long ClaimGeneration, string ReservationId,
+    long ExpectedReservationRevision, long ReservationGrantGeneration, string IntentDigest,
+    string WorkspaceId, string ObservationId);
+
+public sealed record HostProvisionEffectDecision(bool AuthorizedNow, ProvisionOperationView Operation);
+
 // Trusted executor-only evidence. Never bind this type from an HTTP request.
 internal sealed record ProvisionCapacityGrant(string ReservationId, long Revision, long ValidUntil,
     long BuildCpuMillis, long BuildMemoryBytes, long RuntimeCpuMillis, long RuntimeMemoryBytes);
 
 internal sealed record ProvisionResultReceipt(string OperationId, string State, string Code, bool EffectStarted,
     string? IntentDigest, ProvisionContainerObservation? Observed, ProvisionExecutionEvidence? Executed,
+    ImmutableArray<string> RetainedResources);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record HostProvisionProgressInput(string ReportId, long ClaimGeneration, long Sequence, string Stage);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record HostProvisionResultInput(string ReportId, long ClaimGeneration, long Sequence,
+    string OperationId, string IntentDigest, string State, string Code,
+    ProvisionContainerObservation? Observed, ProvisionExecutionEvidence? Executed,
     ImmutableArray<string> RetainedResources);
 
 public sealed class ProvisionAdmissionException(string code) : Exception(code)

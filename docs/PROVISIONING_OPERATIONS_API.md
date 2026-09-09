@@ -1,6 +1,6 @@
 # Provisioning operations API
 
-This is the bounded durable-operation slice of #43. It records owner intent before host work and implements the SQLite-backed `IProvisionAttemptLedger` required by `LocalDevContainerRunner`. It does not register that runner, a host executor, Docker access, capacity service, enrollment workflow, retirement authority or fleet migration.
+This is the durable-operation and outbound executor canary slice of #43. It records owner intent before host work, selects an authenticated executor incarnation, binds a real physical reservation, and atomically joins that permit to `ProvisionEffects`. The web process does not register the runner or receive Docker access.
 
 ## Owner routes
 
@@ -24,7 +24,7 @@ New requests are `AwaitingHostAuthority`. Only internal trusted-host code can bi
 
 Committing an external effect start changes the operation to `Unknown` before process execution. Cancellation before any committed effect becomes `Cancelled`; cancellation afterward remains `Unknown` and permits read-only reconciliation. A verified CLI environment can advance only to `AwaitingEnrollment`. This slice has no `Ready` transition because endpoint, host-key, credential, OpenCode, runtime and worker-slot enrollment evidence does not exist here.
 
-The web process registers the database ledger but not `LocalDevContainerRunner` or an executor. Consequently production requests cannot leave `AwaitingHostAuthority` through these owner routes. This is intentional fail-closed behavior until authenticated executor delivery and the #6 reservation service are implemented and tested.
+The separate Linux executor uses authenticated machine routes for authority, claim, effect, progress and result delivery. Owner capacity binding accepts only a matching held `HostResourceReservation`; arbitrary capacity numbers are not an HTTP authority. The direct database ledger remains a test fixture and is not registered by the web process.
 
 ## Persistence and recovery
 
@@ -36,4 +36,4 @@ The owner response exposes bounded stage markers and exact ownership IDs/effect 
 
 ## Remaining acceptance
 
-Still required before live provisioning: authenticated executor/outbox delivery, verified host identity and protected roots/tools, #6 physical reservations and release reconciliation, disposable real pinned-CLI restart/lost-response tests, enrollment through verified SSH/OpenCode transport, credential grants, owned drain/removal with retained-state handling, canary task execution and progressive fleet migration. A successful HTTP 202, committed Docker effect or observed container is not readiness evidence.
+Still required before beta replacement: production installation/outbox discovery, fresh checkout preparation, Docker builder hard limits, release reconciliation, a published real pinned-CLI/lost-response canary, verified SSH/OpenCode transport, credential/provider/GitHub grants, stable runtime/slot enrollment, task/restart/reconnect, and owned drain/removal with retained-state handling. A successful HTTP acknowledgement, committed Docker effect, or `AwaitingEnrollment` container is not readiness evidence.

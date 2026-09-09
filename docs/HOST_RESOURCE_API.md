@@ -53,7 +53,12 @@ All routes use `/api/v1`.
 | Owner cookie + CSRF | `POST /host-resource-reservations/{id}/release` | `ReleaseHostResourceReservationInput` |
 | Pending or active executor bearer | `POST /host-executor/activate` | `ActivateHostExecutorInput` |
 | Active executor bearer | `POST /host-executor/observations` | `SubmitHostResourceObservationInput` |
-| Active executor bearer | `POST /host-executor/reservations/{id}/begin-effect` | `BeginHostResourceEffectInput`; `HostResourceEffectDecision` |
+| Active executor bearer | `POST /host-executor/reservations/{id}/begin-effect` | Non-provisioning permits only; provisioning permits must use the atomic endpoint below |
+| Active executor bearer | `POST /host-executor/provisioning/{id}/authority` | Select this exact enrollment/incarnation and approve immutable runner intent |
+| Active executor bearer | `POST /host-executor/provisioning/{id}/claim` | Persist the claim for an owner-bound physical reservation |
+| Active executor bearer | `POST /host-executor/provisioning/{id}/begin-effect` | Atomically consume the physical permit and append `ProvisionEffects` |
+| Active executor bearer | `POST /host-executor/provisioning/{id}/progress` | Deduplicated bounded stage receipt |
+| Active executor bearer | `POST /host-executor/provisioning/{id}/result` | Deduplicated claim/intent-bound result receipt |
 
 IDs and request IDs are non-empty UUIDs normalized to 32 lowercase hexadecimal characters. Identity and intent values are SHA-256 hexadecimal digests. Mutation request IDs are durable and share one host-resource namespace, including acquisition. An exact replay returns its original result; reuse for a different action, resource or payload conflicts. Failed validation does not reserve the request ID.
 
@@ -61,4 +66,4 @@ IDs and request IDs are non-empty UUIDs normalized to 32 lowercase hexadecimal c
 
 Implemented here: enrollment/rotation/revocation, opaque bearer authentication, sequenced observations, physical-host policy revisions, atomic grants, effect fencing, uncertainty/release reconciliation, persistence, migration, owner/machine route separation and restart regressions.
 
-Not implemented here: a deployed executor process, endpoint discovery, SSH exchange, Docker access, resource-profile certification, operation execution, automatic timer release, or live-host enrollment. Provisioning integration must call this boundary from its durable approved operation immediately before its existing external-effect adapter and honor `authorizedNow`; it must not move Docker authority into the web process or worker.
+`HVO.AgentControl.HostExecutor` now supplies an outbound executable canary path and the provisioning effect endpoint performs the resource/effect transition in one database transaction. Deployment, endpoint discovery, SSH/OpenCode enrollment, builder hard limits, automatic timer release, lifecycle retirement and live-host acceptance remain unimplemented. See `HOST_EXECUTOR.md`.

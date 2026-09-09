@@ -453,7 +453,7 @@ public sealed class LocalDevContainerRunnerTests
                 if (Mode == "missing-inspect-fields") return Success("[{}]");
                 if (Mode == "malformed-inspect-types") return Success("[{\"Config\":{\"Labels\":1}}]");
                 return Json(new[] { new { Id = Container, Image = "sha256:" + new string('b', 64), Config = new { Image = "fixture:resolved", User = "vscode", Labels = Mode == "foreign-labels" ? Intent.Labels.SetItem("hvo.agentcontrol.intent", "other") : Intent.Labels },
-                    State = new { Running = true }, HostConfig = new { Privileged = false, CapAdd = Mode == "extra-capability" ? new[] { "SYS_PTRACE" } : [], SecurityOpt = Mode == "extra-security-opt" ? new[] { "seccomp=unconfined" } : [] }, Mounts = new[] { new { Type = "bind", Source = Mode == "foreign-mount" ? "/var/run/docker.sock" : Intent.Workspace.Directory, Destination = Intent.Workspace.ContainerWorkspace, RW = true } } } });
+                    State = new { Running = true }, HostConfig = new { Privileged = false, NanoCpus = 2_000_000_000L, Memory = 2L * 1024 * 1024 * 1024, CapAdd = Mode == "extra-capability" ? new[] { "SYS_PTRACE" } : [], SecurityOpt = Mode == "extra-security-opt" ? new[] { "seccomp=unconfined" } : [] }, Mounts = new[] { new { Type = "bind", Source = Mode == "foreign-mount" ? "/var/run/docker.sock" : Intent.Workspace.Directory, Destination = Intent.Workspace.ContainerWorkspace, RW = true } } } });
             }
             if (args[1] == "--version") return Success(LocalDevContainerRunner.CliVersion);
             if (args[1] == "read-configuration")
