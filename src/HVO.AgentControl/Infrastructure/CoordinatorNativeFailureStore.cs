@@ -121,6 +121,29 @@ public sealed partial class ControlStore
         if (held.ProviderId.Length == 0 || held.ModelId.Length == 0) return RetainNativeDecisionHold(run, held);
         var changedRoute = coordinator.ProviderId != held.ProviderId || coordinator.ModelId != held.ModelId ||
             coordinator.Agent != held.Agent || coordinator.Variant != held.Variant;
+        // A transient provider outage must not leave continuous supervision waiting
+        // forever. If the owner has already observed a CLIProxy catalog on this
+        // coordinator, select its bounded free route and retry a fresh decision.
+        // Never replay the failed command or change route after tool/text evidence.
+        if (!changedRoute && held.Category is "AuthenticationRequired" or "Exhausted" or "Throttled" or "Unavailable")
+        {
+            var fallback = Json.Read<List<ModelChoice>>(coordinator.ModelsJson)
+                .Where(x => x.ProviderId == "cliproxy" && x.ModelId != held.ModelId)
+                .OrderBy(x => x.ModelId, StringComparer.Ordinal)
+                .FirstOrDefault();
+            if (fallback is not null)
+            {
+                coordinator.ProviderId = fallback.ProviderId;
+                coordinator.ModelId = fallback.ModelId;
+                coordinator.Agent = fallback.Agents?.Contains("build") == true ? "build" : "";
+                coordinator.Variant = "";
+                coordinator.SettingsRevision++;
+                changedRoute = true;
+                Event(db, "CoordinatorAutomaticFallbackSelected", coordinator.RuntimeId, coordinator.Id, held.CommandId,
+                    new { run.Id, failedProviderId = held.ProviderId, failedModelId = held.ModelId,
+                        fallbackProviderId = fallback.ProviderId, fallbackModelId = fallback.ModelId });
+            }
+        }
         var pool = await db.Set<ProviderPool>().FindAsync("provider:" + coordinator.ProviderId);
         var recoveredProvider = held.Category is "AuthenticationRequired" or "Exhausted" or "Throttled" or "Unavailable" &&
             pool is { State: "Available" } && pool.Id == held.ProviderPoolId && held.ProviderPoolRevision is { } revision && pool.Revision > revision;
