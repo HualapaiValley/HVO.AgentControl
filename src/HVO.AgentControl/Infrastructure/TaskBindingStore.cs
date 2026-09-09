@@ -228,6 +228,9 @@ public sealed partial class ControlStore
             if (binding.State == TaskBindingState.Released) throw Conflict("already_released", "Task binding is already released.");
             var workspace = (await db.TaskWorkspaces.SingleOrDefaultAsync(x => x.Id == binding.WorkspaceId))!;
             var session = (await db.TaskSessionBindings.SingleOrDefaultAsync(x => x.Id == binding.SessionBindingId))!;
+            if (session.LegacyWorkerId is not null && await db.Commands.AnyAsync(x => x.WorkerId == session.LegacyWorkerId && x.Kind == "Prompt" &&
+                (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)))
+                throw Conflict("task_command_pending", "Settle the task worker's queued, in-flight or unknown prompt before releasing its capability requirements.");
             binding.State = TaskBindingState.Released; binding.Revision++; binding.UpdatedAt = Now;
             workspace!.State = TaskBindingState.Released; workspace.Revision++; workspace.UpdatedAt = Now;
             session!.State = TaskSessionBindingState.Released; session.UpdatedAt = Now;

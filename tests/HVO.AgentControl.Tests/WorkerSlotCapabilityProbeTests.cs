@@ -112,6 +112,62 @@ public sealed class WorkerSlotCapabilityProbeTests
     }
 
     [Fact]
+    public async Task ReleasedBindingStopsGoverningLaterPromptAfterItsPendingPromptSettles()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, ["tool.git"], "tool.git\tpresent");
+        var binding = await app.Store.CreateTaskBinding(Binding(setup));
+        var pending = await app.Store.Prompt(setup.Worker.Id,
+            new(Guid.NewGuid().ToString(), "complete the bound task", setup.Worker.Revision));
+
+        var held = await Assert.ThrowsAsync<InventoryException>(() => app.Store.ReleaseTaskBinding(binding.Binding.Id,
+            new(Id(), binding.Binding.Revision)));
+        Assert.Equal("task_command_pending", held.Code);
+
+        await app.Store.Write(async db =>
+        {
+            var command = (await db.Commands.FindAsync(pending.Id))!;
+            command.State = Delivery.Finished;
+            return true;
+        });
+        await app.Store.ReleaseTaskBinding(binding.Binding.Id, new(Id(), binding.Binding.Revision));
+        await SetCapabilities(app, setup.Runtime.Id, "tool.git\tabsent");
+        var worker = await app.Store.Read(db => db.Workers.SingleAsync(x => x.Id == setup.Worker.Id));
+        var later = await app.Store.Prompt(setup.Worker.Id,
+            new(Guid.NewGuid().ToString(), "unrelated later prompt", worker.Revision));
+        var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions()), NullLogger<RuntimeSupervisor>.Instance);
+
+        Assert.Equal(later.Id, (await Claim(supervisor, setup.Runtime.Id))!.Id);
+    }
+
+    [Fact]
+    public async Task SupervisorRenewsExpiredRuntimeEvidenceBeforeClaimingRequiredPrompt()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, ["tool.git"], "tool.git\tpresent");
+        await app.Store.CreateTaskBinding(Binding(setup));
+        var command = await app.Store.Prompt(setup.Worker.Id,
+            new(Guid.NewGuid().ToString(), "run after capability renewal", setup.Worker.Revision));
+        await app.Store.Write(async db =>
+        {
+            var runtime = (await db.Runtimes.FindAsync(setup.Runtime.Id))!;
+            runtime.CapabilitiesJson = Json.Write(CapabilityProbe.Parse("tool.git\tpresent", setup.Worker.Directory) with
+            {
+                ObservedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 121_000
+            });
+            return true;
+        });
+        var transport = new PromptTransport(new PromptHandler(setup.Worker), "tool.git\tpresent");
+        var supervisor = new RuntimeSupervisor(app.Store, null!, Options.Create(new ControlOptions()), NullLogger<RuntimeSupervisor>.Instance);
+
+        Assert.Equal(command.Id, (await Claim(supervisor, setup.Runtime.Id, transport))!.Id);
+        Assert.Equal(1, transport.Probes);
+        var report = await app.Store.RuntimeCapabilityReport(setup.Runtime.Id);
+        Assert.Equal(setup.Worker.Directory, report.Scope);
+        Assert.True(report.ObservedAt >= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5_000);
+    }
+
+    [Fact]
     public async Task SlotRegistrationNormalizesRequirementsAndRejectsUnknownCatalogEntry()
     {
         await using var app = new TestApp();
@@ -131,9 +187,9 @@ public sealed class WorkerSlotCapabilityProbeTests
     private static CapabilityProbeResult Result(CapabilitySnapshot snapshot, string id) => snapshot.Results.Single(x => x.Id == id);
     private static string Id() => Guid.NewGuid().ToString("N");
 
-    private static Task<CommandRecord?> Claim(RuntimeSupervisor supervisor, string runtimeId) =>
-        (Task<CommandRecord?>)typeof(RuntimeSupervisor).GetMethod("Claim", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(supervisor, [runtimeId, null, CancellationToken.None, null])!;
+    private static Task<CommandRecord?> Claim(RuntimeSupervisor supervisor, string runtimeId, IRuntimeTransport? transport = null) =>
+        (Task<CommandRecord?>)typeof(RuntimeSupervisor).GetMethod("ClaimWithTransport", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(supervisor, [runtimeId, transport, CancellationToken.None, null])!;
 
     private static Task Dispatch(RuntimeSupervisor supervisor, CommandRecord command, RuntimeRecord runtime, IRuntimeTransport transport) =>
         (Task)typeof(RuntimeSupervisor).GetMethod("Dispatch", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -184,11 +240,17 @@ public sealed class WorkerSlotCapabilityProbeTests
 
     private sealed record Setup(RuntimeRecord Runtime, ProjectRecord Project, WorkerRecord Worker, WorkItem Work, WorkerSlotRecord Slot);
 
-    private sealed class PromptTransport(HttpMessageHandler handler) : IRuntimeTransport
+    private sealed class PromptTransport(HttpMessageHandler handler, string? probeOutput = null) : IRuntimeTransport
     {
         public OpenCodeClient Api { get; } = new(new HttpClient(handler) { BaseAddress = new Uri("http://native.test") });
         public bool Connected => true;
         public string Platform => "linux";
+        public int Probes { get; private set; }
+        public Task<CapabilitySnapshot> ProbeCapabilities(string directory, CancellationToken cancellationToken)
+        {
+            Probes++;
+            return Task.FromResult(CapabilityProbe.Parse(probeOutput ?? "probe\tunsupported", directory));
+        }
         public Task<WorkspaceIdentity> Workspace(RuntimeRecord runtime, CreateWorkerInput input, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task StopOwnedServer(CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
