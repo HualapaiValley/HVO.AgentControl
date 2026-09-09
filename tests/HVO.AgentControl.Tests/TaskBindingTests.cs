@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using HVO.AgentControl.Core;
+using HVO.AgentControl.GitHub;
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -380,6 +381,82 @@ public sealed class TaskBindingTests
         Assert.True((await app.Store.Detail(workerId)).Worker.Archived);
     }
 
+    [Fact]
+    public async Task TaskSessionActivationReplayRequiresTheExactBindingAndImmutableInput()
+    {
+        await using var app = new TestApp();
+        var first = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/shared");
+        var second = await Seed(app, "https://github.com/RoySalisbury/HVO.RoofControl.git", "feature/shared");
+        var firstBinding = await SlotOwnedBinding(app, first, "agentcontrol");
+        var secondBinding = await SlotOwnedBinding(app, second, "roofcontrol");
+        var commandId = Id();
+        var workerId = Id();
+        var firstInput = await ActivationInput(app, first, firstBinding, commandId, workerId, new string('a', 40));
+        var firstCommand = await app.Store.CreateTaskSession(firstBinding.Binding.Id, firstInput);
+
+        var replay = await app.Store.CreateTaskSession(firstBinding.Binding.Id, firstInput);
+        var changed = await ActivationInput(app, second, secondBinding, commandId, workerId, new string('b', 40));
+        var conflict = await Assert.ThrowsAsync<ControlException>(() => app.Store.CreateTaskSession(secondBinding.Binding.Id, changed));
+
+        Assert.Equal(firstCommand.Id, replay.Id);
+        Assert.Contains("different task-session activation authority", conflict.Message);
+        Assert.Equal(TaskSessionBindingState.Unbound, (await app.Store.TaskBinding(secondBinding.Binding.Id)).Session.State);
+        Assert.True((await app.Store.Detail(workerId)).Worker.Archived);
+    }
+
+    [Fact]
+    public async Task AbandonedTaskRetainsLateNativeReceiptWithoutBindingOrPromptAdmission()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/abandoned");
+        var binding = await SlotOwnedBinding(app, setup, "abandoned");
+        var workerId = Id();
+        var command = await app.Store.CreateTaskSession(binding.Binding.Id,
+            await ActivationInput(app, setup, binding, Id(), workerId, new string('c', 40)));
+        await app.Store.Write(async db =>
+        {
+            var work = (await db.WorkItems.FindAsync(setup.Work.Id))!;
+            work.State = WorkItemState.Abandoned; work.Revision++; return true;
+        });
+        using var native = JsonDocument.Parse($$"""{"id":"late-native","directory":"{{binding.Workspace.Directory}}"}""");
+
+        Assert.False(await app.Store.BindTaskSession(command.Id, native.RootElement, []));
+        var retained = await app.Store.Read(async db => (await db.Commands.FindAsync(command.Id))!);
+        var pending = await app.Store.TaskBinding(binding.Binding.Id);
+
+        Assert.Equal(Delivery.Failed, retained.State);
+        Assert.Equal("late-native", retained.ResultId);
+        Assert.Contains("superseded", retained.Detail);
+        Assert.Equal(TaskSessionBindingState.ActivationPending, pending.Session.State);
+        Assert.True((await app.Store.Detail(workerId)).Worker.Archived);
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(workerId, new(Id(), "abandoned task", 0)));
+    }
+
+    [Fact]
+    public async Task TypedGitHubScopeMustMatchBoundCanonicalProjectBeforePromptIsQueued()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/scope");
+        var binding = await SlotOwnedBinding(app, setup, "scope");
+        var workerId = Id();
+        var activation = await app.Store.CreateTaskSession(binding.Binding.Id,
+            await ActivationInput(app, setup, binding, Id(), workerId, new string('d', 40)));
+        using var native = JsonDocument.Parse($$"""{"id":"native-agentcontrol","directory":"{{binding.Workspace.Directory}}"}""");
+        await app.Store.BindTaskSession(activation.Id, native.RootElement, []);
+        var worker = (await app.Store.Detail(workerId)).Worker;
+        var wrong = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Author, "RoySalisbury/HVO.RoofControl", 0, "");
+
+        var rejected = await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(workerId,
+            new(Id(), "wrong repository", worker.Revision, GitHubMergeScope: wrong)));
+        var current = (await app.Store.Detail(workerId)).Worker;
+        var correct = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Author, "RoySalisbury/HVO.AgentControl", 0, "");
+        var accepted = await app.Store.Prompt(workerId, new(Id(), "correct repository", current.Revision, GitHubMergeScope: correct));
+
+        Assert.Contains("canonical repository", rejected.Message);
+        Assert.Equal(Delivery.Queued, accepted.State);
+        Assert.Empty(await app.Store.Read(db => db.Commands.Where(x => x.WorkerId == workerId && x.Kind == "Prompt" && x.Payload.Contains("wrong repository")).ToListAsync()));
+    }
+
     private static async Task<TaskBindingView> SlotOwnedBinding(TestApp app, SeedData setup, string suffix)
     {
         var work = await app.Store.Write(async db =>
@@ -403,6 +480,15 @@ public sealed class TaskBindingTests
             var runtime = await db.Runtimes.SingleAsync(x => x.Id == setup.Runtime.Id);
             return (work.Revision, project.Revision, slot.Revision, runtime.Revision);
         });
+
+    private static async Task<CreateTaskSessionInput> ActivationInput(TestApp app, SeedData setup, TaskBindingView binding,
+        string commandId, string workerId, string head)
+    {
+        var environment = await app.Store.RuntimeEnvironment(setup.Runtime.Id);
+        var current = await CurrentActivationInputs(app, setup);
+        return new(commandId, workerId, head, binding.Binding.Revision, binding.Workspace.Revision, binding.Session.Revision,
+            current.WorkRevision, current.ProjectRevision, current.SlotRevision, current.RuntimeRevision, environment.Revision);
+    }
 
     private static CreateTaskBindingInput NewBinding(SeedData data, string task, string workspace) =>
         new(Id(), Id(), data.Work.Id, data.Project.Id, data.Slot.Id, Id(), Id(), "/work/" + workspace, data.Work.Branch,

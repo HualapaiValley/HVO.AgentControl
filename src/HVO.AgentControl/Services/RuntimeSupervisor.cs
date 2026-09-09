@@ -292,6 +292,19 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     var occupiedControl = nativeBusy.Concat(inFlight.Where(x => x.RuntimeId == runtimeId).Select(x => x.WorkerId!)).Distinct().Count();
                     if (occupiedControl >= runtime.Capacity) continue;
                 }
+                try
+                {
+                    var taskProject = await ControlStore.RequireActiveTaskTuple(db, worker);
+                    ControlStore.RequireTaskPromptScope(taskProject, Json.Read<PromptInput>(command.Payload).GitHubMergeScope);
+                }
+                catch (ControlException exception)
+                {
+                    command.State = Delivery.Failed;
+                    command.Detail = "Task prompt authority was superseded before dispatch: " + exception.Message;
+                    command.UpdatedAt = ControlStore.Now;
+                    ControlStore.Event(db, "TaskPromptDispatchSuperseded", runtimeId, worker.Id, command.Id);
+                    continue;
+                }
                 if (!await ControlStore.ProviderDispatchAllowed(db, worker, command)) continue;
                 command.ProviderPoolId = ControlStore.PoolId(worker, command);
             }
@@ -435,7 +448,30 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     var admitted = await store.Write(async db =>
                     {
                         var pending = (await db.Commands.FindAsync(command.Id))!;
-                        if (await ControlStore.ProviderDispatchAllowed(db, worker, pending)) return true;
+                        var currentWorker = await db.Workers.FindAsync(worker.Id);
+                        if (currentWorker is null || currentWorker.Archived || currentWorker.NativeSessionId != worker.NativeSessionId ||
+                            currentWorker.Directory != worker.Directory || currentWorker.Revision != worker.Revision)
+                        {
+                            pending.State = Delivery.Failed;
+                            pending.Detail = "Task prompt authority changed before native submission; no prompt was sent.";
+                            pending.UpdatedAt = ControlStore.Now;
+                            ControlStore.Event(db, "TaskPromptDispatchSuperseded", runtime.Id, command.WorkerId, command.Id);
+                            return false;
+                        }
+                        try
+                        {
+                            var taskProject = await ControlStore.RequireActiveTaskTuple(db, currentWorker);
+                            ControlStore.RequireTaskPromptScope(taskProject, Json.Read<PromptInput>(pending.Payload).GitHubMergeScope);
+                        }
+                        catch (ControlException exception)
+                        {
+                            pending.State = Delivery.Failed;
+                            pending.Detail = "Task prompt authority was superseded before native submission: " + exception.Message;
+                            pending.UpdatedAt = ControlStore.Now;
+                            ControlStore.Event(db, "TaskPromptDispatchSuperseded", runtime.Id, command.WorkerId, command.Id);
+                            return false;
+                        }
+                        if (await ControlStore.ProviderDispatchAllowed(db, currentWorker, pending)) return true;
                         pending.State = Delivery.Queued;
                         return false;
                     });

@@ -350,7 +350,8 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         var rendered = AssignmentGuidance.Render(input, worker.Directory);
         if (rendered.Length > options.Value.MaxPromptCharacters) throw new ControlException("Rendered instruction exceeds the prompt limit.", 400);
         if (worker.Archived) throw new ControlException("Restore this worker before sending instructions.");
-        await RequireActiveTaskTuple(db, worker);
+        var taskProject = await RequireActiveTaskTuple(db, worker);
+        RequireTaskPromptScope(taskProject, input.GitHubMergeScope);
         if (worker.Revision != input.ExpectedRevision) throw new ControlException("Worker changed; refresh and review before sending.");
         if (input.StatusInquiry && worker.LastStatusInquiryAt > Now - 60000) throw new ControlException("Status inquiries have a 60-second cooldown; observed state is already available.");
         if (input.StatusInquiry) worker.LastStatusInquiryAt = Now;

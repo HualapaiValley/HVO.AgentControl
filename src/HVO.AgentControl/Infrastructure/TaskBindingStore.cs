@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Core;
+using HVO.AgentControl.GitHub;
 using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Infrastructure;
@@ -198,7 +199,7 @@ public sealed partial class ControlStore
         ValidateRequestId(input.Id);
         if (input.ExpectedHead.Length is not (40 or 64) || input.ExpectedHead.Any(x => !char.IsAsciiHexDigit(x) || char.IsAsciiLetterUpper(x)))
             throw Validation("Expected HEAD must be an exact lowercase commit identity.");
-        if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, prior.RuntimeId, workerId, "CreateTaskSession", prior.Payload);
+        if (await db.Commands.FindAsync(input.Id) is { } prior) return SameTaskSession(prior, bindingId, workerId, input);
         var binding = await db.TaskBindings.SingleOrDefaultAsync(x => x.Id == bindingId) ?? throw new InventoryException("not_found", "Task binding not found.", 404);
         var workspace = await db.TaskWorkspaces.SingleAsync(x => x.Id == binding.WorkspaceId);
         var session = await db.TaskSessionBindings.SingleAsync(x => x.Id == binding.SessionBindingId);
@@ -210,6 +211,7 @@ public sealed partial class ControlStore
         if (runtime.ConnectionKind != RuntimeConnections.Ssh || environment.Kind != RuntimeEnvironmentKind.ExistingMachine)
             throw Conflict("unsupported_runtime_environment", "Fresh task sessions require a configured ExistingMachine SSH runtime.");
         if (binding.State != TaskBindingState.Active || workspace.State != TaskBindingState.Active || session.State != TaskSessionBindingState.Unbound ||
+            work.State is WorkItemState.Completed or WorkItemState.Released or WorkItemState.Abandoned ||
             work.OwnerWorkerSlotId != slot.Id || !string.IsNullOrEmpty(work.OwnerWorkerId) || project.Archived || slot.Archived)
             throw Conflict("session_unavailable", "The exact slot-owned task binding is not available for activation.");
         if (binding.Revision != input.ExpectedBindingRevision || workspace.Revision != input.ExpectedWorkspaceRevision || session.Revision != input.ExpectedSessionRevision ||
@@ -261,10 +263,25 @@ public sealed partial class ControlStore
         var workspace = await db.TaskWorkspaces.SingleAsync(x => x.Id == binding.WorkspaceId);
         var session = await db.TaskSessionBindings.SingleAsync(x => x.Id == binding.SessionBindingId);
         var work = await db.WorkItems.FindAsync(binding.WorkItemId) ?? throw new InventoryException("not_found", "Work item not found.", 404);
+        var project = await db.Projects.SingleAsync(x => x.Id == binding.ProjectId);
+        var slot = await db.WorkerSlots.SingleAsync(x => x.Id == binding.WorkerSlotId);
+        var runtime = await db.Runtimes.FindAsync(binding.RuntimeId) ?? throw new InventoryException("not_found", "Runtime not found.", 404);
+        var environment = await db.RuntimeEnvironments.FindAsync(runtime.Id);
         var worker = await db.Workers.FindAsync(command.WorkerId) ?? throw new ControlException("Reserved task worker is missing.");
         var nativeId = nativeSession.GetProperty("id").GetString();
         if (nativeSession.GetProperty("directory").GetString() != workspace.Directory || string.IsNullOrWhiteSpace(nativeId))
             throw Conflict("native_session_mismatch", "Created session directory or identity differs from the verified task workspace.");
+        if (!ActivationCurrent(binding, workspace, session, work, project, slot, runtime, environment, worker, command, intent))
+        {
+            command.ResultId = nativeId;
+            command.ResultJson = Json.Write(new { nativeSessionId = nativeId, directory = workspace.Directory });
+            command.State = Delivery.Failed;
+            command.Detail = "Native session receipt retained, but task activation authority was superseded; no session was bound.";
+            command.UpdatedAt = Now;
+            Event(db, "TaskSessionActivationSuperseded", binding.RuntimeId, worker.Id, command.Id,
+                new { bindingId = binding.Id, sessionId = session.Id, intent.Generation, nativeSessionId = nativeId }, "observed");
+            return false;
+        }
         worker.NativeSessionId = nativeId; worker.ModelsJson = Json.Write(models); worker.Archived = false; worker.Revision++;
         session.NativeSessionId = nativeId; session.State = TaskSessionBindingState.Bound; session.Revision++; session.UpdatedAt = Now;
         work.OwnerWorkerId = worker.Id; work.OwnerWorkerSlotId = null; work.Revision++; work.UpdatedAt = Now;
@@ -274,17 +291,29 @@ public sealed partial class ControlStore
         return true;
     });
 
-    internal static async Task RequireActiveTaskTuple(ControlDb db, WorkerRecord worker)
+    internal static async Task<ProjectRecord?> RequireActiveTaskTuple(ControlDb db, WorkerRecord worker, bool allowTerminal = false)
     {
         var session = await db.TaskSessionBindings.SingleOrDefaultAsync(x => x.WorkerId == worker.Id);
-        if (session is null) return;
+        if (session is null) return null;
         var binding = await db.TaskBindings.SingleOrDefaultAsync(x => x.Id == session.TaskBindingId);
         var workspace = binding is null ? null : await db.TaskWorkspaces.SingleOrDefaultAsync(x => x.Id == binding.WorkspaceId);
         var work = binding is null ? null : await db.WorkItems.FindAsync(binding.WorkItemId);
+        var project = binding is null ? null : await db.Projects.SingleOrDefaultAsync(x => x.Id == binding.ProjectId);
         if (binding is null || workspace is null || work is null || binding.State != TaskBindingState.Active || workspace.State != TaskBindingState.Active ||
             session.State != TaskSessionBindingState.Bound || session.NativeSessionId != worker.NativeSessionId || workspace.Directory != worker.Directory ||
-            workspace.Branch != worker.Branch || work.OwnerWorkerId != worker.Id || work.OwnerWorkerSlotId is not null)
+            workspace.Branch != worker.Branch || work.OwnerWorkerId != worker.Id || work.OwnerWorkerSlotId is not null || project is null || project.Archived ||
+            (!allowTerminal && (work.State is WorkItemState.Completed or WorkItemState.Released or WorkItemState.Abandoned)) ||
+            !string.Equals(CanonicalProjectRepository(work.Repository), project.RepositoryUrl, StringComparison.Ordinal))
             throw new ControlException("Task execution worker is not the exact active binding, session and workspace owner.");
+        return project;
+    }
+
+    internal static void RequireTaskPromptScope(ProjectRecord? project, GitHubMergeTaskScope? scope)
+    {
+        if (project is null || scope is null) return;
+        var repository = CanonicalProjectRepository(project.RepositoryUrl)["https://github.com/".Length..];
+        if (!GitHubMergeTaskAuthority.SameRepository(scope.Repository, repository))
+            throw new ControlException("Typed GitHub merge task scope does not match the canonical repository of the bound task project.", 409);
     }
 
     public Task<TaskBindingView> ReleaseTaskBinding(string id, ReleaseTaskBindingInput input) => Write(async db =>
@@ -303,7 +332,7 @@ public sealed partial class ControlStore
             {
                 var worker = await db.Workers.FindAsync(session.WorkerId) ?? throw Conflict("worker_missing", "Task worker projection is missing.");
                 var work = await db.WorkItems.FindAsync(binding.WorkItemId) ?? throw new InventoryException("not_found", "Work item not found.", 404);
-                await RequireActiveTaskTuple(db, worker);
+                await RequireActiveTaskTuple(db, worker, allowTerminal: true);
                 if (work.State is not (WorkItemState.Completed or WorkItemState.Released or WorkItemState.Abandoned)) throw Conflict("task_not_terminal", "Task ownership must be terminal before release.");
                 if (worker.Stale || worker.Activity != "Idle" || worker.LastObservedAt < Now - 60000) throw Conflict("worker_not_idle", "Fresh native idle evidence is required.");
                 if (await db.Commands.AnyAsync(x => x.WorkerId == worker.Id && x.State != Delivery.Finished && x.State != Delivery.Failed && x.State != Delivery.Cancelled)) throw Conflict("commands_pending", "Drain task commands before release.");
@@ -349,6 +378,34 @@ public sealed partial class ControlStore
         var slot = await db.WorkerSlots.AsNoTracking().SingleAsync(x => x.Id == binding.WorkerSlotId);
         return new(binding, workspace, session, project, slot);
     }
+
+    private static CommandRecord SameTaskSession(CommandRecord prior, string bindingId, string workerId, CreateTaskSessionInput input)
+    {
+        try
+        {
+            var intent = Json.Read<TaskSessionCreationIntent>(prior.Payload);
+            if (prior.Kind == "CreateTaskSession" && prior.WorkerId == workerId && intent.TaskBindingId == bindingId && intent.Input == input)
+                return prior;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException) { }
+        throw new ControlException("Request ID was already used for different task-session activation authority.", 409);
+    }
+
+    private static bool ActivationCurrent(TaskBindingRecord binding, TaskWorkspaceRecord workspace, TaskSessionBindingRecord session,
+        WorkItem work, ProjectRecord project, WorkerSlotRecord slot, RuntimeRecord runtime, RuntimeEnvironmentRecord? environment,
+        WorkerRecord worker, CommandRecord command, TaskSessionCreationIntent intent) =>
+        binding.State == TaskBindingState.Active && workspace.State == TaskBindingState.Active &&
+        session.State == TaskSessionBindingState.ActivationPending && session.CreationCommandId == command.Id &&
+        session.WorkerId == worker.Id && session.Generation == intent.Generation &&
+        binding.Revision == intent.Input.ExpectedBindingRevision + 1 && session.Revision == intent.Input.ExpectedSessionRevision + 1 &&
+        work.Revision == intent.Input.ExpectedWorkItemRevision && project.Revision == intent.Input.ExpectedProjectRevision &&
+        slot.Revision == intent.Input.ExpectedSlotRevision && runtime.Revision == intent.Input.ExpectedRuntimeRevision &&
+        environment?.Revision == intent.Input.ExpectedEnvironmentRevision && !project.Archived && !slot.Archived && worker.Archived &&
+        work.State is not (WorkItemState.Completed or WorkItemState.Released or WorkItemState.Abandoned) &&
+        work.OwnerWorkerSlotId == slot.Id && string.IsNullOrEmpty(work.OwnerWorkerId) &&
+        worker.RuntimeId == runtime.Id && worker.Directory == workspace.Directory && worker.Branch == workspace.Branch &&
+        worker.NativeSessionId == "pending:" + command.Id &&
+        string.Equals(CanonicalProjectRepository(work.Repository), project.RepositoryUrl, StringComparison.Ordinal);
 
     private static async Task<T> MutateBinding<T>(ControlDb db, string requestId, string kind, string id, string action, object intent, Func<Task<T>> mutate)
     {
