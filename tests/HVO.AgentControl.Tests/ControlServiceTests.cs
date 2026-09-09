@@ -40,6 +40,7 @@ public sealed class ControlServiceTests
             await migrator.MigrateAsync();
             var binding = await db.ControlSessions.AsNoTracking().SingleAsync();
             Assert.Equal(0, binding.Generation); Assert.True(binding.IsCurrent); Assert.Null(binding.PredecessorId);
+            Assert.Equal("Initial", binding.GenerationReason); Assert.Equal(0, binding.CreatedAt);
             Assert.Equal("agentcontrol-control:" + id, binding.Title); Assert.Equal(7, binding.Revision);
         }
         finally { Directory.Delete(directory, true); }
@@ -293,6 +294,308 @@ public sealed class ControlServiceTests
         Assert.Equal(predecessor.WorkerId, (await app.Store.Coordinations()).Single(x => x.Id == run.Id).CoordinatorWorkerId);
         Assert.True((await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == predecessor.Id).IsCurrent);
     }
+
+    [Fact]
+    public async Task ExpiredControlDecisionUsesOneDiscoverableSuccessorAndOneLinkedReplacement()
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var predecessor = await app.Store.CreateControlSession(service.Id,
+            new(Guid.NewGuid().ToString(), "Workgroup", "automatic-recovery", "Automatic recovery", "opencode", "big-pickle"));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == predecessor.WorkerId && !x.Stale && x.Activity == "Idle")), "Predecessor observed");
+        predecessor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == predecessor.Id);
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+
+        var developer = await PersistenceTests.SeedWorker(app.Store);
+        var unrelated = new CommandRecord { Id = Guid.NewGuid().ToString(), RuntimeId = developer.RuntimeId, WorkerId = developer.Id, Kind = "Prompt", State = Delivery.Running };
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), predecessor.WorkerId, "Preserve all assigned work", [developer.Id]));
+        Assert.True(await app.Store.CoordinationTick());
+        var sourceCommandId = (await app.Store.Coordinations()).Single(x => x.Id == run.Id).DecisionCommandId!;
+        await ExpireDecision(app.Store, run.Id, predecessor.WorkerId, sourceCommandId);
+        await app.Store.Write(db => { db.Commands.Add(unrelated); return Task.FromResult(true); });
+
+        Assert.True(await app.Store.CoordinationTick());
+        var requested = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        var recovery = Json.Read<CoordinatorContext>(requested.InputJson).GenerationRecovery!;
+        var successor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == recovery.SuccessorControlSessionId);
+        Assert.Equal("DecisionBudgetRecovery", successor.GenerationReason);
+        Assert.Equal(recovery.IntentId, successor.RecoveryIntentId);
+        Assert.False(successor.IsCurrent);
+
+        var postsBeforeRecovery = native.CreationPosts;
+        native.HideSessions = true;
+        native.LoseCreationResponse = true;
+        await app.Store.Write(async db => { (await db.Commands.FindAsync(successor.CreationCommandId))!.State = Delivery.Accepted; return true; });
+        var backendStarts = await app.Store.Read(db => db.Events.CountAsync(x => x.Type == "BackendStarted"));
+        using (var firstAttempt = ActivatorUtilities.CreateInstance<RuntimeSupervisor>(app.Services))
+        {
+            await firstAttempt.StartAsync(CancellationToken.None);
+            await TestApp.Wait(async () => await app.Store.Read(async db =>
+                await db.Events.CountAsync(x => x.Type == "BackendStarted") > backendStarts &&
+                (await db.Runtimes.FindAsync(service.Id))!.Health == "Healthy" && !(await db.Workers.FindAsync(predecessor.WorkerId))!.Stale),
+                "Control service re-observed before automatic creation");
+            await app.Store.Write(async db =>
+            {
+                var source = (await db.Workers.FindAsync(predecessor.WorkerId))!;
+                source.HistoryGap = false; source.LastObservedAt = ControlStore.Now;
+                var sourceCommand = (await db.Commands.FindAsync(sourceCommandId))!;
+                sourceCommand.State = Delivery.Running;
+                var observation = (await db.CoordinatorNativeObservations.FindAsync(sourceCommandId))!;
+                observation.ObservedAt = source.LastObservedAt.Value; observation.ChildSessionCount = 0;
+                var creation = (await db.Commands.FindAsync(successor.CreationCommandId))!;
+                creation.State = Delivery.Queued; creation.QueueOrder = ControlStore.Now;
+                var binding = (await db.ControlSessions.FindAsync(successor.Id))!;
+                binding.State = "Queued";
+                return true;
+            });
+            await TestApp.Wait(async () => await app.Store.Read(async db =>
+                (await db.Commands.FindAsync(successor.CreationCommandId))!.State is Delivery.Unknown or Delivery.Cancelled or Delivery.Failed), "Automatic successor response lost");
+            await firstAttempt.StopAsync(CancellationToken.None);
+        }
+        var firstCreation = await app.Store.Read(async db => (await db.Commands.FindAsync(successor.CreationCommandId))!);
+        Assert.True(firstCreation.State == Delivery.Unknown, firstCreation.State + ": " + firstCreation.Detail);
+        Assert.Equal(postsBeforeRecovery + 1, native.CreationPosts);
+
+        native.HideSessions = false;
+        native.LoseCreationResponse = false;
+        using (var reconciliation = ActivatorUtilities.CreateInstance<RuntimeSupervisor>(app.Services))
+        {
+            await reconciliation.StartAsync(CancellationToken.None);
+            await TestApp.Wait(async () => (await app.Store.ControlServices()).Single().Sessions
+                .Single(x => x.Id == successor.Id).State == "Ready", "Automatic successor discovered");
+            await reconciliation.StopAsync(CancellationToken.None);
+        }
+        Assert.Equal(postsBeforeRecovery + 1, native.CreationPosts);
+
+        await app.Store.Write(async db =>
+        {
+            var runtime = (await db.Runtimes.FindAsync(service.Id))!;
+            runtime.DesiredConnected = true; runtime.Transport = "Connected"; runtime.Health = "Healthy";
+            var source = (await db.Workers.FindAsync(predecessor.WorkerId))!;
+            source.Stale = false; source.HistoryGap = false; source.Activity = "Idle"; source.LastObservedAt = ControlStore.Now;
+            var target = (await db.Workers.FindAsync(successor.WorkerId))!;
+            target.Stale = false; target.HistoryGap = false; target.Activity = "Idle"; target.LastObservedAt = ControlStore.Now;
+            var command = (await db.Commands.FindAsync(sourceCommandId))!;
+            command.State = Delivery.Running; command.NativeMessageId = "caller-budget";
+            var observation = (await db.CoordinatorNativeObservations.FindAsync(sourceCommandId))!;
+            observation.ObservedAt = ControlStore.Now; observation.ChildSessionCount = 0;
+            source.LastObservedAt = observation.ObservedAt;
+            return true;
+        });
+        Assert.True(await app.Store.CoordinationTick());
+        var cutover = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        Assert.Equal(successor.WorkerId, cutover.CoordinatorWorkerId);
+        Assert.Null(cutover.DecisionCommandId);
+        Assert.Equal(Delivery.Running, await app.Store.Read(async db => (await db.Commands.FindAsync(sourceCommandId))!.State));
+        Assert.Equal(Delivery.Running, await app.Store.Read(async db => (await db.Commands.FindAsync(unrelated.Id))!.State));
+
+        Assert.True(await app.Store.CoordinationTick());
+        var replacement = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        var replacementRecovery = Json.Read<CoordinatorContext>(replacement.InputJson).GenerationRecovery!;
+        Assert.Equal("ReplacementQueued", replacementRecovery.State);
+        Assert.Equal(replacement.DecisionCommandId, replacementRecovery.ReplacementDecisionCommandId);
+        Assert.Equal(replacement.DecisionCommandId, (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == successor.Id).ReplacementDecisionCommandId);
+        Assert.Equal(2, (await app.Store.Snapshot()).Commands.Count(x => x.Origin == "coordinator-decision:" + run.Id));
+        await app.Store.Write(async db =>
+        {
+            var late = (await db.Commands.FindAsync(sourceCommandId))!;
+            late.State = Delivery.Finished;
+            late.ResultJson = Json.Write(new
+            {
+                messages = new[] { new { parts = new[] { new { type = "text", text = Json.Write(new CoordinatorDecision("late", [new("send_prompt", developer.Id, "must not dispatch")])) } } } }
+            });
+            return true;
+        });
+        await app.Store.CoordinationTick();
+        Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
+        Assert.Equal(Delivery.Running, await app.Store.Read(async db => (await db.Commands.FindAsync(unrelated.Id))!.State));
+    }
+
+    [Theory]
+    [InlineData("owner-pause")]
+    [InlineData("elapsed-hold")]
+    public async Task SupersededAutomaticSuccessorIsCancelledAtPreEffectFence(string conflict)
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var predecessor = await app.Store.CreateControlSession(service.Id,
+            new(Guid.NewGuid().ToString(), "Workgroup", "pause-race", "Pause race", "opencode", "big-pickle"));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == predecessor.WorkerId && !x.Stale && x.Activity == "Idle")), "Predecessor observed");
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+        var developer = await PersistenceTests.SeedWorker(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), predecessor.WorkerId, "Pause before effects", [developer.Id]));
+        await app.Store.CoordinationTick();
+        var sourceCommandId = (await app.Store.Coordinations()).Single(x => x.Id == run.Id).DecisionCommandId!;
+        await ExpireDecision(app.Store, run.Id, predecessor.WorkerId, sourceCommandId);
+        await app.Store.CoordinationTick();
+        run = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        var recovery = Json.Read<CoordinatorContext>(run.InputJson).GenerationRecovery!;
+        if (conflict == "owner-pause")
+        {
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(recovery.CreationCommandId))!.State = Delivery.Dispatching; return true; });
+            run = await app.Store.ControlCoordination(run.Id, new(run.Revision, "pause"));
+        }
+        else
+        {
+            await app.Store.Write(async db =>
+            {
+                var saved = (await db.CoordinationRuns.FindAsync(run.Id))!;
+                var context = Json.Read<CoordinatorContext>(saved.InputJson);
+                saved.InputJson = Json.Write(context with
+                {
+                    GenerationRecovery = context.GenerationRecovery! with { RequestedAt = ControlStore.Now - 900_001 }
+                });
+                (await db.Commands.FindAsync(recovery.CreationCommandId))!.State = Delivery.Accepted;
+                return true;
+            });
+            Assert.True(await app.Store.CoordinationTick());
+            await app.Store.Write(async db => { (await db.Commands.FindAsync(recovery.CreationCommandId))!.State = Delivery.Dispatching; return true; });
+            run = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        }
+
+        Assert.False(await app.Store.AuthorizeAutomaticControlSessionCreation(recovery.CreationCommandId));
+        var creation = await app.Store.Read(async db => (await db.Commands.FindAsync(recovery.CreationCommandId))!);
+        var successor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == recovery.SuccessorControlSessionId);
+        Assert.Equal(Delivery.Cancelled, creation.State);
+        Assert.Equal(Delivery.Cancelled, successor.State);
+        Assert.Null(successor.CreationAuthorizedAt);
+        Assert.Equal(conflict == "owner-pause" ? "Paused" : "Deciding", run.State);
+        Assert.Equal(2, native.CreationPosts);
+    }
+
+    [Fact]
+    public async Task OriginalCompletionWinsBeforeSuccessorEffectAndAppliesOnlyOnce()
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var predecessor = await app.Store.CreateControlSession(service.Id,
+            new(Guid.NewGuid().ToString(), "Workgroup", "completion-race", "Completion race", "opencode", "big-pickle"));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == predecessor.WorkerId && !x.Stale && x.Activity == "Idle")), "Predecessor observed");
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+        var developer = await PersistenceTests.SeedWorker(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), predecessor.WorkerId, "Original may still finish", [developer.Id]));
+        await app.Store.CoordinationTick();
+        var sourceCommandId = (await app.Store.Coordinations()).Single(x => x.Id == run.Id).DecisionCommandId!;
+        await ExpireDecision(app.Store, run.Id, predecessor.WorkerId, sourceCommandId);
+        await app.Store.CoordinationTick();
+        var recovery = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single(x => x.Id == run.Id).InputJson).GenerationRecovery!;
+        await app.Store.Write(async db =>
+        {
+            var command = (await db.Commands.FindAsync(sourceCommandId))!;
+            command.State = Delivery.Finished;
+            command.ResultJson = Json.Write(new
+            {
+                messages = new[] { new { parts = new[] { new { type = "text", text = Json.Write(new CoordinatorDecision("Original completed", [])) } } } }
+            });
+            return true;
+        });
+
+        Assert.True(await app.Store.CoordinationTick());
+        var applied = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        var completedRecovery = Json.Read<CoordinatorContext>(applied.InputJson).GenerationRecovery!;
+        Assert.Equal("OriginalCompleted", completedRecovery.State);
+        Assert.Equal("Original completed", applied.Detail);
+        Assert.Null(applied.DecisionCommandId);
+        var successor = (await app.Store.ControlServices()).Single().Sessions.Single(x => x.Id == recovery.SuccessorControlSessionId);
+        Assert.Equal(Delivery.Cancelled, successor.State);
+        Assert.Null(successor.CreationAuthorizedAt);
+        Assert.Equal(2, native.CreationPosts);
+        Assert.Single(await app.Store.Read(db => db.Events.Where(x => x.Type == "CoordinatorDecisionApplied" && x.CommandId == null).ToListAsync()));
+    }
+
+    [Theory]
+    [InlineData("process")]
+    [InlineData("child")]
+    [InlineData("spend")]
+    public async Task ChangedControlProcessOrObservedChildHoldsWithoutAllocatingSuccessor(string conflict)
+    {
+        await using var native = new NativeControlFixture();
+        await using var app = new TestApp();
+        using var owner = await app.SignIn();
+        var service = await Register(app, owner, native);
+        var predecessor = await app.Store.CreateControlSession(service.Id,
+            new(Guid.NewGuid().ToString(), "Workgroup", "process-fence", "Process fence", "opencode", "big-pickle"));
+        await TestApp.Wait(async () => await app.Store.Read(db => db.Workers.AnyAsync(x => x.Id == predecessor.WorkerId && !x.Stale && x.Activity == "Idle")), "Predecessor observed");
+        await app.Services.GetServices<IHostedService>().OfType<RuntimeSupervisor>().Single().StopAsync(CancellationToken.None);
+        var developer = await PersistenceTests.SeedWorker(app.Store);
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), predecessor.WorkerId, "Require exact process", [developer.Id]));
+        await app.Store.CoordinationTick();
+        var sourceCommandId = (await app.Store.Coordinations()).Single(x => x.Id == run.Id).DecisionCommandId!;
+        await ExpireDecision(app.Store, run.Id, predecessor.WorkerId, sourceCommandId);
+        await app.Store.Write(async db =>
+        {
+            if (conflict == "process") (await db.ControlServices.FindAsync(service.Id))!.IncarnationId = Guid.NewGuid().ToString();
+            else if (conflict == "child") (await db.CoordinatorNativeObservations.FindAsync(sourceCommandId))!.ChildSessionCount = 1;
+            else db.ModelUsage.AddRange(
+                new ModelUsageRecord
+                {
+                    RuntimeId = service.Id,
+                    NativeSessionId = predecessor.NativeSessionId,
+                    NativeMessageId = "usage-over-limit",
+                    CommandId = sourceCommandId,
+                    InputTokens = 2_000_001,
+                    ObservedAt = ControlStore.Now - 1
+                },
+                new ModelUsageRecord
+                {
+                    RuntimeId = service.Id,
+                    NativeSessionId = predecessor.NativeSessionId,
+                    NativeMessageId = "usage-later-lower",
+                    CommandId = sourceCommandId,
+                    InputTokens = 100_000,
+                    ObservedAt = ControlStore.Now
+                });
+            return true;
+        });
+
+        Assert.True(await app.Store.CoordinationTick());
+        var held = (await app.Store.Coordinations()).Single(x => x.Id == run.Id);
+        var context = Json.Read<CoordinatorContext>(held.InputJson);
+        Assert.Null(context.GenerationRecovery);
+        var reason = conflict == "process" ? "fence changed" : conflict == "child" ? "ownership cannot be proven" : "spend limit";
+        Assert.Contains(reason, context.DecisionCheckpoint!.RecoveryHold);
+        Assert.DoesNotContain((await app.Store.ControlServices()).Single().Sessions, x => x.PredecessorId == predecessor.Id);
+        Assert.Equal(Delivery.Running, await app.Store.Read(async db => (await db.Commands.FindAsync(sourceCommandId))!.State));
+    }
+
+    private static Task ExpireDecision(ControlStore store, string runId, string coordinatorId, string commandId) => store.Write(async db =>
+    {
+        var run = (await db.CoordinationRuns.FindAsync(runId))!;
+        var context = Json.Read<CoordinatorContext>(run.InputJson);
+        var command = (await db.Commands.FindAsync(commandId))!;
+        command.State = Delivery.Running; command.NativeMessageId = "caller-budget";
+        var observedAt = ControlStore.Now;
+        db.CoordinatorNativeObservations.Add(new CoordinatorNativeObservation
+        {
+            CommandId = command.Id,
+            WorkerId = coordinatorId,
+            RuntimeId = command.RuntimeId,
+            NativeSessionId = (await db.Workers.FindAsync(coordinatorId))!.NativeSessionId,
+            NativeCallerId = command.NativeMessageId,
+            ChildSessionCount = 0,
+            ObservedAt = observedAt
+        });
+        var coordinator = (await db.Workers.FindAsync(coordinatorId))!;
+        coordinator.Stale = false; coordinator.HistoryGap = false; coordinator.Activity = "Active"; coordinator.LastObservedAt = observedAt;
+        run.InputJson = Json.Write(context with
+        {
+            DecisionCheckpoint = context.DecisionCheckpoint! with
+            {
+                NativeCallerId = command.NativeMessageId,
+                Phase = "Inference",
+                StartedAt = ControlStore.Now - 14_400_001,
+                PhaseStartedAt = ControlStore.Now - 7_200_001,
+                LastEvidenceAt = ControlStore.Now - 7_200_001
+            }
+        });
+        return true;
+    });
 
     [Theory]
     [InlineData("version")]
@@ -674,7 +977,10 @@ public sealed class ControlServiceTests
                 else if (path == "/session/status") body = new { };
                 else if (path is "/permission" or "/question" || path.EndsWith("/message", StringComparison.Ordinal)) body = Array.Empty<object>();
                 else if (path.StartsWith("/session/", StringComparison.Ordinal) && context.Request.HttpMethod == "GET")
-                { lock (sessions) body = sessions.Single(x => JsonSerializer.SerializeToElement(x).GetProperty("id").GetString() == path[9..]); }
+                {
+                    lock (sessions) body = sessions.SingleOrDefault(x => JsonSerializer.SerializeToElement(x).GetProperty("id").GetString() == path[9..])!;
+                    if (body is null) { context.Response.StatusCode = 404; return; }
+                }
                 else if (path == "/global/event")
                 {
                     context.Response.ContentType = "text/event-stream"; context.Response.SendChunked = true;

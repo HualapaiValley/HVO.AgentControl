@@ -92,14 +92,15 @@ public sealed partial class ControlStore
     public async Task<string> ExportUsageCsv(UsageQuery query)
     {
         var report = await Usage(query);
-        var output = new StringBuilder("runtimeId,nativeSessionId,nativeMessageId,workerId,sessionRole,providerId,modelId,createdAt,completedAt,totalTokens,inputTokens,outputTokens,reasoningTokens,cacheReadTokens,cacheWriteTokens,providerCost,currency,costProvenance,observedAt,seenInTranscript,seenInCommandResult\r\n");
+        var output = new StringBuilder("runtimeId,nativeSessionId,nativeMessageId,workerId,sessionRole,providerId,modelId,createdAt,completedAt,totalTokens,inputTokens,outputTokens,reasoningTokens,cacheReadTokens,cacheWriteTokens,providerCost,currency,costProvenance,observedAt,seenInTranscript,seenInCommandResult,parentNativeMessageId,commandId,coordinationRunId,controlSessionId,controlSessionGeneration,recoveryIntentId\r\n");
         foreach (var row in report.Rows)
         {
             var values = new string?[] { row.RuntimeId, row.NativeSessionId, row.NativeMessageId, row.WorkerId, row.SessionRole,
                 row.ProviderId, row.ModelId, Number(row.CreatedAt), Number(row.CompletedAt), Number(row.TotalTokens), Number(row.InputTokens),
                 Number(row.OutputTokens), Number(row.ReasoningTokens), Number(row.CacheReadTokens), Number(row.CacheWriteTokens),
                 Number(row.ProviderCost), row.Currency, row.CostProvenance, Number(row.ObservedAt), row.SeenInTranscript ? "true" : "false",
-                row.SeenInCommandResult ? "true" : "false" };
+                row.SeenInCommandResult ? "true" : "false", row.ParentNativeMessageId, row.CommandId, row.CoordinationRunId,
+                row.ControlSessionId, Number(row.ControlSessionGeneration), row.RecoveryIntentId };
             output.AppendJoin(',', values.Select(Csv)).Append("\r\n");
         }
         return output.ToString();
@@ -130,6 +131,7 @@ public sealed partial class ControlStore
                 SessionRole = sessionRole
             };
             Apply(row, incoming);
+            await ApplyAttribution(db, row, workerId, message);
             MarkEvidence(row, source);
             db.ModelUsage.Add(row);
             return new(true, true);
@@ -138,6 +140,7 @@ public sealed partial class ControlStore
         var changed = MarkEvidence(row, source);
         if (row.WorkerId is null && workerId is not null) { row.WorkerId = workerId; changed = true; }
         if (row.SessionRole == "Unknown" && sessionRole != "Unknown") { row.SessionRole = sessionRole; changed = true; }
+        changed |= await ApplyAttribution(db, row, workerId, message);
         var existing = ToUsage(row);
         if (!SameRevision(existing, incoming))
         {
@@ -203,6 +206,102 @@ public sealed partial class ControlStore
         return false;
     }
 
+    private static async Task<bool> ApplyAttribution(ControlDb db, ModelUsageRecord row, string? workerId, JsonElement message)
+    {
+        var info = message.GetProperty("info");
+        var parentId = info.TryGetProperty("parentID", out var parent) && parent.ValueKind == JsonValueKind.String
+            ? parent.GetString() : null;
+        var changed = false;
+        if (row.ParentNativeMessageId is null && parentId is not null) { row.ParentNativeMessageId = parentId; changed = true; }
+        ControlSessionBinding? binding = null;
+        WorkerRecord? worker = null;
+        if (workerId is not null)
+        {
+            worker = await db.Workers.FindAsync(workerId);
+            binding = await db.ControlSessions.AsNoTracking().SingleOrDefaultAsync(x => x.WorkerId == workerId);
+        }
+        if (binding is not null)
+        {
+            if (row.ControlSessionId is null) { row.ControlSessionId = binding.Id; changed = true; }
+            if (row.ControlSessionGeneration is null) { row.ControlSessionGeneration = binding.Generation; changed = true; }
+            if (row.RecoveryIntentId is null && binding.RecoveryIntentId is not null) { row.RecoveryIntentId = binding.RecoveryIntentId; changed = true; }
+        }
+        if (workerId is null) return changed;
+        var command = parentId is null ? null : await db.Commands.AsNoTracking()
+            .Where(x => x.RuntimeId == row.RuntimeId && x.WorkerId == workerId && x.NativeMessageId == parentId)
+            .OrderByDescending(x => x.CreatedAt).FirstOrDefaultAsync();
+        if (command is null && worker?.HistoryGap == false)
+            command = await ResolveCompactionCommand(db, workerId, row.NativeMessageId, message);
+        if (command is null) return changed;
+        if (row.CommandId is null) { row.CommandId = command.Id; changed = true; }
+        const string prefix = "coordinator-decision:";
+        if (row.CoordinationRunId is null && command.Origin.StartsWith(prefix, StringComparison.Ordinal))
+        { row.CoordinationRunId = command.Origin[prefix.Length..]; changed = true; }
+        return changed;
+    }
+
+    private static async Task<CommandRecord?> ResolveCompactionCommand(ControlDb db, string workerId, string nativeMessageId,
+        JsonElement currentMessage)
+    {
+        var messages = await db.Messages.AsNoTracking().Where(x => x.WorkerId == workerId).ToListAsync();
+        foreach (var tracked in db.Messages.Local.Where(x => x.WorkerId == workerId))
+        {
+            var index = messages.FindIndex(x => x.NativeId == tracked.NativeId);
+            if (index < 0) messages.Add(tracked);
+            else messages[index] = tracked;
+        }
+        messages = messages.OrderBy(x => x.NativeCreatedAt).ThenBy(x => x.NativeId).ToList();
+        var currentInfo = currentMessage.GetProperty("info");
+        var parentId = currentInfo.TryGetProperty("parentID", out var parent) && parent.ValueKind == JsonValueKind.String
+            ? parent.GetString() : null;
+        var parentMessage = parentId is null ? null : messages.SingleOrDefault(x => x.NativeId == parentId);
+        if (parentMessage is null) return null;
+        try
+        {
+            using var parentDocument = JsonDocument.Parse(parentMessage.Json);
+            if (parentDocument.RootElement.GetProperty("info").GetProperty("role").GetString() != "user" ||
+                !IsInternalCompactionMessage(parentDocument.RootElement)) return null;
+        }
+        catch (JsonException) { return null; }
+        var current = messages.FindIndex(x => x.NativeId == nativeMessageId);
+        if (current < 0)
+        {
+            var createdAt = currentInfo.GetProperty("time").GetProperty("created").GetInt64();
+            current = messages.FindIndex(x => x.NativeCreatedAt > createdAt);
+            if (current < 0) current = messages.Count;
+        }
+        for (var i = current - 1; i >= 0; i--)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(messages[i].Json);
+                var message = document.RootElement;
+                var info = message.GetProperty("info");
+                if (info.GetProperty("role").GetString() != "user") continue;
+                if (IsInternalCompactionMessage(message)) continue;
+                var callerId = info.GetProperty("id").GetString();
+                return callerId is null ? null : await db.Commands.AsNoTracking()
+                    .Where(x => x.WorkerId == workerId && x.NativeMessageId == callerId)
+                    .OrderByDescending(x => x.CreatedAt).FirstOrDefaultAsync();
+            }
+            catch (JsonException) { return null; }
+        }
+        return null;
+    }
+
+    private static bool IsInternalCompactionMessage(JsonElement message)
+    {
+        if (!message.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array) return false;
+        var values = parts.EnumerateArray().ToArray();
+        if (values.Length == 0) return false;
+        return values.All(x => x.TryGetProperty("type", out var type) && type.GetString() == "compaction" &&
+                x.TryGetProperty("auto", out var automatic) && automatic.ValueKind == JsonValueKind.True) ||
+            values.All(x => x.TryGetProperty("type", out var type) && type.GetString() == "text" &&
+                x.TryGetProperty("synthetic", out var synthetic) && synthetic.ValueKind == JsonValueKind.True &&
+                x.TryGetProperty("metadata", out var metadata) && metadata.TryGetProperty("compaction_continue", out var continuation) &&
+                continuation.ValueKind == JsonValueKind.True);
+    }
+
     private static UsageMetric Metric(IEnumerable<long?> values) => Metric(values.Select(x => x.HasValue ? (decimal?)x.Value : null));
     private static UsageMetric Metric(IEnumerable<decimal?> values)
     {
@@ -217,6 +316,7 @@ public sealed partial class ControlStore
             throw new ControlException("Usage time window is invalid.", 400);
     }
     private static string? Number(long? value) => value?.ToString(CultureInfo.InvariantCulture);
+    private static string? Number(int? value) => value?.ToString(CultureInfo.InvariantCulture);
     private static string? Number(decimal? value) => value?.ToString(CultureInfo.InvariantCulture);
     private static string Number(long value) => value.ToString(CultureInfo.InvariantCulture);
     private static string Csv(string? value) => value is null ? "" : value.IndexOfAny([',', '"', '\r', '\n']) < 0 ? value : "\"" + value.Replace("\"", "\"\"") + "\"";

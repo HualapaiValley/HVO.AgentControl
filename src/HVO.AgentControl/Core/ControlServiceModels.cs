@@ -33,6 +33,15 @@ public sealed class ControlSessionBinding
     public string State { get; set; } = "Queued";
     public string Detail { get; set; } = "Waiting for the control service.";
     public long Revision { get; set; }
+    public string GenerationReason { get; set; } = "Initial";
+    public string? RecoveryIntentId { get; set; }
+    public string? RecoveryRunId { get; set; }
+    public string? RecoverySourceCommandId { get; set; }
+    public long? RecoveryOwnerPolicyRevision { get; set; }
+    public string? RecoveryInstructionHash { get; set; }
+    public long? CreationAuthorizedAt { get; set; }
+    public string? ReplacementDecisionCommandId { get; set; }
+    public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     public string Title => "agentcontrol-control:" + Id + (Generation == 0 ? "" : ":g" + Generation);
 }
 

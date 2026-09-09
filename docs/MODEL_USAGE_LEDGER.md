@@ -14,6 +14,13 @@ the transcript native-created and command-result update chronology rather than a
 time. For equal native revisions, transcript evidence takes precedence over command-result
 evidence, so a stale retained command result cannot replace a reconciled transcript row.
 
+When native assistant metadata contains its parent caller ID, the ledger also resolves and retains
+the exact command and coordination-run IDs. Control-session usage records immutable binding ID,
+generation and automatic-recovery intent where applicable. This keeps predecessor and successor
+spend attributable after cutover, archival, transcript pruning or restart. Missing native caller or
+binding evidence remains null rather than being inferred from timestamps or the worker's current
+settings.
+
 Authenticated endpoints:
 
 - `GET /api/v1/usage?workerId=&providerId=&modelId=&from=&to=` returns stable ledger rows,

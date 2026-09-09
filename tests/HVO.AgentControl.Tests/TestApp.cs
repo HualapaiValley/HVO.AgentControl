@@ -41,6 +41,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
             ["Control:SecretsDirectory"] = SecretPath,
             ["Control:AllowInsecureLocalHttp"] = "true",
             ["Control:PollMilliseconds"] = "150",
+            ["Control:EnableCoordinatorGenerationRecovery"] = "true",
             ["Logging:LogLevel:Default"] = "Warning"
         }));
     }

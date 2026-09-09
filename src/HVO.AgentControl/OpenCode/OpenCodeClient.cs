@@ -11,7 +11,7 @@ namespace HVO.AgentControl.OpenCode;
 public sealed record AdapterCapabilities(bool CanAbort, bool CanReplyToPermissions, bool CanReplyToQuestions,
     bool CanSupplyMessageId, bool CanSteerActiveTurn = false);
 public sealed record NativeSnapshot(JsonElement Session, JsonElement[] Messages, string Status, JsonElement StatusDetail,
-    JsonElement[] Permissions, JsonElement[] Questions, string? IdleToolFailureMessageId = null);
+    JsonElement[] Permissions, JsonElement[] Questions, string? IdleToolFailureMessageId = null, JsonElement[]? Children = null);
 public sealed class NativeRejectedException(int status) : Exception($"OpenCode rejected the request (HTTP {status}).")
 {
     public int Status { get; } = status;
@@ -95,6 +95,16 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
         return await Send(HttpMethod.Post, Scope("/session", directory), new { title }, token);
     }
 
+    public async Task<JsonElement?> CreateSession(string directory, string title, CancellationToken token,
+        Func<Task<bool>> authorize)
+    {
+        var context = await Get(Scope("/path", directory), token);
+        if (context.GetProperty("directory").GetString() != directory) throw new ControlException("OpenCode directory does not match the verified workspace.");
+        if (!await authorize()) return null;
+        using var effectDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        return await Send(HttpMethod.Post, Scope("/session", directory), new { title }, effectDeadline.Token);
+    }
+
     public Task<JsonElement> Sessions(string directory, CancellationToken token) => Get(Scope("/session", directory), token);
     public Task<JsonElement> SessionStatuses(string directory, CancellationToken token) => Get(Scope("/session/status", directory), token);
     // OpenCode retains providers in an instance cache. Scope disposal to the verified
@@ -159,8 +169,13 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
         ancestryDeadline.CancelAfter(TimeSpan.FromSeconds(5));
         var ownership = new NativeRequestOwnership(worker.NativeSessionId, worker.Directory,
             (id, cancellation) => Get(Scope($"/session/{Id(id)}", worker.Directory), cancellation));
+        var children = worker.Role == SessionRoles.Coordinator
+            ? (await Get(Scope("/session?limit=1000", worker.Directory), token, 2_000_000)).EnumerateArray()
+                .Where(x => x.TryGetProperty("parentID", out var parent) && parent.GetString() == worker.NativeSessionId).ToArray()
+            : [];
         return new(session, messages, status, statusDetail,
-            await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token), idleToolFailureMessageId);
+            await ownership.Filter(permissions, ancestryDeadline.Token), await ownership.Filter(questions, ancestryDeadline.Token),
+            idleToolFailureMessageId, children);
     }
 
     private async Task<JsonElement[]> AddMissingCallers(string sessionPath, string directory, string expectedSessionId, JsonElement[] messages,

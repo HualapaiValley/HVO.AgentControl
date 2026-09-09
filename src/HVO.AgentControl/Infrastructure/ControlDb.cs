@@ -29,6 +29,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<RuntimeRecord> Runtimes => Set<RuntimeRecord>();
     public DbSet<WorkerRecord> Workers => Set<WorkerRecord>();
     public DbSet<CommandRecord> Commands => Set<CommandRecord>();
+    public DbSet<CoordinatorNativeObservation> CoordinatorNativeObservations => Set<CoordinatorNativeObservation>();
     public DbSet<AssignmentRecord> Assignments => Set<AssignmentRecord>();
     public DbSet<JournalEvent> Events => Set<JournalEvent>();
     public DbSet<EvidenceConsumerCursor> EvidenceConsumerCursors => Set<EvidenceConsumerCursor>();
@@ -61,7 +62,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<ControlSessionBinding>().Property(x => x.IsCurrent).HasDefaultValue(true).ValueGeneratedNever();
         model.Entity<ControlSessionBinding>().HasIndex(x => new { x.ScopeKind, x.ScopeId, x.Generation }).IsUnique();
         model.Entity<ControlSessionBinding>().HasIndex(x => new { x.ScopeKind, x.ScopeId }).IsUnique().HasFilter("IsCurrent = 1");
-        model.Entity<ControlSessionBinding>().HasIndex(x => x.PredecessorId).IsUnique().HasFilter("PredecessorId IS NOT NULL");
+        model.Entity<ControlSessionBinding>().HasIndex(x => x.PredecessorId).HasFilter("PredecessorId IS NOT NULL");
+        model.Entity<ControlSessionBinding>().HasIndex(x => x.RecoveryIntentId).IsUnique().HasFilter("RecoveryIntentId IS NOT NULL");
         model.Entity<ControlSessionBinding>().HasIndex(x => x.WorkerId).IsUnique();
         model.Entity<ControlSessionBinding>().HasOne<ControlServiceRecord>().WithMany().HasForeignKey(x => x.ControlServiceId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<HostRecord>().HasKey(x => x.Sequence);
@@ -133,8 +135,10 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<ModelUsageRecord>().HasKey(x => new { x.RuntimeId, x.NativeSessionId, x.NativeMessageId });
         model.Entity<ModelUsageRecord>().HasIndex(x => new { x.WorkerId, x.CreatedAt });
         model.Entity<ModelUsageRecord>().HasIndex(x => new { x.ProviderId, x.ModelId, x.CreatedAt });
+        model.Entity<ModelUsageRecord>().HasIndex(x => new { x.CoordinationRunId, x.ControlSessionGeneration, x.CreatedAt });
         model.Entity<PendingRequest>().HasIndex(x => new { x.WorkerId, x.Kind, x.NativeId }).IsUnique();
         model.Entity<CommandRecord>().HasIndex(x => new { x.State, x.QueueOrder });
+        model.Entity<CoordinatorNativeObservation>().HasIndex(x => new { x.WorkerId, x.ObservedAt });
         model.Entity<JournalEvent>().HasIndex(x => new { x.WorkerId, x.Sequence });
         model.Entity<EvidenceConsumerCursor>().HasKey(x => x.ConsumerId);
         model.Entity<EvidenceReadReceipt>().HasIndex(x => new { x.ConsumerId, x.AcknowledgedAt });

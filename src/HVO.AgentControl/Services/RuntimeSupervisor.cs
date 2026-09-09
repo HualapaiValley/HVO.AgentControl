@@ -354,9 +354,15 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     if (existingControl is { } foundControl) await store.BindControlSession(command.Id, foundControl, controlModels);
                     else
                     {
-                        mutationStarted = true;
-                        var createdControl = await api.CreateSession(ControlStore.ControlDirectory, binding.Title, token);
-                        await store.BindControlSession(command.Id, createdControl, controlModels);
+                        var createdControl = await api.CreateSession(ControlStore.ControlDirectory, binding.Title, token,
+                            async () =>
+                            {
+                                if (!await store.AuthorizeAutomaticControlSessionCreation(command.Id)) return false;
+                                mutationStarted = true;
+                                return true;
+                            });
+                        if (createdControl is null) break;
+                        await store.BindControlSession(command.Id, createdControl.Value, controlModels);
                     }
                     break;
                 case "CreateWorker":
@@ -538,13 +544,14 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
     {
         var worker = await db.Workers.FindAsync(workerId);
         if (worker is null) return false;
+        var observedAt = ControlStore.Now;
         var changed = worker.Stale;
         if (worker.CurrentAction == HistoryUnavailableDetail) worker.CurrentAction = "";
-        foreach (var message in snapshot.Messages)
+        foreach (var message in snapshot.Messages.OrderBy(x => x.GetProperty("info").GetProperty("time").GetProperty("created").GetInt64())
+            .ThenBy(x => x.GetProperty("info").GetProperty("id").GetString(), StringComparer.Ordinal))
         {
             var info = message.GetProperty("info"); var nativeId = info.GetProperty("id").GetString()!;
             var json = message.GetRawText();
-            if (await ControlStore.ObserveUsage(db, worker, message, ControlStore.Now)) changed = true;
             var record = await db.Messages.SingleOrDefaultAsync(x => x.WorkerId == workerId && x.NativeId == nativeId);
             if (record?.Json == json) continue;
             changed = true;
@@ -555,6 +562,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             }
             record.Json = json; record.Role = info.GetProperty("role").GetString()!;
             record.NativeCreatedAt = info.GetProperty("time").GetProperty("created").GetInt64();
+            if (await ControlStore.ObserveUsage(db, worker, message, observedAt)) changed = true;
             if (record.Role == "assistant") worker.LastModelAt = ControlStore.Now;
             foreach (var part in message.GetProperty("parts").EnumerateArray())
                 if (part.GetProperty("type").GetString() == "tool")
@@ -584,7 +592,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         }
         var activity = snapshot.Permissions.Length > 0 ? "WaitingPermission" : snapshot.Questions.Length > 0 ? "WaitingQuestion" : snapshot.Status switch { "idle" => "Idle", "busy" => "Active", "retry" => "Retrying", _ => "Unknown" };
         if (worker.Activity != activity) { worker.Activity = activity; worker.Revision++; changed = true; }
-        worker.Stale = false; worker.LastObservedAt = ControlStore.Now;
+        worker.Stale = false; worker.LastObservedAt = observedAt;
         var recoveryIds = await db.Set<ProviderPool>().Where(p => p.RecoveryCommandId != "").Select(p => p.RecoveryCommandId).ToListAsync();
         var commands = await db.Commands.Where(x => x.WorkerId == workerId && (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running ||
             x.Kind == "Prompt" && x.State != Delivery.Queued && recoveryIds.Contains(x.Id))).ToListAsync();
@@ -605,7 +613,28 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             { command.State = Delivery.Finished; command.Detail = "Native idle observed after cancellation request. Review tool results for subprocess effects."; changed = true; }
             if (command.Kind != "Prompt") continue;
             var retired = command.State is Delivery.Cancelled or Delivery.Failed or Delivery.Finished;
-            var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
+            var user = snapshot.Messages.Any(x =>
+            {
+                var info = x.GetProperty("info");
+                return info.TryGetProperty("id", out var id) && id.GetString() == command.NativeMessageId &&
+                    info.TryGetProperty("role", out var role) && role.GetString() == "user" &&
+                    info.TryGetProperty("sessionID", out var session) && session.GetString() == worker.NativeSessionId;
+            });
+            if (user)
+            {
+                var observation = await db.CoordinatorNativeObservations.FindAsync(command.Id);
+                if (observation is null)
+                {
+                    observation = new CoordinatorNativeObservation { CommandId = command.Id };
+                    db.CoordinatorNativeObservations.Add(observation);
+                }
+                observation.WorkerId = worker.Id;
+                observation.RuntimeId = worker.RuntimeId;
+                observation.NativeSessionId = worker.NativeSessionId;
+                observation.NativeCallerId = command.NativeMessageId!;
+                observation.ChildSessionCount = snapshot.Children?.Length ?? -1;
+                observation.ObservedAt = observedAt;
+            }
             var assistants = user ? NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId) : [];
             var compactionFailure = user && activity == "Idle"
                 ? NativeTurnEvidence.CompletedAutomaticCompactionFailure(snapshot.Messages, command.NativeMessageId, worker.NativeSessionId) : null;

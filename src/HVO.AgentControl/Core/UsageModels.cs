@@ -23,6 +23,12 @@ public sealed class ModelUsageRecord
     public long ObservedAt { get; set; }
     public bool SeenInTranscript { get; set; }
     public bool SeenInCommandResult { get; set; }
+    public string? ParentNativeMessageId { get; set; }
+    public string? CommandId { get; set; }
+    public string? CoordinationRunId { get; set; }
+    public string? ControlSessionId { get; set; }
+    public int? ControlSessionGeneration { get; set; }
+    public string? RecoveryIntentId { get; set; }
 }
 
 public sealed record UsageQuery(string? WorkerId = null, string? ProviderId = null, string? ModelId = null, long? From = null, long? To = null);

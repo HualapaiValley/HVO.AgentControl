@@ -182,6 +182,90 @@ public sealed class UsagePersistenceTests
         Assert.Equal("model-usage.csv", export.Content.Headers.ContentDisposition?.FileName);
     }
 
+    [Fact]
+    public async Task CoordinatorUsageRetainsCommandRunAndGenerationRecoveryLineage()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        const string callerId = "caller-generation";
+        const string commandId = "decision-generation";
+        const string runId = "run-generation";
+        const string intentId = "recovery-generation";
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Workers.FindAsync(worker.Id))!;
+            saved.Role = SessionRoles.Coordinator;
+            db.ControlServices.Add(new ControlServiceRecord
+            {
+                Id = worker.RuntimeId,
+                Endpoint = "http://127.0.0.1:4096/",
+                InstanceId = Guid.NewGuid().ToString(),
+                IncarnationId = Guid.NewGuid().ToString(),
+                StartedAt = DateTimeOffset.UtcNow.ToString("O")
+            });
+            db.ControlSessions.Add(new ControlSessionBinding
+            {
+                Id = "binding-generation",
+                ControlServiceId = worker.RuntimeId,
+                ScopeKind = "Workgroup",
+                ScopeId = "usage-generation",
+                WorkerId = worker.Id,
+                NativeSessionId = worker.NativeSessionId,
+                CreationCommandId = "create-generation",
+                Generation = 2,
+                GenerationReason = "DecisionBudgetRecovery",
+                RecoveryIntentId = intentId,
+                State = "Ready"
+            });
+            db.Commands.Add(new CommandRecord
+            {
+                Id = commandId,
+                RuntimeId = worker.RuntimeId,
+                WorkerId = worker.Id,
+                Kind = "Prompt",
+                State = Delivery.Finished,
+                NativeMessageId = callerId,
+                Origin = "coordinator-decision:" + runId
+            });
+            return true;
+        });
+        await SaveTranscript(app.Store, worker, JsonSerializer.Serialize(new
+        {
+            info = new { id = callerId, sessionID = worker.NativeSessionId, role = "user", time = new { created = 6000L } },
+            parts = new[] { new { type = "text", text = "decide" } }
+        }));
+        await SaveTranscript(app.Store, worker, Message("assistant-generation", worker.NativeSessionId, 7000, 8000,
+            30, 20, 10, 0, 5, 2, 0, "USD", callerId));
+        await SaveTranscript(app.Store, worker, JsonSerializer.Serialize(new
+        {
+            info = new { id = "compaction-generation", sessionID = worker.NativeSessionId, role = "user", time = new { created = 8100L } },
+            parts = new[] { new { type = "compaction", auto = true } }
+        }));
+        await SaveTranscript(app.Store, worker, Message("summary-generation", worker.NativeSessionId, 8200, 8250,
+            40, 30, 10, 0, 6, 3, 0, "USD", "compaction-generation"));
+        await SaveTranscript(app.Store, worker, JsonSerializer.Serialize(new
+        {
+            info = new { id = "continuation-generation", sessionID = worker.NativeSessionId, role = "user", time = new { created = 8300L } },
+            parts = new[] { new { type = "text", text = "continue", synthetic = true, metadata = new { compaction_continue = true } } }
+        }));
+        await SaveTranscript(app.Store, worker, Message("assistant-continuation", worker.NativeSessionId, 8400, 8500,
+            25, 15, 10, 0, 4, 1, 0, "USD", "continuation-generation"));
+
+        Assert.Equal(3, (await app.Store.BackfillUsage()).Changed);
+        var usage = (await app.Store.Usage(new())).Rows;
+        Assert.Equal(3, usage.Count);
+        Assert.All(usage, row =>
+        {
+            Assert.Equal(commandId, row.CommandId);
+            Assert.Equal(runId, row.CoordinationRunId);
+            Assert.Equal("binding-generation", row.ControlSessionId);
+            Assert.Equal(2, row.ControlSessionGeneration);
+            Assert.Equal(intentId, row.RecoveryIntentId);
+        });
+        Assert.Equal(callerId, usage.Single(x => x.NativeMessageId == "assistant-generation").ParentNativeMessageId);
+        Assert.Contains(",caller-generation,decision-generation,run-generation,binding-generation,2,recovery-generation", await app.Store.ExportUsageCsv(new()));
+    }
+
     private static async Task SaveTranscript(ControlStore store, WorkerRecord worker, string message)
     {
         using var document = JsonDocument.Parse(message);
@@ -195,7 +279,7 @@ public sealed class UsagePersistenceTests
                 record = new TranscriptMessage { WorkerId = worker.Id, NativeId = nativeId };
                 db.Messages.Add(record);
             }
-            record.Role = "assistant";
+            record.Role = info.GetProperty("role").GetString()!;
             record.NativeCreatedAt = info.GetProperty("time").GetProperty("created").GetInt64();
             record.Json = message;
             return true;
@@ -203,7 +287,7 @@ public sealed class UsagePersistenceTests
     }
 
     private static string Message(string id, string sessionId, long created, long? completed, long? total, long? input,
-        long? output, long? reasoning, long? cacheRead, long? cacheWrite, decimal? cost, string? currency)
+        long? output, long? reasoning, long? cacheRead, long? cacheWrite, decimal? cost, string? currency, string? parentId = null)
     {
         var time = new Dictionary<string, object?> { ["created"] = created };
         if (completed.HasValue) time["completed"] = completed.Value;
@@ -226,6 +310,7 @@ public sealed class UsagePersistenceTests
             ["time"] = time,
             ["tokens"] = tokens
         };
+        if (parentId is not null) info["parentID"] = parentId;
         if (cost.HasValue) info["cost"] = cost.Value;
         if (currency is not null) info["currency"] = currency;
         return JsonSerializer.Serialize(new { info, parts = Array.Empty<object>() });

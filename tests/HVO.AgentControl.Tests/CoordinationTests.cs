@@ -364,6 +364,44 @@ public sealed partial class CoordinationTests
     }
 
     [Fact]
+    public async Task ReconciliationRecordsOnlyExactUserCallerAndObservedChildren()
+    {
+        await using var app = new TestApp();
+        var (coordinator, _, _) = await Seed(app.Store);
+        const string commandId = "exact-caller-observation";
+        await app.Store.Write(db =>
+        {
+            db.Commands.Add(new CommandRecord
+            {
+                Id = commandId,
+                RuntimeId = coordinator.RuntimeId,
+                WorkerId = coordinator.Id,
+                Kind = "Prompt",
+                State = Delivery.Accepted,
+                NativeMessageId = "caller-exact"
+            });
+            return Task.FromResult(true);
+        });
+        var wrongSession = JsonSerializer.SerializeToElement(new
+        {
+            info = new { id = "caller-exact", role = "user", sessionID = "ses_other", time = new { created = 1L } },
+            parts = Array.Empty<object>()
+        });
+        await ReconcileCoordinator(app, coordinator, new(JsonSerializer.SerializeToElement(new { }), [wrongSession], "busy",
+            JsonSerializer.SerializeToElement(new { }), [], [], Children: []));
+        Assert.Null(await app.Store.Read(async db => await db.CoordinatorNativeObservations.FindAsync(commandId)));
+
+        var child = JsonSerializer.SerializeToElement(new { id = "ses_child", parentID = coordinator.NativeSessionId });
+        await ReconcileCoordinator(app, coordinator, new(JsonSerializer.SerializeToElement(new { }),
+            [NativeUser("caller-exact", coordinator.NativeSessionId, 2)], "busy", JsonSerializer.SerializeToElement(new { }),
+            [], [], Children: [child]));
+        var observed = await app.Store.Read(async db => (await db.CoordinatorNativeObservations.FindAsync(commandId))!);
+        Assert.Equal("caller-exact", observed.NativeCallerId);
+        Assert.Equal(coordinator.NativeSessionId, observed.NativeSessionId);
+        Assert.Equal(1, observed.ChildSessionCount);
+    }
+
+    [Fact]
     public async Task RetiredRecoveryPromptCannotClearActiveAutomaticCompactionPhase()
     {
         await using var app = new TestApp();

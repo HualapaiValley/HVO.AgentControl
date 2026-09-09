@@ -28,6 +28,10 @@ public sealed class ControlOptions
     public int CoordinatorNativeRetryBudgetMinutes { get; set; } = 30;
     public int CoordinatorCompactionBudgetMinutes { get; set; } = 120;
     public int CoordinatorDecisionTotalBudgetMinutes { get; set; } = 240;
+    public bool EnableCoordinatorGenerationRecovery { get; set; }
+    public int CoordinatorGenerationRecoveryLimit { get; set; } = 3;
+    public int CoordinatorGenerationRecoveryMinutes { get; set; } = 15;
+    public long CoordinatorGenerationRecoveryEffectiveInputTokenLimit { get; set; } = 2_000_000;
     public int MaxPromptCharacters { get; set; } = 64000;
     public int MaxCommandRecords { get; set; } = 10000;
     public int MaxRuntimes { get; set; } = 32;
@@ -382,6 +386,7 @@ public sealed class CoordinationRun
     public int? ProgressMinutes { get; set; }
     public long LastDecisionAt { get; set; }
     public long Revision { get; set; }
+    public long OwnerPolicyRevision { get; set; } = 1;
     public long CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 }
 public sealed record StartCoordinationInput(string Id, string CoordinatorWorkerId, string Instruction, string[] WorkerIds, int MaxRounds = 20, bool IncludeGuidance = false, int? ProgressMinutes = null, bool ContinuousSupervision = false);
@@ -403,6 +408,22 @@ public sealed record CoordinatorDecisionCheckpoint(string CommandId, string Coor
     string RuntimeId, int RuntimeGeneration, string NativeSessionId, string Directory, string? ControlSessionId,
     int? ControlSessionGeneration, string? ControlProcessIncarnation, string? NativeCallerId, string Phase,
     long StartedAt, long PhaseStartedAt, long LastEvidenceAt, string? RecoveryIntentId = null, string? RecoveryHold = null);
+public sealed class CoordinatorNativeObservation
+{
+    [Key] public string CommandId { get; set; } = "";
+    public string WorkerId { get; set; } = "";
+    public string RuntimeId { get; set; } = "";
+    public string NativeSessionId { get; set; } = "";
+    public string NativeCallerId { get; set; } = "";
+    public int ChildSessionCount { get; set; }
+    public long ObservedAt { get; set; }
+}
+public sealed record CoordinatorGenerationRecovery(string IntentId, string State, string Trigger, string SourceDecisionCommandId,
+    string SourceControlSessionId, int SourceGeneration, string SuccessorControlSessionId, int SuccessorGeneration,
+    string CreationCommandId, long OwnerPolicyRevision, string InstructionHash, long RequestedAt,
+    string Phase, long PhaseElapsedMilliseconds, long TotalElapsedMilliseconds, string? SourceUsageMessageId = null,
+    long? EffectiveInputTokens = null, string? ReplacementDecisionCommandId = null, long? CutoverAt = null,
+    string? Hold = null);
 public sealed record CoordinatorNativeFailure(string CommandId, string? CallerId, string? SessionId, string? AssistantId,
     string Category, int? Status, long? RetryAt, string ProviderId, string ModelId, string Agent, string Variant,
     string ProviderPoolId, long? ProviderPoolRevision, bool HasText, bool HasTools, bool Held = true,
@@ -415,7 +436,8 @@ public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Worke
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
     CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null,
     IdlePlanningReview? IdleReview = null, CoordinatorGitHubAccess[]? GitHubAccess = null, string? PlanningObservationKey = null,
-    CoordinatorNativeFailure? NativeFailure = null, CoordinatorDecisionCheckpoint? DecisionCheckpoint = null);
+    CoordinatorNativeFailure? NativeFailure = null, CoordinatorDecisionCheckpoint? DecisionCheckpoint = null,
+    CoordinatorGenerationRecovery? GenerationRecovery = null);
 
 public sealed class OperatorUpdateSchedule
 {

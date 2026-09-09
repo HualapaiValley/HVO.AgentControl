@@ -162,13 +162,30 @@ public sealed partial class ControlStore
         if (predecessor.ScopeKind != "Workgroup") throw new ControlException("Only workgroup control sessions can be renewed through coordination migration.");
         if (!predecessor.IsCurrent || predecessor.State != "Ready" || predecessor.NativeSessionId.Length == 0)
             throw new ControlException("Renew the current ready workgroup control session.");
-        if (await db.ControlSessions.AnyAsync(x => x.PredecessorId == predecessor.Id))
+        if (await db.ControlSessions.AnyAsync(x => x.PredecessorId == predecessor.Id && x.State != Delivery.Failed && x.State != Delivery.Cancelled))
             throw new ControlException("This control session already has a successor. Inspect its provisioning state before cutover.");
 
         var predecessorWorker = await db.Workers.FindAsync(predecessor.WorkerId)
             ?? throw new ControlException("Current control session worker is missing.");
+        var successor = await QueueSuccessorGeneration(db, service, predecessor, predecessorWorker, "OwnerRenewal");
+        var receipt = await Record(db, input.Id, service.Id, null, "RenewControlSession", payload);
+        receipt.State = Delivery.Finished; receipt.ResultId = successor.Id;
+        receipt.Detail = "Successor generation recorded. The predecessor remains current until an explicit paused migration.";
+        Event(db, "ControlSessionRenewalRequested", service.Id, commandId: receipt.Id,
+            payload: new { predecessorId = predecessor.Id, successorId = successor.Id, successor.Generation, creationCommandId = successor.CreationCommandId },
+            provenance: "user", generation: successor.Generation);
+        return RenewalResult(successor, receipt);
+    });
+
+    private async Task<ControlSessionBinding> QueueSuccessorGeneration(ControlDb db, ControlServiceRecord service,
+        ControlSessionBinding predecessor, WorkerRecord predecessorWorker, string generationReason,
+        string? recoveryIntentId = null, string? recoveryRunId = null, string? recoverySourceCommandId = null,
+        long? recoveryOwnerPolicyRevision = null, string? recoveryInstructionHash = null)
+    {
+        var latestGeneration = await db.ControlSessions.Where(x => x.ScopeKind == predecessor.ScopeKind && x.ScopeId == predecessor.ScopeId)
+            .MaxAsync(x => (int?)x.Generation) ?? predecessor.Generation;
+        if (latestGeneration == int.MaxValue) throw new ControlException("Control session generation limit reached.");
         var creationId = Guid.NewGuid().ToString();
-        if (predecessor.Generation == int.MaxValue) throw new ControlException("Control session generation limit reached.");
         var successor = new ControlSessionBinding
         {
             Id = Guid.NewGuid().ToString("N"),
@@ -177,9 +194,15 @@ public sealed partial class ControlStore
             ScopeId = predecessor.ScopeId,
             WorkerId = Guid.NewGuid().ToString("N"),
             CreationCommandId = creationId,
-            Generation = predecessor.Generation + 1,
+            Generation = latestGeneration + 1,
+            GenerationReason = generationReason,
             PredecessorId = predecessor.Id,
             IsCurrent = false,
+            RecoveryIntentId = recoveryIntentId,
+            RecoveryRunId = recoveryRunId,
+            RecoverySourceCommandId = recoverySourceCommandId,
+            RecoveryOwnerPolicyRevision = recoveryOwnerPolicyRevision,
+            RecoveryInstructionHash = recoveryInstructionHash,
             Detail = "Successor generation is waiting for the control service. The predecessor remains current."
         };
         db.ControlSessions.Add(successor);
@@ -187,15 +210,9 @@ public sealed partial class ControlStore
             predecessorWorker.Name, predecessorWorker.ProviderId, predecessorWorker.ModelId, predecessorWorker.Variant, predecessorWorker.Agent);
         var creation = await Record(db, creationId, service.Id, null, "CreateControlSession", Json.Write(creationInput));
         creation.ResultId = successor.Id;
-        var receipt = await Record(db, input.Id, service.Id, null, "RenewControlSession", payload);
-        receipt.State = Delivery.Finished; receipt.ResultId = successor.Id;
-        receipt.Detail = "Successor generation recorded. The predecessor remains current until an explicit paused migration.";
         predecessor.Revision++;
-        Event(db, "ControlSessionRenewalRequested", service.Id, commandId: receipt.Id,
-            payload: new { predecessorId = predecessor.Id, successorId = successor.Id, successor.Generation, creationCommandId = creation.Id },
-            provenance: "user", generation: successor.Generation);
-        return RenewalResult(successor, receipt);
-    });
+        return successor;
+    }
 
     private static ControlSessionRenewalResult RenewalResult(ControlSessionBinding successor, CommandRecord receipt) =>
         new(successor, new(receipt.Id, receipt.State, successor.Id, receipt.CreatedAt));
@@ -308,7 +325,8 @@ public sealed partial class ControlStore
             throw new ControlException("Drain both control sessions and resolve pending requests before migration; existing commands and work remain independent.");
         var previousWorkerId = run.CoordinatorWorkerId;
         var previousDecisionCommandId = run.DecisionCommandId;
-        run.CoordinatorWorkerId = target.Id; run.DecisionCommandId = null; run.LastObservation = ""; run.InputJson = "{}"; run.Revision++;
+        run.CoordinatorWorkerId = target.Id; run.DecisionCommandId = null; run.LastObservation = ""; run.InputJson = "{}";
+        run.OwnerPolicyRevision++; run.Revision++;
         run.Detail = "Control session migrated. Resume to evaluate fresh evidence; historical decisions and worker assignments are retained.";
         if (generationCutover)
         {
