@@ -200,7 +200,7 @@ class WatchdogTests(unittest.TestCase):
     def test_compact_status_is_used_and_stale_or_partial_observations_are_rejected(self):
         controller = watchdog.Controller('http://localhost', Path('/unused'), 7)
         payload = {'version': 1, 'observedAt': 1000000, 'complete': True, 'coordinations': [],
-                   'snapshot': {key: [] for key in ('runtimes', 'workers', 'commands', 'requests', 'providerFailures', 'githubAccess', 'nativeErrors')}}
+                   'snapshot': {key: [] for key in ('runtimes', 'workers', 'commands', 'requests', 'providerFailures', 'gitHubAccess', 'nativeErrors')}}
         with patch.object(watchdog.time, 'time', return_value=1000):
             controller.authenticated = True
             controller.read = Mock(return_value=json.dumps(payload).encode())
@@ -275,7 +275,7 @@ class WatchdogTests(unittest.TestCase):
 
     def test_github_expiry_and_structured_provider_failures_are_observed_during_pause(self):
         snapshot, runs = self.fleet('Paused')
-        snapshot['githubAccess'] = [{'id': 'expired', 'state': 'Ready', 'expiresAt': 999000},
+        snapshot['gitHubAccess'] = [{'id': 'expired', 'state': 'Ready', 'expiresAt': 999000},
                                     {'id': 'blocked', 'state': 'Blocked'},
                                     {'id': 'disabled', 'state': 'Disabled'},
                                     {'id': 'good', 'state': 'Ready', 'expiresAt': 1001000}]

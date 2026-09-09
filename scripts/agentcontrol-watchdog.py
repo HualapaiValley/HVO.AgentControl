@@ -69,7 +69,7 @@ def analyze(snapshot, runs, now, stall_seconds):
     for request in snapshot.get('requests', []):
         if request.get('state') in ('Pending', 'ReplyUnknown'):
             incidents.append({'kind': 'pending_request', 'subject': identity(request.get('id'))})
-    for access in snapshot.get('githubAccess', []):
+    for access in snapshot.get('gitHubAccess', []):
         if access.get('state') != 'Disabled' and (access.get('state') != 'Ready' or
                 not access.get('expiresAt') or access['expiresAt'] <= now * 1000):
             incidents.append({'kind': 'github_access_unavailable', 'subject': identity(access.get('id'))})
@@ -193,7 +193,7 @@ class Controller:
             snapshot, runs = status['snapshot'], status['coordinations']
             if (not isinstance(snapshot, dict) or not isinstance(runs, list) or
                     any(not isinstance(snapshot.get(key), list) for key in
-                        ('workers', 'runtimes', 'commands', 'requests', 'providerFailures', 'githubAccess', 'nativeErrors'))):
+                        ('workers', 'runtimes', 'commands', 'requests', 'providerFailures', 'gitHubAccess', 'nativeErrors'))):
                 raise ValueError('Invalid observation shape')
             return snapshot, runs
         except Exception:
