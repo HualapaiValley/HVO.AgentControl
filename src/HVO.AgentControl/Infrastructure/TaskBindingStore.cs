@@ -278,6 +278,8 @@ public sealed partial class ControlStore
             command.State = Delivery.Failed;
             command.Detail = "Native session receipt retained, but task activation authority was superseded; no session was bound.";
             command.UpdatedAt = Now;
+            // A retained late receipt is terminal evidence, not an in-flight activation.
+            session.State = TaskSessionBindingState.Superseded; session.Revision++; session.UpdatedAt = Now;
             Event(db, "TaskSessionActivationSuperseded", binding.RuntimeId, worker.Id, command.Id,
                 new { bindingId = binding.Id, sessionId = session.Id, intent.Generation, nativeSessionId = nativeId }, "observed");
             return false;
@@ -328,7 +330,7 @@ public sealed partial class ControlStore
             var session = (await db.TaskSessionBindings.SingleOrDefaultAsync(x => x.Id == binding.SessionBindingId))!;
             if (session.State is TaskSessionBindingState.ActivationPending or TaskSessionBindingState.Creating)
                 throw Conflict("session_in_flight", "Reconcile task-session activation before release.");
-            if (session.WorkerId is not null)
+            if (session.WorkerId is not null && session.State != TaskSessionBindingState.Superseded)
             {
                 var worker = await db.Workers.FindAsync(session.WorkerId) ?? throw Conflict("worker_missing", "Task worker projection is missing.");
                 var work = await db.WorkItems.FindAsync(binding.WorkItemId) ?? throw new InventoryException("not_found", "Work item not found.", 404);

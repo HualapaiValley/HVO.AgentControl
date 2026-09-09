@@ -427,9 +427,11 @@ public sealed class TaskBindingTests
         Assert.Equal(Delivery.Failed, retained.State);
         Assert.Equal("late-native", retained.ResultId);
         Assert.Contains("superseded", retained.Detail);
-        Assert.Equal(TaskSessionBindingState.ActivationPending, pending.Session.State);
+        Assert.Equal(TaskSessionBindingState.Superseded, pending.Session.State);
         Assert.True((await app.Store.Detail(workerId)).Worker.Archived);
         await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(workerId, new(Id(), "abandoned task", 0)));
+        var released = await app.Store.ReleaseTaskBinding(binding.Binding.Id, new(Id(), pending.Binding.Revision));
+        Assert.Equal(TaskSessionBindingState.Released, released.Session.State);
     }
 
     [Fact]

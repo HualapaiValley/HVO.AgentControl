@@ -9,7 +9,7 @@ public static class TaskBindingState
 
 public static class TaskSessionBindingState
 {
-    public const string Unbound = "Unbound", ActivationPending = "ActivationPending", Creating = "Creating", Bound = "Bound", Released = "Released";
+    public const string Unbound = "Unbound", ActivationPending = "ActivationPending", Creating = "Creating", Superseded = "Superseded", Bound = "Bound", Released = "Released";
 }
 
 public sealed class WorkerSlotRecord
