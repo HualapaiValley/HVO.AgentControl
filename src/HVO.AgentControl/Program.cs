@@ -86,6 +86,7 @@ builder.Services.AddRateLimiter(options =>
 });
 builder.Services.AddDbContextFactory<ControlDb>(options => options.UseSqlite($"Data Source={Path.Combine(settings.DataDirectory, "agentcontrol.db")};Default Timeout=10"));
 builder.Services.AddSingleton<ControlStore>();
+builder.Services.AddSingleton(CapabilityProbeCatalog.Default);
 builder.Services.AddSingleton<IProvisionAttemptLedger, DbProvisionAttemptLedger>();
 builder.Services.AddSingleton<IDevContainerCliOperationAdapter, DevContainerCliOperationAdapter>();
 builder.Services.AddSingleton<RuntimeVerificationService>();

@@ -291,6 +291,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     var occupiedControl = nativeBusy.Concat(inFlight.Where(x => x.RuntimeId == runtimeId).Select(x => x.WorkerId!)).Distinct().Count();
                     if (occupiedControl >= runtime.Capacity) continue;
                 }
+                if ((await store.RequiredCapabilityGaps(db, worker)).Length > 0) continue;
                 if (!await ControlStore.ProviderDispatchAllowed(db, worker, command)) continue;
                 command.ProviderPoolId = ControlStore.PoolId(worker, command);
             }
@@ -398,8 +399,11 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     var admitted = await store.Write(async db =>
                     {
                         var pending = (await db.Commands.FindAsync(command.Id))!;
-                        if (await ControlStore.ProviderDispatchAllowed(db, worker, pending)) return true;
+                        var missingCapabilities = await store.RequiredCapabilityGaps(db, worker);
+                        if (missingCapabilities.Length == 0 && await ControlStore.ProviderDispatchAllowed(db, worker, pending)) return true;
                         pending.State = Delivery.Queued;
+                        if (missingCapabilities.Length > 0)
+                            pending.Detail = "Required runtime capabilities are unavailable: " + string.Join(", ", missingCapabilities) + ".";
                         return false;
                     });
                     if (!admitted) break;

@@ -9,6 +9,8 @@ public static class TaskBindingApiEndpoints
     {
         group.MapGet("/worker-slots", async (long? after, int? take, bool? includeArchived, ControlStore store) =>
             await Execute(() => store.WorkerSlots(after ?? 0, take ?? 50, includeArchived ?? false)));
+        group.MapGet("/worker-slot-probes", (ControlStore store) => Results.Ok(store.WorkerSlotProbeCatalog()));
+        group.MapGet("/runtimes/{id}/capabilities", async (string id, ControlStore store) => await Execute(() => store.RuntimeCapabilityReport(id)));
         group.MapGet("/worker-slots/{id}", async (string id, ControlStore store) => await Execute(() => store.WorkerSlot(id)));
         group.MapPost("/worker-slots", async (CreateWorkerSlotInput input, ControlStore store) => await Execute(() => store.CreateWorkerSlot(input)));
         group.MapPost("/worker-slots/{id}/archive", async (string id, ArchiveInventoryInput input, ControlStore store) => await Execute(() => store.ArchiveWorkerSlot(id, input)));

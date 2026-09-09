@@ -161,6 +161,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<WorkerSlotRecord>().HasIndex(x => x.Id).IsUnique();
         model.Entity<WorkerSlotRecord>().HasIndex(x => new { x.RuntimeId, x.Name }).IsUnique();
         model.Entity<WorkerSlotRecord>().Property(x => x.Revision).IsConcurrencyToken();
+        model.Entity<WorkerSlotRecord>().Property(x => x.CapabilityProbeIdsJson).HasDefaultValue("[]");
         model.Entity<TaskWorkspaceRecord>().HasKey(x => x.Sequence);
         model.Entity<TaskWorkspaceRecord>().HasIndex(x => x.Id).IsUnique();
         model.Entity<TaskWorkspaceRecord>().HasIndex(x => new { x.RuntimeId, x.Directory })

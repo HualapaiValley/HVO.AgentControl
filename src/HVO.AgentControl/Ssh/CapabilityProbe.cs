@@ -3,7 +3,12 @@ using HVO.AgentControl.Core;
 
 namespace HVO.AgentControl.Ssh;
 
-public sealed record CapabilitySnapshot(long ObservedAt, string Source, string Scope, Dictionary<string, string> Facts);
+public sealed record CapabilitySnapshot(long ObservedAt, string Source, string Scope, Dictionary<string, string> Facts)
+{
+    public int SchemaVersion { get; init; } = CapabilityProbeCatalog.SchemaVersion;
+    public int CatalogVersion { get; init; } = CapabilityProbeCatalog.CatalogVersion;
+    public IReadOnlyList<CapabilityProbeResult> Results { get; init; } = [];
+}
 
 public static class CapabilityProbe
 {
@@ -19,7 +24,7 @@ public static class CapabilityProbe
         }
         facts["effectiveCpuCores"] = EffectiveCpuCores(facts);
         facts["effectiveMemoryBytes"] = EffectiveMemoryBytes(facts);
-        return new(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), "probe", directory, facts);
+        return CapabilityProbeCatalog.Default.Normalize(new(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), "probe", directory, facts));
     }
 
     /// <summary>Effective CPU quota/cpuset/host minimum normalized from raw probe facts; fractional quotas allowed. "unknown" when no container constraint is verifiable.</summary>

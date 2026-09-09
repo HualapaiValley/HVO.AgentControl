@@ -20,6 +20,8 @@ All routes use `/api/v1`, owner authentication, and the existing CSRF exchange f
 | Method | Route | Behavior |
 | --- | --- | --- |
 | `GET` | `/worker-slots?after=0&take=50&includeArchived=false` | Stable sequence pagination of reusable slots. |
+| `GET` | `/worker-slot-probes` | Versioned catalog of structured environment, resource, tool and access probes that slots may require. |
+| `GET` | `/runtimes/{id}/capabilities` | Current versioned runtime probe results and requirement status for each registered slot. Unknown, unavailable or unsupported evidence is explicit. This is not overall dispatch readiness. |
 | `GET` | `/worker-slots/{id}` | Slot detail. |
 | `POST` | `/worker-slots` | Idempotently create a slot for an existing runtime. |
 | `POST` | `/worker-slots/{id}/archive` | CAS/idempotently archive or restore a slot; active task bindings must be released before archiving. |
@@ -29,6 +31,8 @@ All routes use `/api/v1`, owner authentication, and the existing CSRF exchange f
 | `POST` | `/task-bindings/{id}/release` | CAS/idempotently release the binding, workspace and session association. It does not stop or move native work. |
 
 Mutations use `requestId` and durable inventory receipts. Replaying the same request returns its original committed response after restart; reusing a request ID with a different resource, action or intent returns `idempotency_conflict`. Task creation requires current WorkItem, Project and WorkerSlot revisions. Active uniqueness constraints are enforced transactionally for each task, slot, workspace and runtime directory. The returned `nextAfter` cursor is the last returned sequence, so page boundaries do not skip or duplicate rows. Existing worker/runtime deletion paths reject active new bindings with actionable errors; released binding history is retained without making deletion fail through a database FK.
+
+Worker-slot creation may register up to 32 exact `capabilityProbeIds` from the catalog. The catalog and probe envelopes use schema version 1 and catalog version 1. Runtime connection executes the existing bounded, read-only capability collector and stores both raw facts and typed catalog results. Task-binding admission fails with `capability_unavailable` when any registered requirement is unavailable, unknown, malformed or from an unsupported future schema. For a legacy native session attached to that binding, supervisor claim and final prompt preflight repeat the same check; changed evidence parks the command before native mutation. An executable being present does not imply daemon, credential or signing access; those are separate catalog entries and remain unknown until directly verified.
 
 ## Deferred capabilities
 

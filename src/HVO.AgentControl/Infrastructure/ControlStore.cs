@@ -9,10 +9,12 @@ using Microsoft.Extensions.Options;
 namespace HVO.AgentControl.Infrastructure;
 
 // All writes/claims share this gate in the single, file-locked replica. Network calls never hold it.
-public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, IOptions<ControlOptions> options, Secrets secrets)
+public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, IOptions<ControlOptions> options, Secrets secrets,
+    CapabilityProbeCatalog? capabilityProbeCatalog = null)
 {
     private const int TelemetryHistoryLimit = 200;
     private readonly SemaphoreSlim gate = new(1);
+    private readonly CapabilityProbeCatalog capabilityProbes = capabilityProbeCatalog ?? CapabilityProbeCatalog.Default;
     public event Action? Changed;
     public static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 

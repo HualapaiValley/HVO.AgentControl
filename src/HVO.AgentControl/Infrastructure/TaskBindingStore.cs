@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using HVO.AgentControl.Core;
+using HVO.AgentControl.Ssh;
 using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Infrastructure;
@@ -20,6 +21,27 @@ public sealed partial class ControlStore
         await db.WorkerSlots.AsNoTracking().SingleOrDefaultAsync(x => x.Id == BindingId(id))
         ?? throw new InventoryException("not_found", "Worker slot not found.", 404));
 
+    public CapabilityProbeCatalogContract WorkerSlotProbeCatalog() => capabilityProbes.Contract;
+
+    public Task<RuntimeCapabilityReport> RuntimeCapabilityReport(string id) => Read(async db =>
+    {
+        var runtimeId = RuntimeId(id);
+        var runtime = await db.Runtimes.AsNoTracking().SingleOrDefaultAsync(x => x.Id == runtimeId)
+            ?? throw new InventoryException("not_found", "Runtime not found.", 404);
+        var snapshot = capabilityProbes.Read(runtime.CapabilitiesJson);
+        var results = snapshot?.Results ?? capabilityProbes.Evaluate(new Dictionary<string, string>());
+        var slots = await db.WorkerSlots.AsNoTracking().Where(x => x.RuntimeId == runtime.Id).OrderBy(x => x.Sequence).ToListAsync();
+        var reports = slots.Select(slot =>
+        {
+            var required = slot.CapabilityProbeIds;
+            var missing = capabilityProbes.Missing(runtime.CapabilitiesJson, required);
+            return new WorkerSlotCapabilityReport(slot.Id, slot.Revision, required, missing, !slot.Archived && missing.Length == 0);
+        }).ToArray();
+        return new RuntimeCapabilityReport(CapabilityProbeCatalog.SchemaVersion, CapabilityProbeCatalog.CatalogVersion,
+            runtime.Id, runtime.Generation, snapshot?.ObservedAt, snapshot?.Source ?? "unobserved", snapshot?.Scope ?? "",
+            results, reports);
+    });
+
     public Task<WorkerSlotRecord> CreateWorkerSlot(CreateWorkerSlotInput input) => Write(async db =>
     {
         var id = BindingId(input.Id);
@@ -28,7 +50,10 @@ public sealed partial class ControlStore
         var role = input.Role is SessionRoles.Worker or SessionRoles.Coordinator ? input.Role : throw Validation("Role must be Worker or Coordinator.");
         var provider = BindingText(input.ProviderId, "provider", 120);
         var model = BindingText(input.ModelId, "model", 240);
-        return await MutateBinding(db, input.RequestId, "WorkerSlot", id, "Create", new { id, runtimeId, name, role, provider, model }, async () =>
+        string[] capabilityProbeIds;
+        try { capabilityProbeIds = capabilityProbes.NormalizeRequirements(input.CapabilityProbeIds); }
+        catch (ArgumentException ex) { throw Validation(ex.Message); }
+        return await MutateBinding(db, input.RequestId, "WorkerSlot", id, "Create", new { id, runtimeId, name, role, provider, model, capabilityProbeIds }, async () =>
         {
             var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new InventoryException("not_found", "Runtime not found.", 404);
             RequireDevelopmentRuntime(runtime);
@@ -49,6 +74,7 @@ public sealed partial class ControlStore
                 Role = role,
                 ProviderId = provider,
                 ModelId = model,
+                CapabilityProbeIds = capabilityProbeIds,
                 CreatedAt = Now,
                 UpdatedAt = Now
             };
@@ -124,6 +150,9 @@ public sealed partial class ControlStore
                 throw Conflict("worker_limit", "Managed devcontainers do not support multiple worker slots in this slice.");
             if (slot.Role == SessionRoles.Coordinator)
                 throw Conflict("slot_role", "Coordinator slots cannot own development task bindings.");
+            var missingCapabilities = capabilityProbes.Missing(runtime.CapabilitiesJson, slot.CapabilityProbeIds);
+            if (missingCapabilities.Length > 0)
+                throw Conflict("capability_unavailable", "Required runtime capabilities are unavailable: " + string.Join(", ", missingCapabilities) + ".");
             if (await db.TaskBindings.AnyAsync(x => x.WorkItemId == workItemId && x.State == TaskBindingState.Active))
                 throw Conflict("task_in_use", "The work item already has an active task binding.");
             if (await db.TaskBindings.AnyAsync(x => x.WorkerSlotId == slotId && x.State == TaskBindingState.Active))
@@ -236,6 +265,19 @@ public sealed partial class ControlStore
         var project = await db.Projects.AsNoTracking().SingleAsync(x => x.Id == binding.ProjectId);
         var slot = await db.WorkerSlots.AsNoTracking().SingleAsync(x => x.Id == binding.WorkerSlotId);
         return new(binding, workspace, session, project, slot);
+    }
+
+    internal async Task<string[]> RequiredCapabilityGaps(ControlDb db, WorkerRecord worker)
+    {
+        var slots = await (from binding in db.TaskBindings
+                           join session in db.TaskSessionBindings on binding.Id equals session.TaskBindingId
+                           join candidate in db.WorkerSlots on binding.WorkerSlotId equals candidate.Id
+                           where binding.State == TaskBindingState.Active && session.LegacyWorkerId == worker.Id
+                           select candidate).ToListAsync();
+        var required = slots.SelectMany(x => x.CapabilityProbeIds).Distinct(StringComparer.Ordinal).ToArray();
+        if (required.Length == 0) return [];
+        var runtime = await db.Runtimes.FindAsync(worker.RuntimeId);
+        return runtime is null ? required : capabilityProbes.Missing(runtime.CapabilitiesJson, required);
     }
 
     private static async Task<T> MutateBinding<T>(ControlDb db, string requestId, string kind, string id, string action, object intent, Func<Task<T>> mutate)

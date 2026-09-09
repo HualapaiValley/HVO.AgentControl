@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json.Serialization;
 
 namespace HVO.AgentControl.Core;
@@ -21,6 +22,13 @@ public sealed class WorkerSlotRecord
     public string Role { get; set; } = SessionRoles.Worker;
     public string ProviderId { get; set; } = "";
     public string ModelId { get; set; } = "";
+    [JsonIgnore] public string CapabilityProbeIdsJson { get; set; } = "[]";
+    [NotMapped]
+    public string[] CapabilityProbeIds
+    {
+        get => Json.Read<string[]>(CapabilityProbeIdsJson);
+        set => CapabilityProbeIdsJson = Json.Write(value);
+    }
     public bool Archived { get; set; }
     public long Revision { get; set; } = 1;
     public long CreatedAt { get; set; }
@@ -76,7 +84,7 @@ public sealed class TaskBindingRecord
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record CreateWorkerSlotInput(string RequestId, string Id, string RuntimeId, string Name,
-    string Role = SessionRoles.Worker, string ProviderId = "", string ModelId = "");
+    string Role = SessionRoles.Worker, string ProviderId = "", string ModelId = "", string[]? CapabilityProbeIds = null);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record CreateTaskBindingInput(string RequestId, string Id, string WorkItemId, string ProjectId,
