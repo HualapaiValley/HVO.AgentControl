@@ -423,11 +423,21 @@ public sealed record CoordinatorNativeFailure(string CommandId, string? CallerId
 public sealed record IdlePlanningReview(string ObservationKey, string TriggerCommandId, long RequestedAt);
 public sealed record CoordinatorGitHubAccess(string RuntimeId, string CiInspectionState,
     string ChecksPermission, string CommitStatusesPermission, string ActionsPermission, long? ObservedAt);
+public sealed record CoordinatorProviderFailure(string ReceiptId, string CommandId, string Category, int? Status, long ObservedAt,
+    string? WorkerId, string? RuntimeId);
+public sealed record CoordinatorProviderPool(string Id, string State, long Revision, long? RetryAt,
+    string RecoveryCommandId, bool RecoveryOwnershipUnknown, string AdmissionState, CoordinatorProviderFailure? LastFailure, bool EarlierFailuresOmitted);
+public sealed record CoordinatorProviderReadiness(string RuntimeId, string ProviderId, string State, long? KeyRevision);
+public sealed record CoordinatorModel(string ProviderId, string ModelId, string[] Variants, int OmittedVariants = 0);
+public sealed record CoordinatorModelCatalog(string WorkerId, CoordinatorModel[] Models, int Omitted);
+public sealed record CoordinatorProviderEvidence(CoordinatorProviderPool[] Pools, CoordinatorProviderReadiness[] Readiness,
+    CoordinatorModelCatalog[] Catalogs, bool PoolsTruncated = false);
 public sealed record CoordinatorContext(string Instruction, WorkerRecord[] Workers, CoordinatorResult[] Results, PendingRequest[] Questions,
     DecisionReceipt? LastAppliedDecision = null, DispatchEvidence[]? Dispatch = null, DecisionRepair? Repair = null,
     CoordinationRecovery? Recovery = null, string? ReassessmentReason = null, string[]? AvailableWorkerIds = null,
     IdlePlanningReview? IdleReview = null, CoordinatorGitHubAccess[]? GitHubAccess = null, string? PlanningObservationKey = null,
-    CoordinatorNativeFailure? NativeFailure = null, CoordinatorDecisionCheckpoint? DecisionCheckpoint = null);
+    CoordinatorNativeFailure? NativeFailure = null, CoordinatorDecisionCheckpoint? DecisionCheckpoint = null,
+    CoordinatorProviderEvidence? ProviderEvidence = null, string? ProviderObservationKey = null);
 
 public sealed class OperatorUpdateSchedule
 {

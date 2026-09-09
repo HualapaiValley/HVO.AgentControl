@@ -333,4 +333,10 @@ public sealed partial class ControlStore
         if (runtime.ConnectionKind != RuntimeConnections.Ssh)
             throw new ControlException("This host-owned control service does not provide development workspaces, SSH terminals, or worker lifecycle operations.", 409);
     }
+
+    private static void RequireEnrolledRuntime(RuntimeRecord runtime)
+    {
+        if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft)
+            throw new ControlException("Managed runtime enrollment is pending; worker lifecycle operations are unavailable until ownership is verified.", 409);
+    }
 }

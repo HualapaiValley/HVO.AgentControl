@@ -45,7 +45,7 @@
     }
     @if (selectedId is not null)
     {
-      <section class="worker-detail" aria-label="Worker conversation">
+       <section class="worker-detail" aria-label="Worker conversation" data-conversation-worker="@(detail?.Worker.Id ?? "")" data-selection-generation="@selection.CurrentGeneration">
         @if (detail is null) { <div class="empty"><h3>A conversation that stays with your work.</h3><p>Select a worker to inspect its transcript, send a follow-up, or resolve a pending request.</p></div> }
         else
         {
@@ -107,7 +107,9 @@
           {
           <label class="check"><input type="checkbox" @bind="includeGuidance" /> Include coordination guidance</label>
           @if (includeGuidance) { <label>Progress interval in minutes (0 for milestones only)<input type="number" min="0" max="1440" @bind="progressMinutes" /></label> }
-          <div class="composer"><label>Task or follow-up<textarea rows="5" @bind="promptText" @bind:event="oninput" placeholder="Describe the task, scope, and validation you expect."></textarea></label><div class="actions"><button disabled="@(busy || detail.Worker.Archived || string.IsNullOrWhiteSpace(promptText))" @onclick="SendPrompt">@(detail.Worker.Activity == "Idle" ? "Send instruction" : "Queue follow-up")</button><button class="subtle" disabled="@(busy || detail.Worker.Archived)" @onclick="StatusInquiry">Request progress report</button><button class="danger" disabled="@(busy || detail.Worker.Stale || detail.Worker.Activity == "Idle" && !detail.Commands.Any(x => x.Kind == "Prompt" && Delivery.InFlight(x.State)))" @onclick="Abort">Request cancellation</button></div><p class="meta">Instructions sent while busy wait their turn. Closing this page leaves work running.</p></div>
+          var renderedWorkerId = detail.Worker.Id;
+          var renderedWorkerRevision = detail.Worker.Revision;
+          <div class="composer"><label>Task or follow-up<textarea rows="5" value="@promptText" @oninput="e => SetPromptText(renderedWorkerId, e.Value?.ToString() ?? string.Empty)" placeholder="Describe the task, scope, and validation you expect."></textarea></label><div class="actions"><button disabled="@(busy || detail.Worker.Archived || string.IsNullOrWhiteSpace(promptText))" @onclick="() => SendPrompt(renderedWorkerId, renderedWorkerRevision)">@(detail.Worker.Activity == "Idle" ? "Send instruction" : "Queue follow-up")</button><button class="subtle" disabled="@(busy || detail.Worker.Archived)" @onclick="StatusInquiry">Request progress report</button><button class="danger" disabled="@(busy || detail.Worker.Stale || detail.Worker.Activity == "Idle" && !detail.Commands.Any(x => x.Kind == "Prompt" && Delivery.InFlight(x.State)))" @onclick="Abort">Request cancellation</button></div><p class="meta">Instructions sent while busy wait their turn. Closing this page leaves work running.</p></div>
           }
           @if (detail.Commands.Any(x => x.State == Delivery.Queued || Delivery.InFlight(x.State) || x.State == Delivery.Unknown))
           { <section class="pending-work" aria-label="Current instructions"><h3>Current instructions</h3>

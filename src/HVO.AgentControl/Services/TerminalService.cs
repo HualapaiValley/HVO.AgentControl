@@ -20,6 +20,7 @@ public sealed class TerminalService(ControlStore store, Secrets secrets, ILogger
             origin.GetLeftPart(UriPartial.Authority) != context.Request.Scheme + "://" + context.Request.Host)
         { context.Response.StatusCode = 403; return; }
         var runtime = await store.Read(async db => await db.Runtimes.FindAsync(id)) ?? throw new ControlException("Runtime not found.", 404);
+        if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft) throw new ControlException("Managed runtime enrollment is pending; terminals are unavailable until transport ownership is verified.");
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         var expires = long.TryParse(context.User.FindFirst("hvo:expires")?.Value, out var seconds)
