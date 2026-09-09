@@ -221,9 +221,11 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
         if (await db.Commands.FindAsync(id) is { } prior) return Same(prior, runtimeId, null, kind, prior.Payload);
-        if (kind == "StopManagedServer") RequireDevelopmentRuntime(runtime);
         if (kind is not ("EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer"))
             throw new ControlException("Unsupported runtime lifecycle command.", 400);
+        if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft && kind is not "DisconnectRuntime")
+            throw new ControlException("Managed runtime enrollment is pending; transport lifecycle commands are unavailable until ownership is verified.");
+        if (kind == "StopManagedServer") RequireDevelopmentRuntime(runtime);
         runtime.DesiredConnected = kind is "EnsureServer" or "RefreshState";
         runtime.Revision++;
         OwnedNativeProcess? owned = null;
@@ -308,6 +310,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     private async Task<CommandRecord> EnqueuePrompt(ControlDb db, string workerId, PromptInput input, string origin = "owner")
     {
         var worker = await db.Workers.FindAsync(workerId) ?? throw new ControlException("Worker not found.", 404);
+        RequireEnrolledRuntime(await db.Runtimes.FindAsync(worker.RuntimeId) ?? throw new ControlException("Runtime not found.", 404));
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return SamePrompt(prior, worker.RuntimeId, workerId, input, payload);
         if (worker.Role == SessionRoles.Coordinator && !origin.StartsWith("coordinator-decision:", StringComparison.Ordinal))
@@ -343,6 +346,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     public Task<CommandRecord> Abort(string workerId, string id) => Write(async db =>
     {
         var worker = await db.Workers.FindAsync(workerId) ?? throw new ControlException("Worker not found.", 404);
+        RequireEnrolledRuntime(await db.Runtimes.FindAsync(worker.RuntimeId) ?? throw new ControlException("Runtime not found.", 404));
         return await Record(db, id, worker.RuntimeId, workerId, "Abort", "{}");
     });
 
@@ -352,6 +356,7 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
     {
         var request = await db.Requests.FindAsync(input.RequestId) ?? throw new ControlException("Request not found.", 404);
         var worker = await db.Workers.FindAsync(request.WorkerId) ?? throw new ControlException("Worker not found.", 404);
+        RequireEnrolledRuntime(await db.Runtimes.FindAsync(worker.RuntimeId) ?? throw new ControlException("Runtime not found.", 404));
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, worker.RuntimeId, worker.Id, "Reply", payload);
         if (request.State == "NoLongerPending")
