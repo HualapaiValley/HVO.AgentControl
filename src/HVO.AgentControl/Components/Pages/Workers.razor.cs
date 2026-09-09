@@ -50,7 +50,7 @@ public partial class Workers
     protected override async Task SnapshotChanged()
     {
         var bodyIds = snapshot!.Commands.Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)
-            .Select(x => x.Id).Concat(inspectionId is null ? [] : [inspectionId]).Take(100).ToArray();
+            .Select(x => x.Id).Concat(inspectionId is null ? [] : [inspectionId]).ToArray();
         await Hydrate(snapshot.Commands, bodyIds);
         if (editing is not null && snapshot!.Workers.FirstOrDefault(x => x.Id == editing.Id) is { } current)
             editing.ModelsJson = current.ModelsJson;
@@ -77,12 +77,12 @@ public partial class Workers
     {
         var summaries = commands.Where(x => ids.Contains(x.Id)).ToArray();
         var missing = summaries.Where(x => !commandBodies.TryGetValue(x.Id, out var body) || body.UpdatedAt != x.UpdatedAt).Select(x => x.Id);
-        foreach (var body in await Store.CommandBodies(missing)) commandBodies[body.Id] = body;
+        foreach (var batch in missing.Chunk(100))
+            foreach (var body in await Store.CommandBodies(batch)) commandBodies[body.Id] = body;
         foreach (var summary in summaries)
         {
             if (!commandBodies.TryGetValue(summary.Id, out var body)) continue;
-            var index = commands.FindIndex(x => x.Id == summary.Id);
-            if (index >= 0) commands[index] = body;
+            ApplyCommandBody(summary, body);
         }
     }
     private List<ModelChoice> Models(string id) => id == inspectedRuntime && (newDirectory == inspectedDirectory || newRepository == inspectedDirectory) && inspectedModels is not null

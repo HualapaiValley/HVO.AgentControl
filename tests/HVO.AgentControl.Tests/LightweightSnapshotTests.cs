@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
+using HVO.AgentControl.Components.Pages;
 using HVO.AgentControl.Core;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -66,6 +68,35 @@ public sealed class LightweightSnapshotTests(ITestOutputHelper output)
         output.WriteLine($"stored-body-characters={storedCharacters}; snapshot-bytes={snapshotBytes}; detail-bytes={detailBytes}; snapshot-ms={snapshotMilliseconds}; detail-ms={detailMilliseconds}");
     }
 
+    [Fact]
+    public async Task WorkerCreationCardsHydrateBodiesBeyondBatchLimit()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        await app.Store.Write(db =>
+        {
+            for (var index = 0; index < 101; index++)
+                db.Commands.Add(new CommandRecord
+                {
+                    Id = "creation-" + index,
+                    RuntimeId = worker.RuntimeId,
+                    Kind = "CreateWorker",
+                    State = Delivery.Failed,
+                    Payload = Json.Write(new CreateWorkerInput("creation-" + index, worker.RuntimeId, "Worker " + index,
+                        "Project", "/work/" + index, "openai", "gpt-5.6-sol")),
+                    CreatedAt = index,
+                    QueueOrder = index
+                });
+            return Task.FromResult(true);
+        });
+        var page = new TestWorkers(app.Store);
+
+        await page.Hydrate(await app.Store.Snapshot());
+
+        Assert.Equal(101, page.Cards.Count);
+        Assert.All(page.Cards, command => Assert.NotEmpty(command.Payload));
+    }
+
     private static CommandRecord Command(string id, WorkerRecord worker, string state, long createdAt,
         string payload, string execution, string result) => new()
         {
@@ -89,5 +120,13 @@ public sealed class LightweightSnapshotTests(ITestOutputHelper output)
         Assert.Empty(command.ExecutionPayload);
         Assert.Empty(command.ResultJson);
         Assert.True(command.ProgressText.Length <= 600);
+    }
+
+    private sealed class TestWorkers : Workers
+    {
+        public TestWorkers(Infrastructure.ControlStore store) => Store = store;
+        public Task Hydrate(ControlSnapshot value) { snapshot = value; return SnapshotChanged(); }
+        public List<CommandRecord> Cards => ((IEnumerable<CommandRecord>)typeof(Workers)
+            .GetProperty("CreationCards", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!).ToList();
     }
 }

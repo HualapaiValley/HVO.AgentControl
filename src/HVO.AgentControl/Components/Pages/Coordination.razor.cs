@@ -47,11 +47,10 @@ public partial class Coordination
             .OrderBy(x => x.QueueOrder).Take(100).ToArray();
         var missing = summaries.Where(x => !commandBodies.TryGetValue(x.Id, out var body) || body.UpdatedAt != x.UpdatedAt).Select(x => x.Id);
         foreach (var body in await Store.CommandBodies(missing)) commandBodies[body.Id] = body;
-        foreach (var summary in summaries)
+        foreach (var summary in snapshot.Commands)
         {
             if (!commandBodies.TryGetValue(summary.Id, out var body)) continue;
-            var index = snapshot.Commands.FindIndex(x => x.Id == summary.Id);
-            if (index >= 0) snapshot.Commands[index] = body;
+            ApplyCommandBody(summary, body);
         }
         hostOperationsIds = (await Store.ControlServices()).SelectMany(x => x.Sessions)
             .Where(x => x.ScopeKind == "HostOperations").Select(x => x.WorkerId).ToHashSet();
@@ -62,7 +61,7 @@ public partial class Coordination
         var body = await Store.Command(command.Id);
         commandBodies[body.Id] = body;
         var index = snapshot!.Commands.FindIndex(x => x.Id == body.Id);
-        if (index >= 0) snapshot.Commands[index] = body;
+        if (index >= 0) ApplyCommandBody(snapshot.Commands[index], body);
     });
     private void Select(string id, bool include) { if (include) selected.Add(id); else selected.Remove(id); }
     private Task Start() => Execute(async () =>

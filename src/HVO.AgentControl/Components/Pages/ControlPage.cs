@@ -39,10 +39,24 @@ public abstract class ControlPage : ComponentBase, IAsyncDisposable
     }
     protected async Task Refresh()
     {
-        try { snapshot = await Store.Snapshot(); await SnapshotChanged(); }
-        catch (Exception ex) { error = RuntimeSupervisor.SafeError(ex); }
+        var scope = CaptureRefreshScope();
+        try { snapshot = await ReadSnapshot(); await SnapshotChanged(); }
+        catch (Exception ex)
+        {
+            if (IsRefreshCurrent(scope)) error = RuntimeSupervisor.SafeError(ex);
+        }
     }
+    protected virtual Task<ControlSnapshot> ReadSnapshot() => Store.Snapshot();
+    protected virtual object? CaptureRefreshScope() => null;
+    protected virtual bool IsRefreshCurrent(object? scope) => true;
     protected virtual Task SnapshotChanged() => Task.CompletedTask;
+    // Bodies are immutable request/result evidence; retain the latest lightweight receipt fields from the fresh projection.
+    protected static void ApplyCommandBody(CommandRecord summary, CommandRecord body)
+    {
+        summary.Payload = body.Payload;
+        summary.ExecutionPayload = body.ExecutionPayload;
+        summary.ResultJson = body.ResultJson;
+    }
     protected async Task Execute(Func<Task> action)
     {
         if (busy) return;

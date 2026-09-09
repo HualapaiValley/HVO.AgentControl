@@ -74,6 +74,9 @@ public partial class Home
         }
         catch when (!selection.IsCurrent(current)) { }
     }
+    protected override object? CaptureRefreshScope() => selection.Capture(selectedId);
+    protected override bool IsRefreshCurrent(object? scope) => scope is ValueTuple<string?, long> current &&
+        current.Item1 == selectedId && selection.IsCurrent(current);
     private void SelectConversation(ChangeEventArgs args)
     {
         if (args.Value?.ToString() is { Length: > 0 } id) Navigation.NavigateTo(ConversationUrl(id));
@@ -174,11 +177,10 @@ public partial class Home
             .OrderBy(x => x.QueueOrder).Take(100).ToArray();
         var missing = summaries.Where(x => !commandBodies.TryGetValue(x.Id, out var body) || body.UpdatedAt != x.UpdatedAt).Select(x => x.Id);
         foreach (var body in await Store.CommandBodies(missing)) commandBodies[body.Id] = body;
-        foreach (var summary in summaries)
+        foreach (var summary in loaded.Commands)
         {
             if (!commandBodies.TryGetValue(summary.Id, out var body)) continue;
-            var index = loaded.Commands.FindIndex(x => x.Id == summary.Id);
-            if (index >= 0) loaded.Commands[index] = body;
+            ApplyCommandBody(summary, body);
         }
     }
     private Task LoadCommandBody(CommandRecord command) => Execute(async () =>
@@ -186,7 +188,7 @@ public partial class Home
         var body = await Store.Command(command.Id);
         commandBodies[body.Id] = body;
         var index = detail!.Commands.FindIndex(x => x.Id == body.Id);
-        if (index >= 0) detail.Commands[index] = body;
+        if (index >= 0) ApplyCommandBody(detail.Commands[index], body);
     });
     private static string Timestamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToString("MMM d HH:mm:ss 'UTC'");
     private static string Pretty(string json)
