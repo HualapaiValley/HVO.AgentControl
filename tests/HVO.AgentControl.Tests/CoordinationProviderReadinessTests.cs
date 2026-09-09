@@ -287,6 +287,95 @@ public sealed partial class CoordinationTests
     }
 
     [Fact]
+    public async Task TruncatedPoolEvidenceRetainsDefaultAndObservesOmittedPoolChanges()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await SeedProviderRoutes(app.Store);
+        await app.Store.Write(async db =>
+        {
+            var providers = Enumerable.Range(0, 34).Select(i => "a-held-" + i.ToString("D2")).Append("openai").ToArray();
+            (await db.Workers.FindAsync(a.Id))!.ModelsJson = Json.Write(providers.Select(p => new ModelChoice(p, p == "openai" ? "luna" : "model", "Observed")));
+            foreach (var provider in providers)
+                db.Set<ProviderPool>().Add(new() { Id = "provider:" + provider, ProviderId = provider, State = "Exhausted", ConsecutiveFailures = 1 });
+            return true;
+        });
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Wait for an approved available route", [a.Id], ContinuousSupervision: true));
+        await app.Store.CoordinationTick();
+        var first = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.True(first.ProviderEvidence!.PoolsTruncated);
+        Assert.Contains(first.ProviderEvidence.Pools, x => x.Id == "provider:openai");
+        Assert.DoesNotContain(first.ProviderEvidence.Pools, x => x.Id == "provider:a-held-33");
+        await FinishDecision(app.Store, run.Id, new("No work available", []));
+        await app.Store.CoordinationTick();
+        await app.Store.CoordinationTick(); // one normal idle planning review
+        await FinishDecision(app.Store, run.Id, new("Still blocked", []));
+        await app.Store.CoordinationTick();
+        Assert.False(await app.Store.CoordinationTick());
+        var before = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        await app.Store.Write(async db =>
+        {
+            var command = new CommandRecord
+            {
+                Id = Guid.NewGuid().ToString(),
+                WorkerId = a.Id,
+                RuntimeId = a.RuntimeId,
+                Kind = "Prompt",
+                State = Delivery.Failed,
+                ProviderPoolId = "provider:a-held-33"
+            };
+            db.Commands.Add(command);
+            await ControlStore.ObserveProviderFailure(db, a, command, "native-auth-error", new("AuthenticationRequired", 401, null));
+            return true;
+        });
+        Assert.True(await app.Store.CoordinationTick());
+        var changed = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.Equal(Json.Write(before.ProviderEvidence), Json.Write(changed.ProviderEvidence));
+        Assert.NotEqual(before.ProviderObservationKey, changed.ProviderObservationKey);
+        Assert.Contains("Provider readiness", changed.ReassessmentReason);
+        await FinishDecision(app.Store, run.Id, new("Still no authorized route", []));
+        await app.Store.CoordinationTick();
+        var pool = (await app.Store.ProviderPools()).Single(x => x.Id == "provider:openai");
+        await app.Store.ResumePool(pool.Id, new(pool.Revision, true));
+        Assert.True(await app.Store.CoordinationTick());
+        var resumed = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.Equal("Available", resumed.ProviderEvidence!.Pools.Single(x => x.Id == "provider:openai").AdmissionState);
+        Assert.NotEqual(changed.ProviderObservationKey, resumed.ProviderObservationKey);
+    }
+
+    [Fact]
+    public async Task OmittedCatalogChoiceChangesFullProviderObservationWithoutChangingVisibleModels()
+    {
+        await using var app = new TestApp();
+        var (coordinator, a, _) = await SeedProviderRoutes(app.Store);
+        await app.Store.Write(async db =>
+        {
+            (await db.Workers.FindAsync(a.Id))!.ModelsJson = Json.Write(Enumerable.Range(0, 40)
+                .Select(i => new ModelChoice("openai", "model-" + i.ToString("D2"), "Observed")));
+            return true;
+        });
+        var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Wait for approved work", [a.Id], ContinuousSupervision: true));
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("No work", []));
+        await app.Store.CoordinationTick();
+        await app.Store.CoordinationTick();
+        await FinishDecision(app.Store, run.Id, new("Still no work", []));
+        await app.Store.CoordinationTick();
+        Assert.False(await app.Store.CoordinationTick());
+        var before = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        await app.Store.Write(async db =>
+        {
+            var worker = (await db.Workers.FindAsync(a.Id))!;
+            worker.ModelsJson = worker.ModelsJson.Replace("model-39", "model-zz", StringComparison.Ordinal);
+            return true;
+        });
+        Assert.True(await app.Store.CoordinationTick());
+        var after = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
+        Assert.Equal(Json.Write(before.ProviderEvidence), Json.Write(after.ProviderEvidence));
+        Assert.NotEqual(before.ProviderObservationKey, after.ProviderObservationKey);
+        Assert.Contains("Provider readiness", after.ReassessmentReason);
+    }
+
+    [Fact]
     public async Task CompactedProviderCatalogDoesNotTriggerAnUnchangedPlanningLoop()
     {
         await using var app = new TestApp();

@@ -377,11 +377,10 @@ public sealed partial class ControlStore
                 grant?.ActionsPermission ?? "Unknown", grant?.PermissionsVerifiedAt);
         }).ToArray();
         var previousContext = ReadRecoveryContext(run);
-        var providers = await CoordinatorProviders(db, participants);
-        var providerKey = CoordinationObservation.ProviderKey(providers);
+        var (providers, providerKey) = await CoordinatorProviders(db, participants);
         var providerChanged = run.InputJson != "{}" &&
             (previousContext.ProviderObservationKey ?? CoordinationObservation.ProviderKey(previousContext.ProviderEvidence)) != providerKey;
-        var planningKey = CoordinationObservation.PlanningKey(run.Instruction, availableIds, commands, requests, github, providers);
+        var planningKey = CoordinationObservation.PlanningKey(run.Instruction, availableIds, commands, requests, github, providers, providerKey);
         var planningChanged = previousContext.PlanningObservationKey is not null && previousContext.PlanningObservationKey != planningKey;
         var githubChanged = previousContext.GitHubAccess is not null &&
             CoordinationObservation.GitHubKey(previousContext.GitHubAccess) != CoordinationObservation.GitHubKey(github);
@@ -783,7 +782,8 @@ public sealed partial class ControlStore
         with no guarantee of remaining allowance. It does not clear the pool or bypass the single recovery lease.
         LastFailure identifies its source worker/command, which may differ from the worker you are considering.
         EarlierFailuresOmitted and catalog omission counts mean more durable evidence exists; absence is not proof.
-        A missing pool means no recorded hold, not verified remaining allowance. Remaining quota/cost is unknown.
+        A missing pool means no recorded hold only when poolsTruncated is false; otherwise omitted pool state is unknown.
+        Neither absence nor Available verifies remaining allowance. Remaining quota/cost is unknown.
         Runtime instance state must be RefreshCompleted or NoRecordedHold; opencode-go also requires a Ready receipt.
         Do not infer that a ready key or a catalog entry clears a held pool. Catalog omissions are explicit; inspect
         omitted choices before using them. Old contexts may lack providerEvidence; absence is not authorization.

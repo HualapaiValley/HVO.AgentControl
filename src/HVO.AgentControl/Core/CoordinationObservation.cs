@@ -9,7 +9,7 @@ public static class CoordinationObservation
     // task/capacity/policy changes, not by another token or native retry observation.
     public static string PlanningKey(string instruction, IEnumerable<string> availableWorkers,
         IEnumerable<CommandRecord> commands, IEnumerable<PendingRequest> requests, IEnumerable<CoordinatorGitHubAccess> github,
-        CoordinatorProviderEvidence? providers = null) =>
+        CoordinatorProviderEvidence? providers = null, string? providerObservationKey = null) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
         {
             instruction,
@@ -17,7 +17,7 @@ public static class CoordinationObservation
             commands = commands.OrderBy(x => x.Id).Select(x => new { x.Id, x.State }),
             requests = requests.OrderBy(x => x.Id).Select(x => new { x.Id, x.State }),
             github = GitHubKey(github),
-            providers = ProviderKey(providers)
+            providers = providerObservationKey ?? ProviderKey(providers)
         }))));
 
     public static string ProviderKey(CoordinatorProviderEvidence? evidence) => evidence is null ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
