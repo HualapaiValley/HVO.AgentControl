@@ -357,7 +357,7 @@ public sealed class ProvisioningOperationTests
         await app.Store.ActivateHostExecutor(pending,
             new(executor.Id, host.Id, executor.AuthorityGeneration, Digest("authority"), Digest("boot"), Digest("incarnation")));
         var principal = pending with { State = HostExecutorState.Active };
-        using var machine = app.CreateClient();
+        var machine = app.CreateClient();
         machine.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", executor.Id + "." + secret);
         var operation = await app.Store.CreateProvisionOperation(setup.Input);
         var intent = Intent(operation, setup.Input) with { AuthorityRevision = executor.AuthorityGeneration };
@@ -481,6 +481,116 @@ public sealed class ProvisioningOperationTests
         Assert.Equal(HttpStatusCode.Conflict, (await terminalOwner.PostAsJsonAsync(
             $"/api/v1/provisioning/operations/{operation.Id}/reconcile", new ProvisionOperationControlInput(late.Revision))).StatusCode);
     }
+
+    [Fact]
+    public async Task VerifiedEnvironmentRejectsContradictoryOrRootUidForNonRootUser()
+    {
+        await using var app = new TestApp();
+        var setup = await Setup(app);
+        var host = await app.Store.Host(setup.Input.HostId);
+        var (machine, assignment, operation, intent) = await EstablishClaimedEffect(app, setup, host);
+
+        // A non-root approved user (vscode) cannot claim UID 0 or a negative UID even when
+        // the effective RemoteUser and all workspace/tool evidence otherwise match (finding 3).
+        var positive = new ProvisionExecutionEvidence("vscode", "1000", intent.Workspace.ContainerWorkspace, Tools());
+        var rootClaim = new ProvisionExecutionEvidence("vscode", "0", intent.Workspace.ContainerWorkspace, Tools());
+        var negativeClaim = new ProvisionExecutionEvidence("vscode", "-5", intent.Workspace.ContainerWorkspace, Tools());
+        HostProvisionResultInput Input(string reportId, ProvisionExecutionEvidence executed) => new(
+            reportId, assignment.ClaimGeneration, 2, Guid.Parse(operation.Id).ToString("D"), intent.Digest,
+            "VerifiedEnvironment", "verified", Observed(assignment, setup), executed, []);
+        Assert.Equal(HttpStatusCode.Conflict, (await machine.PostAsJsonAsync(
+            $"/api/v1/host-executor/provisioning/{operation.Id}/result", Input(Id(), rootClaim))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await machine.PostAsJsonAsync(
+            $"/api/v1/host-executor/provisioning/{operation.Id}/result", Input(Id(), negativeClaim))).StatusCode);
+        var accepted = (await (await machine.PostAsJsonAsync(
+            $"/api/v1/host-executor/provisioning/{operation.Id}/result", Input(Id(), positive)))
+            .Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        Assert.Equal(ProvisionOperationState.AwaitingEnrollment, accepted.State);
+    }
+
+    [Fact]
+    public async Task ReportSequenceConflictGuardIsPreservedForRestartedProgress()
+    {
+        await using var app = new TestApp();
+        var setup = await Setup(app);
+        var host = await app.Store.Host(setup.Input.HostId);
+        var (machine, assignment, operation, _) = await EstablishClaimedEffect(app, setup, host);
+
+        // After a committed external effect the operation is Unknown; progress is still accepted.
+        var first = new HostProvisionProgressInput(Id(), assignment.ClaimGeneration, 1, "cli-up");
+        var acceptedProgress = (await (await machine.PostAsJsonAsync(
+            $"/api/v1/host-executor/provisioning/{operation.Id}/progress", first))
+            .Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        Assert.Equal(ProvisionOperationState.Unknown, acceptedProgress.State);
+        Assert.Equal("cli-up", Assert.Single(acceptedProgress.Progress).Stage);
+        // A restarted executor must never reuse an acknowledged sequence; the server's
+        // per-(operation, claim) sequence guard rejects it instead of stranding the run.
+        var replay = new HostProvisionProgressInput(Id(), assignment.ClaimGeneration, 1, "cli-up");
+        Assert.Equal(HttpStatusCode.Conflict, (await machine.PostAsJsonAsync(
+            $"/api/v1/host-executor/provisioning/{operation.Id}/progress", replay)).StatusCode);
+    }
+
+    private static async Task<(HttpClient Machine, HostProvisioningAssignment Assignment, ProvisionOperationView Operation, ProvisionIntent Intent)>
+        EstablishClaimedEffect(TestApp app, SetupResult setup, HostRecord host)
+    {
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var credential = Digest(secret);
+        var executor = await app.Store.CreateHostExecutor(new(Id(), Id(), host.Id, host.Revision,
+            Digest("endpoint"), Digest("physical"), Digest("engine"), Digest("builder"), Digest("cli"),
+            Digest("root"), Digest("authority"), credential));
+        var pending = new HostExecutorPrincipal(executor.Id, host.Id, executor.AuthorityGeneration,
+            HostExecutorState.Pending, credential);
+        await app.Store.ActivateHostExecutor(pending,
+            new(executor.Id, host.Id, executor.AuthorityGeneration, Digest("authority"), Digest("boot"), Digest("incarnation")));
+        var principal = pending with { State = HostExecutorState.Active };
+        var machine = app.CreateClient();
+        machine.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", executor.Id + "." + secret);
+        var operation = await app.Store.CreateProvisionOperation(setup.Input);
+        var intent = Intent(operation, setup.Input) with { AuthorityRevision = executor.AuthorityGeneration };
+        var authorityResponse = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/authority",
+            new ApproveHostProvisionAuthorityInput(intent));
+        Assert.Equal(HttpStatusCode.OK, authorityResponse.StatusCode);
+        operation = (await authorityResponse.Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        var policy = await app.Store.ConfigureHostResourcePolicy(new(Id(), Id(), executor.Id, 0,
+            8000, 8 * 1024L * 1024 * 1024, 100 * 1024L * 1024 * 1024, 2,
+            500, 512 * 1024 * 1024, 1024 * 1024 * 1024, 120, 300));
+        var now = ControlStore.Now;
+        var observation = await app.Store.SubmitHostResourceObservation(principal, new(Id(), executor.Id, host.Id,
+            Digest("endpoint"), Digest("physical"), Digest("engine"), Digest("builder"), executor.AuthorityGeneration,
+            Digest("boot"), Digest("incarnation"), 1, 1, HostObservationState.Complete, now - 1000, now, "x86_64",
+            8000, 7000, 8 * 1024L * 1024 * 1024, 7 * 1024L * 1024 * 1024, 0, 2 * 1024L * 1024 * 1024,
+            512 * 1024 * 1024, 1024 * 1024 * 1024, 0, setup.Input.WorkspaceId,
+            ControlStore.ProvisionWorkspaceDigest(intent.Workspace.Directory), Digest("workspace-fs"),
+            80 * 1024L * 1024 * 1024, 1_000_000, Digest("docker-fs"), 70 * 1024L * 1024 * 1024,
+            1_000_000, true, 2));
+        var reservation = await app.Store.AcquireHostResourceReservation(new(Id(), Id(), intent.Digest, host.Id,
+            executor.Id, policy.Id, policy.Revision, observation.Id, setup.Input.WorkspaceId, operation.Id, "Build",
+            3000, BuildMemory + RuntimeMemory, 1024 * 1024 * 1024, 1));
+        using (var owner = await app.SignIn())
+        {
+            var capacityResponse = await owner.PostAsJsonAsync($"/api/v1/provisioning/operations/{operation.Id}/capacity",
+                new BindProvisionCapacityInput(operation.Revision, reservation.Id));
+            Assert.Equal(HttpStatusCode.OK, capacityResponse.StatusCode);
+        }
+        var claimResponse = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/claim",
+            new ClaimHostProvisioningInput(reservation.Id));
+        Assert.Equal(HttpStatusCode.OK, claimResponse.StatusCode);
+        var assignment = (await claimResponse.Content.ReadFromJsonAsync<HostProvisioningAssignment>())!;
+        var effectInput = new BeginHostProvisionEffectInput(assignment.ClaimGeneration, reservation.Id,
+            reservation.Revision, reservation.GrantGeneration, intent.Digest, setup.Input.WorkspaceId, observation.Id);
+        var effectResponse = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/begin-effect", effectInput);
+        Assert.Equal(HttpStatusCode.OK, effectResponse.StatusCode);
+        return (machine, assignment, operation, intent);
+    }
+
+    private static ProvisionContainerObservation Observed(HostProvisioningAssignment assignment, SetupResult setup) => new(
+        new string('a', 64), "sha256:" + new string('b', 64), "fixture@sha256:" + new string('c', 64),
+        "vscode", true, assignment.Intent.Labels,
+        [new("bind", assignment.Intent.Workspace.Directory, assignment.Intent.Workspace.ContainerWorkspace, null, true)],
+        setup.Input.RequestedRuntimeCpuMillis, setup.Input.RequestedRuntimeMemoryBytes);
+
+    private static ImmutableDictionary<string, string> Tools() =>
+        new Dictionary<string, string> { ["dotnet"] = "10.0.400" }.ToImmutableDictionary();
 
     private static async Task<SetupResult> Setup(TestApp app)
     {

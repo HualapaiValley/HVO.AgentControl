@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -803,9 +804,21 @@ public sealed partial class ControlStore
             !observed.Mounts.Any(x => x.Type == "bind" && x.Source == approved.Workspace.Directory &&
                 x.Destination == approved.Workspace.ContainerWorkspace && x.Writable) ||
             executed.RemoteUser != approved.Workspace.RemoteUser || executed.Workspace != approved.Workspace.ContainerWorkspace ||
-            !int.TryParse(executed.UserId, out _) || approved.Workspace.Tools.Any(x =>
+            !AuthorizedExecutionUserId(executed) || approved.Workspace.Tools.Any(x =>
                 !executed.Tools.TryGetValue(x.Name, out var output) || !output.Contains(x.ExpectedOutput, StringComparison.Ordinal)))
             throw new ProvisionAdmissionException("verified_environment_evidence_mismatch");
+    }
+
+    // A non-root user must not claim a root or negative numeric identity. The approved
+    // RemoteUser is an explicit root identity only when it is "root" or a numeric "0".
+    private static bool AuthorizedExecutionUserId(ProvisionExecutionEvidence executed)
+    {
+        if (!long.TryParse(executed.UserId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var uid))
+            return false;
+        if (uid > 0) return true;
+        if (uid < 0) return false;
+        var user = executed.RemoteUser.Trim();
+        return user == "root" || user == "0";
     }
 
     private static void ClearProvisionCapacity(ProvisionOperationRecord operation)

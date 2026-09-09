@@ -16,11 +16,10 @@ if (args.Length != 2 || args[0] is not ("authorize" or "run"))
 
 try
 {
-    var manifestPath = ProtectedFile(args[1], "authority manifest");
-    var manifest = JsonSerializer.Deserialize<HostExecutorManifest>(await File.ReadAllTextAsync(manifestPath), ExecutorJson.Options)
+    var manifest = JsonSerializer.Deserialize<HostExecutorManifest>(await ReadProtectedText(args[1], "authority manifest"), ExecutorJson.Options)
         ?? throw new InvalidOperationException("Authority manifest is empty.");
     manifest.Validate();
-    var credential = (await File.ReadAllTextAsync(ProtectedFile(manifest.CredentialFile, "credential file"))).Trim();
+    var credential = (await ReadProtectedText(manifest.CredentialFile, "credential file")).Trim();
     if (!credential.StartsWith(manifest.EnrollmentId + ".", StringComparison.Ordinal) || credential.Length > 200)
         throw new InvalidOperationException("Credential identity does not match the manifest enrollment.");
     var authorityDigest = AuthorityDigest(manifest.Authority);
@@ -53,26 +52,37 @@ try
     var ledger = new ControllerProvisionAttemptLedger(api, assignment, observed.Id);
     var runner = new LocalDevContainerRunner(manifest.Authority, ledger, process);
     var result = await runner.Provision(request);
+    // Progress and result sequences come from a durable, monotonic journal rather than the
+    // in-memory runner output. A restarted executor that reconstructs an already-committed
+    // effect with no current-run progress therefore never reuses an acknowledged sequence,
+    // so the controller never rejects it with report_sequence_conflict.
     foreach (var progress in result.Progress)
     {
         try
         {
+            var progressSequence = NextReportSequence(manifest, assignment.ClaimGeneration);
             await api.Post<HostProvisionProgressInput, ProvisionOperationView>(
                 $"api/v1/host-executor/provisioning/{manifest.OperationId}/progress",
-                new(ReportId(manifest.OperationId, assignment.ClaimGeneration, "progress", progress.Sequence),
-                    assignment.ClaimGeneration, progress.Sequence, progress.Stage));
+                new(ReportId(manifest.OperationId, assignment.ClaimGeneration, "progress", progressSequence),
+                    assignment.ClaimGeneration, progressSequence, progress.Stage));
         }
         catch (HttpRequestException) { /* Result delivery still carries the terminal boundary. */ }
     }
-    var resultSequence = Math.Max(1, result.Progress.Select(x => x.Sequence).DefaultIfEmpty().Max() + 1);
+    var resultSequence = NextReportSequence(manifest, assignment.ClaimGeneration);
     var reportedState = ledger.PermitUncertain ? "Unknown" : result.State;
     var reportedCode = ledger.PermitUncertain ? "effect_permit_response_lost_reconciliation_required" : result.Code;
-    await api.Post<HostProvisionResultInput, ProvisionOperationView>(
+    var reported = await api.Post<HostProvisionResultInput, ProvisionOperationView>(
         $"api/v1/host-executor/provisioning/{manifest.OperationId}/result",
         new(ReportId(manifest.OperationId, assignment.ClaimGeneration, "result", resultSequence),
             assignment.ClaimGeneration, resultSequence, result.OperationId, intent.Digest, reportedState,
             reportedCode, result.Observed, result.Executed, result.RetainedResources));
-    return result.State == "VerifiedEnvironment" ? 0 : 2;
+    // Return process success only when the controller acknowledges the exact committed
+    // environment for this operation and claim by ending at AwaitingEnrollment. Discarding
+    // the response and trusting the local runner result (finding 2) would let the process
+    // exit 0 even when the controller retained an Unknown/superseded truth.
+    var reconciled = string.Equals(reported.Id, manifest.OperationId, StringComparison.OrdinalIgnoreCase) &&
+        reported.State == "AwaitingEnrollment";
+    return reconciled && result.State == "VerifiedEnvironment" && !ledger.PermitUncertain ? 0 : 2;
 }
 catch (Exception error) when (error is IOException or InvalidOperationException or UnauthorizedAccessException or HttpRequestException or JsonException)
 {
@@ -81,15 +91,43 @@ catch (Exception error) when (error is IOException or InvalidOperationException 
 
 static int Fail(string message) { Console.Error.WriteLine(message); return 1; }
 
+// Validates that the protected path is an absolute, non-symlink path whose final file
+// is owned by the effective user and is not writable by group/other nor readable by
+// other users. Every path component is checked so a symlinked parent cannot bypass the
+// authority boundary.
 static string ProtectedFile(string path, string name)
 {
     if (!Path.IsPathFullyQualified(path)) throw new InvalidOperationException($"The {name} path must be absolute.");
-    var file = new FileInfo(Path.GetFullPath(path));
-    if (!file.Exists || file.LinkTarget is not null) throw new InvalidOperationException($"The {name} is missing or linked.");
-    var mode = File.GetUnixFileMode(file.FullName);
-    if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite | UnixFileMode.OtherRead)) != 0)
-        throw new InvalidOperationException($"The {name} permissions are too broad.");
-    return file.FullName;
+    var full = Path.GetFullPath(path);
+    var root = Path.GetPathRoot(full)!;
+    var relative = full[root.Length..];
+    var components = relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+
+    var current = root;
+    for (var index = 0; index < components.Length; index++)
+    {
+        current = current.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + components[index];
+        if (index < components.Length - 1)
+        {
+            var info = new DirectoryInfo(current);
+            if (!info.Exists || info.LinkTarget is not null)
+                throw new InvalidOperationException($"The {name} path contains a missing or linked directory component.");
+            continue;
+        }
+        LinuxProtectedFile.AssertProtectedRegularFile(current, name);
+    }
+    return full;
+}
+
+// Race-resistant read: the file is opened once and re-verified on the open descriptor so
+// a replacement between check and read cannot bypass the protected-file authority boundary.
+static async Task<string> ReadProtectedText(string path, string name)
+{
+    var full = ProtectedFile(path, name);
+    using var stream = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.None);
+    LinuxProtectedFile.AssertOpenHandleProtection(stream, name);
+    using var reader = new StreamReader(stream);
+    return await reader.ReadToEndAsync();
 }
 
 static string AuthorityDigest(ProvisionerHostAuthority authority) => Convert.ToHexString(SHA256.HashData(
@@ -99,6 +137,94 @@ static string ReportId(string operationId, long claim, string kind, long sequenc
 {
     var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{operationId}:{claim}:{kind}:{sequence}"));
     return new Guid(bytes.AsSpan(0, 16)).ToString("N");
+}
+
+// Persists a monotonic, per-(operation, claim) report sequence so a restarted executor
+// never reuses an already-acknowledged progress or result sequence. The controller rejects
+// duplicate sequences (report_sequence_conflict), so this durable journal is what lets an
+// already-committed effect be reported again after restart without stranding it as Unknown.
+static long NextReportSequence(HostExecutorManifest manifest, long claim)
+{
+    var keyBytes = SHA256.HashData(Encoding.UTF8.GetBytes(manifest.OperationId + ":" + claim));
+    var key = Convert.ToHexString(keyBytes.AsSpan(0, 8)).ToLowerInvariant();
+    var path = Path.Combine(manifest.Authority.ToolStateDirectory, "host-report-sequence-" + key);
+    var prior = File.Exists(path) && long.TryParse(File.ReadAllText(path), NumberStyles.None, CultureInfo.InvariantCulture, out var saved) ? saved : 0;
+    var next = checked(prior + 1);
+    var temporary = path + ".new";
+    File.WriteAllText(temporary, next.ToString(CultureInfo.InvariantCulture));
+    File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    File.Move(temporary, path, true);
+    return next;
+}
+
+// Linux stat/lstat/fstat bindings used to enforce the protected-file ownership and mode
+// contract and to reject symlinks on every path component, including on the open handle.
+[SupportedOSPlatform("linux")]
+internal static class LinuxProtectedFile
+{
+    private const UnixFileMode RequiredBits = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+    public static void AssertProtectedRegularFile(string path, string name)
+    {
+        var (mode, uid) = Stat(path, followSymlink: false);
+        if ((mode & UnixFileMode.OtherRead) != 0 || (mode & UnixFileMode.GroupWrite) != 0 ||
+            (mode & UnixFileMode.OtherWrite) != 0 || (mode & RequiredBits) != RequiredBits ||
+            uid != EffectiveUid())
+            throw new InvalidOperationException($"The {name} permissions or ownership are too broad.");
+        if (((int)mode & 0xF000) != 0x8000)
+            throw new InvalidOperationException($"The {name} is not a regular file.");
+    }
+
+    public static void AssertOpenHandleProtection(FileStream stream, string name)
+    {
+        // Re-verify the object behind the already-open descriptor so a swap between the
+        // pre-check and the open cannot smuggle in a different, less-protected file.
+        var handle = stream.SafeFileHandle.DangerousGetHandle();
+        var (mode, uid) = FStat(handle);
+        if ((mode & UnixFileMode.OtherRead) != 0 || (mode & UnixFileMode.GroupWrite) != 0 ||
+            (mode & UnixFileMode.OtherWrite) != 0 || (mode & RequiredBits) != RequiredBits ||
+            uid != EffectiveUid())
+            throw new InvalidOperationException($"The {name} was replaced or mis-protected before read.");
+    }
+
+    public static uint EffectiveUid() => GetEuid();
+
+    private static (UnixFileMode Mode, uint Uid) Stat(string path, bool followSymlink)
+    {
+        var buffer = new byte[256];
+        var result = followSymlink
+            ? StatFollow(path, buffer)
+            : LStat(path, buffer);
+        if (result != 0) throw new InvalidOperationException("Unable to inspect protected path.");
+        return Read(buffer);
+    }
+
+    private static (UnixFileMode Mode, uint Uid) FStat(nint fd)
+    {
+        var buffer = new byte[256];
+        if (FStat(fd, buffer) != 0) throw new InvalidOperationException("Unable to inspect opened protected file.");
+        return Read(buffer);
+    }
+
+    private static (UnixFileMode Mode, uint Uid) Read(byte[] buffer) =>
+        RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => ((UnixFileMode)BitConverter.ToInt32(buffer, 24), BitConverter.ToUInt32(buffer, 28)),
+            Architecture.Arm64 => ((UnixFileMode)BitConverter.ToInt32(buffer, 16), BitConverter.ToUInt32(buffer, 24)),
+            _ => throw new InvalidOperationException("Unsupported architecture for protected file checks.")
+        };
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEuid();
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "lstat")]
+    private static extern int LStat(string path, byte[] buffer);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "stat")]
+    private static extern int StatFollow(string path, byte[] buffer);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fstat")]
+    private static extern int FStat(nint fd, byte[] buffer);
 }
 
 internal sealed record HostExecutorManifest(int SchemaVersion, string ControllerUri, string CredentialFile,
