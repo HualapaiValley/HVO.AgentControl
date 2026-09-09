@@ -1,6 +1,8 @@
 # Project, worker and execution environment milestone
 
-Owner priority, 2026-09-08. This is the implementation contract and delivery order for #121, #6, #42, #43 and #98. It supersedes older configuration and assignment defaults where they conflict. It does not claim that the new records, APIs or automated lifecycle are implemented. Preserve current PR104 and audit108 assignments; production-breaking defects may interrupt this sequence with recorded evidence.
+Owner priority, updated 2026-09-09. This is the implementation contract and delivery order for #121, #6, #42, #43, #53 and #98. It supersedes older configuration and assignment defaults where they conflict. It does not claim that the new records, APIs or automated lifecycle are implemented. Preserve active assignments; production-breaking defects may interrupt this sequence with recorded evidence.
+
+The owner confirmed this rollout order: **complete provisioning and replace the beta workers → show the new organization in the UI → introduce RoySalisbury/HVO.RoofControl**. [Worker rollout and repository admission](WORKER_ROLLOUT.md) defines the evidence required at each gate. Test repository isolation with disposable projects during implementation; do not enable live second-repository intake before the earlier rollout gates and isolation checks pass.
 
 ## 1. Separate identities before provisioning
 
@@ -87,7 +89,7 @@ The first #43 operation slice implements authenticated create/list/detail/cancel
 | Retirement | Drain assignments and terminals; inspect unpushed work; stop/remove only recorded owned resources; retain approved volumes/caches and release capacity after observed cleanup. Purge is separate. |
 | Remote Docker host | Repeat a full lifecycle on a second explicitly registered host with real published endpoint and daemon-local paths/caches; no localhost or shared-filesystem assumption. |
 
-Existing fixture/unit/SSH/published desktop/mobile CI remains required. New isolated Docker/Dev Container integration jobs must run on the exact proposed revision with bounded resources and unique ownership labels. Record which live acceptance exercises ran against actual models/hosts. Build caching does not waive lifecycle/user/tool verification.
+Worker validation and the relevant fixture/SSH/published desktop/mobile and Docker/Dev Container acceptance remain required for this milestone. Under the [prerelease validation policy](VALIDATION_POLICY.md), automatic CI is the short `build` check; select relevant integration suites manually when that evidence is needed, rather than requiring every hosted suite on every PR. Run acceptance on the exact proposed revision with bounded resources and unique ownership labels. Record which live exercises ran against actual models/hosts, and distinguish unselected or skipped fixtures from passes. Build caching does not waive lifecycle/user/tool verification.
 
 Only after these gates pass: inventory the legacy fleet; map verified host/environment/project/workspace identities without rewriting active conversations; create one canary worker through the new flow; execute and recover a task; drain and replace one old managed worker; verify retained work/history and rollback; then migrate the rest one at a time. Existing physical machines can remain supported. Restoring the old registration cannot resurrect a killed process, so rollback receipts must state what actually survives.
 
@@ -96,7 +98,8 @@ Only after these gates pass: inventory the legacy fleet; map verified host/envir
 1. **#121:** additive identity/configuration/REST contract with legacy compatibility. Root owns the plan; delegate bounded implementation after review.
 2. **#6 and remaining #4/#5 integration:** shared capacity and authority using existing foundations. **#42:** owned repository preparation and fresh task sessions with workspace verification.
 3. **#43:** type-aware runtime wizard plus REST provisioning, operations, restart/drain/retirement and real automated lifecycle tests. Telemetry/#120 failure classification accompanies this work; multiple slots per container and checkpoint replication are deferred.
-4. **#98:** validate multi-project scheduling against these shared capacities and environment contracts. Admit a second owner-selected repository only with explicit project access/configuration.
-5. **#43 migration acceptance:** canary, retained-state verification and progressive transition of the existing workers/runtimes.
+4. **#43 migration acceptance:** complete the canary lifecycle, retain recovery evidence, and progressively replace the beta workers/runtimes. Use disposable repositories to prove isolation before migrating; live second-repository intake is a later gate.
+5. **#53:** deploy workgroup/worker/task navigation and clear project/runtime status for the replacement fleet. Keep infrastructure details accessible without a redundant container-to-single-worker sidebar level. Validate desktop/mobile navigation, selection and command destinations against the deployed system.
+6. **#98:** admit `RoySalisbury/HVO.RoofControl` as the next repository after the replacement and UI gates. Verify explicit access/configuration, concurrent repository-qualified assignments, fresh sessions on sequential reuse, and rejection of mismatched or stale project bindings through C# services. Follow [the rollout acceptance matrix](WORKER_ROLLOUT.md#repository-admission-and-isolation).
 
 Review current main and issue scope before each assignment. Do not gate a small ready slice on the full closure of a partially shipped epic; create an explicitly bounded prerequisite when necessary. Current PR/audit owners keep their work and the original commissioned audit model policy. New work uses normal risk/provider/model criteria. Unrelated UI polish, expanded provider catalogs and additional transports follow this milestone unless an actual incident requires immediate repair.

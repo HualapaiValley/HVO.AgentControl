@@ -67,6 +67,13 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                 {
                     var runtime = await store.Read(async db => await db.Runtimes.FindAsync(id));
                     if (runtime is null) return;
+                    if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft)
+                    {
+                        await RejectDraftCommands(id);
+                        await Close();
+                        await Task.Delay(options.Value.PollMilliseconds, token);
+                        continue;
+                    }
                     if (!runtime.DesiredConnected)
                     {
                         var stoppedOwned = false;
@@ -824,6 +831,23 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         {
             if (!IsCurrentLifecycle(command, runtime)) continue;
             command.State = Delivery.Finished; command.Attempts++; command.UpdatedAt = ControlStore.Now; ControlStore.Event(db, kind + "Finished", id, commandId: command.Id);
+        }
+        return true;
+    });
+
+    private Task<bool> RejectDraftCommands(string id) => store.Write(async db =>
+    {
+        var runtime = (await db.Runtimes.FindAsync(id))!;
+        runtime.DesiredConnected = false;
+        runtime.Transport = "Unenrolled";
+        runtime.Health = "Pending";
+        runtime.Diagnostic = "Managed runtime enrollment is pending; no transport or command dispatch is permitted.";
+        foreach (var command in await db.Commands.Where(x => x.RuntimeId == id && x.State == Delivery.Queued).ToListAsync())
+        {
+            command.State = Delivery.Cancelled;
+            command.Detail = "Managed runtime enrollment is pending; command was not dispatched.";
+            command.UpdatedAt = ControlStore.Now;
+            ControlStore.Event(db, "DraftCommandRejected", id, commandId: command.Id);
         }
         return true;
     });

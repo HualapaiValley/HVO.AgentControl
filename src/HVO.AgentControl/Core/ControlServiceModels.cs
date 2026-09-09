@@ -2,7 +2,7 @@ namespace HVO.AgentControl.Core;
 
 public static class RuntimeConnections
 {
-    public const string Ssh = "Ssh", ControlHttp = "ControlHttp";
+    public const string Ssh = "Ssh", ControlHttp = "ControlHttp", ManagedDraft = "ManagedDraft";
 }
 
 // The runtime and coordinator records are compatibility projections for the existing durable

@@ -34,3 +34,11 @@ public sealed record RuntimeEnvironmentView(string RuntimeId, string RuntimeName
     long? CreatedAt, long? UpdatedAt);
 
 public sealed record RuntimeEnvironmentPage(List<RuntimeEnvironmentView> Items, string? NextAfter);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record CreateManagedRuntimeDraftInput(string RequestId, string RuntimeId, string Name,
+    string HostId, string ConfigurationProjectId, string DevcontainerPath,
+    long ExpectedHostRevision, long ExpectedProjectRevision);
+
+public sealed record ManagedRuntimeDraftView(RuntimeEnvironmentView Environment, string State, string Message,
+    string RequestId, long CreatedAt);

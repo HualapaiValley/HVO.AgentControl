@@ -1,0 +1,48 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "cliproxy/big-pickle",
+  "provider": {
+    "cliproxy": {
+      "name": "CLIProxy",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://home-docker.home.lan:8317/v1",
+        "apiKey": "{file:/run/secrets/cliproxy-api-key}"
+      },
+      "models": {
+        "big-pickle": { "name": "Big Pickle (Zen Free)" },
+        "mimo-v2.5-free": { "name": "MiniMax Mimo V2.5 Free (Zen)" },
+        "ling-3.0-flash-fin-free": { "name": "Ling 3.0 Flash Fin Free (Zen)" },
+        "nemotron-3-ultra-free": { "name": "Nemotron 3 Ultra Free (Zen)" },
+        "nemotron-3.5-lightning-free": { "name": "Nemotron 3.5 Lightning Free (Zen)" },
+        "claude-opus-5": { "name": "Claude Opus 5 (Pro)" },
+        "claude-sonnet-5": { "name": "Claude Sonnet 5 (Pro)" },
+        "claude-opus-4-6": { "name": "Claude Opus 4.6 (Pro)" },
+        "claude-sonnet-4-6": { "name": "Claude Sonnet 4.6 (Pro)" },
+        "claude-sonnet-4-5-20250929": { "name": "Claude Sonnet 4.5 (Pro)" },
+        "claude-opus-4-6-thinking": { "name": "Claude Opus 4.6 Thinking (Pro)" },
+        "gemini-3.8-flash-high": { "name": "Gemini 3.8 Flash High" },
+        "gemini-3.7-flash-high": { "name": "Gemini 3.7 Flash High" },
+        "gemini-3.1-pro-low": { "name": "Gemini 3.1 Pro Low" },
+        "gemini-pro-agent": { "name": "Gemini Pro Agent" },
+        "glm-5.3-flash": { "name": "GLM 5.3 Flash (Go)" },
+        "glm-5.3": { "name": "GLM 5.3 (Go)" },
+        "glm-5.2": { "name": "GLM 5.2 (Go)" },
+        "kimi-k3": { "name": "Kimi K3 (Go)" },
+        "kimi-k2.7-code": { "name": "Kimi K2.7 Code (Go)" },
+        "deepseek-v4-pro": { "name": "DeepSeek V4 Pro (Go)" },
+        "deepseek-v4-flash-vision-exp": { "name": "DeepSeek V4 Flash Vision (Go)" },
+        "mimo-v2.5-pro": { "name": "MiniMax Mimo V2.5 Pro (Go)" },
+        "minimax-m3": { "name": "MiniMax M3 (Go)" },
+        "qwen3.8-max": { "name": "Qwen 3.8 Max (Go)" },
+        "qwen3.8-flash": { "name": "Qwen 3.8 Flash (Go)" },
+        "qwen3.7-max": { "name": "Qwen 3.7 Max (Go)" },
+        "qwen3.7-plus": { "name": "Qwen 3.7 Plus (Go)" },
+        "qwen3.6-plus": { "name": "Qwen 3.6 Plus (Go)" },
+        "hy3": { "name": "Hy3 (Go)" },
+        "hy4-preview": { "name": "Hy4 Preview (Go)" },
+        "omen-alpha": { "name": "Omen Alpha (Go)" }
+      }
+    }
+  }
+}

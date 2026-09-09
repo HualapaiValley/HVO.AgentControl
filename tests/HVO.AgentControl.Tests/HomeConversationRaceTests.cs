@@ -69,6 +69,148 @@ public sealed class HomeConversationRaceTests
     }
 
     [Fact]
+    public async Task DraftSurvivesLateAbaSelectionAndStillTargetsFinalWorker()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var startedB = Source(); var releaseB = Source();
+        var home = Home(app.Store, async (id, before, beforeId) =>
+        {
+            var loaded = await app.Store.Detail(id, before, beforeId);
+            if (id == b.Id)
+            {
+                startedB.SetResult();
+                await releaseB.Task;
+            }
+            return loaded;
+        });
+
+        await home.Navigate(a.Id);
+        home.SetDraft("draft typed during selection");
+        var pendingB = home.Navigate(b.Id);
+        await startedB.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await home.Navigate(a.Id);
+        releaseB.SetResult();
+        await pendingB;
+
+        Assert.Equal(a.Id, home.Visible!.Worker.Id);
+        Assert.Equal("draft typed during selection", home.Draft);
+        await home.Send("final worker instruction");
+
+        var command = Assert.Single((await app.Store.Detail(a.Id)).Commands);
+        Assert.Equal(a.Id, command.WorkerId);
+        Assert.Equal(a.Revision, Json.Read<PromptInput>(command.Payload).ExpectedRevision);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+    }
+
+    [Fact]
+    public async Task StaleRenderedComposerInputStaysWithRenderedWorkerDuringDelayedNavigation()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var startedB = Source(); var releaseB = Source();
+        var home = Home(app.Store, async (id, before, beforeId) =>
+        {
+            var loaded = await app.Store.Detail(id, before, beforeId);
+            if (id == b.Id)
+            {
+                startedB.SetResult();
+                await releaseB.Task;
+            }
+            return loaded;
+        });
+
+        await home.Navigate(a.Id);
+        var pendingB = home.Navigate(b.Id);
+        await startedB.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        home.SetRenderedDraft(a.Id, "draft-from-rendered-A-25x");
+        await home.SendRendered(a.Id, a.Revision);
+        Assert.NotNull(home.VisibleError);
+        Assert.Empty((await app.Store.Detail(a.Id)).Commands);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+        releaseB.SetResult();
+        await pendingB;
+
+        Assert.Equal(string.Empty, home.Draft);
+        await home.Navigate(a.Id);
+        Assert.Equal("draft-from-rendered-A-25x", home.Draft);
+        await home.Navigate(b.Id);
+        Assert.Equal(string.Empty, home.Draft);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+
+        await home.Navigate(a.Id);
+        await home.Send("final A instruction");
+        var command = Assert.Single((await app.Store.Detail(a.Id)).Commands);
+        Assert.Equal(a.Id, command.WorkerId);
+        Assert.Equal(a.Revision, Json.Read<PromptInput>(command.Payload).ExpectedRevision);
+        Assert.DoesNotContain((await app.Store.Detail(b.Id)).Commands, x =>
+            x.Kind == "Prompt" && Json.Read<PromptInput>(x.Payload).Text == "draft-from-rendered-A-25x");
+    }
+
+    [Fact]
+    public async Task DelayedAcceptedASendDoesNotClearNewlySelectedBDraft()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+        await home.Navigate(a.Id);
+        home.SetRenderedDraft(a.Id, "submitted A draft");
+        var gate = WriterGate(app.Store);
+
+        await gate.WaitAsync();
+        try
+        {
+            var send = home.SendRendered(a.Id, a.Revision);
+            await home.Navigate(b.Id);
+            home.SetRenderedDraft(b.Id, "new unsent B draft");
+            gate.Release();
+            await send;
+        }
+        finally
+        {
+            if (gate.CurrentCount == 0) gate.Release();
+        }
+
+        Assert.Equal("new unsent B draft", home.Draft);
+        Assert.Equal("submitted A draft", Json.Read<PromptInput>(Assert.Single((await app.Store.Detail(a.Id)).Commands).Payload).Text);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+        await home.Navigate(a.Id);
+        Assert.Equal(string.Empty, home.Draft);
+        await home.Navigate(b.Id);
+        Assert.Equal("new unsent B draft", home.Draft);
+    }
+
+    [Fact]
+    public async Task DelayedAcceptedASendDoesNotClearNewerSameWorkerDraft()
+    {
+        await using var app = new TestApp();
+        var (a, _) = await SeedWorkers(app.Store);
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+        await home.Navigate(a.Id);
+        home.SetRenderedDraft(a.Id, "submitted A draft");
+        var gate = WriterGate(app.Store);
+
+        await gate.WaitAsync();
+        try
+        {
+            var send = home.SendRendered(a.Id, a.Revision);
+            home.SetRenderedDraft(a.Id, "newer unsent A draft");
+            gate.Release();
+            await send;
+        }
+        finally
+        {
+            if (gate.CurrentCount == 0) gate.Release();
+        }
+
+        Assert.Equal("newer unsent A draft", home.Draft);
+        var command = Assert.Single((await app.Store.Detail(a.Id)).Commands);
+        var input = Json.Read<PromptInput>(command.Payload);
+        Assert.Equal("submitted A draft", input.Text);
+        Assert.Equal(a.Revision, input.ExpectedRevision);
+    }
+
+    [Fact]
     public async Task DelayedErrorFromFirstAIsRejectedAfterAThenBThenA()
     {
         await using var app = new TestApp();
@@ -245,6 +387,8 @@ public sealed class HomeConversationRaceTests
     }
 
     private static TaskCompletionSource Source() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static SemaphoreSlim WriterGate(ControlStore store) =>
+        (SemaphoreSlim)typeof(ControlStore).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
 
     private static async Task<(WorkerRecord A, WorkerRecord B)> SeedWorkers(ControlStore store, int messages = 0)
     {
@@ -278,6 +422,7 @@ public sealed class HomeConversationRaceTests
         public WorkerDetail? Visible => Field<WorkerDetail?>("detail");
         public string? VisibleError => error;
         public string? Notice => Field<string?>("notice");
+        public string Draft => Field<string>("promptText");
         public string? LastBeforeId { get; private set; }
         public IReadOnlyList<TranscriptMessage> Older => Field<List<TranscriptMessage>>("olderMessages");
         public string ReviewedCommandId => Field<string>("outcomeCommandId");
@@ -287,7 +432,15 @@ public sealed class HomeConversationRaceTests
         public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
-        public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
+        public Task Send(string text)
+        {
+            var worker = Visible!.Worker;
+            SetRenderedDraft(worker.Id, text);
+            return InvokeTask("SendPrompt", worker.Id, worker.Revision);
+        }
+        public Task SendRendered(string workerId, long revision) => InvokeTask("SendPrompt", workerId, revision);
+        public void SetDraft(string text) => SetRenderedDraft(Visible!.Worker.Id, text);
+        public void SetRenderedDraft(string workerId, string text) => Invoke("SetPromptText", workerId, text);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
         {
@@ -307,6 +460,8 @@ public sealed class HomeConversationRaceTests
         private T Field<T>(string name) => (T)typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(this)!;
         private void SetField(string name, object value) => typeof(Home).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, value);
         private Task Invoke(string name) => (Task)typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, null)!;
+        private Task InvokeTask(string name, params object[] args) => (Task)typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, args)!;
+        private void Invoke(string name, params object[] args) => typeof(Home).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(this, args);
     }
 
     private sealed class Authenticated : AuthenticationStateProvider
