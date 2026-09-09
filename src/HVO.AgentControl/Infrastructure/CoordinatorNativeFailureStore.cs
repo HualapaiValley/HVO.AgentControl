@@ -140,8 +140,14 @@ public sealed partial class ControlStore
                 coordinator.SettingsRevision++;
                 changedRoute = true;
                 Event(db, "CoordinatorAutomaticFallbackSelected", coordinator.RuntimeId, coordinator.Id, held.CommandId,
-                    new { run.Id, failedProviderId = held.ProviderId, failedModelId = held.ModelId,
-                        fallbackProviderId = fallback.ProviderId, fallbackModelId = fallback.ModelId });
+                    new
+                    {
+                        run.Id,
+                        failedProviderId = held.ProviderId,
+                        failedModelId = held.ModelId,
+                        fallbackProviderId = fallback.ProviderId,
+                        fallbackModelId = fallback.ModelId
+                    });
             }
         }
         var pool = await db.Set<ProviderPool>().FindAsync("provider:" + coordinator.ProviderId);
