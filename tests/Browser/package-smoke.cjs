@@ -91,6 +91,8 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       await page.getByLabel('Agent conversation').selectOption(workerB);
       await page.getByLabel('Agent conversation').selectOption(workerA);
       const conversation = page.getByRole('region', { name: 'Worker conversation' });
+      await expect(conversation).toHaveAttribute('data-conversation-worker', workerA);
+      await expect.poll(async () => Number(await conversation.getAttribute('data-selection-generation'))).toBeGreaterThanOrEqual(3);
       await expect(conversation.getByRole('heading', { name: 'Conversation race A', exact: true })).toBeVisible();
       await conversation.getByLabel('Task or follow-up').fill('Browser-selected worker identity');
       await conversation.getByRole('button', { name: 'Send instruction', exact: true }).click();
