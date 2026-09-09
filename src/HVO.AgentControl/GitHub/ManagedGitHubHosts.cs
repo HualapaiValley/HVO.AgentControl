@@ -9,7 +9,9 @@ namespace HVO.AgentControl.GitHub;
 internal static class ManagedGitHubHosts
 {
     private const string PlainActor = "^[A-Za-z0-9_-]+\\[bot\\]$";
-    private const string PlainToken = "^[A-Za-z_][A-Za-z0-9_-]*$";
+    // Installation tokens can contain dot-separated segments. gh emits these as plain
+    // YAML strings; dots after a letter/underscore do not introduce YAML scalar syntax.
+    private const string PlainToken = "^[A-Za-z_][A-Za-z0-9_.-]*$";
     private const string ReservedToken = "^(null|true|false|yes|no|on|off)$";
 
     public static string Format(string actor, string token)
@@ -67,7 +69,7 @@ internal static class ManagedGitHubHosts
         if test "$(wc -l < "$config/hosts.yml")" -eq 7; then
         LC_ALL=C awk '
         function actor(v) { return v ~ /^[A-Za-z0-9_-]+\[bot\]$/ }
-        function token(v) { return v ~ /^[A-Za-z_][A-Za-z0-9_-]*$/ && tolower(v) !~ /^(null|true|false|yes|no|on|off)$/ }
+        function token(v) { return v ~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ && tolower(v) !~ /^(null|true|false|yes|no|on|off)$/ }
         {
           line=$0
           if (line ~ /^    user: /) {
