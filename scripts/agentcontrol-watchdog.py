@@ -69,6 +69,21 @@ def analyze(snapshot, runs, now, stall_seconds):
     for request in snapshot.get('requests', []):
         if request.get('state') in ('Pending', 'ReplyUnknown'):
             incidents.append({'kind': 'pending_request', 'subject': identity(request.get('id'))})
+    for access in snapshot.get('githubAccess', []):
+        if access.get('state') != 'Disabled' and (access.get('state') != 'Ready' or
+                not access.get('expiresAt') or access['expiresAt'] <= now * 1000):
+            incidents.append({'kind': 'github_access_unavailable', 'subject': identity(access.get('id'))})
+    for error in snapshot.get('nativeErrors', []):
+        incidents.append({'kind': 'provider_failure', 'subject': identity(error.get('commandId')),
+                          **native_error({'name': error.get('name'), 'data': {
+                              'statusCode': error.get('status'), 'code': error.get('code')}})})
+    # Persisted provider classification can include bounded structured response codes
+    # omitted from the compact native error. Prefer it when both identify the same command.
+    for failure in snapshot.get('providerFailures', []):
+        category, status = failure.get('category'), failure.get('status')
+        incidents.append({'kind': 'provider_failure', 'subject': identity(failure.get('commandId')),
+                          'category': category if category in CATEGORIES else 'NativeError',
+                          'status': status if type(status) is int and 100 <= status <= 599 else None})
     for run in active:
         run_key = identity(run['id'])
         context = parsed(run.get('inputJson', '{}'), {})
@@ -171,7 +186,16 @@ class Controller:
         try:
             if not self.authenticated:
                 self.login()
-            return json.loads(self.read('/api/v1/snapshot')), json.loads(self.read('/api/v1/coordinations'))
+            status = json.loads(self.read('/api/v1/watchdog'))
+            if (not isinstance(status, dict) or status.get('version') != 1 or status.get('complete') is not True or
+                    type(status.get('observedAt')) is not int or not -30 <= time.time() - status['observedAt'] / 1000 <= 120):
+                raise ValueError('Incomplete or stale observation')
+            snapshot, runs = status['snapshot'], status['coordinations']
+            if (not isinstance(snapshot, dict) or not isinstance(runs, list) or
+                    any(not isinstance(snapshot.get(key), list) for key in
+                        ('workers', 'runtimes', 'commands', 'requests', 'providerFailures', 'githubAccess', 'nativeErrors'))):
+                raise ValueError('Invalid observation shape')
+            return snapshot, runs
         except Exception:
             self.authenticated = False
             raise
@@ -207,6 +231,46 @@ def update_incidents(state, observations, now, alert_after, emit):
         if key not in current and record.get('lastReported'):
             emit({'event': 'resolved', 'kind': record['kind'], 'subject': record['subject'], 'observedAt': now})
     state['incidents'] = dict(list(current.items())[-256:])
+
+
+def observe_controller(state, controller, now, stall_seconds, emit):
+    """A running monitor is not healthy unless it can obtain a fresh complete observation."""
+    try:
+        snapshot, runs = controller.snapshot()
+        observations, active, paused = analyze(snapshot, runs, now, stall_seconds)
+        update_incidents(state, observations, now, stall_seconds, emit)
+        if state.get('observationStatus') in ('Unavailable', 'Stale'):
+            emit({'event': 'controller_observation_restored', 'observedAt': now})
+        state.update(lastControllerSuccess=now, intentionalPause=paused, activeCoordination=active,
+                     observationStatus='Healthy', consecutiveObservationFailures=0)
+        for key in ('observationFailureSince', 'controllerFailureAt', 'observationStaleReportedAt'):
+            state.pop(key, None)
+        return True
+    except Exception as error:
+        # Keep previously observed incidents; failure to read is not evidence of their resolution.
+        state.setdefault('observationFailureSince', now)
+        state['consecutiveObservationFailures'] = state.get('consecutiveObservationFailures', 0) + 1
+        since = state.get('lastControllerSuccess', state['observationFailureSince'])
+        state['observationStatus'] = 'Stale' if now - since >= stall_seconds else 'Unavailable'
+        if 'controllerFailureAt' not in state or now - state['controllerFailureAt'] >= 300:
+            kind = type(error).__name__
+            emit({'event': 'controller_observation_failed', 'observedAt': now,
+                  'category': kind if kind in ('HTTPError', 'URLError', 'TimeoutError', 'JSONDecodeError',
+                                              'ValueError', 'KeyError', 'TypeError') else 'ObservationError'})
+            state['controllerFailureAt'] = now
+        if state['observationStatus'] == 'Stale' and (
+                'observationStaleReportedAt' not in state or now - state['observationStaleReportedAt'] >= 300):
+            emit({'event': 'controller_observation_stale', 'severity': 'critical', 'observedAt': now,
+                  'unobservedSeconds': max(0, int(now - since))})
+            state['observationStaleReportedAt'] = now
+        return False
+
+
+def recovery_is_paused(state, now, stall_seconds):
+    # A recent explicit running observation allows recovery of a controller that just exited.
+    # Startup, an owner pause, or extended blindness cannot authorize container starts.
+    return (state.get('intentionalPause', True) or state.get('activeCoordination') is not True or 'lastControllerSuccess' not in state or
+            now - state['lastControllerSuccess'] >= stall_seconds)
 
 
 class Docker:
@@ -303,32 +367,18 @@ def main():
 
         while True:
             now = time.time()
-            try:
-                snapshot, runs = controller.snapshot()
-                observations, active, paused = analyze(snapshot, runs, now, args.stall_seconds)
-                state['lastControllerSuccess'] = now
-                state['intentionalPause'] = paused
-                state['activeCoordination'] = active
-                update_incidents(state, observations, now, args.stall_seconds, emit)
-                state.pop('controllerFailureAt', None)
-            except Exception as error:
-                if now - state.get('controllerFailureAt', 0) >= 300:
-                    kind = type(error).__name__
-                    emit({'event': 'controller_observation_failed', 'observedAt': now,
-                          'category': kind if kind in ('HTTPError', 'URLError', 'TimeoutError', 'JSONDecodeError',
-                                                      'ValueError', 'KeyError', 'TypeError') else 'ObservationError'})
-                    state['controllerFailureAt'] = now
+            fresh = observe_controller(state, controller, now, args.stall_seconds, emit)
             recover_containers(state, docker, args.container, args.owner_label, now, args.confirm_checks,
-                               args.cooldown, args.restart_exited, state.get('intentionalPause', False), emit)
+                               args.cooldown, args.restart_exited, recovery_is_paused(state, now, args.stall_seconds), emit)
             atomic_write(args.state_file, state)
             if args.once:
-                break
+                return 0 if fresh else 1
             time.sleep(args.interval)
 
 
 if __name__ == '__main__':
     try:
-        main()
+        raise SystemExit(main())
     except (OSError, ValueError):
         # Startup diagnostics intentionally omit filesystem paths and exception bodies.
         print('{"event":"watchdog_startup_failed"}', flush=True)

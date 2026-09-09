@@ -197,6 +197,70 @@ class WatchdogTests(unittest.TestCase):
             self.assertFalse(controller.authenticated)
             self.assertIn(b'password=SECRET', controller.read.call_args_list[1].args[1])
 
+    def test_compact_status_is_used_and_stale_or_partial_observations_are_rejected(self):
+        controller = watchdog.Controller('http://localhost', Path('/unused'), 7)
+        payload = {'version': 1, 'observedAt': 1000000, 'complete': True, 'coordinations': [],
+                   'snapshot': {key: [] for key in ('runtimes', 'workers', 'commands', 'requests', 'providerFailures', 'githubAccess', 'nativeErrors')}}
+        with patch.object(watchdog.time, 'time', return_value=1000):
+            controller.authenticated = True
+            controller.read = Mock(return_value=json.dumps(payload).encode())
+            self.assertEqual((payload['snapshot'], []), controller.snapshot())
+            controller.read.assert_called_once_with('/api/v1/watchdog')
+            for change in ({'complete': False}, {'version': 2}, {'observedAt': 1000}, {'observedAt': 2000000}, {'snapshot': {}}):
+                with self.subTest(change=change):
+                    controller.authenticated = True
+                    controller.read = Mock(return_value=json.dumps({**payload, **change}).encode())
+                    with self.assertRaises(ValueError):
+                        controller.snapshot()
+                    self.assertFalse(controller.authenticated)
+
+    def test_blind_monitor_escalates_persists_and_recovers_without_false_resolution(self):
+        controller, events = Mock(), []
+        state = {'lastControllerSuccess': 1000, 'intentionalPause': False, 'activeCoordination': True,
+                 'incidents': {'pending_request:worker': {'kind': 'pending_request', 'subject': 'worker', 'lastReported': 1000}}}
+        controller.snapshot.side_effect = ValueError('SECRET oversized response')
+        self.assertFalse(watchdog.observe_controller(state, controller, 1030, 300, events.append))
+        self.assertEqual('Unavailable', state['observationStatus'])
+        self.assertFalse(watchdog.recovery_is_paused(state, 1030, 300))
+        state = json.loads(json.dumps(state))  # watchdog process restart retains the outage age
+        watchdog.observe_controller(state, controller, 1301, 300, events.append)
+        self.assertEqual('Stale', state['observationStatus'])
+        self.assertTrue(watchdog.recovery_is_paused(state, 1301, 300))
+        self.assertIn('pending_request:worker', state['incidents'])
+        self.assertEqual('critical', events[-1]['severity'])
+        self.assertEqual(301, events[-1]['unobservedSeconds'])
+        self.assertNotIn('SECRET', json.dumps(state) + json.dumps(events))
+        controller.snapshot.side_effect = None
+        controller.snapshot.return_value = self.fleet('Paused')
+        self.assertTrue(watchdog.observe_controller(state, controller, 1302, 300, events.append))
+        self.assertEqual('Healthy', state['observationStatus'])
+        self.assertEqual('controller_observation_restored', events[-1]['event'])
+        self.assertEqual(0, state['consecutiveObservationFailures'])
+        self.assertTrue(watchdog.recovery_is_paused(state, 1302, 300))
+        self.assertTrue(watchdog.recovery_is_paused({}, 1000, 300))
+
+    def test_stopping_final_run_cannot_authorize_restarting_exited_containers(self):
+        controller, state, docker = Mock(), {}, self.docker()
+        snapshot, _ = self.fleet()
+        controller.snapshot.return_value = (snapshot, [])  # compact API omits terminal runs
+        self.assertTrue(watchdog.observe_controller(state, controller, 1000, 300, lambda event: None))
+        for stamp in (1000, 1030, 1060):
+            self.recover(state, docker, stamp, paused=watchdog.recovery_is_paused(state, stamp, 300))
+        docker.start.assert_not_called()
+
+    def test_github_expiry_and_structured_provider_failures_are_observed_during_pause(self):
+        snapshot, runs = self.fleet('Paused')
+        snapshot['githubAccess'] = [{'id': 'expired', 'state': 'Ready', 'expiresAt': 999000},
+                                    {'id': 'blocked', 'state': 'Blocked'},
+                                    {'id': 'disabled', 'state': 'Disabled'},
+                                    {'id': 'good', 'state': 'Ready', 'expiresAt': 1001000}]
+        snapshot['providerFailures'] = [{'commandId': 'prompt', 'category': 'AuthenticationRequired', 'status': 401}]
+        observations, active, paused = watchdog.analyze(snapshot, runs, 1000, 300)
+        self.assertEqual(2, sum(x['kind'] == 'github_access_unavailable' for x in observations))
+        self.assertEqual(401, next(x for x in observations if x['kind'] == 'provider_failure')['status'])
+        self.assertFalse(active)
+        self.assertTrue(paused)
+
     def test_cross_origin_login_redirect_is_rejected(self):
         request = urllib.request.Request('http://127.0.0.1/auth/login', data=b'password=SECRET')
         with self.assertRaises(ValueError):

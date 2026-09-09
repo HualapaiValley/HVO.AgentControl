@@ -59,6 +59,7 @@ public static class ApiEndpoints
         group.MapGet("/operator-updates", (long? after, int? take, ControlStore store) => store.OperatorUpdates(after ?? 0, take ?? 50));
         group.MapPost("/operator-updates/{id}/ack", (string id, ControlStore store) => store.AcknowledgeOperatorUpdate(id));
         group.MapGet("/snapshot", (ControlStore store) => store.Snapshot());
+        group.MapGet("/watchdog", (ControlStore store) => store.WatchdogStatus());
         group.MapGet("/usage", (string? workerId, string? providerId, string? modelId, long? from, long? to, ControlStore store) =>
             store.Usage(new(workerId, providerId, modelId, from, to)));
         group.MapGet("/usage/export", async (string? workerId, string? providerId, string? modelId, long? from, long? to, ControlStore store) =>
