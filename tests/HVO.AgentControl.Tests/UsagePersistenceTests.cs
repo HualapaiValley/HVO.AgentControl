@@ -167,6 +167,49 @@ public sealed class UsagePersistenceTests
     }
 
     [Fact]
+    public async Task LegacyLedgerCanBackfillLineageFromRetainedExactNativeRevision()
+    {
+        string data, secrets;
+        await using (var app = new TestApp())
+        {
+            data = app.DataPath; secrets = app.SecretPath;
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            // Retained exact complete JSON: native created 100 / completed 200, summary, parent, finish.
+            var provenanceMessage = ProvenanceMessage("assistant-backfill-lineage", worker.NativeSessionId);
+            await SaveTranscript(app.Store, worker, provenanceMessage);
+            Assert.Equal(1, (await app.Store.BackfillUsage()).Changed);
+            Assert.Equal("caller-backfill", Assert.Single((await app.Store.Usage(new())).Rows).ParentMessageId);
+            Assert.True(Assert.Single((await app.Store.Usage(new())).Rows).IsSummary);
+
+            // Reproduce a pre-migration ledger: a later poll observation holds the row, and the new
+            // provenance table is empty.
+            await app.Store.Write(async db =>
+            {
+                var row = await db.ModelUsage.SingleAsync(x => x.RuntimeId == worker.RuntimeId && x.NativeSessionId == worker.NativeSessionId && x.NativeMessageId == "assistant-backfill-lineage");
+                row.ObservedAt = 500;
+                await db.ModelUsageProvenance.ExecuteDeleteAsync();
+                return true;
+            });
+        }
+
+        // On restart the network is absent; backfill must still enrich the retained row's lost
+        // provenance from the matching retained native revision, without dropping it to defaults.
+        await using var restarted = new TestApp(data, secrets);
+        var backfill = await restarted.Store.BackfillUsage();
+        Assert.Equal(1, backfill.Accepted);
+        var restored = Assert.Single((await restarted.Store.Usage(new())).Rows);
+        Assert.Equal("caller-backfill", restored.ParentMessageId);
+        Assert.True(restored.IsSummary);
+        Assert.Equal("stop", restored.FinishReason);
+        Assert.Equal(15, restored.EffectiveInputTokens);
+        var provenance = Assert.Single(await restarted.Store.Read(db => db.ModelUsageProvenance.ToListAsync()));
+        Assert.Equal("caller-backfill", provenance.ParentMessageId);
+        Assert.True(provenance.IsSummary);
+        Assert.Equal("stop", provenance.FinishReason);
+        Assert.Equal(15, provenance.EffectiveInputTokens);
+    }
+
+    [Fact]
     public async Task ReportSeparatesRolesCurrenciesMissingValuesAndExportsStableRows()
     {
         await using var app = new TestApp();
@@ -265,4 +308,22 @@ public sealed class UsagePersistenceTests
         if (currency is not null) info["currency"] = currency;
         return JsonSerializer.Serialize(new { info, parts = Array.Empty<object>() });
     }
+
+    private static string ProvenanceMessage(string id, string sessionId) => JsonSerializer.Serialize(new
+    {
+        info = new
+        {
+            id,
+            sessionID = sessionId,
+            role = "assistant",
+            providerID = "openai",
+            modelID = "gpt-5.6-sol",
+            parentID = "caller-backfill",
+            summary = true,
+            finish = "stop",
+            time = new { created = 100L, completed = 200L },
+            tokens = new { input = 5L, output = 2L, reasoning = 1L, cache = new { read = 7L, write = 3L } }
+        },
+        parts = Array.Empty<object>()
+    });
 }

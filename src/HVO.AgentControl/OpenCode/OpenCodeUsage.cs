@@ -19,8 +19,18 @@ public sealed record OpenCodeUsage
     public long? ReasoningTokens { get; init; }
     public long? CacheReadTokens { get; init; }
     public long? CacheWriteTokens { get; init; }
-    public long? EffectiveInputTokens => InputTokens.HasValue && CacheReadTokens.HasValue && CacheWriteTokens.HasValue
-        ? InputTokens.Value + CacheReadTokens.Value + CacheWriteTokens.Value : null;
+    public long? EffectiveInputTokens
+    {
+        get
+        {
+            try
+            {
+                return InputTokens.HasValue && CacheReadTokens.HasValue && CacheWriteTokens.HasValue
+                    ? checked(InputTokens.Value + CacheReadTokens.Value + CacheWriteTokens.Value) : null;
+            }
+            catch (OverflowException) { return null; }
+        }
+    }
     public string? ParentMessageId { get; init; }
     public bool IsSummary { get; init; }
     public string? FinishReason { get; init; }

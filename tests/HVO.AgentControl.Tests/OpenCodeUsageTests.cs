@@ -74,6 +74,26 @@ public sealed class OpenCodeUsageTests
     }
 
     [Fact]
+    public void ValidIndividualCountersCannotWrapEffectiveInputNegative()
+    {
+        var result = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            time = new { created = 100L, completed = 200L },
+            tokens = new { input = long.MaxValue, cache = new { read = 1L, write = 0L } }
+        }));
+
+        Assert.True(result.Accepted);
+        Assert.Equal(long.MaxValue, result.Usage!.InputTokens);
+        Assert.Equal(1, result.Usage.CacheReadTokens);
+        Assert.Equal(0, result.Usage.CacheWriteTokens);
+        // The cache-inclusive sum would overflow Int64; it must be unknown, never a wrapped negative.
+        Assert.Null(result.Usage.EffectiveInputTokens);
+    }
+
+    [Fact]
     public void ParsesDirectAssistantModelVariantAndKeepsMissingDistinctFromZero()
     {
         var result = Parse(new

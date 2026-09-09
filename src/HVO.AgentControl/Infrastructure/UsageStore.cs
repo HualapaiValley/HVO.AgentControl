@@ -159,6 +159,14 @@ public sealed partial class ControlStore
             var merged = OpenCodeUsageMerger.Merge(existing, incoming);
             authoritative = merged;
             if (merged != existing) { Apply(row, merged); changed = true; }
+            else if (CompatibleRevision(existing, incoming))
+            {
+                // Upgrade/backfill: the merger keeps the retained ledger row (later observation),
+                // but a pre-migration row lacks the new provenance fields. Feed the compatible
+                // incoming revision's provenance into the evidence update below without touching
+                // the retained row's counters/provider/model from stale or contradictory data.
+                authoritative = incoming;
+            }
         }
         evidence ??= new ModelUsageProvenanceRecord { RuntimeId = identity.RuntimeId, NativeSessionId = identity.SessionId, NativeMessageId = identity.MessageId };
         if (evidence.EffectiveInputTokens != authoritative.EffectiveInputTokens || evidence.ParentMessageId != authoritative.ParentMessageId ||
@@ -224,6 +232,28 @@ public sealed partial class ControlStore
     }
 
     private static bool SameRevision(OpenCodeUsage left, OpenCodeUsage right) => left with { ObservedAt = 0 } == right with { ObservedAt = 0 };
+
+    // A compatible revision has the same native identity and never contradicts or replaces the
+    // retained row's authoritative provider/model/counters. Where the retained row has a value it
+    // must equal the incoming value; only absent values may differ, so nothing is replaced by
+    // stale or contradictory data.
+    private static bool CompatibleRevision(OpenCodeUsage existing, OpenCodeUsage incoming)
+    {
+        if (existing.Identity != incoming.Identity) return false;
+        return CompatibleText(existing.ProviderId, incoming.ProviderId) &&
+               CompatibleText(existing.ModelId, incoming.ModelId) &&
+               CompatibleNumber(existing.CreatedAt, incoming.CreatedAt) &&
+               CompatibleNumber(existing.CompletedAt, incoming.CompletedAt) &&
+               CompatibleNumber(existing.TotalTokens, incoming.TotalTokens) &&
+               CompatibleNumber(existing.InputTokens, incoming.InputTokens) &&
+               CompatibleNumber(existing.OutputTokens, incoming.OutputTokens) &&
+               CompatibleNumber(existing.ReasoningTokens, incoming.ReasoningTokens) &&
+               CompatibleNumber(existing.CacheReadTokens, incoming.CacheReadTokens) &&
+               CompatibleNumber(existing.CacheWriteTokens, incoming.CacheWriteTokens);
+    }
+
+    private static bool CompatibleText(string? a, string? b) => a is null || b is null || a == b;
+    private static bool CompatibleNumber(long? a, long? b) => a is null || b is null || a == b;
     private static bool MarkEvidence(ModelUsageRecord row, UsageSource source)
     {
         if (source == UsageSource.Transcript && !row.SeenInTranscript) { row.SeenInTranscript = true; return true; }
