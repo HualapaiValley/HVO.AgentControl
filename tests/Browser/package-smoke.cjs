@@ -143,6 +143,9 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       expect(saved.continuousSupervision).toBe(true);
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
+      // Finish the interop-backed preference write before a full navigation tears down this circuit.
+      await expect(page.getByRole('button', { name: 'Collapse worker sidebar', exact: true })).toBeVisible();
+      await expect.poll(() => page.evaluate(() => localStorage.getItem('hvo.agentcontrol.sidebar-collapsed'))).toBe('false');
     }
     await page.goto(base + '/providers');
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');

@@ -82,6 +82,9 @@ def analyze(snapshot, runs, now, stall_seconds):
         attempt = parsed(context.get('repair'), {}).get('attempt', 0)
         if type(attempt) is int and attempt >= 2:
             incidents.append({'kind': 'repeated_format_recovery', 'subject': run_key})
+        recovery_attempt = parsed(context.get('recovery'), {}).get('attempt', 0)
+        if type(recovery_attempt) is int and recovery_attempt >= 2:
+            incidents.append({'kind': 'repeated_decision_recovery', 'subject': run_key})
         command = by_id.get(run.get('decisionCommandId'), {})
         result = parsed(command.get('resultJson', '{}'), {})
         for message in result.get('messages', []):

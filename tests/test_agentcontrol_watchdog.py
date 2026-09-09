@@ -59,6 +59,13 @@ class WatchdogTests(unittest.TestCase):
             self.assertIn('unresolved_command', [item['kind'] for item in incidents])
             self.assertNotIn('SECRET', json.dumps(incidents))
 
+    def test_repeated_action_rejection_or_scheduler_recovery_is_observable_without_reason_text(self):
+        snapshot, runs = self.fleet('Recovering')
+        runs[0]['inputJson'] = '{"recovery":{"attempt":2,"reason":"SECRET"}}'
+        incidents, _, _ = watchdog.analyze(snapshot, runs, 1000, 300)
+        self.assertIn('repeated_decision_recovery', [item['kind'] for item in incidents])
+        self.assertNotIn('SECRET', json.dumps(incidents))
+
     def test_live_work_and_pending_permission_are_not_reported_as_missing_assignment(self):
         snapshot, runs = self.fleet()
         snapshot['commands'] = [{'id': 'work', 'workerId': 'worker', 'state': 'Running',
