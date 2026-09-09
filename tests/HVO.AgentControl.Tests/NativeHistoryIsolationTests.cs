@@ -67,7 +67,7 @@ public sealed class NativeHistoryIsolationTests
             Assert.DoesNotContain("history could not be read", recoveredRuntime.Diagnostic);
             Assert.Equal(worker.NativeSessionId, recovered.Worker.NativeSessionId);
             Assert.Equal(1, recovered.Commands.Single().Attempts);
-            Assert.Contains("Verified final", ControlStore.ResponseText(recovered.Commands.Single().ResultJson));
+            Assert.Contains("Verified final", ControlStore.ResponseText((await app.Store.Command(recovered.Commands.Single().Id)).ResultJson));
             Assert.Equal(1, factory.Connections);
             Assert.Equal(0, handler.Mutations);
             Assert.Single(await app.Store.Read(db => db.Commands.Where(x => x.Kind == "Prompt").ToListAsync()));

@@ -472,17 +472,17 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync());
     });
 
-public Task<WorkerDetail> Detail(string id, long? before = null, string? beforeId = null)
+    public Task<WorkerDetail> Detail(string id, long? before = null, string? beforeId = null)
     {
         if (before is null && !string.IsNullOrWhiteSpace(beforeId)) throw new ControlException("Transcript cursor ID requires its timestamp.", 400);
         if (beforeId is not null && string.IsNullOrWhiteSpace(beforeId)) throw new ControlException("Transcript cursor ID must not be empty.", 400);
         return Read(async db =>
         {
-            var recent = await db.Commands.AsNoTracking().Where(x => x.WorkerId == id)
-                .OrderByDescending(x => x.CreatedAt).Take(100).ToListAsync();
-            var outstanding = await db.Commands.AsNoTracking().Where(x => x.WorkerId == id &&
+            var recent = await CommandMetadata(db.Commands.AsNoTracking().Where(x => x.WorkerId == id)
+                .OrderByDescending(x => x.CreatedAt).Take(100)).ToListAsync();
+            var outstanding = await CommandMetadata(db.Commands.AsNoTracking().Where(x => x.WorkerId == id &&
                 (x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted ||
-                 x.State == Delivery.Running || x.State == Delivery.Unknown)).ToListAsync();
+                 x.State == Delivery.Running || x.State == Delivery.Unknown))).ToListAsync();
             return new WorkerDetail(
                 await db.Workers.FindAsync(id) ?? throw new ControlException("Worker not found.", 404),
                 await db.Messages.Where(x => x.WorkerId == id && (before == null || x.NativeCreatedAt < before ||

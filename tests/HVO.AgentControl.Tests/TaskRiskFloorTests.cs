@@ -85,7 +85,7 @@ public sealed class TaskRiskFloorTests
         var claimed = await (Task<CommandRecord?>)claim.Invoke(supervisor, [worker.RuntimeId, null])!;
 
         Assert.Null(claimed);
-        var saved = (await app.Store.Detail(worker.Id)).Commands.Single(x => x.Id == command.Id);
+        var saved = await app.Store.Command(command.Id);
         Assert.Equal(Delivery.Failed, saved.State);
         Assert.Equal("risk_floor_not_met", Json.Read<TaskRiskRejection>(saved.ResultJson).Code);
         Assert.Single(await app.Store.Read(db => db.Events.Where(x => x.Type == "TaskRiskFloorRejected" && x.CommandId == command.Id).ToListAsync()));
@@ -112,7 +112,7 @@ public sealed class TaskRiskFloorTests
         var claimed = await (Task<CommandRecord?>)claim.Invoke(supervisor, [worker.RuntimeId, null])!;
 
         Assert.Null(claimed);
-        var saved = (await app.Store.Detail(worker.Id)).Commands.Single(x => x.Id == command.Id);
+        var saved = await app.Store.Command(command.Id);
         Assert.Equal(Delivery.Failed, saved.State);
         Assert.Equal("risk_level_required", Json.Read<TaskRiskRejection>(saved.ResultJson).Code);
     }

@@ -36,7 +36,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         var detail = await restarted.Store.Detail(savedWorker.Id);
         Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
         Assert.Equal("NeedsReview", detail.Worker.Outcome);
-        Assert.Contains("Permission was rejected", detail.Commands.Single().ResultJson);
+        Assert.Contains("Permission was rejected", (await restarted.Store.Command(savedCommand.Id)).ResultJson);
     }
 
     [Theory]
@@ -71,7 +71,7 @@ public sealed class RuntimeSupervisorReconciliationTests
 
         var result = (await app.Store.Detail(worker.Id)).Commands.Single();
         Assert.Equal(Delivery.Finished, result.State);
-        Assert.Contains("Final response after permission denial", ControlStore.ResponseText(result.ResultJson));
+        Assert.Contains("Final response after permission denial", ControlStore.ResponseText((await app.Store.Command(result.Id)).ResultJson));
     }
 
     [Fact]
@@ -86,7 +86,7 @@ public sealed class RuntimeSupervisorReconciliationTests
             await Reconcile(app, worker, snapshot with { Messages = snapshot.Messages[..^1] });
             var retained = (await app.Store.Detail(worker.Id)).Commands.Single();
             Assert.Equal(Delivery.Accepted, retained.State);
-            Assert.Equal(command.ResultJson, retained.ResultJson);
+            Assert.Equal(command.ResultJson, (await app.Store.Command(retained.Id)).ResultJson);
             data = app.DataPath; secrets = app.SecretPath;
         }
 
@@ -99,7 +99,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         await Reconcile(restarted, restartedWorker, Snapshot(restartedWorker, restartedCommand, FinalAssistant(completed: 4, text: "Final review evidence")));
         var finished = (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single();
         Assert.Equal(Delivery.Finished, finished.State);
-        Assert.Contains("Final review evidence", ControlStore.ResponseText(finished.ResultJson!));
+        Assert.Contains("Final review evidence", ControlStore.ResponseText((await restarted.Store.Command(finished.Id)).ResultJson));
     }
 
     [Theory]
@@ -130,7 +130,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         var detail = await app.Store.Detail(worker.Id);
         Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
         Assert.Equal("Failed", detail.Worker.Outcome);
-        Assert.Contains("Provider failed", detail.Commands.Single().ResultJson);
+        Assert.Contains("Provider failed", (await app.Store.Command(command.Id)).ResultJson);
     }
 
     [Fact]
@@ -158,7 +158,7 @@ public sealed class RuntimeSupervisorReconciliationTests
         await Reconcile(restarted, restartedWorker, Snapshot(restartedWorker, restartedCommand, FinalAssistant(completed: 4, text: "APPROVED receipt")));
         var completed = (await restarted.Store.Detail(restartedWorker.Id)).Commands.Single();
         Assert.Equal(Delivery.Finished, completed.State);
-        Assert.Contains("APPROVED receipt", ControlStore.ResponseText(completed.ResultJson!));
+        Assert.Contains("APPROVED receipt", ControlStore.ResponseText((await restarted.Store.Command(completed.Id)).ResultJson));
     }
 
     [Fact]
@@ -211,8 +211,14 @@ public sealed class RuntimeSupervisorReconciliationTests
         {
             info = new
             {
-                id = "msg_final", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId,
-                providerID = "openai", modelID = "gpt-5.6-luna", time = new { created = 3L, completed = 4L }, finish = "stop"
+                id = "msg_final",
+                role = "assistant",
+                parentID = command.NativeMessageId,
+                sessionID = worker.NativeSessionId,
+                providerID = "openai",
+                modelID = "gpt-5.6-luna",
+                time = new { created = 3L, completed = 4L },
+                finish = "stop"
             },
             parts = new[] { new { type = "text", text = "Executed on unexpected route" } }
         });
@@ -224,9 +230,14 @@ public sealed class RuntimeSupervisorReconciliationTests
         {
             info = new
             {
-                id = "msg_final_expected", role = "assistant", parentID = command.NativeMessageId,
-                sessionID = worker.NativeSessionId, providerID = "openai", modelID = "gpt-5.6-sol",
-                time = new { created = 5L, completed = 6L }, finish = "stop"
+                id = "msg_final_expected",
+                role = "assistant",
+                parentID = command.NativeMessageId,
+                sessionID = worker.NativeSessionId,
+                providerID = "openai",
+                modelID = "gpt-5.6-sol",
+                time = new { created = 5L, completed = 6L },
+                finish = "stop"
             },
             parts = new[] { new { type = "text", text = "Final response after bounded history changed" } }
         });
@@ -249,7 +260,8 @@ public sealed class RuntimeSupervisorReconciliationTests
         {
             info = new
             {
-                providerID = "openai", modelID = "gpt-5.6-sol",
+                providerID = "openai",
+                modelID = "gpt-5.6-sol",
                 model = new { providerID = "openai", id = "gpt-5.6-luna" }
             }
         });
@@ -260,27 +272,33 @@ public sealed class RuntimeSupervisorReconciliationTests
         Assert.True(route.Contradictory);
     }
 
-[Fact]
-        public async Task LateRouteMismatchCorrectsFinishedAssignmentOutcome()
-        {
-            await using var app = new TestApp();
-            var worker = await PersistenceTests.SeedWorker(app.Store);
-            var command = await AddPrompt(app, worker);
-            await app.Store.Write(async db =>
-        {
-            var saved = (await db.Commands.FindAsync(command.Id))!;
-            saved.ExecutionPayload = Json.Write(new PromptInput("task", "High risk task", worker.Revision,
-                "openai", "gpt-5.6-sol", RiskLevel: TaskRiskLevels.High,
-                RiskPolicyVersion: "risk-floor-v1", RiskRouteMaximum: TaskRiskLevels.High));
-            db.Assignments.Add(new AssignmentRecord { Id = command.Id, WorkerId = worker.Id, Prompt = "High risk task" });
-            return true;
-        });
+    [Fact]
+    public async Task LateRouteMismatchCorrectsFinishedAssignmentOutcome()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = await AddPrompt(app, worker);
+        await app.Store.Write(async db =>
+    {
+        var saved = (await db.Commands.FindAsync(command.Id))!;
+        saved.ExecutionPayload = Json.Write(new PromptInput("task", "High risk task", worker.Revision,
+            "openai", "gpt-5.6-sol", RiskLevel: TaskRiskLevels.High,
+            RiskPolicyVersion: "risk-floor-v1", RiskRouteMaximum: TaskRiskLevels.High));
+        db.Assignments.Add(new AssignmentRecord { Id = command.Id, WorkerId = worker.Id, Prompt = "High risk task" });
+        return true;
+    });
         JsonElement Final(string model) => JsonSerializer.SerializeToElement(new
         {
             info = new
             {
-                id = "msg_final", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId,
-                providerID = "openai", modelID = model, time = new { created = 3L, completed = 4L }, finish = "stop"
+                id = "msg_final",
+                role = "assistant",
+                parentID = command.NativeMessageId,
+                sessionID = worker.NativeSessionId,
+                providerID = "openai",
+                modelID = model,
+                time = new { created = 3L, completed = 4L },
+                finish = "stop"
             },
             parts = new[] { new { type = "text", text = "Terminal result" } }
         });

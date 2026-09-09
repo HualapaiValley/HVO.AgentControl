@@ -34,7 +34,7 @@ public sealed class HomeConversationRaceTests
         Assert.Equal(b.Revision, home.Visible.Worker.Revision);
         await home.Send("final worker instruction");
 
-        var command = Assert.Single((await app.Store.Detail(b.Id)).Commands);
+        var command = await app.Store.Command(Assert.Single((await app.Store.Detail(b.Id)).Commands).Id);
         Assert.Equal(b.Id, command.WorkerId);
         var input = Json.Read<PromptInput>(command.Payload);
         Assert.Equal(b.Revision, input.ExpectedRevision);

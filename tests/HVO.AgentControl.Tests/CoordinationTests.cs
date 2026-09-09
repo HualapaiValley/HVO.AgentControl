@@ -519,7 +519,7 @@ public sealed partial class CoordinationTests
         Assert.True(evidence.EarlierTextOmitted);
         Assert.True(evidence.Response.Length <= 6000);
         Assert.Empty(evidence.ProgressText);
-        Assert.Equal(nativeResult, (await app.Store.Snapshot()).Commands.Single(x => x.Id == assignment.Id).ResultJson);
+        Assert.Equal(nativeResult, (await app.Store.Command(assignment.Id)).ResultJson);
         await FinishDecision(app.Store, run.Id, new("Clean review received.", [], true));
         await app.Store.CoordinationTick();
         Assert.Equal("Completed", (await app.Store.Coordinations()).Single().State);
@@ -544,7 +544,7 @@ public sealed partial class CoordinationTests
         await FinishDecision(app.Store, run.Id, new("Assign A", [new("send_prompt", a.Id, "Perform the requested long task.")]));
         await app.Store.CoordinationTick();
         var assignment = (await app.Store.Snapshot()).Commands.Single(x => x.Origin == "coordinator:" + run.Id);
-        Assert.Contains("every 1 minutes", Json.Read<PromptInput>(assignment.ExecutionPayload).Text);
+        Assert.Contains("every 1 minutes", (await app.Store.CommandPrompt(assignment.Id)).Text);
         await app.Store.Write(async db =>
         {
             var command = (await db.Commands.FindAsync(assignment.Id))!;
@@ -561,8 +561,9 @@ public sealed partial class CoordinationTests
         var messages = (await app.Store.Snapshot()).Commands.Where(x => x.Origin == "coordinator:" + run.Id).ToArray();
         Assert.Equal(2, messages.Length);
         var broadcast = messages.Single(x => x.WorkerId == b.Id);
-        Assert.False(Json.Read<PromptInput>(broadcast.Payload).IncludeGuidance);
-        Assert.Null(Json.Read<PromptInput>(broadcast.Payload).ProgressMinutes);
+        var broadcastPrompt = await app.Store.CommandPrompt(broadcast.Id);
+        Assert.False(broadcastPrompt.IncludeGuidance);
+        Assert.Null(broadcastPrompt.ProgressMinutes);
         Assert.False(await app.Store.CoordinationTick());
         Assert.Equal(2, (await app.Store.Coordinations()).Single().Round);
     }
@@ -776,12 +777,13 @@ public sealed partial class CoordinationTests
         await app.Store.CoordinationTick();
         var snapshot = await app.Store.Snapshot();
         var command = Assert.Single(snapshot.Commands, x => x.Origin == "coordinator:" + run.Id);
-        var payload = Json.Read<PromptInput>(command.ExecutionPayload);
+        var execution = (await app.Store.Command(command.Id)).ExecutionPayload;
+        var payload = await app.Store.CommandPrompt(command.Id);
         Assert.Equal("review", payload.ModelId); Assert.Equal("openai", payload.ProviderId); Assert.Equal("", payload.Variant);
         var saved = snapshot.Workers.Single(x => x.Id == a.Id);
         Assert.Equal("implementation", saved.ModelId); Assert.Equal("high", saved.Variant); Assert.Equal(a.NativeSessionId, saved.NativeSessionId);
         await app.Store.Recover();
-        Assert.Equal(command.ExecutionPayload, (await app.Store.Snapshot()).Commands.Single(x => x.Id == command.Id).ExecutionPayload);
+        Assert.Equal(execution, (await app.Store.Command(command.Id)).ExecutionPayload);
         Assert.Equal("Waiting", (await app.Store.Coordinations()).Single().State);
     }
 
@@ -813,7 +815,7 @@ public sealed partial class CoordinationTests
                 ProviderId: overrideModel ? "openai" : null, ModelId: overrideModel ? "astra" : null, Variant: variant)]));
             await app.Store.CoordinationTick();
             var command = Assert.Single((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + run.Id);
-            commandId = command.Id; execution = command.ExecutionPayload;
+            commandId = command.Id; execution = (await app.Store.Command(command.Id)).ExecutionPayload;
             var prompt = Json.Read<PromptInput>(execution);
             Assert.Equal(expected, prompt.Variant);
             Assert.Equal(overrideModel ? "astra" : "default", prompt.ModelId);
@@ -822,7 +824,7 @@ public sealed partial class CoordinationTests
         await using var restarted = new TestApp(data: data, secrets: secrets);
         await restarted.Store.Recover();
         var snapshot = await restarted.Store.Snapshot();
-        Assert.Equal(execution, snapshot.Commands.Single(x => x.Id == commandId).ExecutionPayload);
+        Assert.Equal(execution, (await restarted.Store.Command(commandId)).ExecutionPayload);
         var defaults = snapshot.Workers.Single(x => x.Id == workerId);
         Assert.Equal("default", defaults.ModelId); Assert.Equal("high", defaults.Variant);
     }

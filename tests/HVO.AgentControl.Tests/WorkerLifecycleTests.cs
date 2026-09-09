@@ -27,7 +27,7 @@ public sealed class WorkerLifecycleTests
         Assert.Equal(1, (await app.Store.UpdateWorker(worker.Id, input)).SettingsRevision);
         await Assert.ThrowsAsync<ControlException>(() => app.Store.UpdateWorker(worker.Id, input with { Id = Guid.NewGuid().ToString(), Name = "Stale" }));
         var detail = await app.Store.Detail(worker.Id);
-        Assert.Equal("old", Json.Read<PromptInput>(detail.Commands.Single(x => x.Id == queued.Id).ExecutionPayload).ModelId);
+        Assert.Equal("old", (await app.Store.CommandPrompt(queued.Id)).ModelId);
         var next = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "review this", detail.Worker.Revision,
             RiskLevel: TaskRiskLevels.Low));
         var captured = Json.Read<PromptInput>(next.ExecutionPayload);

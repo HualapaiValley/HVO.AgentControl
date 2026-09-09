@@ -49,6 +49,8 @@ public partial class Home
         {
             var loaded = await ReadDetail(current.WorkerId!);
             if (!selection.IsCurrent(current)) return;
+            await HydrateOutstanding(loaded);
+            if (!selection.IsCurrent(current)) return;
             var isHostOperations = loaded.Worker.Role == SessionRoles.Coordinator &&
                 await Store.Read(db => db.ControlSessions.AnyAsync(x => x.WorkerId == loaded.Worker.Id && x.ScopeKind == "HostOperations"));
             if (!selection.IsCurrent(current)) return;
