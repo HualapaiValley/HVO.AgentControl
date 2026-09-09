@@ -59,7 +59,8 @@ public sealed class CapabilityProbeCatalog
 
     public CapabilitySnapshot Normalize(CapabilitySnapshot snapshot)
     {
-        if (snapshot.Facts is null || snapshot.SchemaVersion != SchemaVersion || snapshot.CatalogVersion > CatalogVersion)
+        if (snapshot.Facts is null || snapshot.SchemaVersion != SchemaVersion || snapshot.CatalogVersion is < 1 or > CatalogVersion ||
+            snapshot.ObservedAt <= 0 || string.IsNullOrWhiteSpace(snapshot.Source) || string.IsNullOrWhiteSpace(snapshot.Scope))
             throw new InvalidOperationException("Unsupported capability probe schema or catalog version.");
         return snapshot with
         {
@@ -71,15 +72,20 @@ public sealed class CapabilityProbeCatalog
     public IReadOnlyList<CapabilityProbeResult> Evaluate(IReadOnlyDictionary<string, string> facts) => registered.Select(definition =>
     {
         var value = facts.GetValueOrDefault(definition.FactKey, "unknown");
-        return new CapabilityProbeResult(definition.Id, definition.Version, Status(definition.Kind, value), value);
+        return new CapabilityProbeResult(definition.Id, definition.Version, Status(definition, value), value);
     }).ToArray();
 
-    public string[] Missing(string capabilitiesJson, IReadOnlyCollection<string> required)
+    public string[] Missing(string capabilitiesJson, IReadOnlyCollection<string> required, string? requiredScope = null)
     {
         if (required.Count == 0) return [];
         try
         {
             var snapshot = Normalize(Json.Read<CapabilitySnapshot>(capabilitiesJson));
+            if (snapshot.Source != "probe" || snapshot.ObservedAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5_000 ||
+                snapshot.ObservedAt < DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 120_000 ||
+                (required.Contains("resource.workspace-disk", StringComparer.Ordinal) &&
+                 (requiredScope is null || !string.Equals(snapshot.Scope, requiredScope, StringComparison.Ordinal))))
+                return required.Order(StringComparer.Ordinal).ToArray();
             var available = snapshot.Results.Where(x => x.Status == CapabilityProbeStatus.Available)
                 .Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
             return required.Where(x => !available.Contains(x)).Order(StringComparer.Ordinal).ToArray();
@@ -97,20 +103,20 @@ public sealed class CapabilityProbeCatalog
         catch (Exception ex) when (ex is InvalidOperationException or System.Text.Json.JsonException) { return null; }
     }
 
-    private static string Status(string kind, string value)
+    private static string Status(CapabilityProbeDefinition definition, string value)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Equals("unknown", StringComparison.OrdinalIgnoreCase))
             return CapabilityProbeStatus.Unknown;
-        if (kind == "Tool") return value == "present" ? CapabilityProbeStatus.Available : CapabilityProbeStatus.Unavailable;
-        if (kind == "Resource")
+        if (definition.Kind == "Tool") return value == "present" ? CapabilityProbeStatus.Available : CapabilityProbeStatus.Unavailable;
+        if (definition.Kind == "Resource")
             return decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var number) && number > 0
                 ? CapabilityProbeStatus.Available : CapabilityProbeStatus.Unknown;
-        if (kind == "Access") return value.ToLowerInvariant() switch
+        if (definition.Kind == "Access") return value.ToLowerInvariant() switch
         {
             "available" or "present" or "true" => CapabilityProbeStatus.Available,
             "unavailable" or "absent" or "false" or "denied" => CapabilityProbeStatus.Unavailable,
             _ => CapabilityProbeStatus.Unknown
         };
-        return CapabilityProbeStatus.Available;
+        return definition.Id == "environment.scope" && value is not ("machine" or "container") ? CapabilityProbeStatus.Unknown : CapabilityProbeStatus.Available;
     }
 }

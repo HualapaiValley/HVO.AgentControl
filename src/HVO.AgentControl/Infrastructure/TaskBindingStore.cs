@@ -81,7 +81,7 @@ public sealed partial class ControlStore
             db.WorkerSlots.Add(slot);
             Event(db, "WorkerSlotCreated", runtime.Id, payload: new { slot.Id, slot.RuntimeId, slot.Role }, provenance: "user");
             return slot;
-        });
+        }, capabilityProbeIds.Length == 0 ? new { id, runtimeId, name, role, provider, model } : null);
     });
 
     public Task<TaskBindingPage> TaskBindings(long after = 0, int take = 50, bool includeReleased = false) => Read(async db =>
@@ -150,7 +150,7 @@ public sealed partial class ControlStore
                 throw Conflict("worker_limit", "Managed devcontainers do not support multiple worker slots in this slice.");
             if (slot.Role == SessionRoles.Coordinator)
                 throw Conflict("slot_role", "Coordinator slots cannot own development task bindings.");
-            var missingCapabilities = capabilityProbes.Missing(runtime.CapabilitiesJson, slot.CapabilityProbeIds);
+            var missingCapabilities = capabilityProbes.Missing(runtime.CapabilitiesJson, slot.CapabilityProbeIds, directory);
             if (missingCapabilities.Length > 0)
                 throw Conflict("capability_unavailable", "Required runtime capabilities are unavailable: " + string.Join(", ", missingCapabilities) + ".");
             if (await db.TaskBindings.AnyAsync(x => x.WorkItemId == workItemId && x.State == TaskBindingState.Active))
@@ -272,21 +272,24 @@ public sealed partial class ControlStore
         var slots = await (from binding in db.TaskBindings
                            join session in db.TaskSessionBindings on binding.Id equals session.TaskBindingId
                            join candidate in db.WorkerSlots on binding.WorkerSlotId equals candidate.Id
-                           where binding.State == TaskBindingState.Active && session.LegacyWorkerId == worker.Id
-                           select candidate).ToListAsync();
-        var required = slots.SelectMany(x => x.CapabilityProbeIds).Distinct(StringComparer.Ordinal).ToArray();
+                           join workspace in db.TaskWorkspaces on binding.WorkspaceId equals workspace.Id
+                           where session.LegacyWorkerId == worker.Id
+                           select new { candidate, workspace.Directory }).ToListAsync();
+        var required = slots.SelectMany(x => x.candidate.CapabilityProbeIds).Distinct(StringComparer.Ordinal).ToArray();
         if (required.Length == 0) return [];
         var runtime = await db.Runtimes.FindAsync(worker.RuntimeId);
-        return runtime is null ? required : capabilityProbes.Missing(runtime.CapabilitiesJson, required);
+        return runtime is null || slots.Select(x => x.Directory).Distinct(StringComparer.Ordinal).Skip(1).Any()
+            ? required : capabilityProbes.Missing(runtime.CapabilitiesJson, required, slots[0].Directory);
     }
 
-    private static async Task<T> MutateBinding<T>(ControlDb db, string requestId, string kind, string id, string action, object intent, Func<Task<T>> mutate)
+    private static async Task<T> MutateBinding<T>(ControlDb db, string requestId, string kind, string id, string action, object intent, Func<Task<T>> mutate, object? legacyIntent = null)
     {
         var request = BindingId(requestId);
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(intent))));
         if (await db.InventoryMutations.FindAsync(request) is { } prior)
         {
-            if (prior.ResourceKind != kind || prior.ResourceId != id || prior.Action != action || prior.RequestHash != hash)
+            var legacyHash = legacyIntent is null ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(legacyIntent))));
+            if (prior.ResourceKind != kind || prior.ResourceId != id || prior.Action != action || (prior.RequestHash != hash && prior.RequestHash != legacyHash))
                 throw Conflict("idempotency_conflict", "This request ID belongs to a different binding mutation.");
             return Json.Read<T>(prior.ResultJson);
         }
