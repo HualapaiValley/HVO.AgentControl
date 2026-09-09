@@ -1,5 +1,8 @@
 # Documentation
 
+- [Project and communications brief](PROJECT_AND_COMMUNICATIONS_BRIEF.md): standalone introduction for another coordinating agent/team, with working versus planned behavior and focused feedback questions.
+- [Worker rollout and repository admission](WORKER_ROLLOUT.md): replacement, fleet UI and RoofControl admission gates, with repository-isolation acceptance.
+
 - [Managed worker learning plan](MANAGED_WORKER_LEARNING_PLAN.md): approval findings, analysis-record gaps, Dev Container-first execution and future GitHub task intake.
 
 - [Current implementation checkpoint](IMPLEMENTATION_STATUS.md): shipped work, active fleet and next implementation slices.
