@@ -22,6 +22,7 @@ public partial class Home
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
     private readonly ConversationSelection selection = new();
     private readonly Dictionary<string, string> promptDrafts = [];
+    private readonly Dictionary<string, long> promptDraftVersions = [];
     private readonly Dictionary<string, string> answers = [];
     private readonly Dictionary<string, HashSet<string>> choices = [];
     private readonly Dictionary<string, string> replyIds = [];
@@ -89,11 +90,20 @@ public partial class Home
     {
         if (selectedId != renderedWorkerId || detail?.Worker.Id != renderedWorkerId || detail.Worker.Revision != renderedWorkerRevision)
             throw new ControlException("The selected conversation changed. Wait for its details before sending this instruction.");
-        var current = SelectedDetail();
-        promptRequestId ??= Guid.NewGuid().ToString();
-        var command = await Store.Prompt(renderedWorkerId, new(promptRequestId, promptText, renderedWorkerRevision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
+        SelectedDetail();
+        var submittedText = promptText;
+        var submittedDraftVersion = promptDraftVersions.GetValueOrDefault(renderedWorkerId);
+        var submittedRequestId = promptRequestId ??= Guid.NewGuid().ToString();
+        var command = await Store.Prompt(renderedWorkerId, new(submittedRequestId, submittedText, renderedWorkerRevision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
         notice = "Instruction queued. You can leave this page while the worker runs.";
-        promptText = ""; promptDrafts.Remove(current.Worker.Id); promptRequestId = null;
+        if (promptDraftVersions.GetValueOrDefault(renderedWorkerId) == submittedDraftVersion &&
+            promptDrafts.GetValueOrDefault(renderedWorkerId, "") == submittedText)
+        {
+            promptDrafts.Remove(renderedWorkerId);
+            if (selectedId == renderedWorkerId && detail?.Worker.Id == renderedWorkerId && promptText == submittedText)
+                promptText = "";
+        }
+        if (promptRequestId == submittedRequestId) promptRequestId = null;
     });
     private Task StatusInquiry() => Execute(async () =>
     {
@@ -144,6 +154,7 @@ public partial class Home
     private void SetPromptText(string renderedWorkerId, string text)
     {
         promptDrafts[renderedWorkerId] = text;
+        promptDraftVersions[renderedWorkerId] = promptDraftVersions.GetValueOrDefault(renderedWorkerId) + 1;
         if (selectedId == renderedWorkerId && detail?.Worker.Id == renderedWorkerId) promptText = text;
     }
     private Task OlderHistory() => Execute(async () =>

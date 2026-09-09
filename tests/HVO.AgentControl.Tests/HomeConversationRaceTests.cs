@@ -148,6 +148,69 @@ public sealed class HomeConversationRaceTests
     }
 
     [Fact]
+    public async Task DelayedAcceptedASendDoesNotClearNewlySelectedBDraft()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+        await home.Navigate(a.Id);
+        home.SetRenderedDraft(a.Id, "submitted A draft");
+        var gate = WriterGate(app.Store);
+
+        await gate.WaitAsync();
+        try
+        {
+            var send = home.SendRendered(a.Id, a.Revision);
+            await home.Navigate(b.Id);
+            home.SetRenderedDraft(b.Id, "new unsent B draft");
+            gate.Release();
+            await send;
+        }
+        finally
+        {
+            if (gate.CurrentCount == 0) gate.Release();
+        }
+
+        Assert.Equal("new unsent B draft", home.Draft);
+        Assert.Equal("submitted A draft", Json.Read<PromptInput>(Assert.Single((await app.Store.Detail(a.Id)).Commands).Payload).Text);
+        Assert.Empty((await app.Store.Detail(b.Id)).Commands);
+        await home.Navigate(a.Id);
+        Assert.Equal(string.Empty, home.Draft);
+        await home.Navigate(b.Id);
+        Assert.Equal("new unsent B draft", home.Draft);
+    }
+
+    [Fact]
+    public async Task DelayedAcceptedASendDoesNotClearNewerSameWorkerDraft()
+    {
+        await using var app = new TestApp();
+        var (a, _) = await SeedWorkers(app.Store);
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+        await home.Navigate(a.Id);
+        home.SetRenderedDraft(a.Id, "submitted A draft");
+        var gate = WriterGate(app.Store);
+
+        await gate.WaitAsync();
+        try
+        {
+            var send = home.SendRendered(a.Id, a.Revision);
+            home.SetRenderedDraft(a.Id, "newer unsent A draft");
+            gate.Release();
+            await send;
+        }
+        finally
+        {
+            if (gate.CurrentCount == 0) gate.Release();
+        }
+
+        Assert.Equal("newer unsent A draft", home.Draft);
+        var command = Assert.Single((await app.Store.Detail(a.Id)).Commands);
+        var input = Json.Read<PromptInput>(command.Payload);
+        Assert.Equal("submitted A draft", input.Text);
+        Assert.Equal(a.Revision, input.ExpectedRevision);
+    }
+
+    [Fact]
     public async Task DelayedErrorFromFirstAIsRejectedAfterAThenBThenA()
     {
         await using var app = new TestApp();
@@ -324,6 +387,8 @@ public sealed class HomeConversationRaceTests
     }
 
     private static TaskCompletionSource Source() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static SemaphoreSlim WriterGate(ControlStore store) =>
+        (SemaphoreSlim)typeof(ControlStore).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
 
     private static async Task<(WorkerRecord A, WorkerRecord B)> SeedWorkers(ControlStore store, int messages = 0)
     {
@@ -369,12 +434,12 @@ public sealed class HomeConversationRaceTests
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text)
         {
-            SetField("promptText", text);
             var worker = Visible!.Worker;
+            SetRenderedDraft(worker.Id, text);
             return InvokeTask("SendPrompt", worker.Id, worker.Revision);
         }
         public Task SendRendered(string workerId, long revision) => InvokeTask("SendPrompt", workerId, revision);
-        public void SetDraft(string text) => SetField("promptText", text);
+        public void SetDraft(string text) => SetRenderedDraft(Visible!.Worker.Id, text);
         public void SetRenderedDraft(string workerId, string text) => Invoke("SetPromptText", workerId, text);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
