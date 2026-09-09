@@ -1,5 +1,7 @@
 # HVO.AgentControl
 
+For an introduction to the architecture and communication model, read the [project and communications brief](docs/PROJECT_AND_COMMUNICATIONS_BRIEF.md). It is written for another coordinating agent or team and includes the intended workflow, current limitations and questions for feedback.
+
 AgentControl is a single-owner web application for persistent OpenCode coding sessions on SSH-accessible Linux/macOS runtimes. The .NET 10 Blazor UI controls a durable SQLite backend. SSH carries HTTP/SSE to a loopback-only OpenCode server owned by a dedicated tmux session. Remote work continues when the browser, tunnel, or backend disconnects.
 
 The initial M0–M5 release supports runtime registration, verified bootstrap/install, separate workspace sessions, provider/model discovery, streamed transcripts, follow-up queues, native questions/permissions, cancellation, multiple workers, and restart reconciliation. Manual control works without a coordinator. Optional persistent OpenCode coordination now routes arbitrary prompts and responses between workers; see [worker management and coordination](docs/COORDINATION.md). See [implementation status](docs/IMPLEMENTATION_STATUS.md), [compatibility](docs/OPENCODE_COMPATIBILITY.md), and [operations](docs/OPERATIONS.md).
@@ -77,7 +79,7 @@ The original repository's [Dev Container and Docker context instructions](docs/D
 
 ## Validation
 
-CI and Dev Container acceptance finish an already-running `main` validation when another PR merges. GitHub keeps the newest pending run for that workflow and branch; superseded PR runs are still cancelled. Release checks must match the deployed commit in both workflows, since each queue progresses independently.
+During prerelease development, ready-for-review PRs run one short `build` check: restore, Release compilation with warnings as errors, formatting and quick script regressions. Drafts skip automatic builds; marking them ready starts the check. Merges do not trigger another run. Workers still validate code changes and obtain independent review. Full .NET/SSH tests, browser checks, sidecar checks and official Dev Container acceptance are available through the manual **Full validation** workflow. Record exact-source evidence for relevant checks before deployment; see [validation policy](docs/VALIDATION_POLICY.md).
 
 ```bash
 dotnet test HVO.AgentControl.slnx --configuration Release --no-restore

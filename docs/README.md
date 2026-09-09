@@ -1,10 +1,14 @@
 # Documentation
 
+- [Project and communications brief](PROJECT_AND_COMMUNICATIONS_BRIEF.md): standalone introduction for another coordinating agent/team, with working versus planned behavior and focused feedback questions.
+- [Worker rollout and repository admission](WORKER_ROLLOUT.md): replacement, fleet UI and RoofControl admission gates, with repository-isolation acceptance.
+
 - [Managed worker learning plan](MANAGED_WORKER_LEARNING_PLAN.md): approval findings, analysis-record gaps, Dev Container-first execution and future GitHub task intake.
 
 - [Current implementation checkpoint](IMPLEMENTATION_STATUS.md): shipped work, active fleet and next implementation slices.
 - [Advanced coordination verification](validation/advanced-coordination-2026-09-07.md): concurrent assignments, soak, managed GitHub publication and supervising interventions.
 - [Observability design](OBSERVABILITY_DESIGN.md): worker status, runtime measurements and durable model-usage requirements.
+- [Trusted host executor and resource API](HOST_RESOURCE_API.md): scoped executor authentication, sequenced evidence, shared physical-host reservations and effect fencing.
 
 - [Worker GitHub access](GITHUB_ACCESS.md): App setup, scoped credential delivery, renewal and live-validation requirements.
 - [Dev Container provisioning](DEVCONTAINER_PROVISIONING.md): executable worker template and planned multi-host lifecycle, tool installation and GitHub credentials.
