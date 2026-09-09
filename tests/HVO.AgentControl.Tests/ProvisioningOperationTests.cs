@@ -1,6 +1,9 @@
 using System.Collections.Immutable;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
@@ -72,7 +75,7 @@ public sealed class ProvisioningOperationTests
         });
         Assert.Equal(HttpStatusCode.BadRequest, injected.StatusCode);
         Assert.Null(app.Services.GetService<LocalDevContainerRunner>());
-        Assert.IsType<DbProvisionAttemptLedger>(app.Services.GetRequiredService<IProvisionAttemptLedger>());
+        Assert.Null(app.Services.GetService<IProvisionAttemptLedger>());
     }
 
     [Fact]
@@ -149,8 +152,7 @@ public sealed class ProvisioningOperationTests
         var competingOperation = await restarted.Store.CreateProvisionOperation(requested with { RequestId = Id() });
         var competingIntent = Intent(competingOperation, requested) with
         {
-            OperationId = Guid.Parse(competingOperation.Id).ToString("D"),
-            Digest = new string('e', 64)
+            OperationId = Guid.Parse(competingOperation.Id).ToString("D")
         };
         await restarted.Store.ApproveProvisionAuthority(competingOperation.Id, competingIntent);
         await restarted.Store.ApproveProvisionCapacity(competingOperation.Id,
@@ -300,8 +302,7 @@ public sealed class ProvisioningOperationTests
         var secondOperation = await app.Store.CreateProvisionOperation(secondInput);
         var secondIntent = Intent(secondOperation, secondInput) with
         {
-            Workspace = Intent(secondOperation, secondInput).Workspace with { Directory = first.Intent.Workspace.Directory + "/." },
-            Digest = new string('e', 64)
+            Workspace = Intent(secondOperation, secondInput).Workspace with { Directory = first.Intent.Workspace.Directory + "/." }
         };
         await app.Store.ApproveProvisionAuthority(secondOperation.Id, secondIntent);
         await app.Store.ApproveProvisionCapacity(secondOperation.Id,
@@ -340,6 +341,147 @@ public sealed class ProvisioningOperationTests
         Assert.Equal("", Assert.Single(view.Progress).Text);
     }
 
+    [Fact]
+    public async Task AuthenticatedExecutorAtomicallyConsumesPermitAndReportsImmutableSuccess()
+    {
+        await using var app = new TestApp();
+        var setup = await Setup(app);
+        var host = await app.Store.Host(setup.Input.HostId);
+        var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var credential = Digest(secret);
+        var executor = await app.Store.CreateHostExecutor(new(Id(), Id(), host.Id, host.Revision,
+            Digest("endpoint"), Digest("physical"), Digest("engine"), Digest("builder"), Digest("cli"),
+            Digest("root"), Digest("authority"), credential));
+        var pending = new HostExecutorPrincipal(executor.Id, host.Id, executor.AuthorityGeneration,
+            HostExecutorState.Pending, credential);
+        await app.Store.ActivateHostExecutor(pending,
+            new(executor.Id, host.Id, executor.AuthorityGeneration, Digest("authority"), Digest("boot"), Digest("incarnation")));
+        var principal = pending with { State = HostExecutorState.Active };
+        using var machine = app.CreateClient();
+        machine.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", executor.Id + "." + secret);
+        var operation = await app.Store.CreateProvisionOperation(setup.Input);
+        var intent = Intent(operation, setup.Input) with { AuthorityRevision = executor.AuthorityGeneration };
+        var authorityResponse = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/authority",
+            new ApproveHostProvisionAuthorityInput(intent));
+        Assert.Equal(HttpStatusCode.OK, authorityResponse.StatusCode);
+        operation = (await authorityResponse.Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        var policy = await app.Store.ConfigureHostResourcePolicy(new(Id(), Id(), executor.Id, 0,
+            8000, 8 * 1024L * 1024 * 1024, 100 * 1024L * 1024 * 1024, 2,
+            500, 512 * 1024 * 1024, 1024 * 1024 * 1024, 120, 300));
+        var now = ControlStore.Now;
+        var observation = await app.Store.SubmitHostResourceObservation(principal, new(Id(), executor.Id, host.Id,
+            Digest("endpoint"), Digest("physical"), Digest("engine"), Digest("builder"), executor.AuthorityGeneration,
+            Digest("boot"), Digest("incarnation"), 1, 1, HostObservationState.Complete, now - 1000, now, "x86_64",
+            8000, 7000, 8 * 1024L * 1024 * 1024, 7 * 1024L * 1024 * 1024, 0, 2 * 1024L * 1024 * 1024,
+            512 * 1024 * 1024, 1024 * 1024 * 1024, 0, setup.Input.WorkspaceId,
+            ControlStore.ProvisionWorkspaceDigest(intent.Workspace.Directory), Digest("workspace-fs"),
+            80 * 1024L * 1024 * 1024, 1_000_000, Digest("docker-fs"), 70 * 1024L * 1024 * 1024,
+            1_000_000, true, 2));
+        var reservation = await app.Store.AcquireHostResourceReservation(new(Id(), Id(), intent.Digest, host.Id,
+            executor.Id, policy.Id, policy.Revision, observation.Id, setup.Input.WorkspaceId, operation.Id, "Build",
+            3000, BuildMemory + RuntimeMemory, 1024 * 1024 * 1024, 1));
+        using (var owner = await app.SignIn())
+        {
+            var capacityResponse = await owner.PostAsJsonAsync($"/api/v1/provisioning/operations/{operation.Id}/capacity",
+                new BindProvisionCapacityInput(operation.Revision, reservation.Id));
+            Assert.Equal(HttpStatusCode.OK, capacityResponse.StatusCode);
+        }
+        var claimResponse = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/claim",
+            new ClaimHostProvisioningInput(reservation.Id));
+        Assert.Equal(HttpStatusCode.OK, claimResponse.StatusCode);
+        var assignment = (await claimResponse.Content.ReadFromJsonAsync<HostProvisioningAssignment>())!;
+
+        Assert.Equal(intent.Digest, assignment.Intent.Digest);
+        Assert.Equal(reservation.Id, assignment.CapacityReservationId);
+        var otherSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var other = await app.Store.CreateHostExecutor(new(Id(), Id(), host.Id, host.Revision, Digest("other-endpoint"),
+            Digest("physical"), Digest("other-engine"), Digest("other-builder"), Digest("other-cli"), Digest("other-root"),
+            Digest("other-authority"), Digest(otherSecret)));
+        var otherPending = new HostExecutorPrincipal(other.Id, host.Id, other.AuthorityGeneration, HostExecutorState.Pending, Digest(otherSecret));
+        await app.Store.ActivateHostExecutor(otherPending, new(other.Id, host.Id, other.AuthorityGeneration,
+            Digest("other-authority"), Digest("other-boot"), Digest("other-incarnation")));
+        using var otherMachine = app.CreateClient();
+        otherMachine.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", other.Id + "." + otherSecret);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await otherMachine.GetAsync($"/api/v1/host-executor/provisioning/{operation.Id}")).StatusCode);
+        var effectInput = new BeginHostProvisionEffectInput(assignment.ClaimGeneration, reservation.Id,
+            reservation.Revision, reservation.GrantGeneration, intent.Digest, setup.Input.WorkspaceId, observation.Id);
+        await app.Store.Write(async db =>
+        {
+            await db.Database.ExecuteSqlRawAsync("CREATE TRIGGER AbortProvisionEffect BEFORE INSERT ON ProvisionEffects BEGIN SELECT RAISE(ABORT, 'proof rollback'); END;");
+            return true;
+        });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable,
+            (await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/begin-effect", effectInput)).StatusCode);
+        await app.Store.Read(async db =>
+        {
+            Assert.Equal(HostReservationState.Held, (await db.HostResourceReservations.FindAsync(reservation.Id))!.State);
+            Assert.Empty(await db.ProvisionEffects.Where(x => x.OperationId == operation.Id).ToListAsync());
+            Assert.Equal(ProvisionOperationState.AwaitingExecution, (await db.ProvisionOperations.SingleAsync(x => x.Id == operation.Id)).State);
+            return true;
+        });
+        await app.Store.Write(async db =>
+        {
+            await db.Database.ExecuteSqlRawAsync("DROP TRIGGER AbortProvisionEffect;");
+            return true;
+        });
+        var effectResponse = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/begin-effect", effectInput);
+        Assert.Equal(HttpStatusCode.OK, effectResponse.StatusCode);
+        var effect = (await effectResponse.Content.ReadFromJsonAsync<HostProvisionEffectDecision>())!;
+        Assert.True(effect.AuthorizedNow);
+        var replay = (await (await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/begin-effect", effectInput))
+            .Content.ReadFromJsonAsync<HostProvisionEffectDecision>())!;
+        Assert.False(replay.AuthorizedNow);
+        await app.Store.Read(async db =>
+        {
+            Assert.Equal(HostReservationState.EffectCommitted, (await db.HostResourceReservations.FindAsync(reservation.Id))!.State);
+            Assert.Single(await db.ProvisionEffects.Where(x => x.OperationId == operation.Id).ToListAsync());
+            return true;
+        });
+
+        var progressInput = new HostProvisionProgressInput(Id(), assignment.ClaimGeneration, 1, "cli-up");
+        var progress = (await (await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/progress", progressInput))
+            .Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        Assert.Equal("cli-up", Assert.Single(progress.Progress).Stage);
+        Assert.Equal("", Assert.Single(progress.Progress).Text);
+        Assert.Equal(progress.Revision, (await (await machine.PostAsJsonAsync(
+            $"/api/v1/host-executor/provisioning/{operation.Id}/progress", progressInput)).Content.ReadFromJsonAsync<ProvisionOperationView>())!.Revision);
+
+        var observed = new ProvisionContainerObservation(new string('a', 64), "sha256:" + new string('b', 64),
+            "fixture@sha256:" + new string('c', 64), "vscode", true, intent.Labels,
+            [new("bind", intent.Workspace.Directory, intent.Workspace.ContainerWorkspace, null, true)],
+            setup.Input.RequestedRuntimeCpuMillis, setup.Input.RequestedRuntimeMemoryBytes);
+        var executed = new ProvisionExecutionEvidence("vscode", "1000", intent.Workspace.ContainerWorkspace,
+            new Dictionary<string, string> { ["dotnet"] = "10.0.400" }.ToImmutableDictionary());
+        var resultId = Id();
+        var resultInput = new HostProvisionResultInput(resultId, assignment.ClaimGeneration, 2,
+            Guid.Parse(operation.Id).ToString("D"), intent.Digest, "VerifiedEnvironment", "verified", observed, executed, []);
+        var wrongRoot = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/result",
+            resultInput with { ReportId = Id(), Observed = observed with { Mounts = [new("bind", "/wrong", intent.Workspace.ContainerWorkspace, null, true)] } });
+        Assert.Equal(HttpStatusCode.Conflict, wrongRoot.StatusCode);
+        var noTools = await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/result",
+            resultInput with { ReportId = Id(), Executed = executed with { Tools = ImmutableDictionary<string, string>.Empty } });
+        Assert.Equal(HttpStatusCode.Conflict, noTools.StatusCode);
+        var result = (await (await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/result", resultInput))
+            .Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        Assert.Equal(ProvisionOperationState.AwaitingEnrollment, result.State);
+        Assert.Equal(observed.ContainerId, result.ObservedContainerId);
+        var revision = result.Revision;
+        Assert.Equal(revision, (await (await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/result", resultInput))
+            .Content.ReadFromJsonAsync<ProvisionOperationView>())!.Revision);
+        var late = (await (await machine.PostAsJsonAsync($"/api/v1/host-executor/provisioning/{operation.Id}/result",
+            resultInput with { ReportId = Id(), Sequence = 3, State = "Failed", Code = "late_failure", Observed = null, Executed = null }))
+            .Content.ReadFromJsonAsync<ProvisionOperationView>())!;
+        Assert.Equal(ProvisionOperationState.AwaitingEnrollment, late.State);
+        Assert.Equal(observed.ContainerId, late.ObservedContainerId);
+        Assert.Equal(revision, late.Revision);
+        using var terminalOwner = await app.SignIn();
+        Assert.Equal(HttpStatusCode.Conflict, (await terminalOwner.PostAsJsonAsync(
+            $"/api/v1/provisioning/operations/{operation.Id}/cancel", new ProvisionOperationControlInput(late.Revision))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await terminalOwner.PostAsJsonAsync(
+            $"/api/v1/provisioning/operations/{operation.Id}/reconcile", new ProvisionOperationControlInput(late.Revision))).StatusCode);
+    }
+
     private static async Task<SetupResult> Setup(TestApp app)
     {
         var host = await app.Store.CreateHost(new(Id(), Id(), "Provision host", "PhysicalMachine"));
@@ -358,10 +500,22 @@ public sealed class ProvisioningOperationTests
     {
         var workspace = new ApprovedProvisionWorkspace(input.WorkspaceId, "/srv/workspaces/" + input.WorkspaceId,
             "https://github.com/example/provision-source", input.SourceRevision, input.ConfigurationPath,
-            input.ConfigurationSha256, "vscode", "/workspaces/source", ImmutableArray<ProvisionToolProbe>.Empty);
-        return new(Guid.Parse(operation.Id).ToString("D"), operation.HostId, 3, workspace,
+            input.ConfigurationSha256, "vscode", "/workspaces/source", [new("dotnet", ["dotnet", "--version"], "10.0.400")]);
+        var operationId = Guid.Parse(operation.Id).ToString("D");
+        var digest = new string('d', 64);
+        var labels = new Dictionary<string, string>
+        {
+            ["hvo.agentcontrol.provisioner"] = "official-cli-v1",
+            ["hvo.agentcontrol.operation"] = operationId,
+            ["hvo.agentcontrol.host"] = operation.HostId,
+            ["hvo.agentcontrol.workspace"] = workspace.Id,
+            ["hvo.agentcontrol.intent"] = digest,
+            ["hvo.agentcontrol.source"] = workspace.SourceRevision,
+            ["hvo.agentcontrol.config"] = workspace.ConfigurationSha256
+        }.ToImmutableDictionary(StringComparer.Ordinal);
+        return new(operationId, operation.HostId, 3, workspace,
             LocalDevContainerRunner.CliVersion, LocalDevContainerRunner.CliSha256, input.ColdBuild,
-            new string('d', 64), ImmutableDictionary<string, string>.Empty);
+            digest, labels);
     }
 
     private static async Task<ReadyResult> Ready(TestApp app, string reservationId)
@@ -379,6 +533,8 @@ public sealed class ProvisioningOperationTests
         app.Services.GetRequiredService<IDbContextFactory<ControlDb>>(),
         app.Services.GetRequiredService<IOptions<ControlOptions>>(),
         app.Services.GetRequiredService<Secrets>());
+
+    private static string Digest(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
     private sealed record SetupResult(CreateProvisionOperationInput Input);
     private sealed record ReadyResult(CreateProvisionOperationInput Input, ProvisionOperationView Operation, ProvisionIntent Intent);

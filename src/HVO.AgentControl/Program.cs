@@ -86,7 +86,6 @@ builder.Services.AddRateLimiter(options =>
 });
 builder.Services.AddDbContextFactory<ControlDb>(options => options.UseSqlite($"Data Source={Path.Combine(settings.DataDirectory, "agentcontrol.db")};Default Timeout=10"));
 builder.Services.AddSingleton<ControlStore>();
-builder.Services.AddSingleton<IProvisionAttemptLedger, DbProvisionAttemptLedger>();
 builder.Services.AddSingleton<IDevContainerCliOperationAdapter, DevContainerCliOperationAdapter>();
 builder.Services.AddSingleton<RuntimeVerificationService>();
 builder.Services.AddSingleton<ProviderLoginService>();
@@ -121,6 +120,10 @@ app.Use(async (context, next) =>
     if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path == "/" || context.Request.Path == "/providers") context.Response.Headers.CacheControl = "no-store";
     try { await next(); }
     catch (ControlException ex) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = ex.Message }); }
+    catch (HVO.AgentControl.Provisioning.ProvisionAdmissionException ex)
+    { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { error = ex.Message, code = ex.Code }); }
+    catch (HVO.AgentControl.Provisioning.ProvisionIntentConflictException)
+    { context.Response.StatusCode = 409; await context.Response.WriteAsJsonAsync(new { error = "Provisioning intent conflicts with durable authority.", code = "provision_intent_conflict" }); }
     catch (AntiforgeryValidationException) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = "Invalid antiforgery token; reload the page." }); }
     catch (BadHttpRequestException ex) when (!context.Response.HasStarted)
     {

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +11,285 @@ namespace HVO.AgentControl.Infrastructure;
 
 public sealed partial class ControlStore
 {
+    public Task<ProvisionOperationView> ApproveHostProvisionAuthority(HostExecutorPrincipal principal, string id,
+        ApproveHostProvisionAuthorityInput input) => Write(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        var executor = await RequireProvisioningExecutor(db, principal, operation);
+        if (input.Intent.AuthorityRevision != executor.AuthorityGeneration)
+            throw new ProvisionIntentConflictException();
+        if (operation.SelectedEnrollmentId.Length != 0 && (operation.SelectedEnrollmentId != executor.Id ||
+            operation.SelectedAuthorityGeneration != executor.AuthorityGeneration || operation.SelectedIncarnationId != executor.IncarnationId))
+            throw new ControlException("Provisioning authority is already bound to another executor claim.", 409);
+        await ApproveProvisionAuthorityCore(db, operation, input.Intent);
+        operation.SelectedEnrollmentId = executor.Id;
+        operation.SelectedAuthorityGeneration = executor.AuthorityGeneration;
+        operation.SelectedIncarnationId = executor.IncarnationId;
+        return await ProvisionView(db, operation);
+    });
+
+    public Task<ProvisionOperationView> BindProvisionCapacity(string id, BindProvisionCapacityInput input) => Write(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        RequireProvisionRevision(operation, input.ExpectedRevision);
+        var reservation = await db.HostResourceReservations.FindAsync(ResourceId(input.ReservationId))
+            ?? throw new ControlException("Resource reservation not found.", 404);
+        if (operation.ApprovedIntentJson.Length == 0 || operation.SelectedEnrollmentId.Length == 0 ||
+            reservation.State != HostReservationState.Held || reservation.OperationId != operation.Id || reservation.HostId != operation.HostId ||
+            reservation.WorkspaceId != operation.WorkspaceId || reservation.EnrollmentId != operation.SelectedEnrollmentId ||
+            reservation.AuthorityGeneration != operation.SelectedAuthorityGeneration || reservation.IncarnationId != operation.SelectedIncarnationId ||
+            !SameDigest(reservation.IntentDigest, operation.IntentDigest) || reservation.GrantExpiresAt <= Now || reservation.BuildSlots < 1 ||
+            reservation.CpuMillis < checked(operation.RequestedBuildCpuMillis + operation.RequestedRuntimeCpuMillis) ||
+            reservation.MemoryBytes < checked(operation.RequestedBuildMemoryBytes + operation.RequestedRuntimeMemoryBytes) ||
+            reservation.CanonicalWorkspaceIdentity != ProvisionWorkspaceDigest(operation.ApprovedWorkspaceIdentity))
+            throw new ProvisionAdmissionException("valid_physical_capacity_reservation_required");
+        operation.CapacityReservationId = reservation.Id;
+        operation.CapacityRevision = reservation.Revision;
+        operation.CapacityValidUntil = reservation.GrantExpiresAt;
+        operation.ReservedBuildCpuMillis = operation.RequestedBuildCpuMillis;
+        operation.ReservedBuildMemoryBytes = operation.RequestedBuildMemoryBytes;
+        operation.ReservedRuntimeCpuMillis = operation.RequestedRuntimeCpuMillis;
+        operation.ReservedRuntimeMemoryBytes = operation.RequestedRuntimeMemoryBytes;
+        operation.ReconcileRequested = false;
+        operation.State = ProvisionOperationState.AwaitingExecution;
+        operation.Code = "trusted_executor_may_claim";
+        operation.Revision++;
+        operation.UpdatedAt = Now;
+        return await ProvisionView(db, operation);
+    });
+
+    public Task<HostProvisioningAssignment> ClaimHostProvisioningAssignment(HostExecutorPrincipal principal, string id,
+        ClaimHostProvisioningInput input) => Write(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        var executor = await RequireProvisioningExecutor(db, principal, operation);
+        var reservation = await RequireProvisionReservation(db, operation, input.ReservationId);
+        var prior = await db.ProvisionAttempts.SingleOrDefaultAsync(x => x.OperationId == operation.Id);
+        if (prior is not null)
+        {
+            RequireClaim(prior, executor, operation.ClaimGeneration);
+            return await Assignment(db, operation, prior, reservation);
+        }
+        if (operation.State != ProvisionOperationState.AwaitingExecution || reservation.State != HostReservationState.Held ||
+            reservation.GrantExpiresAt <= Now || operation.CapacityReservationId != reservation.Id ||
+            operation.CapacityRevision != reservation.Revision)
+            throw new ControlException("Provisioning operation is not claimable.", 409);
+        operation.ClaimGeneration++;
+        operation.Code = "trusted_executor_claimed";
+        operation.Revision++;
+        operation.UpdatedAt = Now;
+        var attempt = new ProvisionAttemptRecord
+        {
+            OperationId = operation.Id,
+            IntentDigest = operation.IntentDigest,
+            IntentJson = operation.ApprovedIntentJson,
+            HostId = operation.HostId,
+            WorkspaceId = operation.WorkspaceId,
+            WorkspaceIdentity = operation.ApprovedWorkspaceIdentity,
+            AuthorityRevision = operation.AuthorityRevision!.Value,
+            CapacityReservationId = reservation.Id,
+            CapacityRevision = reservation.Revision,
+            CapacityFingerprint = ProvisionCapacityFingerprint(operation),
+            ClaimGeneration = operation.ClaimGeneration,
+            EnrollmentId = executor.Id,
+            ExecutorAuthorityGeneration = executor.AuthorityGeneration,
+            IncarnationId = executor.IncarnationId,
+            ReservationGrantGeneration = reservation.GrantGeneration,
+            ClaimedAt = Now,
+            Revision = 1,
+            CreatedAt = Now,
+            UpdatedAt = Now
+        };
+        db.ProvisionAttempts.Add(attempt);
+        return await Assignment(db, operation, attempt, reservation);
+    });
+
+    public Task<HostProvisioningAssignment> HostProvisioningAssignment(HostExecutorPrincipal principal, string id) => Read(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        var executor = await RequireProvisioningExecutor(db, principal, operation);
+        var attempt = await db.ProvisionAttempts.SingleOrDefaultAsync(x => x.OperationId == operation.Id)
+            ?? throw new ControlException("Provisioning assignment has not been claimed.", 409);
+        RequireClaim(attempt, executor, operation.ClaimGeneration);
+        var reservation = await RequireProvisionReservation(db, operation, attempt.CapacityReservationId);
+        return await Assignment(db, operation, attempt, reservation);
+    });
+
+    public Task<HostProvisionEffectDecision> BeginHostProvisionEffect(HostExecutorPrincipal principal, string id,
+        BeginHostProvisionEffectInput input) => Write(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        var executor = await RequireProvisioningExecutor(db, principal, operation);
+        var attempt = await RequireProvisionClaim(db, operation, executor, input.ClaimGeneration);
+        var reservation = await RequireProvisionReservation(db, operation, input.ReservationId);
+        var observationId = ResourceId(input.ObservationId);
+        var workspaceId = ResourceId(input.WorkspaceId);
+        var intentDigest = Digest(input.IntentDigest, "intent digest");
+        var existing = await db.ProvisionEffects.SingleOrDefaultAsync(x => x.OperationId == operation.Id && x.Effect == "up");
+        if (existing is not null)
+        {
+            if (reservation.State is not (HostReservationState.EffectCommitted or HostReservationState.Unknown) ||
+                existing.ReservationId != reservation.Id || existing.ClaimGeneration != attempt.ClaimGeneration ||
+                existing.EnrollmentId != executor.Id || existing.AuthorityGeneration != executor.AuthorityGeneration ||
+                existing.IncarnationId != executor.IncarnationId || !SameDigest(existing.IntentDigest, intentDigest) ||
+                existing.WorkspaceId != workspaceId || existing.ObservationId != observationId)
+                throw new ProvisionAdmissionException("inconsistent_committed_provision_effect");
+            return new HostProvisionEffectDecision(false, await ProvisionView(db, operation));
+        }
+        if (reservation.State != HostReservationState.Held)
+            throw new ProvisionAdmissionException("inconsistent_committed_provision_effect");
+        if (operation.State != ProvisionOperationState.AwaitingExecution || operation.CancelRequested || operation.ReconcileRequested ||
+            operation.CapacityReservationId != reservation.Id || operation.CapacityRevision != reservation.Revision ||
+            attempt.CapacityReservationId != reservation.Id || attempt.CapacityRevision != reservation.Revision ||
+            input.ExpectedReservationRevision != reservation.Revision || input.ReservationGrantGeneration != reservation.GrantGeneration ||
+            attempt.ReservationGrantGeneration != reservation.GrantGeneration || reservation.GrantExpiresAt <= Now ||
+            workspaceId != operation.WorkspaceId || !SameDigest(intentDigest, operation.IntentDigest) ||
+            attempt.IntentJson != operation.ApprovedIntentJson || attempt.CapacityFingerprint != ProvisionCapacityFingerprint(operation))
+            throw new ProvisionAdmissionException("fresh_capacity_reservation_required");
+        var observation = await db.HostResourceObservations.FindAsync(observationId)
+            ?? throw new ControlException("Effect-time observation not found.", 404);
+        var policy = await db.HostResourcePolicies.Where(x => x.Id == reservation.PolicyId).OrderByDescending(x => x.Revision).FirstOrDefaultAsync();
+        var host = await RequireHost(db, reservation.HostId);
+        if (executor.State != HostExecutorState.Active || executor.AuthorityGeneration != reservation.AuthorityGeneration ||
+            executor.IncarnationId != reservation.IncarnationId || policy is null || policy.State != "Active" || policy.Revision != reservation.PolicyRevision ||
+            host.Archived || !ObservationMatches(reservation, observation) || !Fresh(observation, policy) ||
+            observation.PhysicalRevision != await LatestPhysicalRevision(db, reservation.PhysicalHostId) ||
+            observation.Sequence != await LatestWorkspaceSequence(db, reservation.EnrollmentId, reservation.WorkspaceId))
+            throw new ProvisionAdmissionException("effect_time_authority_changed");
+        var otherHeld = (await HeldReservations(db, reservation.PhysicalHostId)).Where(x => x.Id != reservation.Id).ToList();
+        RequireCapacity(reservation.Kind, reservation.CpuMillis, reservation.MemoryBytes, reservation.DiskBytes,
+            reservation.BuildSlots, observation, policy, otherHeld);
+        var now = Now;
+        reservation.State = HostReservationState.EffectCommitted;
+        reservation.EffectCommittedAt = now;
+        reservation.EffectObservationId = observation.Id;
+        reservation.Revision++;
+        db.ProvisionEffects.Add(new()
+        {
+            OperationId = operation.Id,
+            Effect = "up",
+            ResourceId = operation.WorkspaceId,
+            ReservationId = reservation.Id,
+            ReservationRevision = reservation.Revision,
+            ReservationGrantGeneration = reservation.GrantGeneration,
+            ClaimGeneration = attempt.ClaimGeneration,
+            EnrollmentId = executor.Id,
+            AuthorityGeneration = executor.AuthorityGeneration,
+            IncarnationId = executor.IncarnationId,
+            IntentDigest = operation.IntentDigest,
+            WorkspaceId = operation.WorkspaceId,
+            CanonicalWorkspaceIdentity = reservation.CanonicalWorkspaceIdentity,
+            ObservationId = observation.Id,
+            PolicyId = policy.Id,
+            PolicyRevision = policy.Revision,
+            StartedAt = now
+        });
+        operation.EffectStarted = true;
+        operation.State = ProvisionOperationState.Unknown;
+        operation.Code = "external_effect_started_result_pending";
+        operation.Revision++;
+        operation.UpdatedAt = now;
+        Event(db, "ProvisionEffectCommitted", operation.RuntimeId, payload: new
+        {
+            operationId = operation.Id,
+            reservationId = reservation.Id,
+            enrollmentId = executor.Id,
+            attempt.ClaimGeneration,
+            observationId = observation.Id
+        }, provenance: "host-executor");
+        return new HostProvisionEffectDecision(true, await ProvisionView(db, operation));
+    });
+
+    public Task<ProvisionOperationView> RecordHostProvisionProgress(HostExecutorPrincipal principal, string id,
+        HostProvisionProgressInput input) => Write(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        var executor = await RequireProvisioningExecutor(db, principal, operation);
+        var attempt = await RequireProvisionClaim(db, operation, executor, input.ClaimGeneration);
+        if (input.Sequence < 1) throw new ProvisionAdmissionException("invalid_progress_metadata");
+        var reportId = InventoryId(input.ReportId);
+        var stage = BoundProvisionStage(input.Stage);
+        var payload = Json.Write(new { stage });
+        var hash = ReportHash(new { operation.Id, input.ClaimGeneration, input.Sequence, stage });
+        if (await ReplayReport(db, reportId, operation.Id, input.ClaimGeneration, input.Sequence, "Progress", hash))
+            return await ProvisionView(db, operation);
+        if (operation.State is not (ProvisionOperationState.AwaitingExecution or ProvisionOperationState.Unknown or ProvisionOperationState.AwaitingEnrollment))
+            throw new ControlException("Provisioning operation is not accepting execution progress.", 409);
+        db.Set<ProvisionExecutorReportRecord>().Add(new()
+        {
+            ReportId = reportId,
+            OperationId = operation.Id,
+            ClaimGeneration = attempt.ClaimGeneration,
+            Sequence = input.Sequence,
+            Kind = "Progress",
+            RequestHash = hash,
+            PayloadJson = payload,
+            Disposition = operation.State == ProvisionOperationState.AwaitingEnrollment ? "IgnoredAfterSuccess" : "Applied",
+            ReceivedAt = Now
+        });
+        if (operation.State != ProvisionOperationState.AwaitingEnrollment)
+            return await RecordProvisionProgressCore(db, operation, new(input.Sequence, stage, ""));
+        return await ProvisionView(db, operation);
+    });
+
+    public Task<ProvisionOperationView> RecordHostProvisionResult(HostExecutorPrincipal principal, string id,
+        HostProvisionResultInput input) => Write(async db =>
+    {
+        var operation = await RequireProvisionOperation(db, id);
+        var executor = await RequireProvisioningExecutor(db, principal, operation);
+        var attempt = await RequireProvisionClaim(db, operation, executor, input.ClaimGeneration);
+        if (!string.Equals(operation.Id, InventoryId(input.OperationId), StringComparison.Ordinal))
+            throw new ProvisionIntentConflictException();
+        if (!SameDigest(input.IntentDigest, operation.IntentDigest)) throw new ProvisionIntentConflictException();
+        if (input.State is not ("VerifiedEnvironment" or "Unknown" or "Observed" or "Failed" or "Unsupported"))
+            throw new ProvisionAdmissionException("invalid_result_state");
+        if (input.Sequence < 1) throw new ProvisionAdmissionException("invalid_result_sequence");
+        var reportId = InventoryId(input.ReportId);
+        var code = BoundProvisionCode(input.Code);
+        var hash = ResultReportHash(operation.Id, input with { ReportId = reportId, Code = code });
+        if (await ReplayReport(db, reportId, operation.Id, input.ClaimGeneration, input.Sequence, "Result", hash))
+            return await ProvisionView(db, operation);
+        var disposition = input.Sequence <= operation.LastAppliedResultSequence ? "Superseded" :
+            operation.State == ProvisionOperationState.AwaitingEnrollment ? "IgnoredAfterSuccess" : "Applied";
+        db.Set<ProvisionExecutorReportRecord>().Add(new()
+        {
+            ReportId = reportId,
+            OperationId = operation.Id,
+            ClaimGeneration = attempt.ClaimGeneration,
+            Sequence = input.Sequence,
+            Kind = "Result",
+            RequestHash = hash,
+            PayloadJson = "{}",
+            Disposition = disposition,
+            ReceivedAt = Now
+        });
+        if (disposition != "Applied") return await ProvisionView(db, operation);
+        var effect = await db.ProvisionEffects.SingleOrDefaultAsync(x => x.OperationId == operation.Id && x.Effect == "up");
+        var effectStarted = effect is not null;
+        var approved = JsonSerializer.Deserialize<ProvisionIntent>(operation.ApprovedIntentJson)!;
+        var result = new HostProvisionResult(operation.Id, input.State, code,
+            effectStarted, approved, null, input.Observed, input.Executed, ImmutableArray<ProvisionProgress>.Empty,
+            input.RetainedResources.IsDefault ? ImmutableArray<string>.Empty : input.RetainedResources);
+        if (input.State == "VerifiedEnvironment")
+            RequireVerifiedEnvironment(operation, attempt, effect, input.Observed, input.Executed, approved);
+        operation.LastAppliedResultSequence = input.Sequence;
+        if (effectStarted && input.State != "VerifiedEnvironment")
+            result = result with { State = "Unknown", Code = "external_effect_result_requires_reconciliation" };
+        return await RecordProvisionResultCore(db, operation, result);
+    });
+
+    private static async Task<HostExecutorEnrollment> RequireProvisioningExecutor(ControlDb db, HostExecutorPrincipal principal,
+        ProvisionOperationRecord operation)
+    {
+        var executor = await RequireAuthenticatedExecutor(db, principal, allowPending: false);
+        if (executor.State != HostExecutorState.Active || executor.HostId != operation.HostId)
+            throw new ControlException("An active executor for the assigned host is required.", 403);
+        if (operation.SelectedEnrollmentId.Length != 0 && (operation.SelectedEnrollmentId != executor.Id ||
+            operation.SelectedAuthorityGeneration != executor.AuthorityGeneration || operation.SelectedIncarnationId != executor.IncarnationId))
+            throw new ControlException("Provisioning operation belongs to another executor authority.", 403);
+        return executor;
+    }
+
     internal static readonly ConcurrentDictionary<string, SemaphoreSlim> ProvisionAdmissions = new(StringComparer.Ordinal);
 
     public Task<ProvisionOperationView> CreateProvisionOperation(CreateProvisionOperationInput input)
@@ -89,6 +369,8 @@ public sealed partial class ControlStore
     {
         var operation = await RequireProvisionOperation(db, id);
         RequireProvisionRevision(operation, input.ExpectedRevision);
+        if (operation.State == ProvisionOperationState.AwaitingEnrollment)
+            throw InventoryConflict("terminal_success_immutable", "A verified environment cannot be cancelled as an unresolved provisioning attempt.");
         operation.CancelRequested = true;
         var hasEffect = await db.ProvisionEffects.AnyAsync(x => x.OperationId == operation.Id);
         operation.State = hasEffect ? ProvisionOperationState.Unknown : ProvisionOperationState.Cancelled;
@@ -103,6 +385,8 @@ public sealed partial class ControlStore
     {
         var operation = await RequireProvisionOperation(db, id);
         RequireProvisionRevision(operation, input.ExpectedRevision);
+        if (operation.State == ProvisionOperationState.AwaitingEnrollment)
+            throw InventoryConflict("terminal_success_immutable", "A verified environment cannot be returned to provisioning reconciliation.");
         operation.ReconcileRequested = true;
         if (await db.ProvisionEffects.AnyAsync(x => x.OperationId == operation.Id))
         {
@@ -128,6 +412,12 @@ public sealed partial class ControlStore
     internal Task<ProvisionOperationView> ApproveProvisionAuthority(string id, ProvisionIntent intent) => Write(async db =>
     {
         var operation = await RequireProvisionOperation(db, id);
+        return await ApproveProvisionAuthorityCore(db, operation, intent);
+    });
+
+    private static async Task<ProvisionOperationView> ApproveProvisionAuthorityCore(ControlDb db,
+        ProvisionOperationRecord operation, ProvisionIntent intent)
+    {
         var project = await RequireProject(db, operation.ProjectId);
         if (operation.ApprovedIntentJson.Length != 0)
         {
@@ -141,7 +431,9 @@ public sealed partial class ControlStore
             intent.Workspace.ConfigurationPath != operation.ConfigurationPath || intent.Workspace.ConfigurationSha256 != operation.ConfigurationSha256 ||
             intent.ColdBuild != operation.ColdBuild || intent.CliVersion != LocalDevContainerRunner.CliVersion ||
             intent.CliSha256 != LocalDevContainerRunner.CliSha256 || intent.Digest.Length != 64 || intent.Digest.Any(x => !Uri.IsHexDigit(x)) ||
-            CanonicalProjectRepository(intent.Workspace.Repository) != project.RepositoryUrl)
+            CanonicalProjectRepository(intent.Workspace.Repository) != project.RepositoryUrl ||
+            !RequiredIntentLabels(intent).All(x => intent.Labels.TryGetValue(x.Key, out var value) && value == x.Value) ||
+            intent.Labels.Count != RequiredIntentLabels(intent).Count)
             throw new ProvisionIntentConflictException();
         operation.ApprovedIntentJson = JsonSerializer.Serialize(intent);
         operation.IntentDigest = intent.Digest;
@@ -153,7 +445,7 @@ public sealed partial class ControlStore
         operation.Revision++;
         operation.UpdatedAt = Now;
         return await ProvisionView(db, operation);
-    });
+    }
 
     internal Task<ProvisionOperationView> ApproveProvisionCapacity(string id, ProvisionCapacityGrant grant) => Write(async db =>
     {
@@ -182,6 +474,12 @@ public sealed partial class ControlStore
     internal Task<ProvisionOperationView> RecordProvisionProgress(string id, ProvisionProgress progress) => Write(async db =>
     {
         var operation = await RequireProvisionOperation(db, id);
+        return await RecordProvisionProgressCore(db, operation, progress);
+    });
+
+    private static async Task<ProvisionOperationView> RecordProvisionProgressCore(ControlDb db,
+        ProvisionOperationRecord operation, ProvisionProgress progress)
+    {
         var items = Json.Read<List<ProvisionProgress>>(operation.ProgressJson);
         if (progress.Sequence < 0 || items.Count > 0 && progress.Sequence <= items[^1].Sequence)
             throw new ProvisionAdmissionException("invalid_progress_metadata");
@@ -192,11 +490,24 @@ public sealed partial class ControlStore
         operation.Revision++;
         operation.UpdatedAt = Now;
         return await ProvisionView(db, operation);
-    });
+    }
 
     internal Task<ProvisionOperationView> RecordProvisionResult(string id, HostProvisionResult result) => Write(async db =>
     {
         var operation = await RequireProvisionOperation(db, id);
+        return await RecordProvisionResultCore(db, operation, result);
+    });
+
+    private static async Task<ProvisionOperationView> RecordProvisionResultCore(ControlDb db,
+        ProvisionOperationRecord operation, HostProvisionResult result)
+    {
+        if (operation.State == ProvisionOperationState.AwaitingEnrollment)
+        {
+            var existing = operation.ResultJson.Length == 0 ? null : JsonSerializer.Deserialize<ProvisionResultReceipt>(operation.ResultJson);
+            var incoming = ProvisionReceipt(result);
+            if (existing is not null && Json.Write(existing) == Json.Write(incoming)) return await ProvisionView(db, operation);
+            return await ProvisionView(db, operation);
+        }
         if (InventoryId(result.OperationId) != operation.Id) throw new ProvisionIntentConflictException();
         var receipt = ProvisionReceipt(result);
         if (result.EffectStarted && !await db.ProvisionEffects.AnyAsync(x => x.OperationId == operation.Id))
@@ -225,12 +536,17 @@ public sealed partial class ControlStore
                 result.State is "Unknown" or "Observed" ? ProvisionOperationState.Unknown : ProvisionOperationState.Failed;
             operation.Code = result.State == "VerifiedEnvironment" ? "environment_verified_enrollment_not_performed" : result.Code;
         }
+        if (result.State == "VerifiedEnvironment")
+        {
+            operation.TerminalSuccessSequence = operation.LastAppliedResultSequence == 0 ? null : operation.LastAppliedResultSequence;
+            operation.TerminalSuccessAt = Now;
+        }
         if (!operation.EffectStarted && result.State is ("Failed" or "Unsupported") && await db.ProvisionAttempts.FindAsync(operation.Id) is { } unused)
             db.ProvisionAttempts.Remove(unused);
         operation.Revision++;
         operation.UpdatedAt = Now;
         return await ProvisionView(db, operation);
-    });
+    }
 
     private static CreateProvisionOperationInput NormalizeProvisionRequest(CreateProvisionOperationInput input)
     {
@@ -297,6 +613,14 @@ public sealed partial class ControlStore
         return text;
     }
 
+    private static string BoundProvisionCode(string? value)
+    {
+        var text = value?.Replace("\0", "", StringComparison.Ordinal) ?? "";
+        if (text.Length is < 1 or > 200 || text.Any(char.IsControl))
+            throw new ProvisionAdmissionException("result_evidence_outside_bounds");
+        return text;
+    }
+
     private static ProvisionResultReceipt ProvisionReceipt(HostProvisionResult result)
     {
         if (result.State is not ("VerifiedEnvironment" or "Observed" or "Unknown" or "Failed" or "Unsupported" or "Removed" or "AbsentObserved") ||
@@ -315,19 +639,18 @@ public sealed partial class ControlStore
             result.Observed, result.Executed, result.RetainedResources);
     }
 
-    internal static bool SameProvisionIntent(ProvisionIntent left, ProvisionIntent right) =>
-        left.OperationId == right.OperationId && left.HostId == right.HostId && left.AuthorityRevision == right.AuthorityRevision &&
-        SameProvisionWorkspace(left.Workspace, right.Workspace) && left.CliVersion == right.CliVersion && left.CliSha256 == right.CliSha256 &&
-        left.ColdBuild == right.ColdBuild && left.Digest == right.Digest && left.Labels.Count == right.Labels.Count &&
-        left.Labels.All(x => right.Labels.TryGetValue(x.Key, out var value) && value == x.Value);
+    internal static bool SameProvisionIntent(ProvisionIntent left, ProvisionIntent right) => ProvisionIntentIdentity.Same(left, right);
 
-    private static bool SameProvisionWorkspace(ApprovedProvisionWorkspace left, ApprovedProvisionWorkspace right) =>
-        left.Id == right.Id && left.Directory == right.Directory && left.Repository == right.Repository &&
-        left.SourceRevision == right.SourceRevision && left.ConfigurationPath == right.ConfigurationPath &&
-        left.ConfigurationSha256 == right.ConfigurationSha256 && left.RemoteUser == right.RemoteUser &&
-        left.ContainerWorkspace == right.ContainerWorkspace && left.Tools.Length == right.Tools.Length &&
-        left.Tools.Zip(right.Tools).All(x => x.First.Name == x.Second.Name && x.First.ExpectedOutput == x.Second.ExpectedOutput &&
-            x.First.Command.SequenceEqual(x.Second.Command));
+    private static Dictionary<string, string> RequiredIntentLabels(ProvisionIntent intent) => new(StringComparer.Ordinal)
+    {
+        ["hvo.agentcontrol.provisioner"] = "official-cli-v1",
+        ["hvo.agentcontrol.operation"] = intent.OperationId,
+        ["hvo.agentcontrol.host"] = intent.HostId,
+        ["hvo.agentcontrol.workspace"] = intent.Workspace.Id,
+        ["hvo.agentcontrol.intent"] = intent.Digest,
+        ["hvo.agentcontrol.source"] = intent.Workspace.SourceRevision,
+        ["hvo.agentcontrol.config"] = intent.Workspace.ConfigurationSha256
+    };
 
     internal static string CanonicalProvisionWorkspace(string path)
     {
@@ -355,6 +678,135 @@ public sealed partial class ControlStore
             operation.ReservedRuntimeCpuMillis,
             operation.ReservedRuntimeMemoryBytes
         }))));
+
+    internal static string ProvisionWorkspaceDigest(string canonicalPath) => Convert.ToHexString(SHA256.HashData(
+        Encoding.UTF8.GetBytes(CanonicalProvisionWorkspace(canonicalPath))));
+
+    private static bool SameDigest(string? left, string? right) => left is not null && right is not null &&
+        string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<HostResourceReservation> RequireProvisionReservation(ControlDb db,
+        ProvisionOperationRecord operation, string reservationId)
+    {
+        var reservation = await db.HostResourceReservations.FindAsync(ResourceId(reservationId))
+            ?? throw new ControlException("Resource reservation not found.", 404);
+        if (reservation.OperationId != operation.Id || reservation.HostId != operation.HostId ||
+            reservation.WorkspaceId != operation.WorkspaceId || reservation.EnrollmentId != operation.SelectedEnrollmentId ||
+            reservation.AuthorityGeneration != operation.SelectedAuthorityGeneration || reservation.IncarnationId != operation.SelectedIncarnationId ||
+            !SameDigest(reservation.IntentDigest, operation.IntentDigest) || reservation.CanonicalWorkspaceIdentity != ProvisionWorkspaceDigest(operation.ApprovedWorkspaceIdentity))
+            throw new ProvisionAdmissionException("provision_reservation_authority_mismatch");
+        return reservation;
+    }
+
+    private static async Task<HostProvisioningAssignment> Assignment(ControlDb db, ProvisionOperationRecord operation,
+        ProvisionAttemptRecord attempt, HostResourceReservation reservation)
+    {
+        var committed = await db.ProvisionEffects.AnyAsync(x => x.OperationId == operation.Id && x.Effect == "up" && x.ReservationId == reservation.Id);
+        if (operation.State == ProvisionOperationState.AwaitingExecution)
+        {
+            if (reservation.State != HostReservationState.Held || reservation.GrantExpiresAt <= Now)
+                throw new ControlException("Provisioning assignment no longer has a fresh permit.", 409);
+        }
+        else if (operation.State != ProvisionOperationState.Unknown || !committed ||
+            reservation.State is not (HostReservationState.EffectCommitted or HostReservationState.Unknown))
+            throw new ControlException("Provisioning operation is not available to this claim.", 409);
+        var intent = JsonSerializer.Deserialize<ProvisionIntent>(operation.ApprovedIntentJson)
+            ?? throw new ControlException("Approved provisioning intent is unavailable.", 503);
+        return new(await ProvisionView(db, operation), intent, reservation.Id, reservation.Revision,
+            reservation.GrantExpiresAt, operation.ReservedBuildCpuMillis ?? 0, operation.ReservedBuildMemoryBytes ?? 0,
+            operation.ReservedRuntimeCpuMillis ?? 0, operation.ReservedRuntimeMemoryBytes ?? 0,
+            attempt.ClaimGeneration, attempt.EnrollmentId, attempt.ExecutorAuthorityGeneration, attempt.IncarnationId,
+            attempt.ReservationGrantGeneration);
+    }
+
+    private static void RequireClaim(ProvisionAttemptRecord attempt, HostExecutorEnrollment executor, long claimGeneration)
+    {
+        if (claimGeneration < 1 || attempt.ClaimGeneration != claimGeneration || attempt.EnrollmentId != executor.Id ||
+            attempt.ExecutorAuthorityGeneration != executor.AuthorityGeneration || attempt.IncarnationId != executor.IncarnationId)
+            throw new ControlException("Provisioning claim does not match the authenticated executor incarnation.", 403);
+    }
+
+    private static async Task<ProvisionAttemptRecord> RequireProvisionClaim(ControlDb db, ProvisionOperationRecord operation,
+        HostExecutorEnrollment executor, long claimGeneration)
+    {
+        var attempt = await db.ProvisionAttempts.SingleOrDefaultAsync(x => x.OperationId == operation.Id)
+            ?? throw new ControlException("Provisioning assignment has not been claimed.", 409);
+        RequireClaim(attempt, executor, claimGeneration);
+        return attempt;
+    }
+
+    private static async Task<bool> ReplayReport(ControlDb db, string reportId, string operationId,
+        long claimGeneration, long sequence, string kind, string hash)
+    {
+        if (await db.Set<ProvisionExecutorReportRecord>().FindAsync(reportId) is { } prior)
+        {
+            if (prior.OperationId != operationId || prior.ClaimGeneration != claimGeneration || prior.Sequence != sequence ||
+                prior.Kind != kind || prior.RequestHash != hash)
+                throw new ProvisionAdmissionException("report_id_conflict");
+            return true;
+        }
+        if (await db.Set<ProvisionExecutorReportRecord>().AnyAsync(x => x.OperationId == operationId &&
+            x.ClaimGeneration == claimGeneration && x.Sequence == sequence))
+            throw new ProvisionAdmissionException("report_sequence_conflict");
+        return false;
+    }
+
+    private static string ReportHash(object value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(value))));
+
+    private static string ResultReportHash(string operationId, HostProvisionResultInput input) => ReportHash(new
+    {
+        operationId,
+        input.ClaimGeneration,
+        input.Sequence,
+        intentDigest = input.IntentDigest.ToUpperInvariant(),
+        input.State,
+        input.Code,
+        observed = input.Observed is null ? null : new
+        {
+            input.Observed.ContainerId,
+            input.Observed.ImageId,
+            input.Observed.ImageReference,
+            input.Observed.ContainerUser,
+            input.Observed.Running,
+            labels = input.Observed.Labels.OrderBy(x => x.Key, StringComparer.Ordinal).ToArray(),
+            mounts = input.Observed.Mounts.OrderBy(x => x.Destination, StringComparer.Ordinal).ToArray(),
+            input.Observed.CpuLimitMillis,
+            input.Observed.MemoryLimitBytes
+        },
+        executed = input.Executed is null ? null : new
+        {
+            input.Executed.RemoteUser,
+            input.Executed.UserId,
+            input.Executed.Workspace,
+            tools = input.Executed.Tools.OrderBy(x => x.Key, StringComparer.Ordinal).ToArray()
+        },
+        retained = (input.RetainedResources.IsDefault ? ImmutableArray<string>.Empty : input.RetainedResources)
+            .OrderBy(x => x, StringComparer.Ordinal).ToArray()
+    });
+
+    private static void RequireVerifiedEnvironment(ProvisionOperationRecord operation, ProvisionAttemptRecord attempt,
+        ProvisionEffectRecord? effect, ProvisionContainerObservation? observed, ProvisionExecutionEvidence? executed,
+        ProvisionIntent approved)
+    {
+        if (operation.State != ProvisionOperationState.Unknown || effect is null || effect.ClaimGeneration != attempt.ClaimGeneration ||
+            effect.EnrollmentId != attempt.EnrollmentId || effect.AuthorityGeneration != attempt.ExecutorAuthorityGeneration ||
+            effect.IncarnationId != attempt.IncarnationId || effect.ReservationId != attempt.CapacityReservationId ||
+            effect.ReservationGrantGeneration != attempt.ReservationGrantGeneration || effect.WorkspaceId != attempt.WorkspaceId ||
+            effect.CanonicalWorkspaceIdentity != ProvisionWorkspaceDigest(attempt.WorkspaceIdentity) ||
+            !SameDigest(effect.IntentDigest, approved.Digest) ||
+            observed is null || executed is null || !observed.Running || observed.ContainerId.Length != 64 ||
+            observed.ContainerId.Any(x => !Uri.IsHexDigit(x)) || !observed.ImageId.StartsWith("sha256:", StringComparison.Ordinal) ||
+            observed.ImageId.Length != 71 || observed.ImageId[7..].Any(x => !Uri.IsHexDigit(x)) ||
+            observed.ContainerUser != approved.Workspace.RemoteUser || observed.CpuLimitMillis != operation.RequestedRuntimeCpuMillis ||
+            observed.MemoryLimitBytes != operation.RequestedRuntimeMemoryBytes ||
+            approved.Labels.Any(x => !observed.Labels.TryGetValue(x.Key, out var value) || value != x.Value) ||
+            !observed.Mounts.Any(x => x.Type == "bind" && x.Source == approved.Workspace.Directory &&
+                x.Destination == approved.Workspace.ContainerWorkspace && x.Writable) ||
+            executed.RemoteUser != approved.Workspace.RemoteUser || executed.Workspace != approved.Workspace.ContainerWorkspace ||
+            !int.TryParse(executed.UserId, out _) || approved.Workspace.Tools.Any(x =>
+                !executed.Tools.TryGetValue(x.Name, out var output) || !output.Contains(x.ExpectedOutput, StringComparison.Ordinal)))
+            throw new ProvisionAdmissionException("verified_environment_evidence_mismatch");
+    }
 
     private static void ClearProvisionCapacity(ProvisionOperationRecord operation)
     {

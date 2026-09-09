@@ -29,6 +29,7 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
 
     public Task<HostProvisionResult> Provision(HostProvisionRequest request, CancellationToken token = default, Action<ProvisionProgress>? progress = null) => Run(request, ProvisionAction.CreateOrObserve, null, token, progress);
     public Task<HostProvisionResult> Reconcile(HostProvisionRequest request, CancellationToken token = default, Action<ProvisionProgress>? progress = null) => Run(request, ProvisionAction.Observe, null, token, progress);
+    public ProvisionIntent CreateIntent(HostProvisionRequest request) => ResolveIntent(request);
     // The ledger must grant separate, drained retirement authority. This does not
     // purge volumes, images, caches or the host checkout.
     public Task<HostProvisionResult> RemoveOwned(HostProvisionRequest request, string containerId, CancellationToken token = default, Action<ProvisionProgress>? progress = null) => Run(request, ProvisionAction.Remove, containerId, token, progress);
@@ -382,7 +383,11 @@ public sealed partial class LocalDevContainerRunner(ProvisionerHostAuthority? au
                 mounts.Any(x => x.Type == "bind" && x.Source != intent.Workspace.Directory) ||
                 !mounts.Any(x => x.Type == "bind" && x.Source == intent.Workspace.Directory && x.Destination == intent.Workspace.ContainerWorkspace && x.Writable))
                 throw new ProvisionFault("Unknown", "observed_mount_or_privilege_mismatch");
-            return new(ids[0], image, Text(config, "Image") ?? "", Text(config, "User") ?? "", item.GetProperty("State").GetProperty("Running").GetBoolean(), labels, mounts);
+            var cpuLimit = hostConfig.GetProperty("NanoCpus").GetInt64() / 1_000_000;
+            var memoryLimit = hostConfig.GetProperty("Memory").GetInt64();
+            if (cpuLimit <= 0 || memoryLimit <= 0) throw new ProvisionFault("Unknown", "observed_resource_limits_missing");
+            return new(ids[0], image, Text(config, "Image") ?? "", Text(config, "User") ?? "",
+                item.GetProperty("State").GetProperty("Running").GetBoolean(), labels, mounts, cpuLimit, memoryLimit);
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException or ArgumentException)
         { throw new ProvisionFault("Unknown", "malformed_owner_inspection"); }

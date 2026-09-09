@@ -25,5 +25,6 @@ public static class ProvisioningApiEndpoints
         });
         group.MapPost("/{id}/cancel", (string id, ProvisionOperationControlInput input, ControlStore store) => store.CancelProvisionOperation(id, input));
         group.MapPost("/{id}/reconcile", (string id, ProvisionOperationControlInput input, ControlStore store) => store.RequestProvisionReconciliation(id, input));
+        group.MapPost("/{id}/capacity", (string id, BindProvisionCapacityInput input, ControlStore store) => store.BindProvisionCapacity(id, input));
     }
 }

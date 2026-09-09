@@ -52,6 +52,7 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<ProvisionOperationRecord> ProvisionOperations => Set<ProvisionOperationRecord>();
     public DbSet<ProvisionAttemptRecord> ProvisionAttempts => Set<ProvisionAttemptRecord>();
     public DbSet<ProvisionEffectRecord> ProvisionEffects => Set<ProvisionEffectRecord>();
+    public DbSet<ProvisionExecutorReportRecord> ProvisionExecutorReports => Set<ProvisionExecutorReportRecord>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -107,6 +108,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
             .HasForeignKey(x => x.ObservationId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<HostResourceReservation>().HasOne<HostResourceObservation>().WithMany()
             .HasForeignKey(x => x.ReleaseObservationId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<HostResourceReservation>().HasOne<HostResourceObservation>().WithMany()
+            .HasForeignKey(x => x.EffectObservationId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<HostResourceMutationReceipt>().HasKey(x => x.RequestId);
         model.Entity<ProviderPool>();
         model.Entity<ProviderFailureReceipt>();
@@ -198,5 +201,12 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<ProvisionEffectRecord>().HasKey(x => new { x.OperationId, x.Effect });
         model.Entity<ProvisionEffectRecord>().HasOne<ProvisionAttemptRecord>().WithMany()
             .HasForeignKey(x => x.OperationId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<ProvisionEffectRecord>().HasIndex(x => new { x.ReservationId, x.Effect }).IsUnique()
+            .HasFilter("ReservationId IS NOT NULL");
+        model.Entity<ProvisionExecutorReportRecord>().HasKey(x => x.ReportId);
+        model.Entity<ProvisionExecutorReportRecord>().HasIndex(x => new { x.OperationId, x.ClaimGeneration, x.Sequence }).IsUnique();
+        model.Entity<ProvisionExecutorReportRecord>().HasIndex(x => new { x.OperationId, x.ClaimGeneration, x.Kind, x.Sequence });
+        model.Entity<ProvisionExecutorReportRecord>().HasOne<ProvisionOperationRecord>().WithMany()
+            .HasForeignKey(x => x.OperationId).HasPrincipalKey(x => x.Id).OnDelete(DeleteBehavior.Restrict);
     }
 }

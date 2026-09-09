@@ -375,6 +375,8 @@ public sealed partial class ControlStore
     {
         var authenticatedExecutor = await RequireAuthenticatedExecutor(db, principal, allowPending: false);
         var reservation = await db.HostResourceReservations.FindAsync(ResourceId(id)) ?? throw new ControlException("Resource reservation not found.", 404);
+        if (await db.ProvisionOperations.AnyAsync(x => x.Id == reservation.OperationId))
+            throw new ControlException("Provisioning reservations require the atomic provisioning effect endpoint.", 409);
         if (reservation.EnrollmentId != authenticatedExecutor.Id || reservation.AuthorityGeneration != authenticatedExecutor.AuthorityGeneration ||
             reservation.IncarnationId != authenticatedExecutor.IncarnationId)
             throw new ControlException("Reservation does not belong to the authenticated executor authority.", 403);
@@ -401,7 +403,7 @@ public sealed partial class ControlStore
             reservation.BuildSlots, observation, policy, otherHeld);
         reservation.State = HostReservationState.EffectCommitted;
         reservation.EffectCommittedAt = Now;
-        reservation.ObservationId = observation.Id;
+        reservation.EffectObservationId = observation.Id;
         reservation.Revision++;
         Event(db, "HostResourceEffectCommitted", payload: new
         {
@@ -456,7 +458,7 @@ public sealed partial class ControlStore
                     if (evidence != "ObservedAbsent" || input.ObservationId is null)
                         throw new ControlException("Committed or unknown ownership requires an authenticated ObservedAbsent receipt.");
                     observation = await db.HostResourceObservations.FindAsync(ResourceId(input.ObservationId)) ?? throw new ControlException("Release observation not found.", 404);
-                    var effectObservation = await db.HostResourceObservations.FindAsync(reservation.ObservationId)
+                    var effectObservation = await db.HostResourceObservations.FindAsync(reservation.EffectObservationId ?? reservation.ObservationId)
                         ?? throw new ControlException("Committed effect observation not found.", 404);
                     var latestScopeRevision = await db.HostResourceObservations.Where(x => x.PhysicalHostId == reservation.PhysicalHostId &&
                         x.CanonicalWorkspaceIdentity == reservation.CanonicalWorkspaceIdentity).MaxAsync(x => x.PhysicalRevision);

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Provisioning;
 
 namespace HVO.AgentControl.Services;
 
@@ -48,6 +49,24 @@ public static class HostResourceApiEndpoints
             .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
         group.MapPost("/reservations/{id}/begin-effect", (ClaimsPrincipal user, string id, BeginHostResourceEffectInput input, ControlStore store) =>
                 store.BeginHostResourceEffect(Principal(user), id, input))
+            .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
+        group.MapPost("/provisioning/{id}/authority", (ClaimsPrincipal user, string id, ApproveHostProvisionAuthorityInput input, ControlStore store) =>
+                store.ApproveHostProvisionAuthority(Principal(user), id, input))
+            .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
+        group.MapPost("/provisioning/{id}/claim", (ClaimsPrincipal user, string id, ClaimHostProvisioningInput input, ControlStore store) =>
+                store.ClaimHostProvisioningAssignment(Principal(user), id, input))
+            .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
+        group.MapGet("/provisioning/{id}", (ClaimsPrincipal user, string id, ControlStore store) =>
+                store.HostProvisioningAssignment(Principal(user), id))
+            .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
+        group.MapPost("/provisioning/{id}/begin-effect", (ClaimsPrincipal user, string id, BeginHostProvisionEffectInput input, ControlStore store) =>
+                store.BeginHostProvisionEffect(Principal(user), id, input))
+            .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
+        group.MapPost("/provisioning/{id}/progress", (ClaimsPrincipal user, string id, HostProvisionProgressInput input, ControlStore store) =>
+                store.RecordHostProvisionProgress(Principal(user), id, input))
+            .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
+        group.MapPost("/provisioning/{id}/result", (ClaimsPrincipal user, string id, HostProvisionResultInput input, ControlStore store) =>
+                store.RecordHostProvisionResult(Principal(user), id, input))
             .RequireAuthorization(HostExecutorAuthenticationDefaults.ActivePolicy);
     }
 

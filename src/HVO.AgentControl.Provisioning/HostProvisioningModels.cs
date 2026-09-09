@@ -19,6 +19,22 @@ public sealed record ProvisionIntent(string OperationId, string HostId, long Aut
     ApprovedProvisionWorkspace Workspace, string CliVersion, string CliSha256, bool ColdBuild,
     string Digest, ImmutableDictionary<string, string> Labels);
 public sealed class ProvisionIntentConflictException : Exception;
+public static class ProvisionIntentIdentity
+{
+    public static bool Same(ProvisionIntent left, ProvisionIntent right) =>
+        left.OperationId == right.OperationId && left.HostId == right.HostId && left.AuthorityRevision == right.AuthorityRevision &&
+        SameWorkspace(left.Workspace, right.Workspace) && left.CliVersion == right.CliVersion && left.CliSha256 == right.CliSha256 &&
+        left.ColdBuild == right.ColdBuild && left.Digest == right.Digest && left.Labels.Count == right.Labels.Count &&
+        left.Labels.All(x => right.Labels.TryGetValue(x.Key, out var value) && value == x.Value);
+
+    private static bool SameWorkspace(ApprovedProvisionWorkspace left, ApprovedProvisionWorkspace right) =>
+        left.Id == right.Id && left.Directory == right.Directory && left.Repository == right.Repository &&
+        left.SourceRevision == right.SourceRevision && left.ConfigurationPath == right.ConfigurationPath &&
+        left.ConfigurationSha256 == right.ConfigurationSha256 && left.RemoteUser == right.RemoteUser &&
+        left.ContainerWorkspace == right.ContainerWorkspace && left.Tools.Length == right.Tools.Length &&
+        left.Tools.Zip(right.Tools).All(x => x.First.Name == x.Second.Name && x.First.ExpectedOutput == x.Second.ExpectedOutput &&
+            x.First.Command.SequenceEqual(x.Second.Command));
+}
 public enum ProvisionAction { CreateOrObserve, Observe, Remove }
 
 // The caller MUST durably bind OperationId -> Digest, serialize all users of this
@@ -52,7 +68,7 @@ public interface IProvisionProcessRunner
 
 public sealed record ProvisionContainerObservation(string ContainerId, string ImageId, string ImageReference,
     string ContainerUser, bool Running, ImmutableDictionary<string, string> Labels,
-    ImmutableArray<ProvisionMount> Mounts);
+    ImmutableArray<ProvisionMount> Mounts, long CpuLimitMillis, long MemoryLimitBytes);
 public sealed record ProvisionMount(string Type, string Source, string Destination, string? VolumeName, bool Writable);
 public sealed record ProvisionExecutionEvidence(string RemoteUser, string UserId, string Workspace,
     ImmutableDictionary<string, string> Tools);

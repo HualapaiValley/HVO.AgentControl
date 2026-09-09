@@ -138,6 +138,7 @@ public sealed class HostResourceReservation
     public long GrantedAt { get; set; }
     public long GrantExpiresAt { get; set; }
     public long? EffectCommittedAt { get; set; }
+    public string? EffectObservationId { get; set; }
     public long? ReleasedAt { get; set; }
     public string? ReleaseObservationId { get; set; }
     public string ReleaseEvidence { get; set; } = "";
