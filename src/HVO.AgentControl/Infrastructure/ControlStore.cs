@@ -454,13 +454,23 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
             Stale = x.Stale,
             Activity = x.Activity
         }).ToListAsync(), [], []));
+    public Task<long> Sequence() => Read(async db => await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0);
 
-    public Task<ControlSnapshot> Snapshot() => Read(async db => new ControlSnapshot(
-        await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0, await db.Runtimes.AsNoTracking().ToListAsync(),
-        await db.Workers.AsNoTracking().ToListAsync(),
-        await db.Commands.AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(500)
-            .Union(db.Commands.AsNoTracking().Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)).ToListAsync(),
-        await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync()));
+    public Task<ControlSnapshot> Snapshot() => Read(async db =>
+    {
+        // Capture the cursor before projections so a concurrent committed change cannot be acknowledged by a snapshot
+        // that began before it was visible.
+        var sequence = await db.Events.MaxAsync(x => (long?)x.Sequence) ?? 0;
+        var recent = await CommandMetadata(db.Commands.AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(500)).ToListAsync();
+        var outstanding = await CommandMetadata(db.Commands.AsNoTracking().Where(x =>
+            x.State == Delivery.Queued || x.State == Delivery.Dispatching || x.State == Delivery.Accepted ||
+            x.State == Delivery.Running || x.State == Delivery.Unknown ||
+            x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)).ToListAsync();
+        return new ControlSnapshot(sequence, await db.Runtimes.AsNoTracking().ToListAsync(),
+            await db.Workers.AsNoTracking().ToListAsync(),
+            recent.Concat(outstanding).DistinctBy(x => x.Id).OrderByDescending(x => x.CreatedAt).ToList(),
+            await db.Requests.AsNoTracking().Where(x => x.State == "Pending" || x.State == "ReplyUnknown").ToListAsync());
+    });
 
     public Task<WorkerDetail> Detail(string id, long? before = null, string? beforeId = null)
     {

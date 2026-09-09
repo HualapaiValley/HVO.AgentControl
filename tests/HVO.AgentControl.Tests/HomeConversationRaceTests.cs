@@ -94,6 +94,32 @@ public sealed class HomeConversationRaceTests
     }
 
     [Fact]
+    public async Task DelayedSnapshotErrorFromFirstAIsRejectedAfterAThenBThenA()
+    {
+        await using var app = new TestApp();
+        var (a, b) = await SeedWorkers(app.Store);
+        var started = Source(); var release = Source(); var firstA = true;
+        string? homeWorkerId = null;
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId), async () =>
+        {
+            if (homeWorkerId == a.Id && firstA)
+            {
+                firstA = false; started.SetResult(); await release.Task;
+                throw new InvalidOperationException("delayed stale snapshot error");
+            }
+            return await app.Store.Snapshot();
+        });
+        home.WorkerChanged = id => homeWorkerId = id;
+
+        var staleA = home.Navigate(a.Id); await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await home.Navigate(b.Id); await home.Navigate(a.Id);
+        release.SetResult(); await staleA;
+
+        Assert.Equal(a.Id, home.Visible!.Worker.Id);
+        Assert.Null(home.VisibleError);
+    }
+
+    [Fact]
     public async Task SameWorkerRefreshDoesNotDiscardDelayedOlderHistory()
     {
         await using var app = new TestApp();
@@ -187,7 +213,8 @@ public sealed class HomeConversationRaceTests
         Assert.Null(home.Visible);
     }
 
-    private static TestHome Home(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read) => new(store, read);
+    private static TestHome Home(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read,
+        Func<Task<ControlSnapshot>>? readSnapshot = null) => new(store, read, readSnapshot ?? store.Snapshot);
     [Fact]
     public async Task BackgroundRefreshCannotReplacePinnedOutcomeRevision()
     {
@@ -246,6 +273,47 @@ public sealed class HomeConversationRaceTests
         Assert.Equal(0, home.ReviewExpectedRevision);
     }
 
+    [Fact]
+    public async Task LoadedCompletedBodySurvivesExecuteRefreshAndKeepsFreshProgressReceipt()
+    {
+        await using var app = new TestApp();
+        var (worker, _) = await SeedWorkers(app.Store);
+        var command = new CommandRecord
+        {
+            Id = "completed-body",
+            RuntimeId = worker.RuntimeId,
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            State = Delivery.Finished,
+            Payload = Json.Write(new PromptInput("completed-body", "Exact completed instruction", worker.Revision)),
+            ExecutionPayload = Json.Write(new PromptInput("completed-body", "Exact completed instruction", worker.Revision)),
+            ResultJson = Json.Write(new { messages = new[] { new { parts = new[] { new { type = "text", text = "Exact result" } } } } }),
+            CreatedAt = 10,
+            UpdatedAt = 10,
+            ProgressText = "old progress",
+            LastProgressAt = 10
+        };
+        await app.Store.Write(db => { db.Commands.Add(command); return Task.FromResult(true); });
+        var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
+
+        await home.Navigate(worker.Id);
+        await home.LoadBody(command.Id);
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Commands.FindAsync(command.Id))!;
+            saved.ProgressText = "fresh progress";
+            saved.LastProgressAt = 20;
+            return true;
+        });
+        await home.BackgroundRefresh();
+
+        var visible = Assert.Single(home.Visible!.Commands);
+        Assert.Contains("Exact completed instruction", visible.Payload);
+        Assert.Contains("Exact result", visible.ResultJson);
+        Assert.Equal("fresh progress", visible.ProgressText);
+        Assert.Equal(20, visible.LastProgressAt);
+    }
+
     private static TaskCompletionSource Source() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private static async Task<(WorkerRecord A, WorkerRecord B)> SeedWorkers(ControlStore store, int messages = 0)
@@ -272,9 +340,11 @@ public sealed class HomeConversationRaceTests
     private sealed class TestHome : Home
     {
         private readonly Func<string, long?, string?, Task<WorkerDetail>> read;
-        public TestHome(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read)
+        private readonly Func<Task<ControlSnapshot>> readSnapshot;
+        public Action<string>? WorkerChanged { get; set; }
+        public TestHome(ControlStore store, Func<string, long?, string?, Task<WorkerDetail>> read, Func<Task<ControlSnapshot>> readSnapshot)
         {
-            Store = store; Authentication = new Authenticated(); this.read = read;
+            Store = store; Authentication = new Authenticated(); this.read = read; this.readSnapshot = readSnapshot;
         }
 
         public WorkerDetail? Visible => Field<WorkerDetail?>("detail");
@@ -286,11 +356,14 @@ public sealed class HomeConversationRaceTests
         public string ReviewOutcome => Field<string>("outcome");
         public string ReviewEvidence => Field<string>("evidence");
         public long ReviewExpectedRevision => Field<long>("outcomeExpectedRevision");
-        public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
+        public Task Navigate(string id) { WorkerId = id; WorkerChanged?.Invoke(id); return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
         public Task Send(string text) { SetField("promptText", text); SetField("riskLevel", TaskRiskLevels.Low); return Invoke("SendPrompt"); }
+        public Task LoadBody(string id) => typeof(Home).GetMethod("LoadCommandBody", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(this, [Visible!.Commands.Single(x => x.Id == id)]) as Task ?? Task.CompletedTask;
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
+        protected override Task<ControlSnapshot> ReadSnapshot() => readSnapshot();
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
         {
             LastBeforeId = beforeId;
