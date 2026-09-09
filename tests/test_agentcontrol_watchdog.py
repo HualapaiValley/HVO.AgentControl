@@ -217,6 +217,7 @@ class WatchdogTests(unittest.TestCase):
     def test_blind_monitor_escalates_persists_and_recovers_without_false_resolution(self):
         controller, events = Mock(), []
         state = {'lastControllerSuccess': 1000, 'intentionalPause': False, 'activeCoordination': True,
+                 'observationStatus': 'Healthy',
                  'incidents': {'pending_request:worker': {'kind': 'pending_request', 'subject': 'worker', 'lastReported': 1000}}}
         controller.snapshot.side_effect = ValueError('SECRET oversized response')
         self.assertFalse(watchdog.observe_controller(state, controller, 1030, 300, events.append))
@@ -247,6 +248,30 @@ class WatchdogTests(unittest.TestCase):
         for stamp in (1000, 1030, 1060):
             self.recover(state, docker, stamp, paused=watchdog.recovery_is_paused(state, stamp, 300))
         docker.start.assert_not_called()
+
+    def test_incident_overflow_never_resolves_still_observed_work_and_is_not_healthy(self):
+        state, events, controller = {}, [], Mock()
+        snapshot, runs = self.fleet()
+        snapshot['commands'] = [{'id': 'old', 'state': 'DeliveryUnknown'}]
+        controller.snapshot.return_value = (snapshot, runs)
+        self.assertTrue(watchdog.observe_controller(state, controller, 1000, 300, events.append))
+        snapshot['commands'] += [{'id': str(i), 'state': 'DeliveryUnknown'} for i in range(256)]
+        self.assertFalse(watchdog.observe_controller(state, controller, 1030, 300, events.append))
+        self.assertEqual('Limited', state['observationStatus'])
+        self.assertGreater(state['incidentOverflowCount'], 0)
+        self.assertTrue(any(x['event'] == 'incident_tracking_overflow' for x in events))
+        self.assertFalse(any(x['event'] == 'resolved' for x in events))
+        self.assertIn('unresolved_command:' + watchdog.identity('old'), state['incidents'])
+        self.assertTrue(watchdog.recovery_is_paused(state, 1030, 300))
+        controller.snapshot.side_effect = TimeoutError()
+        self.assertFalse(watchdog.observe_controller(state, controller, 1040, 300, events.append))
+        self.assertEqual('Unavailable', state['observationStatus'])
+        self.assertTrue(watchdog.recovery_is_paused(state, 1040, 300))
+        controller.snapshot.side_effect = None
+        snapshot['commands'] = []
+        self.assertTrue(watchdog.observe_controller(state, controller, 1060, 300, events.append))
+        self.assertEqual('Healthy', state['observationStatus'])
+        self.assertTrue(any(x['event'] == 'incident_tracking_restored' for x in events))
 
     def test_github_expiry_and_structured_provider_failures_are_observed_during_pause(self):
         snapshot, runs = self.fleet('Paused')

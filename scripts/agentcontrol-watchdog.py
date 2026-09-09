@@ -219,7 +219,18 @@ def update_incidents(state, observations, now, alert_after, emit):
     old = state.get('incidents', {})
     current = {}
     selected = {item['kind'] + ':' + item['subject']: item for item in observations}
-    for key, observation in list(selected.items())[-256:]:
+    state['incidentOverflowCount'] = max(0, len(selected) - 256)
+    if state['incidentOverflowCount']:
+        if 'incidentOverflowReportedAt' not in state or now - state['incidentOverflowReportedAt'] >= 300:
+            emit({'event': 'incident_tracking_overflow', 'severity': 'critical', 'observedAt': now,
+                  'untrackedIncidents': state['incidentOverflowCount']})
+            state['incidentOverflowReportedAt'] = now
+    elif state.pop('incidentOverflowReportedAt', None) is not None:
+        emit({'event': 'incident_tracking_restored', 'observedAt': now})
+    # Preserve already tracked incidents first. Capacity eviction is never resolution.
+    ordered = [key for key in old if key in selected] + [key for key in selected if key not in old]
+    for key in ordered[:256]:
+        observation = selected[key]
         record = dict(old.get(key, {'firstSeen': now, 'lastReported': 0}))
         record.update(observation, lastSeen=now)
         delayed = observation['kind'] in ('no_assignments', 'runtime_unavailable', 'pending_request') and now - record['firstSeen'] < alert_after
@@ -228,7 +239,7 @@ def update_incidents(state, observations, now, alert_after, emit):
             record['lastReported'] = now
         current[key] = record
     for key, record in old.items():
-        if key not in current and record.get('lastReported'):
+        if key not in selected and record.get('lastReported'):
             emit({'event': 'resolved', 'kind': record['kind'], 'subject': record['subject'], 'observedAt': now})
     state['incidents'] = dict(list(current.items())[-256:])
 
@@ -242,10 +253,10 @@ def observe_controller(state, controller, now, stall_seconds, emit):
         if state.get('observationStatus') in ('Unavailable', 'Stale'):
             emit({'event': 'controller_observation_restored', 'observedAt': now})
         state.update(lastControllerSuccess=now, intentionalPause=paused, activeCoordination=active,
-                     observationStatus='Healthy', consecutiveObservationFailures=0)
+                     observationStatus='Limited' if state['incidentOverflowCount'] else 'Healthy', consecutiveObservationFailures=0)
         for key in ('observationFailureSince', 'controllerFailureAt', 'observationStaleReportedAt'):
             state.pop(key, None)
-        return True
+        return not state['incidentOverflowCount']
     except Exception as error:
         # Keep previously observed incidents; failure to read is not evidence of their resolution.
         state.setdefault('observationFailureSince', now)
@@ -269,7 +280,9 @@ def observe_controller(state, controller, now, stall_seconds, emit):
 def recovery_is_paused(state, now, stall_seconds):
     # A recent explicit running observation allows recovery of a controller that just exited.
     # Startup, an owner pause, or extended blindness cannot authorize container starts.
-    return (state.get('intentionalPause', True) or state.get('activeCoordination') is not True or 'lastControllerSuccess' not in state or
+    return (state.get('intentionalPause', True) or state.get('activeCoordination') is not True or
+            state.get('incidentOverflowCount', 0) > 0 or
+            state.get('observationStatus') not in ('Healthy', 'Unavailable') or 'lastControllerSuccess' not in state or
             now - state['lastControllerSuccess'] >= stall_seconds)
 
 

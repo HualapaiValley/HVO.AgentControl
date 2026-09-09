@@ -1,14 +1,66 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Data.Common;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.GitHub;
 using HVO.AgentControl.Infrastructure;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
 
 public sealed class WatchdogStatusTests
 {
+    [Fact]
+    public async Task MonitoringReadDoesNotBlockHeartbeatWrites()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var blocker = new PauseWatchdogRead();
+        var connection = await app.Store.Read(db => Task.FromResult(db.Database.GetConnectionString()!));
+        var factory = new PooledDbContextFactory<ControlDb>(new DbContextOptionsBuilder<ControlDb>()
+            .UseSqlite(connection).AddInterceptors(blocker).Options);
+        var store = new ControlStore(factory, app.Services.GetRequiredService<IOptions<ControlOptions>>(), app.Services.GetRequiredService<Secrets>());
+        var reading = store.WatchdogStatus();
+        Task<bool>? writing = null;
+        try
+        {
+            await blocker.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            writing = Task.Run(() => app.Store.Write(async db =>
+            {
+                (await db.Workers.FindAsync(worker.Id))!.LastObservedAt = 123;
+                return true;
+            }));
+            Assert.True(await writing.WaitAsync(TimeSpan.FromSeconds(3)));
+        }
+        finally
+        {
+            blocker.Release.TrySetResult();
+            await reading;
+            if (writing is not null) await writing;
+        }
+    }
+
+    private sealed class PauseWatchdogRead : DbCommandInterceptor
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command,
+            CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("FROM \"Commands\"", StringComparison.Ordinal))
+            {
+                Entered.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+            return result;
+        }
+    }
+
     [Fact]
     public async Task CompactStatusRetainsOldUnresolvedWorkWithoutDownloadingEvidence()
     {

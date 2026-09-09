@@ -1,4 +1,5 @@
 using HVO.AgentControl.Core;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace HVO.AgentControl.Infrastructure;
@@ -11,7 +12,9 @@ public sealed partial class ControlStore
     public Task<WatchdogStatus> WatchdogStatus() => Read(async db =>
     {
         // Keep one consistent read across tables while workers continue to update the ledger.
-        await using var transaction = await db.Database.BeginTransactionAsync();
+        await db.Database.OpenConnectionAsync();
+        await using var transaction = ((SqliteConnection)db.Database.GetDbConnection()).BeginTransaction(deferred: true);
+        await db.Database.UseTransactionAsync(transaction);
         var now = Now;
         var runtimes = await db.Runtimes.AsNoTracking().OrderBy(x => x.Id).Take(WatchdogEntityLimit + 1)
             .Select(x => new WatchdogRuntime(x.Id, x.DesiredConnected, x.Transport, x.Health)).ToListAsync();
