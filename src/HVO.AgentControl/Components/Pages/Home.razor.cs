@@ -21,6 +21,8 @@ public partial class Home
     private int progressMinutes = 5;
     private string promptText = "", outcome = "ReportedComplete", evidence = "";
     private readonly ConversationSelection selection = new();
+    private readonly Dictionary<string, string> promptDrafts = [];
+    private readonly Dictionary<string, long> promptDraftVersions = [];
     private readonly Dictionary<string, string> answers = [];
     private readonly Dictionary<string, HashSet<string>> choices = [];
     private readonly Dictionary<string, string> replyIds = [];
@@ -31,9 +33,12 @@ public partial class Home
     protected override async Task OnParametersSetAsync()
     {
         if (appliedWorkerId == WorkerId) return;
+        if (appliedWorkerId is { Length: > 0 }) promptDrafts[appliedWorkerId] = promptText;
         appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = ""; outcomeExpectedRevision = 0;
-        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); commandBodies.Clear(); promptText = ""; promptRequestId = null;
+        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); commandBodies.Clear();
+        promptText = WorkerId is { Length: > 0 } ? promptDrafts.GetValueOrDefault(WorkerId, "") : "";
+        promptRequestId = null;
         await Refresh();
     }
     protected override async Task SnapshotChanged()
@@ -87,12 +92,24 @@ public partial class Home
         if (firstRender) module = await JavaScript.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Home.razor.js");
         if (module is not null) await module.InvokeVoidAsync("observeTranscript", selectedId);
     }
-    private Task SendPrompt() => Execute(async () =>
+    private Task SendPrompt(string renderedWorkerId, long renderedWorkerRevision) => Execute(async () =>
     {
-        var current = SelectedDetail();
-        promptRequestId ??= Guid.NewGuid().ToString();
-        var command = await Store.Prompt(current.Worker.Id, new(promptRequestId, promptText, current.Worker.Revision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
-        notice = "Instruction queued. You can leave this page while the worker runs."; promptText = ""; promptRequestId = null;
+        if (selectedId != renderedWorkerId || detail?.Worker.Id != renderedWorkerId || detail.Worker.Revision != renderedWorkerRevision)
+            throw new ControlException("The selected conversation changed. Wait for its details before sending this instruction.");
+        SelectedDetail();
+        var submittedText = promptText;
+        var submittedDraftVersion = promptDraftVersions.GetValueOrDefault(renderedWorkerId);
+        var submittedRequestId = promptRequestId ??= Guid.NewGuid().ToString();
+        var command = await Store.Prompt(renderedWorkerId, new(submittedRequestId, submittedText, renderedWorkerRevision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
+        notice = "Instruction queued. You can leave this page while the worker runs.";
+        if (promptDraftVersions.GetValueOrDefault(renderedWorkerId) == submittedDraftVersion &&
+            promptDrafts.GetValueOrDefault(renderedWorkerId, "") == submittedText)
+        {
+            promptDrafts.Remove(renderedWorkerId);
+            if (selectedId == renderedWorkerId && detail?.Worker.Id == renderedWorkerId && promptText == submittedText)
+                promptText = "";
+        }
+        if (promptRequestId == submittedRequestId) promptRequestId = null;
     });
     private Task StatusInquiry() => Execute(async () =>
     {
@@ -140,6 +157,12 @@ public partial class Home
         if (!question.Multiple) Choices(id, question.Index).Clear();
         SetAnswer(id, question.Index, text);
     }
+    private void SetPromptText(string renderedWorkerId, string text)
+    {
+        promptDrafts[renderedWorkerId] = text;
+        promptDraftVersions[renderedWorkerId] = promptDraftVersions.GetValueOrDefault(renderedWorkerId) + 1;
+        if (selectedId == renderedWorkerId && detail?.Worker.Id == renderedWorkerId) promptText = text;
+    }
     private Task OlderHistory() => Execute(async () =>
     {
         var current = SelectedDetail();
@@ -185,11 +208,21 @@ public partial class Home
     }
     private Task LoadCommandBody(CommandRecord command) => Execute(async () =>
     {
-        var body = await Store.Command(command.Id);
+        // Fence the body read to the rendered selection. A late 404 (or any late failure)
+        // started for worker A must not write its error onto B or back onto a new A after
+        // A→B→A; cache insertion and UI application apply only while this exact scope is
+        // still current, and a current-generation 404 remains visible.
+        var scope = selection.Capture(selectedId);
+        var commandId = command.Id;
+        CommandRecord body;
+        try { body = await ReadCommandBody(commandId); }
+        catch (Exception) when (!selection.IsCurrent(scope)) { return; }
+        if (!selection.IsCurrent(scope)) return;
         commandBodies[body.Id] = body;
         var index = detail!.Commands.FindIndex(x => x.Id == body.Id);
         if (index >= 0) ApplyCommandBody(detail.Commands[index], body);
     });
+    protected virtual Task<CommandRecord> ReadCommandBody(string commandId) => Store.Command(commandId);
     private static string Timestamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToString("MMM d HH:mm:ss 'UTC'");
     private static string Pretty(string json)
     {

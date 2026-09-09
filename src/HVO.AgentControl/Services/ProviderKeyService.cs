@@ -99,6 +99,8 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
             var (runtime, reference, revision) = await store.Write(async db =>
             {
                 var runtime = await db.Runtimes.FindAsync(runtimeId) ?? throw new ControlException("Runtime not found.", 404);
+                if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft)
+                    throw new ControlException("Managed runtime enrollment is pending; provider setup is unavailable until transport ownership is verified.");
                 if (!runtime.DesiredConnected || runtime.Health != "Healthy") throw new ControlException("Verify and connect the runtime first.");
                 var key = await db.Set<ProviderCredential>().FindAsync(ProviderId) ?? throw new ControlException("Save the OpenCode Go key first.");
                 if (key.Revision != input.ExpectedRevision) throw new ControlException("The saved key changed. Refresh before applying it.");

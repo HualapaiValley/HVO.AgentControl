@@ -11,6 +11,7 @@ public partial class Runtimes
 {
     [Inject] private RuntimeVerificationService Verification { get; set; } = default!;
     private IEnumerable<RuntimeRecord> DevelopmentRuntimes => (snapshot?.Runtimes ?? []).Where(x => x.ConnectionKind == RuntimeConnections.Ssh);
+    private IEnumerable<RuntimeRecord> ManagedDrafts => (snapshot?.Runtimes ?? []).Where(x => x.ConnectionKind == RuntimeConnections.ManagedDraft);
     private RuntimeRecord? runtimeEdit;
     private string? deletingRuntimeId;
     private RuntimeVerification? runtimeVerification;
@@ -72,7 +73,10 @@ public partial class Runtimes
     private Task DeleteRuntime(RuntimeRecord runtime) => Execute(async () =>
     {
         await Store.DeleteRuntime(runtime.Id, new(Guid.NewGuid().ToString(), runtime.Revision));
-        deletingRuntimeId = null; notice = "Runtime registration deleted. Remote processes, files and saved credentials retained.";
+        deletingRuntimeId = null;
+        notice = runtime.ConnectionKind == RuntimeConnections.ManagedDraft
+            ? "Runtime draft deleted."
+            : "Runtime registration deleted. Remote processes, files and saved credentials retained.";
     });
     private Task RuntimeAction(string id, string kind) => Execute(async () => { var command = await Store.RuntimeCommand(id, kind, Guid.NewGuid().ToString()); notice = kind + " recorded: " + command.Id; });
 }

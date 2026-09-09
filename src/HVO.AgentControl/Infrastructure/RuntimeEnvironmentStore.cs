@@ -8,6 +8,80 @@ namespace HVO.AgentControl.Infrastructure;
 
 public sealed partial class ControlStore
 {
+    public Task<ManagedRuntimeDraftView> CreateManagedRuntimeDraft(CreateManagedRuntimeDraftInput input) => Write(async db =>
+    {
+        var runtimeId = InventoryId(input.RuntimeId);
+        var hostId = InventoryId(input.HostId);
+        var projectId = InventoryId(input.ConfigurationProjectId);
+        var name = InventoryText(input.Name, "name", 120, required: true);
+        var path = ValidateDevcontainerPath(input.DevcontainerPath) ?? throw new InventoryException("validation", "A devcontainer.json path is required.");
+        var requestId = InventoryId(input.RequestId);
+        var intent = new { runtimeId, name, hostId, projectId, path, input.ExpectedHostRevision, input.ExpectedProjectRevision };
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(intent))));
+        if (await db.InventoryMutations.FindAsync(requestId) is { } prior)
+        {
+            if (prior.ResourceKind != "ManagedRuntimeDraft" || prior.RequestHash != hash)
+                throw InventoryConflict("idempotency_conflict", "This request ID belongs to a different managed runtime draft.");
+            return Json.Read<ManagedRuntimeDraftView>(prior.ResultJson);
+        }
+
+        var host = await RequireHost(db, hostId);
+        var project = await RequireProject(db, projectId);
+        if (host.Archived || project.Archived) throw InventoryConflict("resource_archived", "Draft references must be active.");
+        if (host.Revision != input.ExpectedHostRevision || project.Revision != input.ExpectedProjectRevision)
+            throw InventoryConflict("revision_conflict", "Host or project changed; refresh before creating the draft.");
+        if (await db.Runtimes.AnyAsync(x => x.Id == runtimeId))
+            throw InventoryConflict("identity_exists", "Runtime identity already exists; use a new identity for a new draft.");
+        if (await db.Commands.AnyAsync(x => x.RuntimeId == runtimeId && x.Kind == "DeleteRuntime"))
+            throw InventoryConflict("identity_retired", "Runtime identity was deleted and cannot be reused.");
+
+        var runtime = new RuntimeRecord
+        {
+            Id = runtimeId,
+            Name = name,
+            ConnectionKind = RuntimeConnections.ManagedDraft,
+            Transport = "Unenrolled",
+            Health = "Pending",
+            ProviderState = "Pending",
+            DesiredConnected = false,
+            Revision = 1,
+            Capacity = 1,
+            Host = "",
+            Username = "",
+            HostKeySha256 = "",
+            CredentialReference = "",
+            AllowedRoots = "",
+            StateDirectory = ""
+        };
+        var environment = new RuntimeEnvironmentRecord
+        {
+            RuntimeId = runtimeId,
+            HostId = hostId,
+            Kind = RuntimeEnvironmentKind.ManagedDevcontainer,
+            ConfigurationProjectId = projectId,
+            DevcontainerPath = path,
+            Revision = 1,
+            CreatedAt = Now,
+            UpdatedAt = Now
+        };
+        db.Runtimes.Add(runtime);
+        db.RuntimeEnvironments.Add(environment);
+        var view = new ManagedRuntimeDraftView(EnvironmentView(runtime, environment), "PendingEnrollment",
+            "Managed runtime draft is pending authenticated enrollment; placement and transport are not verified.", requestId, Now);
+        db.InventoryMutations.Add(new InventoryMutationReceipt
+        {
+            RequestId = requestId,
+            ResourceKind = "ManagedRuntimeDraft",
+            ResourceId = runtimeId,
+            Action = "Create",
+            RequestHash = hash,
+            ResultJson = Json.Write(view),
+            CreatedAt = Now
+        });
+        Event(db, "ManagedRuntimeDraftCreated", runtimeId, payload: new { requestId, hostId, projectId, path }, provenance: "user");
+        return view;
+    });
+
     public Task<RuntimeEnvironmentView> RuntimeEnvironment(string runtimeId) => Read(async db =>
     {
         var runtime = await RequireEnvironmentRuntime(db, RuntimeEnvironmentId(runtimeId));
@@ -148,7 +222,7 @@ public sealed partial class ControlStore
     private static RuntimeEnvironmentView EnvironmentView(RuntimeRecord runtime, RuntimeEnvironmentRecord? environment)
     {
         var kind = environment?.Kind ?? RuntimeEnvironmentKind.LegacySsh;
-        var state = kind == RuntimeEnvironmentKind.LegacySsh ? "LegacySsh" :
+        var state = runtime.ConnectionKind == RuntimeConnections.ManagedDraft ? "PendingEnrollment" : kind == RuntimeEnvironmentKind.LegacySsh ? "LegacySsh" :
             environment!.ConnectionFingerprint == RuntimeConnectionFingerprint(runtime) ? "Configured" : "ConnectionProfileChanged";
         return new(runtime.Id, runtime.Name, runtime.Revision, environment?.Revision ?? 0, environment?.HostId, kind,
             environment?.ConfigurationProjectId, environment?.DevcontainerPath, state,

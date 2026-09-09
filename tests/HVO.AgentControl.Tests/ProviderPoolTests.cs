@@ -33,6 +33,24 @@ public sealed class ProviderPoolTests
         Assert.Equal(now + 60000, ProviderFailure.Parse(Error(429, retry: date), now)!.RetryAt);
     }
 
+    [Theory]
+    [InlineData("{\"error\":{\"type\":\"usage_limit_reached\"}}", "Exhausted")]
+    [InlineData("{\"error\":{\"code\":null,\"type\":\"usage_limit_reached\"}}", "Exhausted")]
+    [InlineData("{\"error\":{\"code\":\"usage_limit_reached\"}}", "Exhausted")]
+    [InlineData("{\"error\":{\"message\":\"usage_limit_reached\"}}", "Throttled")]
+    [InlineData("{\"error\":{\"type\":123}}", "Throttled")]
+    [InlineData("{\"error\":{\"type\":\"rate_limit_error\"}}", "Throttled")]
+    [InlineData("{\"error\":[{\"type\":\"usage_limit_reached\"}]}", "Throttled")]
+    [InlineData("{malformed", "Throttled")]
+    [InlineData("", "Throttled")]
+    public void StructuredUsageLimitTypeIsRecognizedWithoutInferringExhaustionFromGeneric429(string body, string category)
+    {
+        var failure = ProviderFailure.Parse(Error(429, body), 1000)!;
+        Assert.Equal(category, failure.Category);
+        Assert.Equal(429, failure.Status);
+        Assert.Null(failure.RetryAt);
+    }
+
     private static CommandRecord Command(WorkerRecord worker, string provider = "opencode-go") => new()
     {
         Id = Guid.NewGuid().ToString(),
