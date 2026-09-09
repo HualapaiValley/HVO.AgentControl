@@ -19,6 +19,7 @@ var builder = WebApplication.CreateBuilder(args);
 var settings = builder.Configuration.GetSection("Control").Get<ControlOptions>() ?? new ControlOptions();
 settings.DataDirectory = Path.GetFullPath(settings.DataDirectory);
 settings.SecretsDirectory = Path.GetFullPath(settings.SecretsDirectory);
+TaskRiskPolicy.Validate(settings.TaskRiskFloor);
 Directory.CreateDirectory(settings.DataDirectory);
 if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(settings.DataDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 if (settings.GlobalCapacity is < 1 or > 128 || settings.QueueLimit is < 1 or > 256 || settings.EventRetention is < 100 or > 1000000 ||
@@ -120,7 +121,7 @@ app.Use(async (context, next) =>
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
     if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path == "/" || context.Request.Path == "/providers") context.Response.Headers.CacheControl = "no-store";
     try { await next(); }
-    catch (ControlException ex) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = ex.Message }); }
+    catch (ControlException ex) { context.Response.StatusCode = ex.Status; await context.Response.WriteAsJsonAsync(new { error = ex.Message, code = ex.Code, details = ex.Details }); }
     catch (AntiforgeryValidationException) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = "Invalid antiforgery token; reload the page." }); }
     catch (BadHttpRequestException ex) when (!context.Response.HasStarted)
     {

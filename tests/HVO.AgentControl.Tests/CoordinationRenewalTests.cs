@@ -114,13 +114,16 @@ public sealed partial class CoordinationTests
     {
         await using var app = new TestApp();
         var (coordinator, a, b) = await Seed(app.Store);
-        var old = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Earlier task", a.Revision));
+        var old = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Earlier task", a.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await Finish(app.Store, old.Id, "Previous run evidence");
         await app.Store.Write(async db => { (await db.Commands.FindAsync(old.Id))!.CreatedAt = ControlStore.Now - 60000; return true; });
         var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Track owner work", [a.Id]));
         a = (await app.Store.Snapshot()).Workers.Single(x => x.Id == a.Id);
-        var ownerWork = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Root-assigned correction", a.Revision));
-        var outsider = await app.Store.Prompt(b.Id, new(Guid.NewGuid().ToString(), "Other project", b.Revision));
+        var ownerWork = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Root-assigned correction", a.Revision,
+            RiskLevel: TaskRiskLevels.Low));
+        var outsider = await app.Store.Prompt(b.Id, new(Guid.NewGuid().ToString(), "Other project", b.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await app.Store.CoordinationTick();
         var evidence = Json.Read<CoordinatorContext>((await app.Store.Coordinations()).Single().InputJson);
         Assert.Equal("owner", Assert.Single(evidence.Results).Origin);

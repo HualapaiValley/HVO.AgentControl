@@ -4,6 +4,7 @@ using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
 using HVO.AgentControl.Services;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -190,6 +191,110 @@ public sealed class RuntimeSupervisorReconciliationTests
 
         await Reconcile(app, worker, Snapshot(worker, command, failed));
         Assert.Equal(Delivery.Accepted, (await app.Store.Detail(worker.Id)).Commands.Single().State);
+    }
+
+    [Fact]
+    public async Task ObservedRouteMismatchFailsOutcomeAndRecordsNativeEvidence()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var command = await AddPrompt(app, worker);
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Commands.FindAsync(command.Id))!;
+            saved.ExecutionPayload = Json.Write(new PromptInput("task", "High risk task", worker.Revision,
+                "openai", "gpt-5.6-sol", RiskLevel: TaskRiskLevels.High,
+                RiskPolicyVersion: "risk-floor-v1", RiskRouteMaximum: TaskRiskLevels.High));
+            return true;
+        });
+        var mismatch = JsonSerializer.SerializeToElement(new
+        {
+            info = new
+            {
+                id = "msg_final", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId,
+                providerID = "openai", modelID = "gpt-5.6-luna", time = new { created = 3L, completed = 4L }, finish = "stop"
+            },
+            parts = new[] { new { type = "text", text = "Executed on unexpected route" } }
+        });
+
+        await Reconcile(app, worker, Snapshot(worker, command, mismatch) with { Status = "busy" });
+        Assert.Equal(Delivery.Running, (await app.Store.Detail(worker.Id)).Commands.Single().State);
+
+        var final = JsonSerializer.SerializeToElement(new
+        {
+            info = new
+            {
+                id = "msg_final_expected", role = "assistant", parentID = command.NativeMessageId,
+                sessionID = worker.NativeSessionId, providerID = "openai", modelID = "gpt-5.6-sol",
+                time = new { created = 5L, completed = 6L }, finish = "stop"
+            },
+            parts = new[] { new { type = "text", text = "Final response after bounded history changed" } }
+        });
+        await Reconcile(app, worker, Snapshot(worker, command, final));
+
+        var detail = await app.Store.Detail(worker.Id);
+        Assert.Equal(Delivery.Finished, detail.Commands.Single().State);
+        Assert.Equal("Failed", detail.Worker.Outcome);
+        Assert.Contains("different provider/model", detail.Commands.Single().Detail);
+        var evidence = await app.Store.Read(db => db.Events.SingleAsync(x =>
+            x.Type == "TaskRiskRouteMismatch" && x.CommandId == command.Id));
+        Assert.Contains("gpt-5.6-sol", evidence.Payload);
+        Assert.Contains("gpt-5.6-luna", evidence.Payload);
+    }
+
+    [Fact]
+    public void ContradictoryNativeRouteMetadataIsUntrusted()
+    {
+        var message = JsonSerializer.SerializeToElement(new
+        {
+            info = new
+            {
+                providerID = "openai", modelID = "gpt-5.6-sol",
+                model = new { providerID = "openai", id = "gpt-5.6-luna" }
+            }
+        });
+
+        var route = NativeTurnEvidence.ObservedRoute(message);
+
+        Assert.NotNull(route);
+        Assert.True(route.Contradictory);
+    }
+
+[Fact]
+        public async Task LateRouteMismatchCorrectsFinishedAssignmentOutcome()
+        {
+            await using var app = new TestApp();
+            var worker = await PersistenceTests.SeedWorker(app.Store);
+            var command = await AddPrompt(app, worker);
+            await app.Store.Write(async db =>
+        {
+            var saved = (await db.Commands.FindAsync(command.Id))!;
+            saved.ExecutionPayload = Json.Write(new PromptInput("task", "High risk task", worker.Revision,
+                "openai", "gpt-5.6-sol", RiskLevel: TaskRiskLevels.High,
+                RiskPolicyVersion: "risk-floor-v1", RiskRouteMaximum: TaskRiskLevels.High));
+            db.Assignments.Add(new AssignmentRecord { Id = command.Id, WorkerId = worker.Id, Prompt = "High risk task" });
+            return true;
+        });
+        JsonElement Final(string model) => JsonSerializer.SerializeToElement(new
+        {
+            info = new
+            {
+                id = "msg_final", role = "assistant", parentID = command.NativeMessageId, sessionID = worker.NativeSessionId,
+                providerID = "openai", modelID = model, time = new { created = 3L, completed = 4L }, finish = "stop"
+            },
+            parts = new[] { new { type = "text", text = "Terminal result" } }
+        });
+
+        await Reconcile(app, worker, Snapshot(worker, command, Final("gpt-5.6-sol")));
+        Assert.Equal("NeedsReview", (await app.Store.Detail(worker.Id)).Assignments.Single().Outcome);
+
+        await Reconcile(app, worker, Snapshot(worker, command, Final("gpt-5.6-luna")));
+
+        var detail = await app.Store.Detail(worker.Id);
+        Assert.Equal("Failed", detail.Assignments.Single().Outcome);
+        Assert.Contains("different provider/model", detail.Commands.Single().Detail);
+        Assert.Single(await app.Store.Read(db => db.Events.Where(x =>
+            x.Type == "TaskRiskRouteMismatch" && x.CommandId == command.Id).ToListAsync()));
     }
 
     [Fact]

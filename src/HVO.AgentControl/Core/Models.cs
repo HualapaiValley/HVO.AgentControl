@@ -33,6 +33,7 @@ public sealed class ControlOptions
     public int MaxRuntimes { get; set; } = 32;
     public int MaxWorkers { get; set; } = 128;
     public string[] TrustedProxies { get; set; } = [];
+    public TaskRiskFloorOptions TaskRiskFloor { get; set; } = new();
 }
 
 public sealed class RuntimeRecord
@@ -346,7 +347,16 @@ public sealed record CreateWorkerInput(string Id, string RuntimeId, string Name,
     string ProviderId, string ModelId, string? Repository = null, string? Branch = null, string? BaseRef = null, string Role = SessionRoles.Worker, bool DiscoverCapabilities = false);
 public sealed record PromptInput(string Id, string Text, long ExpectedRevision, string? ProviderId = null,
     string? ModelId = null, bool StatusInquiry = false, string? Agent = null, string? Variant = null, bool IncludeGuidance = false,
-    int? ProgressMinutes = null, GitHubMergeTaskScope? GitHubMergeScope = null);
+    int? ProgressMinutes = null, GitHubMergeTaskScope? GitHubMergeScope = null,
+    string? RiskLevel = null, string? RiskPolicyVersion = null, string? RiskRouteMaximum = null);
+public sealed record TaskPromptInput(string Id, string Text, long ExpectedRevision,
+    [property: JsonRequired] string RiskLevel, string? ProviderId = null, string? ModelId = null, bool StatusInquiry = false,
+    string? Agent = null, string? Variant = null, bool IncludeGuidance = false, int? ProgressMinutes = null,
+    GitHubMergeTaskScope? GitHubMergeScope = null)
+{
+    public PromptInput Prompt() => new(Id, Text, ExpectedRevision, ProviderId, ModelId, StatusInquiry, Agent, Variant,
+        IncludeGuidance, ProgressMinutes, GitHubMergeScope, RiskLevel);
+}
 public sealed record ReplyInput(string Id, string RequestId, string? Permission, string[][]? Answers, bool Reject = false);
 public sealed record QueueEdit(string Action);
 public sealed record InspectWorkspaceInput(string Id, string RuntimeId, string Directory);
@@ -357,9 +367,11 @@ public sealed record ControlSnapshot(long Sequence, List<RuntimeRecord> Runtimes
 public sealed record WorkerDetail(WorkerRecord Worker, List<TranscriptMessage> Messages, List<CommandRecord> Commands,
     List<PendingRequest> Requests, List<AssignmentRecord> Assignments);
 
-public sealed class ControlException(string message, int status = 409) : Exception(message)
+public sealed class ControlException(string message, int status = 409, string code = "control_error", object? details = null) : Exception(message)
 {
     public int Status { get; } = status;
+    public string Code { get; } = code;
+    public object? Details { get; } = details;
 }
 
 public sealed class CoordinationRun
@@ -391,7 +403,8 @@ public sealed record CoordinationRenewalInput(string Id, long ExpectedRevision, 
 public sealed record CoordinatorDecision(string Summary, CoordinatorAction[] Actions, bool Complete = false);
 public sealed record CoordinatorAction(string Type, string WorkerId, string? Text = null, string? RequestId = null,
     string[][]? Answers = null, bool? IncludeGuidance = null, int? ProgressMinutes = null, string? ProviderId = null,
-    string? ModelId = null, string? Variant = null, GitHubMergeTaskScope? GitHubMergeScope = null);
+    string? ModelId = null, string? Variant = null, GitHubMergeTaskScope? GitHubMergeScope = null,
+    string RiskLevel = TaskRiskLevels.Low);
 public sealed record CoordinatorResult(string Id, string WorkerId, string State, string Detail, string ProgressText,
     long? LastProgressAt, string Prompt, string Response, bool ResponseTruncated, bool EarlierTextOmitted, string Origin = "");
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);

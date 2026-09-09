@@ -88,7 +88,8 @@ public sealed class RegistrationLifecycleTests
         });
         await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id, input));
         await app.Store.Write(async db => { (await db.CoordinationRuns.FindAsync(run.Id))!.State = "Stopped"; return true; });
-        var queued = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "task", worker.Revision));
+        var queued = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "task", worker.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteWorker(worker.Id, input));
         await app.Store.EditQueue(queued.Id, "cancel");
         var deleted = await app.Store.DeleteWorker(worker.Id, input);

@@ -200,7 +200,8 @@ public sealed class AssignmentOutcomeTests
         var malformed = GitHubMergeTaskAuthority.Scope(GitHubMergeTaskKinds.Author, "Owner/Repo", 0, null!);
 
         var error = await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(worker.Id,
-            new(Guid.NewGuid().ToString(), "Implement this change.", 0, GitHubMergeScope: malformed)));
+            new(Guid.NewGuid().ToString(), "Implement this change.", 0, GitHubMergeScope: malformed,
+                RiskLevel: TaskRiskLevels.Low)));
 
         Assert.Equal(400, error.Status);
         Assert.Empty((await app.Store.Detail(worker.Id)).Commands);

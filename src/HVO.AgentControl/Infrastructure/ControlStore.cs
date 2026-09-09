@@ -325,16 +325,18 @@ public sealed partial class ControlStore(IDbContextFactory<ControlDb> factory, I
         if (input.StatusInquiry) worker.LastStatusInquiryAt = Now;
         if (await db.Commands.CountAsync(x => x.WorkerId == workerId && x.State == Delivery.Queued) >= options.Value.QueueLimit)
             throw new ControlException("Worker queue is full.");
-        var command = await Record(db, input.Id, worker.RuntimeId, workerId, "Prompt", payload);
-        command.Origin = origin;
-        command.ExecutionPayload = Json.Write(input with
+        var execution = input with
         {
             Text = rendered,
             ProviderId = input.ProviderId ?? worker.ProviderId,
             ModelId = input.ModelId ?? worker.ModelId,
             Agent = input.Agent ?? worker.Agent,
             Variant = input.Variant ?? worker.Variant
-        });
+        };
+        execution = TaskRiskPolicy.Admit(options.Value.TaskRiskFloor, execution);
+        var command = await Record(db, input.Id, worker.RuntimeId, workerId, "Prompt", payload);
+        command.Origin = origin;
+        command.ExecutionPayload = Json.Write(execution);
         db.Assignments.Add(new AssignmentRecord { Id = command.Id, WorkerId = workerId, Prompt = rendered, TemplateVersion = input.IncludeGuidance ? AssignmentGuidance.Version : "manual-v1" });
         worker.Revision++;
         return command;

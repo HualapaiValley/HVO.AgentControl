@@ -87,7 +87,7 @@ public static class ApiEndpoints
         group.MapPost("/workspaces/inspect", (InspectWorkspaceInput input, ControlStore store) => store.InspectWorkspace(input));
         group.MapGet("/workers/{id}", (string id, ControlStore store) => store.Detail(id));
         group.MapGet("/workers/{id}/history", (string id, long? before, string? beforeId, ControlStore store) => store.Detail(id, before, beforeId));
-        group.MapPost("/workers/{id}/prompts", (string id, PromptInput input, ControlStore store) => store.Prompt(id, input));
+        group.MapPost("/workers/{id}/prompts", (string id, TaskPromptInput input, ControlStore store) => store.Prompt(id, input.Prompt()));
         group.MapPost("/workers/{id}/abort", (string id, RequestId input, ControlStore store) => store.Abort(id, input.Id));
         group.MapPost("/workers/{id}/outcome", (string id, OutcomeInput input, ControlStore store) => store.SetOutcome(id, input));
         group.MapPost("/requests/{id}/reply", (string id, ReplyInput input, ControlStore store) =>

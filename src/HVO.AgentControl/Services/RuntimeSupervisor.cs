@@ -275,6 +275,12 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             }
             if (command.Kind == "Prompt")
             {
+                var executionPayload = string.IsNullOrEmpty(command.ExecutionPayload) ? command.Payload : command.ExecutionPayload;
+                if (!TaskRiskPolicy.TryReadAndEvaluate(options.Value.TaskRiskFloor, executionPayload, out _, out var riskRejection))
+                {
+                    await RejectTaskRisk(db, command, riskRejection!);
+                    continue;
+                }
                 var worker = await db.Workers.FindAsync(command.WorkerId);
                 if (worker is null || worker.Archived || worker.Stale || worker.Activity != "Idle") continue;
                 var inFlight = await db.Commands.Where(x => x.Kind == "Prompt" && (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)).ToListAsync();
@@ -384,11 +390,21 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                         var facts = await transport.ProbeCapabilities(worker.Directory, token);
                         await store.Write(async db => { (await db.Workers.FindAsync(worker.Id))!.CapabilitiesJson = Json.Write(facts); return true; });
                     }
-                    var prompt = Json.Read<PromptInput>(string.IsNullOrEmpty(command.ExecutionPayload) ? command.Payload : command.ExecutionPayload);
+                    var executionPayload = string.IsNullOrEmpty(command.ExecutionPayload) ? command.Payload : command.ExecutionPayload;
+                    if (!TaskRiskPolicy.TryReadAndEvaluate(options.Value.TaskRiskFloor, executionPayload, out var prompt, out var riskRejection))
+                    {
+                        await store.Write(async db =>
+                        {
+                            await RejectTaskRisk(db, (await db.Commands.FindAsync(command.Id))!, riskRejection!);
+                            return true;
+                        });
+                        break;
+                    }
+                    var admittedPrompt = prompt!;
                     var choices = await api.Models(worker!.Directory, token);
-                    if (!choices.Any(x => x.ProviderId == (prompt.ProviderId ?? worker.ProviderId) && x.ModelId == (prompt.ModelId ?? worker.ModelId)))
+                    if (!choices.Any(x => x.ProviderId == (admittedPrompt.ProviderId ?? worker.ProviderId) && x.ModelId == (admittedPrompt.ModelId ?? worker.ModelId)))
                         throw new ControlException("Provider/model unavailable; configure authentication on the runtime and submit a new request when ready.");
-                    ControlStore.ValidateModelOptions(choices, prompt.ProviderId ?? worker.ProviderId, prompt.ModelId ?? worker.ModelId, prompt.Agent ?? "", prompt.Variant ?? "");
+                    ControlStore.ValidateModelOptions(choices, admittedPrompt.ProviderId ?? worker.ProviderId, admittedPrompt.ModelId ?? worker.ModelId, admittedPrompt.Agent ?? "", admittedPrompt.Variant ?? "");
                     var beforePrompt = await api.Snapshot(worker, options.Value.HistoryLimit, token);
                     if (beforePrompt.Status != "idle" || beforePrompt.Questions.Length > 0 || beforePrompt.Permissions.Length > 0)
                     {
@@ -406,7 +422,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     command.NativeMessageId = OpenCodeClient.NewMessageId(beforePrompt);
                     await store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.NativeMessageId = command.NativeMessageId; return true; });
                     mutationStarted = true;
-                    await api.Prompt(worker, command, prompt, token);
+                    await api.Prompt(worker, command, admittedPrompt, token);
                     await Complete(command.Id, Delivery.Accepted, "OpenCode accepted asynchronous submission; completion is not yet known.");
                     break;
                 case "Abort":
@@ -586,8 +602,10 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         if (worker.Activity != activity) { worker.Activity = activity; worker.Revision++; changed = true; }
         worker.Stale = false; worker.LastObservedAt = ControlStore.Now;
         var recoveryIds = await db.Set<ProviderPool>().Where(p => p.RecoveryCommandId != "").Select(p => p.RecoveryCommandId).ToListAsync();
+        var retainedNativeIds = snapshot.Messages.Select(x => x.GetProperty("info").GetProperty("id").GetString()!).ToList();
         var commands = await db.Commands.Where(x => x.WorkerId == workerId && (x.State == Delivery.Dispatching || x.State == Delivery.Unknown || x.State == Delivery.Accepted || x.State == Delivery.Running ||
-            x.Kind == "Prompt" && x.State != Delivery.Queued && recoveryIds.Contains(x.Id))).ToListAsync();
+            x.Kind == "Prompt" && x.State != Delivery.Queued && (recoveryIds.Contains(x.Id) || x.State == Delivery.Finished &&
+                x.NativeMessageId != null && retainedNativeIds.Contains(x.NativeMessageId)))).ToListAsync();
         var nativeRetry = NativeRetryFailure.Parse(snapshot.StatusDetail);
         var abortObserved = activity == "Idle" && commands.Any(x => x.Kind == "Abort" && x.State == Delivery.Accepted);
         var activePrompt = commands.Where(x => x.Kind == "Prompt" && x.State is Delivery.Dispatching or Delivery.Accepted or Delivery.Running &&
@@ -607,6 +625,24 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             var retired = command.State is Delivery.Cancelled or Delivery.Failed or Delivery.Finished;
             var user = snapshot.Messages.Any(x => x.GetProperty("info").GetProperty("id").GetString() == command.NativeMessageId);
             var assistants = user ? NativeTurnEvidence.AssistantMessages(snapshot.Messages, command.NativeMessageId) : [];
+            var routeMismatch = ObservedRouteMismatch(command, assistants);
+            var recordedRouteMismatch = await db.Events.AnyAsync(x => x.Type == "TaskRiskRouteMismatch" && x.CommandId == command.Id);
+            if (routeMismatch is not null && !recordedRouteMismatch)
+            {
+                ControlStore.Event(db, "TaskRiskRouteMismatch", worker.RuntimeId, worker.Id, command.Id, new
+                {
+                    riskLevel = routeMismatch.Value.Prompt.RiskLevel,
+                    expectedProviderId = routeMismatch.Value.Prompt.ProviderId,
+                    expectedModelId = routeMismatch.Value.Prompt.ModelId,
+                    observedProviderId = routeMismatch.Value.Evidence.Route.ProviderId,
+                    observedModelId = routeMismatch.Value.Evidence.Route.ModelId,
+                    contradictory = routeMismatch.Value.Evidence.Route.Contradictory,
+                    policyVersion = routeMismatch.Value.Prompt.RiskPolicyVersion,
+                    routeMaximum = routeMismatch.Value.Prompt.RiskRouteMaximum
+                }, provenance: "native", nativeId: routeMismatch.Value.Evidence.NativeMessageId);
+                changed = true;
+                recordedRouteMismatch = true;
+            }
             var compactionFailure = user && activity == "Idle"
                 ? NativeTurnEvidence.CompletedAutomaticCompactionFailure(snapshot.Messages, command.NativeMessageId, worker.NativeSessionId) : null;
             // Preserve scoped failure evidence even when the same snapshot settles an abort.
@@ -657,10 +693,16 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                 snapshot.IdleToolFailureMessageId == assistants[^1].GetProperty("info").GetProperty("id").GetString() &&
                 NativeTurnEvidence.IsCompletedToolFailure(assistants[^1]);
             var ended = compactionFailure is not null || assistants.Length > 0 && (NativeTurnEvidence.IsTerminalAssistantResponse(assistants[^1]) || stoppedToolFailure);
-            var failed = compactionFailure is not null || assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
+            var failed = recordedRouteMismatch || compactionFailure is not null || assistants.Any(x => x.GetProperty("info").TryGetProperty("error", out var error) && error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined));
             var resultMessages = compactionFailure is null ? assistants : [.. assistants, compactionFailure.Summary];
             if (retired)
             {
+                if (recordedRouteMismatch && command.State == Delivery.Finished)
+                {
+                    if (command.Detail != RouteMismatchDetail) { command.Detail = RouteMismatchDetail; changed = true; }
+                    if (await db.Assignments.FindAsync(command.Id) is { Outcome: not "Failed" } retiredAssignment)
+                    { retiredAssignment.Outcome = "Failed"; changed = true; }
+                }
                 if (activity == "Idle" && ended)
                     await ObserveTurnSettlement(db, worker, command, compactionFailure,
                         !failed && ControlStore.ResponseText(Json.Write(new { messages = assistants })).Length > 0);
@@ -692,7 +734,8 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
             if (state == command.State) continue;
             command.State = state; command.UpdatedAt = ControlStore.Now;
             command.Detail = state == Delivery.Finished
-                ? compactionFailure is not null ? "Native automatic compaction failed after the caller turn. The original prompt was not replayed; retained history requires explicit recovery."
+                ? recordedRouteMismatch ? RouteMismatchDetail
+                : compactionFailure is not null ? "Native automatic compaction failed after the caller turn. The original prompt was not replayed; retained history requires explicit recovery."
                 : stoppedToolFailure ? "Native idle and a refreshed failed tool step confirm the turn stopped. Task completion remains unverified." : "Native turn ended. Assignment outcome requires evidence and owner review."
                 : "Native caller message identity found in retained history.";
             var outcome = failed ? "Failed" : state == Delivery.Finished ? "NeedsReview" : "Running";
@@ -725,7 +768,24 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                 compactionFailure.ProviderId, compactionFailure.ModelId);
     }
 
+    private static (PromptInput Prompt, (string NativeMessageId, NativeRouteEvidence Route) Evidence)? ObservedRouteMismatch(
+        CommandRecord command, JsonElement[] assistants)
+    {
+        PromptInput prompt;
+        try { prompt = Json.Read<PromptInput>(command.ExecutionPayload); }
+        catch (Exception error) when (error is JsonException or InvalidOperationException) { return null; }
+        if (prompt.ProviderId is null || prompt.ModelId is null) return null;
+        foreach (var assistant in assistants)
+        {
+            var route = NativeTurnEvidence.ObservedRoute(assistant);
+            if (route is null || !route.Contradictory && route.ProviderId == prompt.ProviderId && route.ModelId == prompt.ModelId) continue;
+            return (prompt, (assistant.GetProperty("info").GetProperty("id").GetString()!, route));
+        }
+        return null;
+    }
+
     private const string HistoryUnavailableDetail = "Native history could not be read within validated observation limits. SSH remains connected; affected worker activity is unknown until history can be refreshed.";
+    private const string RouteMismatchDetail = "Native execution used untrusted or different provider/model evidence than the route admitted by the task risk policy. Review execution effects; the prompt was not replayed.";
 
     private Task<bool> MarkHistoryUnavailable(string workerId) => store.Write(async db =>
     {
@@ -788,6 +848,16 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         ControlStore.Event(db, "CommandStateChanged", command.RuntimeId, command.WorkerId, id, new { state, detail });
         return true;
     });
+    private static async Task RejectTaskRisk(ControlDb db, CommandRecord command, TaskRiskRejection rejection)
+    {
+        if (command.State is not (Delivery.Queued or Delivery.Dispatching)) return;
+        command.State = Delivery.Failed;
+        command.Detail = rejection.Error;
+        command.ResultJson = Json.Write(rejection);
+        command.UpdatedAt = ControlStore.Now;
+        await ControlStore.ObserveProviderCompletion(db, command, false);
+        ControlStore.Event(db, "TaskRiskFloorRejected", command.RuntimeId, command.WorkerId, command.Id, rejection);
+    }
     private Task<bool> FinishRuntimeCommands(string id, string kind) => store.Write(async db =>
     {
         var runtime = (await db.Runtimes.FindAsync(id))!;

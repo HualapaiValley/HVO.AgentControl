@@ -19,7 +19,7 @@ public partial class Home
     private long outcomeExpectedRevision;
     private bool includeGuidance, hostOperations;
     private int progressMinutes = 5;
-    private string promptText = "", outcome = "ReportedComplete", evidence = "";
+    private string promptText = "", riskLevel = "", outcome = "ReportedComplete", evidence = "";
     private readonly ConversationSelection selection = new();
     private readonly Dictionary<string, string> answers = [];
     private readonly Dictionary<string, HashSet<string>> choices = [];
@@ -32,7 +32,7 @@ public partial class Home
         if (appliedWorkerId == WorkerId) return;
         appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = ""; outcomeExpectedRevision = 0;
-        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; promptRequestId = null;
+        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; riskLevel = ""; promptRequestId = null;
         await Refresh();
     }
     protected override async Task SnapshotChanged()
@@ -85,13 +85,14 @@ public partial class Home
     {
         var current = SelectedDetail();
         promptRequestId ??= Guid.NewGuid().ToString();
-        var command = await Store.Prompt(current.Worker.Id, new(promptRequestId, promptText, current.Worker.Revision, IncludeGuidance: includeGuidance, ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null));
+        var command = await Store.Prompt(current.Worker.Id, new(promptRequestId, promptText, current.Worker.Revision, IncludeGuidance: includeGuidance,
+            ProgressMinutes: includeGuidance && progressMinutes > 0 ? progressMinutes : null, RiskLevel: riskLevel));
         notice = "Instruction queued. You can leave this page while the worker runs."; promptText = ""; promptRequestId = null;
     });
     private Task StatusInquiry() => Execute(async () =>
     {
         var current = SelectedDetail();
-        await Store.Prompt(current.Worker.Id, new(Guid.NewGuid().ToString(), "Report current progress, completed validation, blockers, and the next step. Do not start unrelated work.", current.Worker.Revision, StatusInquiry: true));
+        await Store.Prompt(current.Worker.Id, new(Guid.NewGuid().ToString(), "Report current progress, completed validation, blockers, and the next step. Do not start unrelated work.", current.Worker.Revision, StatusInquiry: true, RiskLevel: TaskRiskLevels.Low));
         notice = "A progress inquiry is queued; current observed state remains visible above.";
     });
     private Task Abort() => Execute(async () => { await Store.Abort(selectedId!, Guid.NewGuid().ToString()); notice = "Cancellation request recorded. Watch delivery and native state for the result."; });

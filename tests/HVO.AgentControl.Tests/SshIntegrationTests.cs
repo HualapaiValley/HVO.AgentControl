@@ -337,7 +337,8 @@ public sealed class SshIntegrationTests
     internal static async Task<CommandRecord> Prompt(ControlStore store, WorkerRecord worker, string text)
     {
         var current = await store.Detail(worker.Id);
-        return await store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), text, current.Worker.Revision));
+        return await store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), text, current.Worker.Revision,
+            RiskLevel: TaskRiskLevels.Low));
     }
     internal static Task Finished(ControlStore store, CommandRecord command) => TestApp.Wait(async () =>
     {

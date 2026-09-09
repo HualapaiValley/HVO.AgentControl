@@ -29,7 +29,8 @@ public sealed partial class CoordinationTests
     {
         await using var app = new TestApp();
         var (run, coordinator, worker) = await NativeDecisionRun(app.Store);
-        var independent = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Independent work", worker.Revision));
+        var independent = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Independent work", worker.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await app.Store.Write(async db => { (await db.Commands.FindAsync(independent.Id))!.State = Delivery.Running; return true; });
         var command = await ReconcileDecision(app, run, coordinator, NativeError(errorName, status, code));
         Assert.Equal(Delivery.Finished, command.State);

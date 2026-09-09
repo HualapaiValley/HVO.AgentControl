@@ -20,7 +20,8 @@ public sealed class AssignmentCapabilitiesTests
         {
             data = app.DataPath; secrets = app.SecretPath;
             var worker = await PersistenceTests.SeedWorker(app.Store); workerId = worker.Id;
-            input = new(Guid.NewGuid().ToString(), "Review PR 1234. Reply with the comment reference.", worker.Revision, IncludeGuidance: true, ProgressMinutes: 5);
+            input = new(Guid.NewGuid().ToString(), "Review PR 1234. Reply with the comment reference.", worker.Revision,
+                IncludeGuidance: true, ProgressMinutes: 5, RiskLevel: TaskRiskLevels.Low);
             var command = await app.Store.Prompt(worker.Id, input);
             rendered = Json.Read<PromptInput>(command.ExecutionPayload).Text;
             Assert.Contains("every 5 minutes", rendered); Assert.EndsWith(input.Text, rendered);
@@ -205,7 +206,8 @@ public sealed class AssignmentCapabilitiesTests
         var worker = new WorkerRecord { RuntimeId = coordinator.RuntimeId, Name = "Worker", NativeSessionId = "ses_worker", Directory = "/other", Activity = "Idle", Stale = false };
         var another = new WorkerRecord { RuntimeId = coordinator.RuntimeId, Name = "Other coordinator", NativeSessionId = "ses_other", Directory = "/coordinator2", Role = SessionRoles.Coordinator };
         await app.Store.Write(db => { db.Workers.AddRange(worker, another); return Task.FromResult(true); });
-        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(coordinator.Id, new(Guid.NewGuid().ToString(), "Do work", 1)));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(coordinator.Id,
+            new(Guid.NewGuid().ToString(), "Do work", 1, RiskLevel: TaskRiskLevels.Low)));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.StartCoordination(new(Guid.NewGuid().ToString(), worker.Id, "Do work", [another.Id])));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Do work", [another.Id])));
         var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id, "Do work", [worker.Id]));

@@ -119,7 +119,8 @@ public sealed partial class CoordinationTests
             ["type"] = "send_prompt",
             ["workerId"] = worker.Id,
             ["text"] = "Perform the task",
-            ["includeGuidance"] = includeGuidance
+            ["includeGuidance"] = includeGuidance,
+            ["riskLevel"] = TaskRiskLevels.Low
         };
         if (!omitProgress) action["progressMinutes"] = progressMinutes;
         run = (await app.Store.Coordinations()).Single();

@@ -193,7 +193,8 @@ public sealed class HomeConversationRaceTests
     {
         await using var app = new TestApp();
         var (a, _) = await SeedWorkers(app.Store);
-        var command = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Review this assignment", a.Revision));
+        var command = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Review this assignment", a.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await app.Store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.State = Delivery.Finished; return true; });
         var home = Home(app.Store, (id, before, beforeId) => app.Store.Detail(id, before, beforeId));
 
@@ -213,7 +214,8 @@ public sealed class HomeConversationRaceTests
     {
         await using var app = new TestApp();
         var (worker, _) = await SeedWorkers(app.Store);
-        var reviewed = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Review this assignment", worker.Revision));
+        var reviewed = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Review this assignment", worker.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await app.Store.Write(async db =>
         {
             var original = (await db.Commands.FindAsync(reviewed.Id))!;
@@ -287,7 +289,7 @@ public sealed class HomeConversationRaceTests
         public Task Navigate(string id) { WorkerId = id; return OnParametersSetAsync(); }
         public Task BackgroundRefresh() => SnapshotChanged();
         public Task LoadOlder() => Invoke("OlderHistory");
-        public Task Send(string text) { SetField("promptText", text); return Invoke("SendPrompt"); }
+        public Task Send(string text) { SetField("promptText", text); SetField("riskLevel", TaskRiskLevels.Low); return Invoke("SendPrompt"); }
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before = null) => read(workerId, before, null);
         protected override Task<WorkerDetail> ReadDetail(string workerId, long? before, string beforeId)
         {

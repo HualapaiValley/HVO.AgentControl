@@ -90,6 +90,9 @@ const passwordFile = process.env.HVO_OWNER_PASSWORD_FILE || path.resolve(__dirna
       const conversation = page.getByRole('region', { name: 'Worker conversation' });
       await expect(conversation.getByRole('heading', { name: 'Conversation race A', exact: true })).toBeVisible();
       await conversation.getByLabel('Task or follow-up').fill('Browser-selected worker identity');
+      await expect(conversation.getByLabel('Task risk')).toHaveValue('');
+      await expect(conversation.getByRole('button', { name: 'Send instruction', exact: true })).toBeDisabled();
+      await conversation.getByLabel('Task risk').selectOption('low');
       await conversation.getByRole('button', { name: 'Send instruction', exact: true }).click();
       await expect(page.getByRole('status')).toContainText('Instruction queued');
       const snapshot = await (await context.request.get(base + '/api/v1/snapshot')).json();

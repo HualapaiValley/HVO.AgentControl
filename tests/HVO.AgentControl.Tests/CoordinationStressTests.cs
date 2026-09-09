@@ -37,7 +37,7 @@ public sealed class CoordinationStressTests
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
         var promptId = Guid.NewGuid().ToString();
-        var first = new PromptInput(promptId, "duplicate-safe instruction", 0);
+        var first = new PromptInput(promptId, "duplicate-safe instruction", 0, RiskLevel: TaskRiskLevels.Low);
         var results = await Task.WhenAll(app.Store.Prompt(worker.Id, first), app.Store.Prompt(worker.Id, first));
         Assert.Equal(results[0].Id, results[1].Id);
         Assert.Single((await app.Store.Snapshot()).Commands);
@@ -57,7 +57,7 @@ public sealed class CoordinationStressTests
         await using var app = new TestApp();
         var worker = await PersistenceTests.SeedWorker(app.Store);
         var id = Guid.NewGuid().ToString();
-        var input = new PromptInput(id, "legacy durable instruction", 0);
+        var input = new PromptInput(id, "legacy durable instruction", 0, RiskLevel: TaskRiskLevels.Low);
         var legacyPayload = Json.Write(new
         {
             input.Id,
@@ -69,7 +69,8 @@ public sealed class CoordinationStressTests
             input.Agent,
             input.Variant,
             input.IncludeGuidance,
-            input.ProgressMinutes
+            input.ProgressMinutes,
+            input.RiskLevel
         });
         await app.Store.Write(db =>
         {
@@ -118,7 +119,8 @@ public sealed class CoordinationStressTests
         await using var app = new TestApp();
         var (coordinator, workers) = await Seed(app.Store, 2);
         var a = workers[0];
-        var busy = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "already busy", 0));
+        var busy = await app.Store.Prompt(a.Id,
+            new(Guid.NewGuid().ToString(), "already busy", 0, RiskLevel: TaskRiskLevels.Low));
         var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id,
             "Ask both workers for memory usage.", workers.Select(x => x.Id).ToArray()));
         await app.Store.CoordinationTick();
@@ -172,7 +174,8 @@ public sealed class CoordinationStressTests
             var worker = await PersistenceTests.SeedWorker(app.Store);
             workerId = worker.Id;
             directPromptId = Guid.NewGuid().ToString();
-            await app.Store.Prompt(workerId, new PromptInput(directPromptId, "at-most-once durable instruction", 0));
+            await app.Store.Prompt(workerId, new PromptInput(directPromptId, "at-most-once durable instruction", 0,
+                RiskLevel: TaskRiskLevels.Low));
             var (coordinator, participants) = await Seed(app.Store, 1);
             var run = await app.Store.StartCoordination(new(Guid.NewGuid().ToString(), coordinator.Id,
                 "Persist across restart.", [participants[0].Id]));
@@ -196,8 +199,10 @@ public sealed class CoordinationStressTests
             var snapshot = await restarted.Store.Snapshot();
             Assert.Equal(Delivery.Unknown, snapshot.Commands.Single(x => x.Id == shippedId).State);
             Assert.True(snapshot.Workers.Single(x => x.Id == workerId).Stale);
-            Assert.Equal(directPromptId, (await restarted.Store.Prompt(workerId, new PromptInput(directPromptId, "at-most-once durable instruction", 0))).Id);
-            await Assert.ThrowsAsync<ControlException>(() => restarted.Store.Prompt(workerId, new PromptInput(directPromptId, "different content", 0)));
+            Assert.Equal(directPromptId, (await restarted.Store.Prompt(workerId,
+                new PromptInput(directPromptId, "at-most-once durable instruction", 0, RiskLevel: TaskRiskLevels.Low))).Id);
+            await Assert.ThrowsAsync<ControlException>(() => restarted.Store.Prompt(workerId,
+                new PromptInput(directPromptId, "different content", 0, RiskLevel: TaskRiskLevels.Low)));
         }
     }
 

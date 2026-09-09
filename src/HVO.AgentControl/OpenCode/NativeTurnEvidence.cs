@@ -12,6 +12,8 @@ public sealed record AutomaticCompactionFailure(
     string? ErrorName,
     JsonElement Error);
 
+public sealed record NativeRouteEvidence(string? ProviderId, string? ModelId, bool Contradictory);
+
 public static class NativeTurnEvidence
 {
     public static JsonElement[] AssistantMessages(JsonElement[] messages, string? callerId)
@@ -137,6 +139,22 @@ public static class NativeTurnEvidence
         // Only provider-executed calls and cleanup-marked interrupted orphans allow exit.
         return message.GetProperty("parts").EnumerateArray().All(part =>
             part.GetProperty("type").GetString() != "tool" || IsSettledTerminalTool(part));
+    }
+
+    public static NativeRouteEvidence? ObservedRoute(JsonElement message)
+    {
+        var info = message.GetProperty("info");
+        var directProvider = BoundedText(info, "providerID");
+        var directModel = BoundedText(info, "modelID");
+        var nestedProvider = info.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.Object
+            ? BoundedText(model, "providerID") : null;
+        var nestedModel = model.ValueKind == JsonValueKind.Object ? BoundedText(model, "id") : null;
+        var contradictory = directProvider is not null && nestedProvider is not null && directProvider != nestedProvider ||
+            directModel is not null && nestedModel is not null && directModel != nestedModel;
+        var providerId = directProvider ?? nestedProvider;
+        var modelId = directModel ?? nestedModel;
+        return contradictory || providerId is not null && modelId is not null
+            ? new(providerId, modelId, contradictory) : null;
     }
 
     public static string? CompletedToolFailureId(JsonElement[] messages)

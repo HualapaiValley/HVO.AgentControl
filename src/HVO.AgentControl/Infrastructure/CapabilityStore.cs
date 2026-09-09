@@ -64,7 +64,8 @@ public sealed partial class ControlStore
             Event(db, "CapabilityInquiryCoalesced", worker.RuntimeId, worker.Id, requestId, alias, provenance: "user");
             return pending;
         }
-        var command = await EnqueuePrompt(db, worker.Id, new(requestId, CapabilityInquiry, worker.Revision), "capability-report");
+        var command = await EnqueuePrompt(db, worker.Id, new(requestId, CapabilityInquiry, worker.Revision,
+            RiskLevel: TaskRiskLevels.Low), "capability-report");
         worker.CapabilityCommandId = command.Id;
         if (worker.CapabilityReport.Length == 0) worker.CapabilityReportedAt = null;
         return command;

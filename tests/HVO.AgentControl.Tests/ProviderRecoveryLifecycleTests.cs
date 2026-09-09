@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
 using HVO.AgentControl.OpenCode;
@@ -16,6 +17,30 @@ namespace HVO.AgentControl.Tests;
 public sealed class ProviderRecoveryLifecycleTests
 {
     private const string PoolId = "provider:openai";
+
+    [Fact]
+    public async Task RiskRejectionReleasesReservedRecoveryLease()
+    {
+        await using var app = new TestApp();
+        var (worker, probe, _, _) = await Reserve(app);
+        await Complete(app, probe.Id, Delivery.Queued);
+        await app.Store.Write(async db =>
+        {
+            var saved = (await db.Commands.FindAsync(probe.Id))!;
+            var payload = JsonNode.Parse(saved.ExecutionPayload)!.AsObject();
+            payload.Remove("riskLevel");
+            saved.ExecutionPayload = payload.ToJsonString();
+            return true;
+        });
+
+        Assert.Null(await Claim(app, worker.RuntimeId));
+
+        var rejected = (await app.Store.Read(async db => await db.Commands.FindAsync(probe.Id)))!;
+        Assert.Equal(Delivery.Failed, rejected.State);
+        var pool = Assert.Single(await app.Store.ProviderPools());
+        Assert.Empty(pool.RecoveryCommandId);
+        Assert.Equal("RecoveryRequired", pool.State);
+    }
 
     [Theory]
     [InlineData("Exhausted")]
@@ -268,17 +293,23 @@ public sealed class ProviderRecoveryLifecycleTests
         return true;
     });
 
-    private static CommandRecord Prompt(WorkerRecord worker) => new()
+    private static CommandRecord Prompt(WorkerRecord worker)
     {
-        Id = Guid.NewGuid().ToString(),
-        RuntimeId = worker.RuntimeId,
-        WorkerId = worker.Id,
-        Kind = "Prompt",
-        State = Delivery.Queued,
-        NativeMessageId = "msg_" + Guid.NewGuid().ToString("N"),
-        ProviderPoolId = PoolId,
-        Payload = Json.Write(new PromptInput(Guid.NewGuid().ToString(), "Disposable lease regression", 0, "openai", "fixture"))
-    };
+        var input = new PromptInput(Guid.NewGuid().ToString(), "Disposable lease regression", 0, "openai", "fixture",
+            RiskLevel: TaskRiskLevels.Low, RiskPolicyVersion: "risk-floor-v1", RiskRouteMaximum: TaskRiskLevels.Low);
+        return new()
+        {
+            Id = Guid.NewGuid().ToString(),
+            RuntimeId = worker.RuntimeId,
+            WorkerId = worker.Id,
+            Kind = "Prompt",
+            State = Delivery.Queued,
+            NativeMessageId = "msg_" + Guid.NewGuid().ToString("N"),
+            ProviderPoolId = PoolId,
+            Payload = Json.Write(input),
+            ExecutionPayload = Json.Write(input)
+        };
+    }
 
     private static NativeSnapshot Terminal(WorkerRecord worker, CommandRecord probe, string? category = null) => new(JsonSerializer.SerializeToElement(new { }),
         [JsonSerializer.SerializeToElement(new { info = new { id = probe.NativeMessageId, role = "user", sessionID = worker.NativeSessionId, time = new { created = 1L } }, parts = Array.Empty<object>() }),

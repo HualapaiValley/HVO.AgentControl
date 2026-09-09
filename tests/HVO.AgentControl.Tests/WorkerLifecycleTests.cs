@@ -18,7 +18,8 @@ public sealed class WorkerLifecycleTests
             w.ModelsJson = Json.Write(new[] { new ModelChoice("fixture", "new", "New", ["high"], ["plan"]) });
             return true;
         });
-        var queued = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "what time is it?", 0));
+        var queued = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "what time is it?", 0,
+            RiskLevel: TaskRiskLevels.Low));
         var input = new UpdateWorkerInput(Guid.NewGuid().ToString(), 0, "Renamed", "Project", "Reviewer", "fixture", "new", "plan", "high");
         var updated = await app.Store.UpdateWorker(worker.Id, input);
         Assert.Equal(worker.NativeSessionId, updated.NativeSessionId);
@@ -27,7 +28,8 @@ public sealed class WorkerLifecycleTests
         await Assert.ThrowsAsync<ControlException>(() => app.Store.UpdateWorker(worker.Id, input with { Id = Guid.NewGuid().ToString(), Name = "Stale" }));
         var detail = await app.Store.Detail(worker.Id);
         Assert.Equal("old", Json.Read<PromptInput>(detail.Commands.Single(x => x.Id == queued.Id).ExecutionPayload).ModelId);
-        var next = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "review this", detail.Worker.Revision));
+        var next = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "review this", detail.Worker.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         var captured = Json.Read<PromptInput>(next.ExecutionPayload);
         Assert.Equal("new", captured.ModelId); Assert.Equal("plan", captured.Agent); Assert.Equal("high", captured.Variant);
         Assert.DoesNotContain(detail.Commands, x => x.Kind is "Abort" or "StopManagedServer");
@@ -47,12 +49,13 @@ public sealed class WorkerLifecycleTests
             db.WorkspaceClaims.Add(new WorkspaceClaim { Id = "claim", WorkerId = w.Id, RuntimeId = w.RuntimeId, Directory = w.Directory });
             return true;
         });
-        var queued = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "task", 0));
+        var queued = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "task", 0, RiskLevel: TaskRiskLevels.Low));
         await Assert.ThrowsAsync<ControlException>(() => app.Store.ArchiveWorker(worker.Id, input));
         await app.Store.EditQueue(queued.Id, "cancel");
         var archived = await app.Store.ArchiveWorker(worker.Id, input);
         Assert.True(archived.Archived);
-        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "should fail", archived.Revision)));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.Prompt(worker.Id,
+            new(Guid.NewGuid().ToString(), "should fail", archived.Revision, RiskLevel: TaskRiskLevels.Low)));
         var restored = await app.Store.ArchiveWorker(worker.Id, new(Guid.NewGuid().ToString(), archived.SettingsRevision, false));
         Assert.False(restored.Archived); Assert.Equal(worker.NativeSessionId, restored.NativeSessionId);
         Assert.NotNull(await app.Store.Read(db => db.WorkspaceClaims.FindAsync("claim").AsTask()));

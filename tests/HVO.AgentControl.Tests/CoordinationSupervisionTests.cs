@@ -85,7 +85,8 @@ public sealed partial class CoordinationTests
     {
         await using var app = new TestApp();
         var (coordinator, a, b) = await Seed(app.Store);
-        var priorWork = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Earlier external assignment", a.Revision));
+        var priorWork = await app.Store.Prompt(a.Id, new(Guid.NewGuid().ToString(), "Earlier external assignment", a.Revision,
+            RiskLevel: TaskRiskLevels.Low));
         await app.Store.Write(async db =>
         {
             var command = (await db.Commands.FindAsync(priorWork.Id))!;

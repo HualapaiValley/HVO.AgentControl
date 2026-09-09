@@ -28,6 +28,7 @@ const root=path.resolve(__dirname,'../..'),base=process.env.HVO_BASE_URL||'http:
   await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
   const conversation=page.getByRole('region',{name:'Worker conversation'});
   const token='BROWSER_NATIVE_'+suffix;
+  await conversation.getByLabel('Task risk').selectOption('low');
   await conversation.getByLabel('Task or follow-up').fill('In this disposable workspace use bash to run exactly `printf "'+token+'\\n" > browser-evidence.txt; cat browser-evidence.txt`. Report the output and stop. Do not commit or access other directories.');
   await conversation.getByRole('button',{name:'Send instruction',exact:true}).click();
   let approvals=0,questions=0;
@@ -45,6 +46,7 @@ const root=path.resolve(__dirname,'../..'),base=process.env.HVO_BASE_URL||'http:
   },'Native browser task did not finish',150);}
   await finish(1);
   await expect(conversation.locator('.transcript')).toContainText(token);
+  await conversation.getByLabel('Task risk').selectOption('low');
   await conversation.getByLabel('Task or follow-up').fill('Use the question tool to ask whether to append FOLLOWUP to browser-evidence.txt, offering Append and Cancel. Wait for the answer. If Append, use bash to append FOLLOWUP on a new line, then cat the file. Report both lines and stop. Do not commit or access other directories.');
   await conversation.getByRole('button',{name:'Send instruction',exact:true}).click();
   await finish(2,true);

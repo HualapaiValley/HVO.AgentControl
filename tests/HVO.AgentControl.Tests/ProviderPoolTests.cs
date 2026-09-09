@@ -40,7 +40,8 @@ public sealed class ProviderPoolTests
         WorkerId = worker.Id,
         Kind = "Prompt",
         State = Delivery.Queued,
-        Payload = Json.Write(new PromptInput(Guid.NewGuid().ToString(), "Do not replay effects", 0, provider, "model")),
+        Payload = Json.Write(new PromptInput(Guid.NewGuid().ToString(), "Do not replay effects", 0, provider, "model",
+            RiskLevel: TaskRiskLevels.Low, RiskPolicyVersion: "risk-floor-v1", RiskRouteMaximum: TaskRiskLevels.Low)),
         ProviderPoolId = "provider:" + provider
     };
 
@@ -119,7 +120,8 @@ public sealed class ProviderPoolTests
 
     private static async Task<CommandRecord> AcceptedPrompt(TestApp app, WorkerRecord worker)
     {
-        var command = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Do not replay effects", worker.Revision, "opencode-go", "model"));
+        var command = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "Do not replay effects", worker.Revision,
+            "opencode-go", "model", RiskLevel: TaskRiskLevels.Low));
         return await app.Store.Write(async db =>
         {
             (await db.Workers.FindAsync(worker.Id))!.ModelsJson = Json.Write(new List<ModelChoice>

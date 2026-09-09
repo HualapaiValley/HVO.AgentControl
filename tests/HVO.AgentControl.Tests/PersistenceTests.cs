@@ -40,7 +40,8 @@ public sealed class PersistenceTests
     {
         await using var app = new TestApp();
         var worker = await SeedWorker(app.Store);
-        var input = new PromptInput(Guid.NewGuid().ToString(), "quotes ' \" ; $(touch forbidden)\nfollow-up", worker.Revision);
+        var input = new PromptInput(Guid.NewGuid().ToString(), "quotes ' \" ; $(touch forbidden)\nfollow-up", worker.Revision,
+            RiskLevel: TaskRiskLevels.Low);
         var results = await Task.WhenAll(app.Store.Prompt(worker.Id, input), app.Store.Prompt(worker.Id, input));
         Assert.Equal(results[0].Id, results[1].Id);
         Assert.Single((await app.Store.Snapshot()).Commands);
@@ -55,14 +56,15 @@ public sealed class PersistenceTests
     {
         await using var app = new TestApp();
         var worker = await SeedWorker(app.Store);
-        var command = await app.Store.Prompt(worker.Id, new(Guid.NewGuid().ToString(), "task", 0));
+        var command = await app.Store.Prompt(worker.Id,
+            new(Guid.NewGuid().ToString(), "task", 0, RiskLevel: TaskRiskLevels.Low));
         await app.Store.Write(async db => { (await db.Commands.FindAsync(command.Id))!.State = Delivery.Dispatching; return true; });
         await app.Store.Recover();
         Assert.Equal(Delivery.Unknown, (await app.Store.Detail(worker.Id)).Commands.Single().State);
         var factory = app.Services.GetRequiredService<IDbContextFactory<ControlDb>>();
         await using var db = await factory.CreateDbContextAsync();
         await db.Database.ExecuteSqlRawAsync("CREATE TRIGGER fail_command BEFORE INSERT ON Commands BEGIN SELECT RAISE(ABORT, 'fixture database failure'); END;");
-        var next = new PromptInput(Guid.NewGuid().ToString(), "must not be acknowledged", 1);
+        var next = new PromptInput(Guid.NewGuid().ToString(), "must not be acknowledged", 1, RiskLevel: TaskRiskLevels.Low);
         await Assert.ThrowsAsync<DbUpdateException>(() => app.Store.Prompt(worker.Id, next));
         Assert.False(await app.Store.Read(storeDb => storeDb.Commands.AnyAsync(x => x.Id == next.Id)));
     }

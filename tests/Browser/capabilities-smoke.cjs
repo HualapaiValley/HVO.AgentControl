@@ -38,7 +38,7 @@ const root = path.resolve(__dirname,'../..'), base = process.env.HVO_BASE_URL ||
   await expect(page.getByRole('group',{name:'Agents it can contact'})).not.toContainText('Capability Coordinator');
   await page.goto(base+'/?worker='+worker.id);await expect(page.locator('.shell')).toHaveAttribute('data-interactive','true');
   await page.getByLabel('Include coordination guidance',{exact:true}).check();await page.getByLabel('Progress interval in minutes').fill('3');
-  await page.getByLabel('Task or follow-up').fill('Reply with a short acknowledgement.');await page.getByRole('button',{name:'Send instruction',exact:true}).click();
+   await page.getByLabel('Task risk').selectOption('low');await page.getByLabel('Task or follow-up').fill('Reply with a short acknowledgement.');await page.getByRole('button',{name:'Send instruction',exact:true}).click();
   await expect.poll(async()=> (await get('/workers/'+worker.id)).commands.filter(x=>x.origin==='owner'&&x.kind==='Prompt').length).toBe(1);
   const submitted=(await get('/workers/'+worker.id)).commands.find(x=>x.origin==='owner'&&x.kind==='Prompt');
   expect(JSON.parse(submitted.executionPayload).text).toContain('every 3 minutes');expect(JSON.parse(submitted.payload).text).toBe('Reply with a short acknowledgement.');
