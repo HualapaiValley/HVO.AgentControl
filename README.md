@@ -1,5 +1,7 @@
 # HVO.AgentControl
 
+For an introduction to the architecture and communication model, read the [project and communications brief](docs/PROJECT_AND_COMMUNICATIONS_BRIEF.md). It is written for another coordinating agent or team and includes the intended workflow, current limitations and questions for feedback.
+
 AgentControl is a single-owner web application for persistent OpenCode coding sessions on SSH-accessible Linux/macOS runtimes. The .NET 10 Blazor UI controls a durable SQLite backend. SSH carries HTTP/SSE to a loopback-only OpenCode server owned by a dedicated tmux session. Remote work continues when the browser, tunnel, or backend disconnects.
 
 The initial M0–M5 release supports runtime registration, verified bootstrap/install, separate workspace sessions, provider/model discovery, streamed transcripts, follow-up queues, native questions/permissions, cancellation, multiple workers, and restart reconciliation. Manual control works without a coordinator. Optional persistent OpenCode coordination now routes arbitrary prompts and responses between workers; see [worker management and coordination](docs/COORDINATION.md). See [implementation status](docs/IMPLEMENTATION_STATUS.md), [compatibility](docs/OPENCODE_COMPATIBILITY.md), and [operations](docs/OPERATIONS.md).
