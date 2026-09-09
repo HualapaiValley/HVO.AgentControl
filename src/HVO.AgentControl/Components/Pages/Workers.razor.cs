@@ -26,6 +26,7 @@ public partial class Workers
     private string runtimeFilter = "", activityFilter = "", projectFilter = "";
     private string? workerRequestId, inspectionId, inspectedDirectory, inspectedRuntime;
     private List<ModelChoice>? inspectedModels;
+    private readonly Dictionary<string, CommandRecord> commandBodies = [];
 
     protected override void OnParametersSet()
     {
@@ -46,7 +47,7 @@ public partial class Workers
         newWorkerName = ""; newProject = ""; newDirectory = ControlStore.Roots(runtime)[0]; newModel = ""; newRepository = ""; newBranch = ""; newBaseRef = "HEAD";
         inspectionId = null; inspectedModels = null;
     }
-    protected override Task SnapshotChanged()
+    protected override async Task SnapshotChanged()
     {
         var bodyIds = snapshot!.Commands.Where(x => x.Kind == "CreateWorker" && !x.Dismissed && x.State != Delivery.Finished)
             .Select(x => x.Id).Concat(inspectionId is null ? [] : [inspectionId]).ToArray();

@@ -20,6 +20,7 @@ public partial class Coordination
     private readonly Dictionary<string, int> renewalRounds = [];
     private readonly Dictionary<string, CoordinationRenewalInput> renewalRequests = [];
     private readonly Dictionary<string, bool> renewalSupervision = [];
+    private readonly Dictionary<string, CommandRecord> commandBodies = [];
     private Task Renew(CoordinationRun run) => Execute(async () =>
     {
         var instruction = renewalInstructions.GetValueOrDefault(run.Id, run.Instruction);

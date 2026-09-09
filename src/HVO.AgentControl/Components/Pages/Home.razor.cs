@@ -26,13 +26,14 @@ public partial class Home
     private readonly Dictionary<string, string> replyIds = [];
     private readonly List<TranscriptMessage> olderMessages = [];
     private readonly AsyncLocal<string?> historyBeforeId = new();
+    private readonly Dictionary<string, CommandRecord> commandBodies = [];
 
     protected override async Task OnParametersSetAsync()
     {
         if (appliedWorkerId == WorkerId) return;
         appliedWorkerId = WorkerId; selectedId = WorkerId; selection.Change(selectedId); detail = null; hostOperations = false;
         error = null; notice = null; outcome = "ReportedComplete"; evidence = ""; outcomeExpectedRevision = 0;
-        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); promptText = ""; riskLevel = ""; promptRequestId = null;
+        olderMessages.Clear(); answers.Clear(); choices.Clear(); replyIds.Clear(); commandBodies.Clear(); promptText = ""; riskLevel = ""; promptRequestId = null;
         await Refresh();
     }
     protected override async Task SnapshotChanged()
