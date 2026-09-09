@@ -397,7 +397,7 @@ public sealed record CoordinatorResult(string Id, string WorkerId, string State,
 public sealed record DecisionActionReceipt(string Type, string WorkerId, string? CommandId = null, string? RequestId = null);
 public sealed record DecisionReceipt(string Summary, int Round, string DecisionCommandId, long AppliedAt, DecisionActionReceipt[] Dispatched);
 public sealed record DispatchEvidence(string CommandId, string WorkerId, string Kind, string State, long CreatedAt);
-public sealed record DecisionRepair(int Attempt, string RejectedCommandId);
+public sealed record DecisionRepair(int Attempt, string RejectedCommandId, string? Feedback = null);
 public sealed record CoordinationRecovery(int Attempt, long RetryAt, string Reason);
 public sealed record CoordinatorDecisionCheckpoint(string CommandId, string CoordinatorWorkerId, long CoordinatorSettingsRevision,
     string RuntimeId, int RuntimeGeneration, string NativeSessionId, string Directory, string? ControlSessionId,

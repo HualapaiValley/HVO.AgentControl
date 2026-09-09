@@ -66,7 +66,10 @@ public sealed partial class CoordinationTests
             await app.Store.CoordinationTick();
             var recovery = (await app.Store.Coordinations()).Single();
             Assert.Equal("Ready", recovery.State);
-            Assert.Equal(new DecisionRepair(1, first), Json.Read<CoordinatorContext>(recovery.InputJson).Repair);
+            var repair = Json.Read<CoordinatorContext>(recovery.InputJson).Repair!;
+            Assert.Equal(1, repair.Attempt);
+            Assert.Equal(first, repair.RejectedCommandId);
+            Assert.Contains("one JSON decision object", repair.Feedback);
             Assert.DoesNotContain((await app.Store.Snapshot()).Commands, x => x.Origin == "coordinator:" + runId);
         }
         await using var restarted = new TestApp(data, secrets);
