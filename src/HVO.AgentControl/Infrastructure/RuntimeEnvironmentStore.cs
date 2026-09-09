@@ -32,8 +32,8 @@ public sealed partial class ControlStore
             throw InventoryConflict("revision_conflict", "Host or project changed; refresh before creating the draft.");
         if (await db.Runtimes.AnyAsync(x => x.Id == runtimeId))
             throw InventoryConflict("identity_exists", "Runtime identity already exists; use a new identity for a new draft.");
-        if (await db.RuntimeEnvironments.AnyAsync(x => x.HostId == hostId && x.ConfigurationProjectId == projectId && x.DevcontainerPath == path))
-            throw InventoryConflict("configuration_exists", "This managed runtime configuration already has a runtime identity.");
+        if (await db.Commands.AnyAsync(x => x.RuntimeId == runtimeId && x.Kind == "DeleteRuntime"))
+            throw InventoryConflict("identity_retired", "Runtime identity was deleted and cannot be reused.");
 
         var runtime = new RuntimeRecord
         {

@@ -137,6 +137,10 @@ public sealed partial class ControlStore
         var ids = input.WorkerIds.Append(input.CoordinatorWorkerId).ToArray();
         var workers = await db.Workers.Where(x => ids.Contains(x.Id) && !x.Archived).ToListAsync();
         if (workers.Count != ids.Length) throw new ControlException("All participants must be available, unarchived workers.");
+        var runtimeIds = workers.Select(x => x.RuntimeId).Distinct().ToArray();
+        var runtimes = await db.Runtimes.Where(x => runtimeIds.Contains(x.Id)).ToListAsync();
+        if (runtimes.Count != runtimeIds.Length) throw new ControlException("All participants must have an enrolled parent runtime.");
+        foreach (var runtime in runtimes) RequireEnrolledRuntime(runtime);
         if (workers.Single(x => x.Id == input.CoordinatorWorkerId).Role != SessionRoles.Coordinator ||
             workers.Any(x => input.WorkerIds.Contains(x.Id) && x.Role != SessionRoles.Worker))
             throw new ControlException("Choose a coordinator-role session and task workers only.", 400);

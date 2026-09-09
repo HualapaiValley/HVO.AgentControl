@@ -31,15 +31,20 @@ public sealed partial class ControlStore
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior) return Same(prior, id, null, "DeleteRuntime", payload);
         var runtime = await db.Runtimes.FindAsync(id) ?? throw new ControlException("Runtime not found.", 404);
-        RequireDevelopmentRuntime(runtime);
+        if (runtime.ConnectionKind != RuntimeConnections.ManagedDraft) RequireDevelopmentRuntime(runtime);
         if (runtime.Revision != input.ExpectedRevision) throw new ControlException("Runtime changed; refresh before deleting.");
         if (await db.GitHubAccess.AnyAsync(x => x.Id == id && x.State != "Disabled"))
             throw new ControlException("Disable GitHub credential renewal before deleting this runtime.");
         var count = await db.Workers.CountAsync(x => x.RuntimeId == id);
         if (count > 0) throw new ControlException($"Runtime is in use by {count} worker/coordinator registration(s), including archived workers. Delete those registrations first.");
         await TaskBindingLifecycleGuards.RequireRuntimeDeletionAllowed(db, id);
+        var provisionOperations = db.ProvisionOperations.Where(x => x.RuntimeId == id);
+        if (await provisionOperations.AnyAsync() || await db.ProvisionAttempts.AnyAsync(x => provisionOperations.Select(operation => operation.Id).Contains(x.OperationId)))
+            throw new ControlException("Retained provisioning operations or attempts reference this runtime. Resolve their lifecycle before deleting the draft.");
         if (activeTerminals.GetValueOrDefault(id) > 0) throw new ControlException("Close this runtime's admin terminals before deleting it.");
-        if (runtime.DesiredConnected || runtime.Transport != "Disconnected") throw new ControlException("Disconnect this runtime before deleting its registration.");
+        if (runtime.DesiredConnected || runtime.Transport != "Disconnected" &&
+            (runtime.ConnectionKind != RuntimeConnections.ManagedDraft || runtime.Transport != "Unenrolled"))
+            throw new ControlException("Disconnect this runtime before deleting its registration.");
         if (await Unresolved(db, id, null) || await db.WorkspaceClaims.AnyAsync(x => x.RuntimeId == id))
             throw new ControlException("Resolve pending operations and workspace claims before deleting this runtime.");
         var command = await Record(db, input.Id, id, null, "DeleteRuntime", payload);

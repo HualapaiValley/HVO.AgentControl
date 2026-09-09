@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using HVO.AgentControl.Core;
 using HVO.AgentControl.Infrastructure;
+using HVO.AgentControl.Provisioning;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
@@ -62,6 +63,126 @@ public sealed class RuntimeEnvironmentTests
         await app.Store.ArchiveHost(host.Id, new(Id(), host.Revision));
         await Conflict(() => app.Store.CreateManagedRuntimeDraft(input with { RequestId = Id(), ExpectedHostRevision = host.Revision + 1 }), "resource_archived");
         Assert.Equal(0, await app.Store.Read(db => db.Runtimes.CountAsync()));
+    }
+
+    [Fact]
+    public async Task ManagedRuntimeDraftTemplateCanBeReusedByIndependentRuntimeIdentities()
+    {
+        await using var app = new TestApp();
+        var host = await Host(app.Store); var project = await Project(app.Store);
+        var first = new CreateManagedRuntimeDraftInput(Id(), Id(), "First", host.Id, project.Id,
+            ".devcontainer/devcontainer.json", host.Revision, project.Revision);
+        var second = first with { RequestId = Id(), RuntimeId = Id(), Name = "Second" };
+
+        var firstDraft = await app.Store.CreateManagedRuntimeDraft(first);
+        var secondDraft = await app.Store.CreateManagedRuntimeDraft(second);
+
+        Assert.NotEqual(firstDraft.Environment.RuntimeId, secondDraft.Environment.RuntimeId);
+        Assert.Equal(firstDraft, await app.Store.CreateManagedRuntimeDraft(first));
+        Assert.Equal(secondDraft, await app.Store.CreateManagedRuntimeDraft(second));
+        Assert.Equal(2, await app.Store.Read(db => db.Runtimes.CountAsync(x => x.ConnectionKind == RuntimeConnections.ManagedDraft)));
+    }
+
+    [Fact]
+    public async Task DeletedSshRuntimeIdentityCannotBeRecreatedAsManagedDraftAfterRestart()
+    {
+        string data, secrets;
+        CreateManagedRuntimeDraftInput input;
+        await using (var app = new TestApp())
+        {
+            var host = await Host(app.Store); var project = await Project(app.Store);
+            var runtime = await app.Store.SaveRuntime(PersistenceTests.Profile());
+            await app.Store.DeleteRuntime(runtime.Id, new(Id(), runtime.Revision));
+            input = new(Id(), runtime.Id, "Replacement", host.Id, project.Id,
+                ".devcontainer/devcontainer.json", host.Revision, project.Revision);
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+
+        await using var restarted = new TestApp(data, secrets);
+        await Conflict(() => restarted.Store.CreateManagedRuntimeDraft(input), "identity_retired");
+        Assert.False(await restarted.Store.Read(db => db.Runtimes.AnyAsync(x => x.Id == input.RuntimeId)));
+    }
+
+    [Fact]
+    public async Task ManagedRuntimeDraftDeletionAllowsUnusedDraftAndRejectsRetainedProvisioningMetadata()
+    {
+        await using var app = new TestApp();
+        var host = await Host(app.Store); var project = await Project(app.Store);
+        var unused = await app.Store.CreateManagedRuntimeDraft(new(Id(), Id(), "Unused", host.Id, project.Id,
+            ".devcontainer/devcontainer.json", host.Revision, project.Revision));
+        var deletion = new DeleteRegistrationInput(Id(), unused.Environment.RuntimeRevision);
+        var deleted = await app.Store.DeleteRuntime(unused.Environment.RuntimeId, deletion);
+        Assert.Equal(deleted.Id, (await app.Store.DeleteRuntime(unused.Environment.RuntimeId, deletion)).Id);
+        Assert.False(await app.Store.Read(db => db.Runtimes.AnyAsync(x => x.Id == unused.Environment.RuntimeId)));
+
+        var retained = await app.Store.CreateManagedRuntimeDraft(new(Id(), Id(), "Retained", host.Id, project.Id,
+            ".devcontainer/devcontainer.json", host.Revision, project.Revision));
+        var operationId = Id();
+        await app.Store.Write(db =>
+        {
+            db.ProvisionOperations.Add(new ProvisionOperationRecord
+            {
+                Id = operationId,
+                RuntimeId = retained.Environment.RuntimeId,
+                HostId = host.Id,
+                ProjectId = project.Id,
+                WorkspaceId = Id(),
+                CreatedAt = ControlStore.Now,
+                UpdatedAt = ControlStore.Now
+            });
+            db.ProvisionAttempts.Add(new ProvisionAttemptRecord
+            {
+                OperationId = operationId,
+                HostId = host.Id,
+                WorkspaceId = Id(),
+                WorkspaceIdentity = "/work/" + Id()
+            });
+            return Task.FromResult(true);
+        });
+
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.DeleteRuntime(retained.Environment.RuntimeId,
+            new(Id(), retained.Environment.RuntimeRevision)));
+        Assert.True(await app.Store.Read(db => db.Runtimes.AnyAsync(x => x.Id == retained.Environment.RuntimeId)));
+    }
+
+    [Fact]
+    public async Task DraftLinkedParticipantsCannotReserveCoordinatorOrCreateCoordinationRun()
+    {
+        await using var app = new TestApp();
+        var host = await Host(app.Store); var project = await Project(app.Store);
+        var draft = await app.Store.CreateManagedRuntimeDraft(new(Id(), Id(), "Draft", host.Id, project.Id,
+            ".devcontainer/devcontainer.json", host.Revision, project.Revision));
+        var candidate = new WorkerRecord
+        {
+            Id = Id(),
+            RuntimeId = draft.Environment.RuntimeId,
+            ManagedServerId = Id(),
+            NativeSessionId = Id(),
+            Name = "Candidate",
+            Role = SessionRoles.Worker,
+            Stale = false,
+            Activity = "Idle",
+            LastObservedAt = ControlStore.Now
+        };
+        var coordinator = new WorkerRecord
+        {
+            Id = Id(),
+            RuntimeId = draft.Environment.RuntimeId,
+            ManagedServerId = Id(),
+            NativeSessionId = Id(),
+            Name = "Coordinator",
+            Role = SessionRoles.Coordinator,
+            Stale = false,
+            Activity = "Idle",
+            LastObservedAt = ControlStore.Now
+        };
+        await app.Store.Write(db => { db.Workers.AddRange(candidate, coordinator); return Task.FromResult(true); });
+
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.ReserveCoordinator(candidate.Id, new(Id(), candidate.SettingsRevision)));
+        await Assert.ThrowsAsync<ControlException>(() => app.Store.StartCoordination(new(Id(), coordinator.Id, "Do work", [candidate.Id])));
+        Assert.Equal(SessionRoles.Worker, (await app.Store.Read(async db => (await db.Workers.FindAsync(candidate.Id))!)).Role);
+        Assert.Equal(0, await app.Store.Read(db => db.Commands.CountAsync(x => x.Kind == "ReserveCoordinator")));
+        Assert.Equal(0, await app.Store.Read(db => db.CoordinationRuns.CountAsync()));
     }
 
     private static async Task<ActiveBindingSetup> ActiveBinding(TestApp app)
