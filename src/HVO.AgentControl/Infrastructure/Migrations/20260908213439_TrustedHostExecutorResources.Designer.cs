@@ -2,16 +2,19 @@
 using HVO.AgentControl.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace HVO.AgentControl.Infrastructure
+namespace HVO.AgentControl.Infrastructure.Migrations
 {
     [DbContext(typeof(ControlDb))]
-    partial class ControlDbModelSnapshot : ModelSnapshot
+    [Migration("20260908213439_TrustedHostExecutorResources")]
+    partial class TrustedHostExecutorResources
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
@@ -1941,9 +1944,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("CreationCommandId")
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("Generation")
                         .HasColumnType("INTEGER");
 
@@ -1957,10 +1957,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("Revision")
-                        .IsConcurrencyToken()
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("State")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -1972,28 +1968,17 @@ namespace HVO.AgentControl.Infrastructure
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("WorkerId")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("WorkerSlotId")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.HasKey("Sequence");
 
-                    b.HasIndex("CreationCommandId")
-                        .IsUnique()
-                        .HasFilter("CreationCommandId IS NOT NULL");
-
                     b.HasIndex("Id")
                         .IsUnique();
 
                     b.HasIndex("TaskBindingId")
                         .IsUnique();
-
-                    b.HasIndex("WorkerId")
-                        .IsUnique()
-                        .HasFilter("WorkerId IS NOT NULL");
 
                     b.HasIndex("WorkerSlotId", "NativeSessionId")
                         .IsUnique()
@@ -2124,9 +2109,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("OwnerWorkerSlotId")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Repository")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -2152,10 +2134,6 @@ namespace HVO.AgentControl.Infrastructure
                     b.HasIndex("IssueNumber");
 
                     b.HasIndex("OwnerWorkerId");
-
-                    b.HasIndex("OwnerWorkerSlotId")
-                        .IsUnique()
-                        .HasFilter("OwnerWorkerSlotId IS NOT NULL AND State NOT IN ('Released', 'Abandoned')");
 
                     b.HasIndex("Repository", "Branch")
                         .IsUnique()
@@ -2186,9 +2164,6 @@ namespace HVO.AgentControl.Infrastructure
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("OwnerWorkerSlotId")
-                        .HasColumnType("TEXT");
-
                     b.Property<long?>("StartedAt")
                         .HasColumnType("INTEGER");
 
@@ -2201,8 +2176,6 @@ namespace HVO.AgentControl.Infrastructure
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("OwnerWorkerSlotId");
 
                     b.HasIndex("WorkItemId", "Name")
                         .IsUnique();
@@ -3132,11 +3105,6 @@ namespace HVO.AgentControl.Infrastructure
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
-                    b.HasOne("HVO.AgentControl.Core.WorkerRecord", null)
-                        .WithMany()
-                        .HasForeignKey("WorkerId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("HVO.AgentControl.Core.WorkerSlotRecord", null)
                         .WithMany()
                         .HasForeignKey("WorkerSlotId")
@@ -3166,24 +3134,6 @@ namespace HVO.AgentControl.Infrastructure
                         .HasPrincipalKey("Id")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.WorkItem", b =>
-                {
-                    b.HasOne("HVO.AgentControl.Core.WorkerSlotRecord", null)
-                        .WithMany()
-                        .HasForeignKey("OwnerWorkerSlotId")
-                        .HasPrincipalKey("Id")
-                        .OnDelete(DeleteBehavior.Restrict);
-                });
-
-            modelBuilder.Entity("HVO.AgentControl.Core.WorkItemPhase", b =>
-                {
-                    b.HasOne("HVO.AgentControl.Core.WorkerSlotRecord", null)
-                        .WithMany()
-                        .HasForeignKey("OwnerWorkerSlotId")
-                        .HasPrincipalKey("Id")
-                        .OnDelete(DeleteBehavior.Restrict);
                 });
 
             modelBuilder.Entity("HVO.AgentControl.Provisioning.ProvisionAttemptRecord", b =>

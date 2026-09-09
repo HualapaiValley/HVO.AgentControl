@@ -20,6 +20,7 @@ public static class ApiEndpoints
         group.MapGet("/csrf", (HttpContext context, IAntiforgery antiforgery) => new { token = antiforgery.GetAndStoreTokens(context).RequestToken });
         group.MapInventoryApi();
         group.MapTaskBindingApi();
+        group.MapHostResourceOwnerApi();
         group.MapProvisioningApi();
         group.MapGet("/control-services", (ControlStore store) => store.ControlServices());
         group.MapPost("/control-services", (RegisterControlServiceInput input, ControlServiceRegistration registration, CancellationToken token) => registration.Register(input, token));
