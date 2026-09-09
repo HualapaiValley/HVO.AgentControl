@@ -10,6 +10,12 @@ The host connects directly over authenticated HTTP/SSE using the existing durabl
 
 The direct adapter performs no SSH verification, tmux bootstrap, workspace creation or development capability probe. Disposing the host closes HTTP/SSE clients only. The container owner controls native lifecycle. Worker creation, terminal access, SSH profile edits, development environment configuration, GitHub credential delivery and destructive runtime stop are rejected for this service. Provider Go key delivery and ChatGPT device enrollment use the existing encrypted credential and native HTTP services from the control-service page.
 
+### CLIProxy model catalog
+
+CLIProxy can be enabled with the opt-in `compose.control.cliproxy.yaml` overlay. The overlay mounts `docker/opencode-control/control.cliproxy.json` and a protected API-key file as a Docker secret; the key is referenced with OpenCode's `{file:...}` substitution and is never committed to the repository or baked into the image. The checked-in catalog deliberately excludes GPT models while the current owner policy keeps development work off GPT routes. Change the catalog or default model in the overlay config when the owner wants another CLIProxy model, then validate the exact config and key before restarting the sidecar.
+
+The overlay is separate from the base sidecar Compose file so an installation without CLIProxy credentials remains deployable. A sidecar restart preserves its named OpenCode state volume, but an active native turn can still be interrupted; wait for a quiet coordinator checkpoint and record its state before applying the overlay. Existing AgentControl worker defaults and queued execution payloads are not changed by enabling this sidecar overlay. Workers require their own runtime-scoped secret delivery and model refresh before selecting `cliproxy`.
+
 ## Owner API
 
 All mutations use the existing authenticated owner session and CSRF protection.
