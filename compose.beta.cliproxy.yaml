@@ -1,0 +1,23 @@
+# Opt-in CLIProxy overlay for development workers.
+# Apply only after active native turns are settled; changing the OpenCode
+# configuration requires a worker process restart for the provider catalog to load.
+services:
+  dev1:
+    volumes:
+      # SSH-launched tmux sessions do not inherit Docker environment variables.
+      # OpenCode's standard per-user path is therefore used instead of relying
+      # on OPENCODE_CONFIG from the container environment.
+      - ./docker/development/opencode-cliproxy.json:/home/agent/.config/opencode/opencode.json:ro
+    secrets: [cliproxy-api-key]
+  dev2:
+    volumes:
+      - ./docker/development/opencode-cliproxy.json:/home/agent/.config/opencode/opencode.json:ro
+    secrets: [cliproxy-api-key]
+  dev3:
+    volumes:
+      - ./docker/development/opencode-cliproxy.json:/home/agent/.config/opencode/opencode.json:ro
+    secrets: [cliproxy-api-key]
+
+secrets:
+  cliproxy-api-key:
+    file: ${CONTROL_CLIPROXY_API_KEY_FILE:?Set CONTROL_CLIPROXY_API_KEY_FILE to a protected CLIProxy API-key file}

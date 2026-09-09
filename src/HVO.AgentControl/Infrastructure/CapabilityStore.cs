@@ -8,6 +8,7 @@ public sealed partial class ControlStore
     public Task<WorkerRecord> ReserveCoordinator(string id, ReserveCoordinatorInput input) => Write(async db =>
     {
         var worker = await db.Workers.FindAsync(id) ?? throw new ControlException("Session not found.", 404);
+        RequireEnrolledRuntime(await db.Runtimes.FindAsync(worker.RuntimeId) ?? throw new ControlException("Runtime not found.", 404));
         var payload = Json.Write(input);
         if (await db.Commands.FindAsync(input.Id) is { } prior)
         { _ = Same(prior, worker.RuntimeId, id, "ReserveCoordinator", payload); return worker; }

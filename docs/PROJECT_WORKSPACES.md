@@ -4,6 +4,8 @@ Owner clarification, updated 2026-09-08. This is a proposed extension, not imple
 
 See [managed project and worker conventions](PROVISIONING_CONVENTIONS.md) for the initial `HVO Development` workgroup, immutable project/task identities, managed host paths, container configuration precedence and required multi-project lifecycle verification.
 
+The owner selected `RoySalisbury/HVO.RoofControl` as the next live repository after beta worker replacement and the fleet UI update. [Worker rollout and repository admission](WORKER_ROLLOUT.md) defines that order and the C# rejection/positive-control tests required before second-repository dispatch. Disposable multi-project tests can be implemented earlier; this selection does not mark the live repository enrolled or ready.
+
 ## Current behavior
 
 A runtime is the reusable SSH execution environment and managed OpenCode server. A worker binds one persistent native conversation to one canonical directory. Its `Project` string is a label, not a repository registration or scheduler policy. Coordination selects existing worker IDs; it does not select a bare runtime and provision a project session.

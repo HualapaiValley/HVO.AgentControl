@@ -26,6 +26,8 @@ public sealed class ProviderLoginService(ControlStore store, IRuntimeTransportFa
         if (!Guid.TryParse(requestId, out _)) throw new ControlException("A sign-in request ID is required.", 400);
         var runtime = await store.Read(async db => await db.Runtimes.FindAsync(runtimeId))
             ?? throw new ControlException("Runtime not found.", 404);
+        if (runtime.ConnectionKind == RuntimeConnections.ManagedDraft)
+            throw new ControlException("Managed runtime enrollment is pending; provider sign-in is unavailable until transport ownership is verified.");
         if (!runtime.DesiredConnected || runtime.Health != "Healthy")
             throw new ControlException("Verify and connect this runtime before signing in.");
         ProviderLogin login;

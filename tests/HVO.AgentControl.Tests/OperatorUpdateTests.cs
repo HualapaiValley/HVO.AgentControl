@@ -364,10 +364,11 @@ public sealed class OperatorUpdateTests
 
     private static async Task<(WorkerRecord Coordinator, WorkerRecord Participant)> SeedCoordinatorParticipant(ControlStore store)
     {
+        var runtime = await store.SaveRuntime(PersistenceTests.Profile());
         var coordinator = new WorkerRecord
         {
             Id = Guid.NewGuid().ToString("N"),
-            RuntimeId = Guid.NewGuid().ToString("N"),
+            RuntimeId = runtime.Id,
             ManagedServerId = "server",
             NativeSessionId = Guid.NewGuid().ToString("N"),
             Name = "Coordinator",

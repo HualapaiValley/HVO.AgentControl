@@ -1,0 +1,15 @@
+# Opt-in CLIProxy provider overlay. Keep the API key outside Git and the image.
+# Example:
+#   CONTROL_CLIPROXY_API_KEY_FILE=/run/secrets/cliproxy-api-key \
+#   docker compose -f compose.control.yaml -f compose.control.cliproxy.yaml up -d
+services:
+  opencode-control:
+    volumes:
+      - ./docker/opencode-control/control.cliproxy.json:/etc/opencode/control.json:ro
+    secrets:
+      - source: cliproxy-api-key
+        target: cliproxy-api-key
+
+secrets:
+  cliproxy-api-key:
+    file: ${CONTROL_CLIPROXY_API_KEY_FILE:?Set CONTROL_CLIPROXY_API_KEY_FILE to a protected CLIProxy API-key file}

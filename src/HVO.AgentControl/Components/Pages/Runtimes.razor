@@ -13,6 +13,29 @@
   else
   {
     <div class="section-heading"><h2>Runtimes</h2><button @onclick="NewRuntime">Add runtime</button></div>
+    @if (ManagedDrafts.Any())
+    {
+      <section class="panel" aria-label="Managed runtime drafts">
+        <h2>Managed runtime drafts</h2>
+        @foreach (var draft in ManagedDrafts)
+        {
+          <article class="notice" aria-label="Managed runtime draft" @key="draft.Id">
+            <strong>@draft.Name</strong> · <span class="badge">Pending enrollment</span>
+            <p>Waiting for container setup and connection checks before workers can use this runtime.</p>
+            <button class="subtle" disabled="@busy" @onclick="() => deletingRuntimeId = draft.Id">Delete draft</button>
+            @if (deletingRuntimeId == draft.Id)
+            {
+              <p>Delete @draft.Name? Drafts referenced by provisioning operations or workers must be retained.</p>
+              <div class="actions">
+                <button class="danger" disabled="@busy" @onclick="() => DeleteRuntime(draft)">Confirm delete draft</button>
+                <button class="subtle" disabled="@busy" @onclick="() => deletingRuntimeId = null">Keep draft</button>
+              </div>
+            }
+            <details><summary>Draft details</summary><p class="mono">@draft.Id</p></details>
+          </article>
+        }
+      </section>
+    }
     @if (!DevelopmentRuntimes.Any()) { <div class="empty">Add an SSH host and login, then use Verify to check access and prepare your runtime.</div> }
     @if (runtimeEdit is not null)
     {

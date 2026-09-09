@@ -34,6 +34,12 @@ public static class InventoryApiEndpoints
         group.MapPut("/projects/{id}", (string id, UpdateProjectInput input, ControlStore store) => store.UpdateProject(id, input));
         group.MapPost("/projects/{id}/archive", (string id, ArchiveInventoryInput input, ControlStore store) => store.ArchiveProject(id, input));
         group.MapGet("/inventory/requests/{id}", (string id, ControlStore store) => store.InventoryMutation(id));
+        group.MapPost("/runtimes/drafts", async (CreateManagedRuntimeDraftInput input, ControlStore store) =>
+        {
+            var draft = await store.CreateManagedRuntimeDraft(input);
+            return Results.Created($"/api/v1/runtimes/{draft.Environment.RuntimeId}/environment", draft);
+        });
+        group.MapGet("/runtimes/drafts/{id}", (string id, ControlStore store) => store.RuntimeEnvironment(id));
         group.MapGet("/runtimes/{id}/environment", (string id, ControlStore store) => store.RuntimeEnvironment(id));
         group.MapPut("/runtimes/{id}/environment", (string id, ConfigureRuntimeEnvironmentInput input, ControlStore store) => store.ConfigureRuntimeEnvironment(id, input));
         group.MapPost("/runtimes/{id}/environment/reset", (string id, ResetRuntimeEnvironmentInput input, ControlStore store) => store.ResetRuntimeEnvironment(id, input));

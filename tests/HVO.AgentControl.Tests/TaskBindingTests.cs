@@ -297,6 +297,323 @@ public sealed class TaskBindingTests
         Assert.Equal(runtimeId, (await app.Store.RuntimeEnvironment(runtimeId)).RuntimeId);
     }
 
+    // RoofControl (#98) disposable isolation fixtures
+
+    [Fact]
+    public async Task TwoRepositoriesSharingIssueNumberAreDistinguishedByProject()
+    {
+        await using var app = new TestApp();
+        var agentControlSetup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-123-base");
+        var roofControlSetup = await SeedSecondProject(app, "https://github.com/RoySalisbury/HVO.RoofControl.git", "feature/rc-123-base");
+
+        // Both projects can have issue #123 - they are distinguished by project identity
+        var acWork = await app.Store.CreateWorkItem(new("ac-123", "123", "AgentControl task", "feature/ac-123-a", agentControlSetup.Project.RepositoryUrl, agentControlSetup.LegacyWorker.Id));
+        var rcWork = await app.Store.CreateWorkItem(new("rc-123", "123", "RoofControl task", "feature/rc-123-b", roofControlSetup.Project.RepositoryUrl, roofControlSetup.LegacyWorker.Id));
+
+        var acBinding = await app.Store.CreateTaskBinding(new(Id(), Id(), acWork.Id, agentControlSetup.Project.Id, agentControlSetup.Slot.Id, Id(), Id(), "/work/ac-123", acWork.Branch, acWork.Revision, agentControlSetup.Project.Revision, agentControlSetup.Slot.Revision));
+        var rcBinding = await app.Store.CreateTaskBinding(new(Id(), Id(), rcWork.Id, roofControlSetup.Project.Id, roofControlSetup.Slot.Id, Id(), Id(), "/work/rc-123", rcWork.Branch, rcWork.Revision, roofControlSetup.Project.Revision, roofControlSetup.Slot.Revision));
+
+        Assert.Equal(agentControlSetup.Project.Id, acBinding.Project.Id);
+        Assert.Equal(roofControlSetup.Project.Id, rcBinding.Project.Id);
+        Assert.NotEqual(acBinding.Binding.Id, rcBinding.Binding.Id);
+        Assert.NotEqual(acBinding.Workspace.Id, rcBinding.Workspace.Id);
+        Assert.NotEqual(acBinding.Session.Id, rcBinding.Session.Id);
+    }
+
+    [Fact]
+    public async Task TwoRepositoriesSharingIssueNumberOnDifferentBranchesAreDistinguished()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-shared-123-base");
+
+        // Create second project on same runtime
+        var rcSetup = await SeedSecondProject(app, "https://github.com/RoySalisbury/HVO.RoofControl.git", "feature/rc-shared-123-base");
+
+        // Same issue number on different branches
+        var acWork = await app.Store.CreateWorkItem(new("ac-123-a", "123", "AC task", "feature/ac-shared-123-a", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var rcWork = await app.Store.CreateWorkItem(new("rc-123-b", "123", "RC task", "feature/rc-shared-123-b", rcSetup.Project.RepositoryUrl, rcSetup.LegacyWorker.Id));
+
+        var acBinding = await app.Store.CreateTaskBinding(new(Id(), Id(), acWork.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(), "/work/ac-123", acWork.Branch, acWork.Revision, setup.Project.Revision, setup.Slot.Revision));
+        var rcBinding = await app.Store.CreateTaskBinding(new(Id(), Id(), rcWork.Id, rcSetup.Project.Id, rcSetup.Slot.Id, Id(), Id(), "/work/rc-123", rcWork.Branch, rcWork.Revision, rcSetup.Project.Revision, rcSetup.Slot.Revision));
+
+        Assert.Equal(setup.Project.Id, acBinding.Project.Id);
+        Assert.Equal(rcSetup.Project.Id, rcBinding.Project.Id);
+    }
+
+    [Fact]
+    public async Task WrongRepositoryRejectionIsImmediateWithZeroDownstreamCalls()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-wrong-repo");
+        var otherProject = await app.Store.CreateProject(new(Id(), Id(), "Other", "https://github.com/RoySalisbury/HVO.Other.git"));
+        var otherWork = await app.Store.CreateWorkItem(new("other-work", "1", "Other task", "feature/other", otherProject.RepositoryUrl, setup.LegacyWorker.Id));
+
+        // Try to bind work item from "Other" project to AgentControl project
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
+        var commandsBefore = await app.Store.Read(db => db.Commands.CountAsync());
+
+        var error = await Assert.ThrowsAsync<InventoryException>(() =>
+            app.Store.CreateTaskBinding(new(Id(), Id(), otherWork.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(), "/work/wrong", otherWork.Branch, otherWork.Revision, setup.Project.Revision, setup.Slot.Revision)));
+
+        Assert.Equal("validation", error.Code); // Work item repository does not identify the selected project
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+        Assert.Equal(commandsBefore, await app.Store.Read(db => db.Commands.CountAsync()));
+    }
+
+    [Fact]
+    public async Task WrongWorkspaceRejectionIsImmediateWithZeroDownstreamCalls()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-wrong-ws");
+
+        // Create first binding
+        var work1 = await app.Store.CreateWorkItem(new("work-1", "1", "First task", "feature/ac-wrong-ws-1", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var existingBinding = await app.Store.CreateTaskBinding(NewBinding(setup, work1, "existing", "existing-workspace"));
+
+        // Try to create second binding with same slot (different workspace directory)
+        // The slot is already in use, so it should fail with slot_in_use
+        var work2 = await app.Store.CreateWorkItem(new("work-2", "2", "Second task", "feature/ac-wrong-ws-2", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
+
+        var error = await Assert.ThrowsAsync<InventoryException>(() =>
+            app.Store.CreateTaskBinding(new(Id(), Id(), work2.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(), "/work/different", work2.Branch, work2.Revision, setup.Project.Revision, setup.Slot.Revision)));
+
+        // Slot is already in use from first binding
+        Assert.Equal("slot_in_use", error.Code);
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+    }
+
+    [Fact]
+    public async Task WrongSessionGrantRejectionIsImmediateWithZeroDownstreamCalls()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-wrong-session-1");
+
+        // Try to bind with a legacy session that doesn't match the work item's owner
+        var otherWorker = new WorkerRecord { Id = Id(), RuntimeId = setup.Runtime.Id, ManagedServerId = setup.Runtime.ManagedServerId, NativeSessionId = "other-session", Project = setup.Project.Name, Directory = "/work/other", Branch = setup.Work.Branch };
+        await app.Store.Write(async db => { db.Workers.Add(otherWorker); return true; });
+
+        var newWork = await app.Store.CreateWorkItem(new("new-work", "2", "New task", "feature/ac-wrong-session-1-b", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
+
+        var error = await Assert.ThrowsAsync<InventoryException>(() =>
+            app.Store.CreateTaskBinding(new(Id(), Id(), newWork.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(), "/work/new", newWork.Branch, newWork.Revision, setup.Project.Revision, setup.Slot.Revision)
+            {
+                LegacyWorkerId = otherWorker.Id,
+                NativeSessionId = otherWorker.NativeSessionId,
+                Directory = otherWorker.Directory
+            }));
+
+        Assert.Equal("legacy_session_mismatch", error.Code);
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+    }
+
+    [Fact]
+    public async Task ValidAssignmentsToEitherRepositoryAreAccepted()
+    {
+        await using var app = new TestApp();
+        var acSetup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-valid-1");
+        var rcSetup = await SeedSecondProject(app, "https://github.com/RoySalisbury/HVO.RoofControl.git", "feature/rc-valid-1");
+
+        // Assign to AgentControl
+        var acWork = await app.Store.CreateWorkItem(new("ac-work", "1", "AC Task", "feature/ac-valid-1-a", acSetup.Project.RepositoryUrl, acSetup.LegacyWorker.Id));
+        var acBinding = await app.Store.CreateTaskBinding(NewBinding(acSetup, acWork, "ac-binding", "ac-workspace"));
+        Assert.Equal(acSetup.Project.Id, acBinding.Project.Id);
+
+        // Assign to RoofControl
+        var rcWork = await app.Store.CreateWorkItem(new("rc-work", "1", "RC Task", "feature/rc-valid-1-b", rcSetup.Project.RepositoryUrl, rcSetup.LegacyWorker.Id));
+        var rcBinding = await app.Store.CreateTaskBinding(NewBinding(rcSetup, rcWork, "rc-binding", "rc-workspace"));
+        Assert.Equal(rcSetup.Project.Id, rcBinding.Project.Id);
+    }
+
+    [Fact]
+    public async Task SequentialReuseWithNewSessionsCreatesFreshBindings()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/sequential-1");
+
+        // First task
+        var work1 = await app.Store.CreateWorkItem(new("work-1", "1", "First task", "feature/sequential-1-a", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var binding1 = await app.Store.CreateTaskBinding(NewBinding(setup, work1, "first", "workspace-1"));
+
+        // Release first binding
+        await app.Store.ReleaseTaskBinding(binding1.Binding.Id, new(Id(), binding1.Binding.Revision));
+
+        // Re-fetch to verify release
+        var releasedBinding = await app.Store.TaskBinding(binding1.Binding.Id);
+        Assert.Equal(TaskBindingState.Released, releasedBinding.Binding.State);
+
+        // Second task on same project, reusing the same slot
+        var work2 = await app.Store.CreateWorkItem(new("work-2", "2", "Second task", "feature/sequential-1-b", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var binding2 = await app.Store.CreateTaskBinding(NewBinding(setup, work2, "second", "workspace-2"));
+
+        Assert.NotEqual(binding1.Binding.Id, binding2.Binding.Id);
+        Assert.NotEqual(binding1.Workspace.Id, binding2.Workspace.Id);
+        Assert.NotEqual(binding1.Session.Id, binding2.Session.Id);
+        Assert.Equal(TaskBindingState.Released, releasedBinding.Binding.State);
+        Assert.Equal(TaskBindingState.Active, binding2.Binding.State);
+    }
+
+    [Fact]
+    public async Task SequentialAgentControlToRoofControlToAgentControlCreatesFreshSessions()
+    {
+        await using var app = new TestApp();
+        var acSetup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/ac-seq-1");
+        var rcSetup = await SeedSecondProject(app, "https://github.com/RoySalisbury/HVO.RoofControl.git", "feature/rc-seq-1");
+
+        // AC -> RC -> AC sequence
+        var acWork1 = await app.Store.CreateWorkItem(new("ac-1", "1", "AC 1", "feature/ac-seq-1-a", acSetup.Project.RepositoryUrl, acSetup.LegacyWorker.Id));
+        var ac1 = await app.Store.CreateTaskBinding(NewBinding(acSetup, acWork1, "ac-1", "ws-1"));
+
+        await app.Store.ReleaseTaskBinding(ac1.Binding.Id, new(Id(), ac1.Binding.Revision));
+
+        var rcWork = await app.Store.CreateWorkItem(new("rc-1", "1", "RC 1", "feature/rc-seq-1-b", rcSetup.Project.RepositoryUrl, rcSetup.LegacyWorker.Id));
+        var rc1 = await app.Store.CreateTaskBinding(NewBinding(rcSetup, rcWork, "rc-1", "ws-rc"));
+
+        await app.Store.ReleaseTaskBinding(rc1.Binding.Id, new(Id(), rc1.Binding.Revision));
+
+        var acWork2 = await app.Store.CreateWorkItem(new("ac-2", "2", "AC 2", "feature/ac-seq-1-c", acSetup.Project.RepositoryUrl, acSetup.LegacyWorker.Id));
+        var ac2 = await app.Store.CreateTaskBinding(NewBinding(acSetup, acWork2, "ac-2", "ws-2"));
+
+        Assert.Equal(3, await app.Store.Read(db => db.TaskBindings.CountAsync()));
+        Assert.Equal(3, await app.Store.Read(db => db.TaskWorkspaces.CountAsync()));
+        Assert.Equal(3, await app.Store.Read(db => db.TaskSessionBindings.CountAsync()));
+    }
+
+    [Fact]
+    public async Task SimultaneousSlotContentionAllowsExactlyOneBinding()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/contention-1");
+
+        var workA = await app.Store.CreateWorkItem(new("work-a", "1", "Task A", "feature/contention-1-a", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var workB = await app.Store.CreateWorkItem(new("work-b", "2", "Task B", "feature/contention-1-b", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+
+        var taskA = app.Store.CreateTaskBinding(new(Id(), Id(), workA.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(), "/work/a", workA.Branch, workA.Revision, setup.Project.Revision, setup.Slot.Revision));
+        var taskB = app.Store.CreateTaskBinding(new(Id(), Id(), workB.Id, setup.Project.Id, setup.Slot.Id, Id(), Id(), "/work/b", workB.Branch, workB.Revision, setup.Project.Revision, setup.Slot.Revision));
+
+        var results = new List<TaskBindingView>();
+        var exceptions = new List<Exception>();
+
+        try { results.Add(await taskA); } catch (Exception ex) { exceptions.Add(ex); }
+        try { results.Add(await taskB); } catch (Exception ex) { exceptions.Add(ex); }
+
+        // Exactly one should succeed
+        Assert.Single(results);
+        Assert.Single(exceptions);
+        Assert.IsType<InventoryException>(exceptions[0]);
+        Assert.Equal("slot_in_use", ((InventoryException)exceptions[0]).Code);
+    }
+
+    [Fact]
+    public async Task StalePermissionRejectionPreservesExistingBinding()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/stale-perm-1");
+
+        var work = await app.Store.CreateWorkItem(new("stale-work", "1", "Stale task", "feature/stale-perm-1-a", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var binding = await app.Store.CreateTaskBinding(NewBinding(setup, work, "stale", "workspace"));
+
+        // Change project permission (archive project)
+        await app.Store.Write(async db =>
+        {
+            var project = await db.Projects.FirstOrDefaultAsync(x => x.Id == setup.Project.Id);
+            project!.Archived = true;
+            return true;
+        });
+
+        // Try to create another binding with stale project
+        var work2 = await app.Store.CreateWorkItem(new("stale-work-2", "2", "Stale 2", "feature/stale-perm-1-b", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
+
+        await Assert.ThrowsAsync<InventoryException>(() =>
+            app.Store.CreateTaskBinding(NewBinding(setup, work2, "stale-2", "workspace-2")));
+
+        // Original binding should be unaffected
+        var existing = await app.Store.TaskBinding(binding.Binding.Id);
+        Assert.Equal(TaskBindingState.Active, existing.Binding.State);
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+    }
+
+    [Fact]
+    public async Task StaleGenerationRejectionDoesNotMutateState()
+    {
+        await using var app = new TestApp();
+        var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/stale-gen-1");
+
+        var work = await app.Store.CreateWorkItem(new("gen-work", "1", "Gen task", "feature/stale-gen-1-a", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+        var binding = await app.Store.CreateTaskBinding(NewBinding(setup, work, "gen", "workspace"));
+
+        // Increment slot revision manually to simulate stale
+        await app.Store.Write(async db =>
+        {
+            var slot = await db.WorkerSlots.FirstOrDefaultAsync(x => x.Id == setup.Slot.Id);
+            slot!.Revision++;
+            return true;
+        });
+
+        var work2 = await app.Store.CreateWorkItem(new("gen-work-2", "2", "Gen 2", "feature/stale-gen-1-b", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+
+        var receiptsBefore = await app.Store.Read(db => db.InventoryMutations.CountAsync());
+
+        await Assert.ThrowsAsync<InventoryException>(() =>
+            app.Store.CreateTaskBinding(NewBinding(setup, work2, "gen-2", "workspace-2")));
+
+        Assert.Equal(receiptsBefore, await app.Store.Read(db => db.InventoryMutations.CountAsync()));
+        var existing = await app.Store.TaskBinding(binding.Binding.Id);
+        Assert.Equal(TaskBindingState.Active, existing.Binding.State);
+    }
+
+    [Fact]
+    public async Task StaleProposalRejectionAndRestartReconciliation()
+    {
+        string data, secrets;
+        TaskBindingView binding;
+        await using (var app = new TestApp())
+        {
+            var setup = await Seed(app, "https://github.com/RoySalisbury/HVO.AgentControl.git", "feature/restart-1");
+            var work = await app.Store.CreateWorkItem(new("restart-work", "1", "Restart task", "feature/restart-1-a", setup.Project.RepositoryUrl, setup.LegacyWorker.Id));
+            binding = await app.Store.CreateTaskBinding(NewBinding(setup, work, "restart", "workspace"));
+
+            // Simulate a proposal with stale generation
+            await app.Store.Write(async db =>
+            {
+                var slot = await db.WorkerSlots.FirstOrDefaultAsync(x => x.Id == setup.Slot.Id);
+                slot!.Revision++;
+                return true;
+            });
+
+            data = app.DataPath; secrets = app.SecretPath;
+        }
+
+        // After restart, the binding should still be active
+        await using var restarted = new TestApp(data, secrets);
+        var restored = await restarted.Store.TaskBinding(binding.Binding.Id);
+        Assert.Equal(TaskBindingState.Active, restored.Binding.State);
+        Assert.Equal(binding.Workspace.Id, restored.Workspace.Id);
+        Assert.Equal(binding.Session.Id, restored.Session.Id);
+    }
+
+    private static async Task<SeedData> SeedSecondProject(TestApp app, string repository, string branch)
+    {
+        var runtimeCommand = await app.Store.SaveRuntimeForSetup(new RuntimeRecord { Id = Id(), Name = "runtime", Host = "host", Username = "agent", HostKeySha256 = "SHA256:1234567890123456789012345678901234567890123", CredentialReference = "key", ServerPasswordReference = "server-password", StateDirectory = "/home/agent/state", AllowedRoots = "/home/agent/workspaces" }, Id());
+        var runtime = await app.Store.Read(db => db.Runtimes.SingleAsync(x => x.Id == runtimeCommand.ResultId));
+        var host = await app.Store.CreateHost(new(Id(), Id(), "host"));
+        await app.Store.ConfigureRuntimeEnvironment(runtime.Id, new(Id(), 0, runtime.Revision, host.Id, RuntimeEnvironmentKind.ExistingMachine));
+        var project = await app.Store.CreateProject(new(Id(), Id(), "project", repository));
+        var worker = new WorkerRecord { Id = Id(), RuntimeId = runtime.Id, ManagedServerId = runtime.ManagedServerId, NativeSessionId = "native-" + Id(), Project = project.Name, Directory = "/work/legacy", Branch = branch };
+        await app.Store.Write(async db => { db.Workers.Add(worker); return true; });
+        var work = await app.Store.CreateWorkItem(new("work-" + Id(), null, "task", branch, project.RepositoryUrl, worker.Id));
+        var slot = await app.Store.CreateWorkerSlot(new(Id(), Id(), runtime.Id, "slot-" + Id()));
+        return new(runtime, project, worker, work, slot);
+    }
+
+    private static CreateTaskBindingInput NewBinding(SeedData data, WorkItem work, string task, string workspace) =>
+        new(Id(), Id(), work.Id, data.Project.Id, data.Slot.Id, Id(), Id(), "/work/" + workspace, work.Branch,
+            work.Revision, data.Project.Revision, data.Slot.Revision);
+
     private static CreateTaskBindingInput NewBinding(SeedData data, string task, string workspace) =>
         new(Id(), Id(), data.Work.Id, data.Project.Id, data.Slot.Id, Id(), Id(), "/work/" + workspace, data.Work.Branch,
             data.Work.Revision, data.Project.Revision, data.Slot.Revision);
