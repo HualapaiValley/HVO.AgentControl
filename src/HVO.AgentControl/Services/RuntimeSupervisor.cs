@@ -112,6 +112,12 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                             var record = (await db.Runtimes.FindAsync(id))!;
                             record.Transport = "Connected"; record.Health = "Reconciling"; record.Version = version;
                             record.InstalledExecutable = transport.InstalledExecutable; record.Platform = transport.Platform; record.CapabilitiesJson = Json.Write(capabilities); record.Generation++; record.ModelsJson = Json.Write(models);
+                            var catalog = await db.ModelCatalogObservations.FindAsync(record.Id) ?? new ModelCatalogObservationRecord { RuntimeId = record.Id };
+                            catalog.Json = Json.Write(transport.Api.LastModelCatalogObservation ?? new ModelCatalogObservation(
+                                ModelCatalogVersions.Schema, ModelCatalogVersions.Catalog, "opencode-provider", "opencode-http-api",
+                                ControlStore.Roots(record)[0], ControlStore.Now, "Unknown", "No catalog observation was returned.", []));
+                            catalog.ObservedAt = ControlStore.Now;
+                            if (catalog.RuntimeId == record.Id && db.Entry(catalog).State == EntityState.Detached) db.ModelCatalogObservations.Add(catalog);
                             if (RuntimeTelemetryProjection.FromCapabilities(record.CapabilitiesJson, $"{record.Id}:{record.Generation}") is { } telemetry)
                                 await ControlStore.RecordTelemetry(db, record.Id, telemetry.Result);
                             record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
@@ -203,7 +209,14 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                             if (!historyUnavailable) record.LastHealthyAt = ControlStore.Now;
                             if (runtime.ConnectionKind == RuntimeConnections.ControlHttp)
                                 foreach (var controlWorker in await db.Workers.Where(x => x.RuntimeId == id).ToListAsync()) controlWorker.ModelsJson = Json.Write(models);
-                            record.ModelsJson = Json.Write(models); record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
+                            record.ModelsJson = Json.Write(models);
+                            if (transport.Api.LastModelCatalogObservation is { } catalog)
+                            {
+                                var stored = await db.ModelCatalogObservations.FindAsync(record.Id) ?? new ModelCatalogObservationRecord { RuntimeId = record.Id };
+                                stored.Json = Json.Write(catalog); stored.ObservedAt = catalog.ObservedAt;
+                                if (stored.RuntimeId == record.Id && db.Entry(stored).State == EntityState.Detached) db.ModelCatalogObservations.Add(stored);
+                            }
+                            record.ProviderState = models.Count == 0 ? "ProviderSetupRequired" : "ModelsAvailable";
                             record.Diagnostic = historyUnavailable ? HistoryUnavailableDetail : models.Count == 0 ? "Provider setup required in the remote runtime." : runtime.ConnectionKind == RuntimeConnections.ControlHttp ? "Control service HTTP, events, and sessions are healthy." : "SSH, API and session reconciliation are healthy.";
                             return true;
                         });

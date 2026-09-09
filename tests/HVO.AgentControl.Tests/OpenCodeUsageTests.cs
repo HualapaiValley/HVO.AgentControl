@@ -38,6 +38,42 @@ public sealed class OpenCodeUsageTests
     }
 
     [Fact]
+    public void AttributesParentSummaryFinishAndCacheInclusiveInput()
+    {
+        var result = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            parentID = "msg_parent",
+            summary = true,
+            finish = "stop",
+            time = new { created = 100L, completed = 200L },
+            tokens = new { input = 5L, cache = new { read = 2L, write = 3L } }
+        })).Usage!;
+
+        Assert.Equal("msg_parent", result.ParentMessageId);
+        Assert.True(result.IsSummary);
+        Assert.Equal("stop", result.FinishReason);
+        Assert.Equal(10, result.EffectiveInputTokens);
+    }
+
+    [Fact]
+    public void MissingCacheCountersKeepEffectiveInputUnknown()
+    {
+        var result = Parse(Assistant(new
+        {
+            id = "msg_test",
+            sessionID = "ses_test",
+            role = "assistant",
+            time = new { created = 100L },
+            tokens = new { input = 5L }
+        })).Usage!;
+
+        Assert.Null(result.EffectiveInputTokens);
+    }
+
+    [Fact]
     public void ParsesDirectAssistantModelVariantAndKeepsMissingDistinctFromZero()
     {
         var result = Parse(new

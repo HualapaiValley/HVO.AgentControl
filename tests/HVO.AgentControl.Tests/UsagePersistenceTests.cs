@@ -11,6 +11,41 @@ namespace HVO.AgentControl.Tests;
 public sealed class UsagePersistenceTests
 {
     [Fact]
+    public async Task PersistsLineageAndCacheInclusiveEffectiveInput()
+    {
+        await using var app = new TestApp();
+        var worker = await PersistenceTests.SeedWorker(app.Store);
+        var message = JsonSerializer.Serialize(new
+        {
+            info = new
+            {
+                id = "assistant-lineage",
+                sessionID = worker.NativeSessionId,
+                role = "assistant",
+                providerID = "openai",
+                modelID = "gpt-5.6-sol",
+                parentID = "caller-1",
+                summary = true,
+                finish = "stop",
+                time = new { created = 100L, completed = 200L },
+                tokens = new { input = 5L, output = 2L, reasoning = 1L, cache = new { read = 7L, write = 3L } }
+            },
+            parts = Array.Empty<object>()
+        });
+        await SaveTranscript(app.Store, worker, message);
+
+        await app.Store.BackfillUsage();
+        var provenance = Assert.Single(await app.Store.Read(db => db.ModelUsageProvenance.ToListAsync()));
+        Assert.Equal("caller-1", provenance.ParentMessageId);
+        var row = Assert.Single((await app.Store.Usage(new())).Rows);
+        Assert.Equal("caller-1", row.ParentMessageId);
+        Assert.True(row.IsSummary);
+        Assert.Equal("stop", row.FinishReason);
+        Assert.Equal(15, row.EffectiveInputTokens);
+        Assert.Equal(15, Assert.Single((await app.Store.Usage(new())).Groups).EffectiveInputTokens.Sum);
+    }
+
+    [Fact]
     public async Task ProvisionalFinalAndStaleReplayKeepOneAuthoritativeRow()
     {
         await using var app = new TestApp();

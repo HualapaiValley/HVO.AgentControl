@@ -35,6 +35,8 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
     public DbSet<EvidenceReadReceipt> EvidenceReadReceipts => Set<EvidenceReadReceipt>();
     public DbSet<TranscriptMessage> Messages => Set<TranscriptMessage>();
     public DbSet<ModelUsageRecord> ModelUsage => Set<ModelUsageRecord>();
+    public DbSet<ModelUsageProvenanceRecord> ModelUsageProvenance => Set<ModelUsageProvenanceRecord>();
+    public DbSet<ModelCatalogObservationRecord> ModelCatalogObservations => Set<ModelCatalogObservationRecord>();
     public DbSet<PendingRequest> Requests => Set<PendingRequest>();
     public DbSet<WorkspaceClaim> WorkspaceClaims => Set<WorkspaceClaim>();
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
@@ -125,6 +127,9 @@ public sealed class ControlDb(DbContextOptions<ControlDb> options) : DbContext(o
         model.Entity<GitHubMergeAttempt>().HasIndex(x => new { x.IntentId, x.State }).IsUnique();
         model.Entity<GitHubMergeLease>().Property(x => x.Repository).UseCollation("NOCASE");
         model.Entity<GitHubMergeLease>().HasIndex(x => new { x.Repository, x.BaseBranch }).IsUnique();
+        model.Entity<ModelCatalogObservationRecord>().HasKey(x => x.RuntimeId);
+        model.Entity<ModelCatalogObservationRecord>().HasOne<RuntimeRecord>().WithOne().HasForeignKey<ModelCatalogObservationRecord>(x => x.RuntimeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<ModelUsageProvenanceRecord>().HasKey(x => new { x.RuntimeId, x.NativeSessionId, x.NativeMessageId });
         model.Entity<RuntimeRecord>().Ignore(x => x.TmuxName);
         model.Entity<RuntimeRecord>().Property(x => x.ConnectionKind).HasDefaultValue(RuntimeConnections.Ssh);
         model.Entity<WorkerRecord>().HasIndex(x => new { x.RuntimeId, x.ManagedServerId, x.NativeSessionId }).IsUnique();

@@ -318,6 +318,13 @@ public sealed class TranscriptMessage
     public long NativeCreatedAt { get; set; }
 }
 
+public sealed class ModelCatalogObservationRecord
+{
+    public string RuntimeId { get; set; } = "";
+    public string Json { get; set; } = "{}";
+    public long ObservedAt { get; set; }
+}
+
 public sealed class PendingRequest
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -329,7 +336,10 @@ public sealed class PendingRequest
     public string? ReplyCommandId { get; set; }
 }
 
-public sealed record ModelChoice(string ProviderId, string ModelId, string Name, string[]? Variants = null, string[]? Agents = null);
+public sealed record ModelChoice(string ProviderId, string ModelId, string Name, string[]? Variants = null, string[]? Agents = null)
+{
+    public ModelLimitEntry? Limits { get; init; }
+}
 public sealed record UpdateWorkerInput(string Id, long ExpectedRevision, string Name, string Project,
     string Description, string ProviderId, string ModelId, string Agent = "", string Variant = "");
 public sealed record ReserveCoordinatorInput(string Id, long ExpectedRevision);

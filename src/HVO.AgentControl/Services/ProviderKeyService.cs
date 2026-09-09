@@ -264,6 +264,12 @@ public sealed class ProviderKeyService(ControlStore store, Secrets secrets, IRun
                         var receipt = (await db.Set<ProviderReadinessReceipt>().FindAsync("instance:" + id))!;
                         if (receipt.PendingDisposalJson != attemptJson) throw new ControlException("Pending refresh changed.");
                         receipt.PendingDisposalJson = "";
+                        if (api.LastModelCatalogObservation is { } catalog)
+                        {
+                            var stored = await db.ModelCatalogObservations.FindAsync(runtime.Id) ?? new ModelCatalogObservationRecord { RuntimeId = runtime.Id };
+                            stored.Json = Json.Write(catalog); stored.ObservedAt = catalog.ObservedAt;
+                            if (db.Entry(stored).State == EntityState.Detached) db.ModelCatalogObservations.Add(stored);
+                        }
                         ControlStore.Event(db, "ProviderDisposalCompleted", id, payload: attempt, provenance: "observed");
                         return true;
                     });

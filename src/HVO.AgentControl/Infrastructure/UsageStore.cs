@@ -72,6 +72,15 @@ public sealed partial class ControlStore
         var rows = (await ledger.ToListAsync()).OrderBy(x => x.CreatedAt is null).ThenBy(x => x.CreatedAt)
             .ThenBy(x => x.RuntimeId, StringComparer.Ordinal).ThenBy(x => x.NativeSessionId, StringComparer.Ordinal)
             .ThenBy(x => x.NativeMessageId, StringComparer.Ordinal).ToList();
+        var provenance = await db.ModelUsageProvenance.AsNoTracking().ToDictionaryAsync(x => (x.RuntimeId, x.NativeSessionId, x.NativeMessageId));
+        foreach (var row in rows)
+            if (provenance.TryGetValue((row.RuntimeId, row.NativeSessionId, row.NativeMessageId), out var evidence))
+            {
+                row.EffectiveInputTokens = evidence.EffectiveInputTokens;
+                row.ParentMessageId = evidence.ParentMessageId;
+                row.IsSummary = evidence.IsSummary;
+                row.FinishReason = evidence.FinishReason;
+            }
 
         var workerIds = rows.Where(x => x.WorkerId is not null).Select(x => x.WorkerId!).Distinct().ToList();
         var gaps = workerIds.Count == 0 ? 0 : await db.Workers.CountAsync(x => workerIds.Contains(x.Id) && x.HistoryGap);
@@ -82,7 +91,8 @@ public sealed partial class ControlStore
             .Select(group => new UsageGroup(group.Key.SessionRole, group.Key.WorkerId, group.Key.ProviderId, group.Key.ModelId,
                 group.Key.Currency, group.Count(), group.Count(x => x.CompletedAt.HasValue), Metric(group.Select(x => x.TotalTokens)),
                 Metric(group.Select(x => x.InputTokens)), Metric(group.Select(x => x.OutputTokens)), Metric(group.Select(x => x.ReasoningTokens)),
-                Metric(group.Select(x => x.CacheReadTokens)), Metric(group.Select(x => x.CacheWriteTokens)), Metric(group.Select(x => x.ProviderCost))))
+                Metric(group.Select(x => x.CacheReadTokens)), Metric(group.Select(x => x.CacheWriteTokens)), Metric(group.Select(x => x.EffectiveInputTokens)),
+                Metric(group.Select(x => x.ProviderCost))))
             .OrderBy(x => x.SessionRole, StringComparer.Ordinal).ThenBy(x => x.WorkerId, StringComparer.Ordinal)
             .ThenBy(x => x.ProviderId, StringComparer.Ordinal).ThenBy(x => x.ModelId, StringComparer.Ordinal)
             .ThenBy(x => x.Currency, StringComparer.Ordinal).ToList();
@@ -92,13 +102,13 @@ public sealed partial class ControlStore
     public async Task<string> ExportUsageCsv(UsageQuery query)
     {
         var report = await Usage(query);
-        var output = new StringBuilder("runtimeId,nativeSessionId,nativeMessageId,workerId,sessionRole,providerId,modelId,createdAt,completedAt,totalTokens,inputTokens,outputTokens,reasoningTokens,cacheReadTokens,cacheWriteTokens,providerCost,currency,costProvenance,observedAt,seenInTranscript,seenInCommandResult\r\n");
+        var output = new StringBuilder("runtimeId,nativeSessionId,nativeMessageId,workerId,sessionRole,providerId,modelId,createdAt,completedAt,totalTokens,inputTokens,outputTokens,reasoningTokens,cacheReadTokens,cacheWriteTokens,effectiveInputTokens,parentMessageId,isSummary,finishReason,providerCost,currency,costProvenance,observedAt,seenInTranscript,seenInCommandResult\r\n");
         foreach (var row in report.Rows)
         {
             var values = new string?[] { row.RuntimeId, row.NativeSessionId, row.NativeMessageId, row.WorkerId, row.SessionRole,
                 row.ProviderId, row.ModelId, Number(row.CreatedAt), Number(row.CompletedAt), Number(row.TotalTokens), Number(row.InputTokens),
-                Number(row.OutputTokens), Number(row.ReasoningTokens), Number(row.CacheReadTokens), Number(row.CacheWriteTokens),
-                Number(row.ProviderCost), row.Currency, row.CostProvenance, Number(row.ObservedAt), row.SeenInTranscript ? "true" : "false",
+                Number(row.OutputTokens), Number(row.ReasoningTokens), Number(row.CacheReadTokens), Number(row.CacheWriteTokens), Number(row.EffectiveInputTokens),
+                row.ParentMessageId, row.IsSummary ? "true" : "false", row.FinishReason, Number(row.ProviderCost), row.Currency, row.CostProvenance, Number(row.ObservedAt), row.SeenInTranscript ? "true" : "false",
                 row.SeenInCommandResult ? "true" : "false" };
             output.AppendJoin(',', values.Select(Csv)).Append("\r\n");
         }
@@ -119,6 +129,7 @@ public sealed partial class ControlStore
         if (parsed.Usage is null) return new(false, false);
         var incoming = parsed.Usage;
         var row = await db.ModelUsage.FindAsync(identity.RuntimeId, identity.SessionId, identity.MessageId);
+        var changed = false;
         if (row is null)
         {
             row = new ModelUsageRecord
@@ -132,17 +143,31 @@ public sealed partial class ControlStore
             Apply(row, incoming);
             MarkEvidence(row, source);
             db.ModelUsage.Add(row);
-            return new(true, true);
+            changed = true;
         }
-
-        var changed = MarkEvidence(row, source);
-        if (row.WorkerId is null && workerId is not null) { row.WorkerId = workerId; changed = true; }
-        if (row.SessionRole == "Unknown" && sessionRole != "Unknown") { row.SessionRole = sessionRole; changed = true; }
-        var existing = ToUsage(row);
+        else
+        {
+            changed = MarkEvidence(row, source);
+            if (row.WorkerId is null && workerId is not null) { row.WorkerId = workerId; changed = true; }
+            if (row.SessionRole == "Unknown" && sessionRole != "Unknown") { row.SessionRole = sessionRole; changed = true; }
+        }
+        var evidence = await db.ModelUsageProvenance.FindAsync(identity.RuntimeId, identity.SessionId, identity.MessageId);
+        var existing = ToUsage(row, evidence);
+        var authoritative = incoming;
         if (!SameRevision(existing, incoming))
         {
             var merged = OpenCodeUsageMerger.Merge(existing, incoming);
+            authoritative = merged;
             if (merged != existing) { Apply(row, merged); changed = true; }
+        }
+        evidence ??= new ModelUsageProvenanceRecord { RuntimeId = identity.RuntimeId, NativeSessionId = identity.SessionId, NativeMessageId = identity.MessageId };
+        if (evidence.EffectiveInputTokens != authoritative.EffectiveInputTokens || evidence.ParentMessageId != authoritative.ParentMessageId ||
+            evidence.IsSummary != authoritative.IsSummary || evidence.FinishReason != authoritative.FinishReason)
+        {
+            evidence.EffectiveInputTokens = authoritative.EffectiveInputTokens; evidence.ParentMessageId = authoritative.ParentMessageId;
+            evidence.IsSummary = authoritative.IsSummary; evidence.FinishReason = authoritative.FinishReason;
+            if (evidence.RuntimeId == identity.RuntimeId && db.Entry(evidence).State == EntityState.Detached) db.ModelUsageProvenance.Add(evidence);
+            changed = true;
         }
         return new(true, changed);
     }
@@ -167,7 +192,7 @@ public sealed partial class ControlStore
         return sessionId is not null && messageId is not null;
     }
 
-    private static OpenCodeUsage ToUsage(ModelUsageRecord row) => new()
+    private static OpenCodeUsage ToUsage(ModelUsageRecord row, ModelUsageProvenanceRecord? evidence = null) => new()
     {
         Identity = new(row.RuntimeId, row.NativeSessionId, row.NativeMessageId),
         ProviderId = row.ProviderId,
@@ -180,6 +205,9 @@ public sealed partial class ControlStore
         ReasoningTokens = row.ReasoningTokens,
         CacheReadTokens = row.CacheReadTokens,
         CacheWriteTokens = row.CacheWriteTokens,
+        ParentMessageId = evidence?.ParentMessageId,
+        IsSummary = evidence?.IsSummary ?? false,
+        FinishReason = evidence?.FinishReason,
         Cost = row.ProviderCost,
         Currency = row.Currency,
         ObservedAt = row.ObservedAt,

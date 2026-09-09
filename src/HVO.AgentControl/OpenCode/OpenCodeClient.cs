@@ -23,6 +23,7 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
 {
     private const int MaxMissingCallerReads = 8;
     private bool hasAgents;
+    public ModelCatalogObservation? LastModelCatalogObservation { get; private set; }
     public AdapterCapabilities Capabilities { get; private set; } = new(false, false, false, false);
     public static string Scope(string path, string directory) => path + (path.Contains('?') ? "&" : "?") + "directory=" + Uri.EscapeDataString(directory);
     public static string Id(string id) => Uri.EscapeDataString(id);
@@ -66,7 +67,8 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
     public async Task<List<ModelChoice>> Models(string directory, CancellationToken token)
     {
         var providers = await Get(Scope("/provider", directory), token, 8_000_000);
-        var connected = providers.GetProperty("connected").EnumerateArray().Select(x => x.GetString()).ToHashSet();
+        var catalog = OpenCodeModelCatalog.Parse(providers, directory, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        LastModelCatalogObservation = catalog.Observation;
         string[] agents = [];
         if (hasAgents)
         {
@@ -75,17 +77,7 @@ public sealed class OpenCodeClient(HttpClient http) : IDisposable
                 (!x.TryGetProperty("mode", out var mode) || mode.GetString() is "primary" or "all"))
                 .Select(x => x.GetProperty("name").GetString()!).ToArray();
         }
-        var result = new List<ModelChoice>();
-        foreach (var provider in providers.GetProperty("all").EnumerateArray())
-        {
-            var providerId = provider.GetProperty("id").GetString()!;
-            if (!connected.Contains(providerId)) continue;
-            foreach (var model in provider.GetProperty("models").EnumerateObject())
-                result.Add(new ModelChoice(providerId, model.Name, model.Value.TryGetProperty("name", out var name) ? name.GetString() ?? model.Name : model.Name,
-                    model.Value.TryGetProperty("variants", out var variants) && variants.ValueKind == JsonValueKind.Object
-                        ? variants.EnumerateObject().Select(x => x.Name).ToArray() : [], agents));
-        }
-        return result;
+        return catalog.Models.Select(x => x with { Agents = agents }).ToList();
     }
 
     public async Task<JsonElement> CreateSession(string directory, string title, CancellationToken token)

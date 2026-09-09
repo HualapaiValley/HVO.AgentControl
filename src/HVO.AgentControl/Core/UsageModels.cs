@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace HVO.AgentControl.Core;
 
 public sealed class ModelUsageRecord
@@ -17,6 +19,10 @@ public sealed class ModelUsageRecord
     public long? ReasoningTokens { get; set; }
     public long? CacheReadTokens { get; set; }
     public long? CacheWriteTokens { get; set; }
+    [NotMapped] public long? EffectiveInputTokens { get; set; }
+    [NotMapped] public string? ParentMessageId { get; set; }
+    [NotMapped] public bool IsSummary { get; set; }
+    [NotMapped] public string? FinishReason { get; set; }
     public decimal? ProviderCost { get; set; }
     public string? Currency { get; set; }
     public string CostProvenance { get; set; } = "";
@@ -29,8 +35,20 @@ public sealed record UsageQuery(string? WorkerId = null, string? ProviderId = nu
 public sealed record UsageMetric(decimal? Sum, int Present, int Missing);
 public sealed record UsageGroup(string SessionRole, string? WorkerId, string? ProviderId, string? ModelId, string? Currency,
     int Messages, int FinalMessages, UsageMetric TotalTokens, UsageMetric InputTokens, UsageMetric OutputTokens,
-    UsageMetric ReasoningTokens, UsageMetric CacheReadTokens, UsageMetric CacheWriteTokens, UsageMetric ProviderCost);
+    UsageMetric ReasoningTokens, UsageMetric CacheReadTokens, UsageMetric CacheWriteTokens, UsageMetric EffectiveInputTokens,
+    UsageMetric ProviderCost);
 public sealed record UsageCoverage(string Scope, long? EarliestCreatedAt, long? LatestCreatedAt, int Messages,
     int FinalMessages, int ProvisionalMessages, int MissingCreatedAt, int WorkersWithHistoryGap);
 public sealed record UsageReport(UsageCoverage Coverage, IReadOnlyList<UsageGroup> Groups, IReadOnlyList<ModelUsageRecord> Rows);
 public sealed record UsageBackfillResult(int TranscriptMessages, int CommandMessages, int Accepted, int Changed);
+
+public sealed class ModelUsageProvenanceRecord
+{
+    public string RuntimeId { get; set; } = "";
+    public string NativeSessionId { get; set; } = "";
+    public string NativeMessageId { get; set; } = "";
+    public long? EffectiveInputTokens { get; set; }
+    public string? ParentMessageId { get; set; }
+    public bool IsSummary { get; set; }
+    public string? FinishReason { get; set; }
+}

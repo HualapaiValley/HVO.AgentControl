@@ -65,6 +65,7 @@ public static class ApiEndpoints
             Results.File(Encoding.UTF8.GetBytes(await store.ExportUsageCsv(new(workerId, providerId, modelId, from, to))),
                 "text/csv; charset=utf-8", "model-usage.csv"));
         group.MapGet("/runtimes", (ControlStore store) => store.Read(db => db.Runtimes.AsNoTracking().ToListAsync()));
+        group.MapGet("/runtimes/{id}/model-catalog", (string id, ControlStore store) => store.ModelCatalog(id));
         group.MapGet("/runtimes/{id}/telemetry-history", (string id, int? take, ControlStore store) => store.TelemetryHistory(id, take ?? 10));
         group.MapPost("/runtimes", (RuntimeRecord input, ControlStore store) => store.SaveRuntime(input));
         group.MapPost("/runtimes/verify", (RuntimeVerifyInput input, RuntimeVerificationService verification, CancellationToken token) => verification.Verify(input, token));

@@ -19,6 +19,11 @@ public sealed record OpenCodeUsage
     public long? ReasoningTokens { get; init; }
     public long? CacheReadTokens { get; init; }
     public long? CacheWriteTokens { get; init; }
+    public long? EffectiveInputTokens => InputTokens.HasValue && CacheReadTokens.HasValue && CacheWriteTokens.HasValue
+        ? InputTokens.Value + CacheReadTokens.Value + CacheWriteTokens.Value : null;
+    public string? ParentMessageId { get; init; }
+    public bool IsSummary { get; init; }
+    public string? FinishReason { get; init; }
     public decimal? Cost { get; init; }
     public string? Currency { get; init; }
     public long ObservedAt { get; init; }
@@ -93,6 +98,9 @@ public static class OpenCodeUsageParser
             ReasoningTokens = ReadCounter(tokens, "reasoning", "reasoning tokens", errors),
             CacheReadTokens = ReadCounter(cache, "read", "cache read tokens", errors),
             CacheWriteTokens = ReadCounter(cache, "write", "cache write tokens", errors),
+            ParentMessageId = StringProperty(info, "parentID"),
+            IsSummary = BooleanProperty(info, "summary"),
+            FinishReason = StringProperty(info, "finish"),
             Cost = ReadCost(info, errors),
             Currency = StringProperty(info, "currency"),
             ObservedAt = observedAt,
@@ -109,6 +117,10 @@ public static class OpenCodeUsageParser
     private static string? StringProperty(JsonElement parent, string name) =>
         parent.ValueKind == JsonValueKind.Object && parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() : null;
+
+    private static bool BooleanProperty(JsonElement parent, string name) =>
+        parent.ValueKind == JsonValueKind.Object && parent.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.True;
 
     private static long? ReadCounter(JsonElement parent, string name, string label, List<string> errors)
     {
@@ -185,6 +197,12 @@ public static class OpenCodeUsageMerger
         var cacheWrite = Nullable.Compare(left.CacheWriteTokens, right.CacheWriteTokens);
         if (cacheWrite != 0) return cacheWrite;
         var cost = Nullable.Compare(left.Cost, right.Cost);
-        return cost != 0 ? cost : string.CompareOrdinal(left.Currency, right.Currency);
+        if (cost != 0) return cost;
+        var currency = string.CompareOrdinal(left.Currency, right.Currency);
+        if (currency != 0) return currency;
+        var parent = string.CompareOrdinal(left.ParentMessageId, right.ParentMessageId);
+        if (parent != 0) return parent;
+        var summary = left.IsSummary.CompareTo(right.IsSummary);
+        return summary != 0 ? summary : string.CompareOrdinal(left.FinishReason, right.FinishReason);
     }
 }
