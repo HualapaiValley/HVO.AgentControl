@@ -26,9 +26,18 @@ module.exports = async ({ page, context, base, expect }) => {
   const visit = async () => {
     await page.goto(base + '/runtimes');
     await expect(page.locator('.shell')).toHaveAttribute('data-interactive', 'true');
+    if (page.viewportSize().width <= 850) {
+      await expect.poll(() => page.locator('.worker-sidebar').evaluate(el => el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+    }
   };
 
   for (const width of [1280, 390]) {
+    if (width === 390) {
+      // The preceding desktop fixture deliberately leaves navigation expanded.
+      // Close it through the actual control before entering the mobile overlay layout.
+      await page.getByRole('button', { name: 'Collapse worker sidebar', exact: true }).click();
+      await expect.poll(() => page.evaluate(() => localStorage.getItem('hvo.agentcontrol.sidebar-collapsed'))).toBe('true');
+    }
     await page.setViewportSize({ width, height: 900 });
     const unusedName = 'Unused draft ' + width;
     const unused = await createDraft(unusedName);
@@ -83,5 +92,8 @@ module.exports = async ({ page, context, base, expect }) => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   }
   await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByRole('button', { name: 'Expand worker sidebar', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Collapse worker sidebar', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('hvo.agentcontrol.sidebar-collapsed'))).toBe('false');
   console.log('PASS: managed drafts on desktop/mobile persist across navigation; keep/delete unused drafts; reject a newly referenced or cancelled-operation draft and retain its card and receipt.');
 };

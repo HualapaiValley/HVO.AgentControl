@@ -148,6 +148,8 @@ jobs:
           done
           export HVO_BASE_URL=http://127.0.0.1:5058
           export HVO_OWNER_PASSWORD_FILE="$PWD/artifacts/ui-secrets/owner-password"
+          python3 scripts/agentcontrol-watchdog.py --url "$HVO_BASE_URL" \
+            --password-file "$HVO_OWNER_PASSWORD_FILE" --state-file "$PWD/artifacts/watchdog-smoke.json" --once
           python3 tests/Browser/seed-provider-pool.py artifacts/ui-data/agentcontrol.db
           python3 tests/Browser/seed-coordination-supervision.py artifacts/ui-data/agentcontrol.db
           python3 tests/Browser/seed-conversation-race.py artifacts/ui-data/agentcontrol.db

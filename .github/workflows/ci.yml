@@ -41,6 +41,7 @@ jobs:
         run: |
           python3 tests/test_backlog_priority.py
           python3 tests/test_soak_runner.py scripts/run-coordination-soak.sh
+          python3 -m unittest discover -s tests -p 'test_agentcontrol_watchdog.py'
           node --test tests/Browser/setup-recovery-ownership.test.cjs
           node tests/Browser/terminal-target-selection.test.cjs
           node --test tests/Browser/terminal-assets.test.cjs

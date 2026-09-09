@@ -371,7 +371,8 @@ public sealed class GitHubProcessEnvironmentTests
             var canonical = "";
             for (var renewal = 0; renewal < 3; renewal++)
             {
-                var credential = new GitHubInstallationToken("ghs_DISPOSABLE_SSH_RENEWAL_" + renewal,
+                var tokenSuffix = renewal == 0 ? "_0" : "." + renewal + ".DISPOSABLE_SIGNATURE";
+                var credential = new GitHubInstallationToken("ghs_DISPOSABLE_SSH_RENEWAL" + tokenSuffix,
                     DateTimeOffset.UtcNow.AddHours(1), actor);
                 canonical = GitHubCredentialDelivery.HostsYaml(credential);
                 var delivered = await delivery.Deliver(runtime, credential, CancellationToken.None, fingerprint);

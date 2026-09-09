@@ -52,6 +52,36 @@ public sealed class GitHubManagedHostsTests
             GitHubProcessEnvironment.CredentialFingerprint(changed));
     }
 
+    [Fact]
+    public void DotSeparatedTokenRewritePreservesOwnershipAndPreviouslyDeliveredFingerprint()
+    {
+        // Match the observed length/character structure using entirely disposable values.
+        var token = "ghs_" + new string('a', 180) + "." + new string('b', 205);
+        var canonical = Hosts(token);
+        foreach (var rewritten in EquivalentForms(canonical, token))
+        {
+            Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(rewritten, Actor));
+            Assert.Equal(RawHash(canonical), GitHubProcessEnvironment.CredentialFingerprint(rewritten));
+        }
+        var plain = EquivalentForms(canonical, token).Last();
+        foreach (var invalid in new[]
+        {
+            plain.Replace("            oauth_token: " + token, "            oauth_token: " + token + ".changed", StringComparison.Ordinal),
+            plain + "enterprise.example.com:\n    user: personal\n",
+            plain.Replace("    users:\n", "    users:\n        personal:\n            oauth_token: personal\n", StringComparison.Ordinal),
+            plain.Replace(token, token + " # comment", StringComparison.Ordinal),
+            plain.Replace(token, "&alias " + token, StringComparison.Ordinal),
+            plain.Replace(token, ".nan", StringComparison.Ordinal),
+            plain.Replace(token, "1.5", StringComparison.Ordinal)
+        })
+        {
+            Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(invalid, Actor));
+            Assert.NotEqual(RawHash(canonical), GitHubProcessEnvironment.CredentialFingerprint(invalid));
+        }
+        Assert.False(GitHubCredentialDelivery.IsExclusivelyManagedHosts(plain, "different-app[bot]"));
+        Assert.False(GitHubCredentialDelivery.IsManagedConfigurationReplacementAllowed(true, "another-runtime", "owned-runtime"));
+    }
+
     [GitHubCliFact]
     public async Task InstalledCliUsageAndTwoRenewalsPreserveCanonicalAndRemoteFingerprints()
     {
@@ -62,7 +92,7 @@ public sealed class GitHubManagedHostsTests
             // Git configuration are available to these installed CLI invocations.
             for (var renewal = 0; renewal < 3; renewal++)
             {
-                var value = Token + "_" + renewal;
+                var value = renewal == 0 ? Token : Token + "." + renewal + ".DISPOSABLE_SIGNATURE";
                 var canonical = Hosts(value);
                 if (File.Exists(Path.Combine(directory, "hosts.yml")))
                     Assert.True(GitHubCredentialDelivery.IsExclusivelyManagedHosts(
@@ -99,6 +129,16 @@ public sealed class GitHubManagedHostsTests
                 await File.WriteAllTextAsync(Path.Combine(directory, "hosts.yml"), equivalent);
                 Assert.Equal(expected, await PortableFingerprint(directory));
             }
+            var segmentedToken = Token + ".DISPOSABLE_SIGNATURE";
+            var segmented = Hosts(segmentedToken);
+            foreach (var equivalent in EquivalentForms(segmented, segmentedToken))
+            {
+                await File.WriteAllTextAsync(Path.Combine(directory, "hosts.yml"), equivalent);
+                Assert.Equal(RawHash(segmented), await PortableFingerprint(directory));
+            }
+            var changedSegment = Hosts(segmentedToken + ".changed");
+            await File.WriteAllTextAsync(Path.Combine(directory, "hosts.yml"), changedSegment);
+            Assert.NotEqual(RawHash(segmented), await PortableFingerprint(directory));
             foreach (var invalid in InvalidForms(canonical).Append(Hosts("ghs_CHANGED_TOKEN")).Append(""))
             {
                 await File.WriteAllTextAsync(Path.Combine(directory, "hosts.yml"), invalid);
@@ -125,13 +165,13 @@ public sealed class GitHubManagedHostsTests
         finally { Directory.Delete(directory, true); }
     }
 
-    private static IEnumerable<string> EquivalentForms(string canonical)
+    private static IEnumerable<string> EquivalentForms(string canonical, string token = Token)
     {
         yield return canonical;
         yield return canonical.Replace("    user: \"" + Actor + "\"", "    user: " + Actor, StringComparison.Ordinal)
-            .Replace("            oauth_token: \"" + Token + "\"", "            oauth_token: " + Token, StringComparison.Ordinal);
+            .Replace("            oauth_token: \"" + token + "\"", "            oauth_token: " + token, StringComparison.Ordinal);
         yield return canonical.Replace('"' + Actor + '"', Actor, StringComparison.Ordinal)
-            .Replace('"' + Token + '"', Token, StringComparison.Ordinal);
+            .Replace('"' + token + '"', token, StringComparison.Ordinal);
     }
 
     private static IEnumerable<string> InvalidForms(string canonical)

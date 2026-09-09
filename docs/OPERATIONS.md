@@ -99,6 +99,48 @@ Each application request has a UUID and immutable routing/content. Retrying that
 
 Coordinator native errors are classified before decision JSON repair. A run can show `Waiting` with **Coordinator held after native …** while its heartbeat and independent workers continue. See [coordinator native failure recovery](COORDINATOR_NATIVE_FAILURES.md) for the durable hold, eligible recovery, and remaining fallback/compaction limitations.
 
+### External fleet watchdog
+
+`scripts/agentcontrol-watchdog.py` supplies a small operational monitor outside the controller process. It authenticates using the owner password file, refreshes an expired login on the next poll, and reads the owner-only `GET /api/v1/watchdog` endpoint with ten-second request timeouts and an 8 MiB response limit. This endpoint projects status and recovery counters in the database, excluding transcripts, prompts, catalogs and credential bodies. It includes all open commands up to an explicit 4,096-command bound, including commands older than the full snapshot's latest 500. Other collections are bounded at 512 records. Overflow returns `complete: false`; it cannot masquerade as a healthy partial observation. Run it against the controller's local interface or an authenticated HTTPS origin. The password stays out of arguments, logs, and the incident file.
+
+The monitor rejects incomplete, malformed or stale responses and never falls back to downloading retained conversations. Its private ledger exposes `observationStatus` (`Healthy`, `Limited`, `Unavailable`, or `Stale`), `lastControllerSuccess`, and `consecutiveObservationFailures`. An outage immediately records `controller_observation_failed`; after the configured stall interval, `controller_observation_stale` is a critical journal event, repeated every five minutes. Previously observed incidents remain unresolved until fresh evidence arrives. Successful observation records recovery and clears the outage. `--once` exits nonzero if observation fails, for external health checks. These events are local journald signals; they do not send email or external notifications. GitHub credential blockage or expiry is a separate incident even during a scheduling pause. More than 256 distinct current incidents produces `Limited` status and a critical `incident_tracking_overflow` event; already tracked incidents are retained, and capacity loss never emits a false resolution. Container recovery is suppressed until incident tracking is complete again.
+
+```bash
+python3 scripts/agentcontrol-watchdog.py \
+  --url http://127.0.0.1:5054 \
+  --password-file /srv/agentcontrol/secrets/owner-password \
+  --state-file /srv/agentcontrol/watchdog/state.json \
+  --once
+```
+
+Omit `--once` to poll every 30 seconds. The monitor classifies current coordinator and recent worker provider errors, repeated format correction or decision recovery, unresolved commands, pending approvals/questions, unavailable connected runtimes, and active runs with available idle workers but no assignments. Missing assignments, pending requests, and runtime outages must persist five minutes before the first alert. Pending approvals/questions suppress the missing-assignment alert but remain observable themselves. An intentional pause, completed run, or stopped run does not produce a missing-assignment alert; uncertain commands remain observable. Slow inference produces an incident when appropriate and does not authorize a process restart.
+
+The private, atomically replaced state file retains up to 256 current incidents and 256 journal entries. Repeated incidents are reported at most once per five minutes and record their resolution. Subjects are SHA-256 identifier prefixes (16 hex characters); compare those hashes to the live run/command/container IDs when investigating. Error reports retain only an allowlisted native error name, numeric HTTP status, and fixed category. Raw messages, prompts, model responses, headers, Docker stderr, and passwords are excluded. This file is an operational index; the AgentControl database remains the authoritative assignment and delivery ledger.
+
+For optional stopped-container recovery, add `--restart-exited`, repeat `--container exact-name` for each owned container, and provide `--owner-label key=value`. A Compose project's `com.docker.compose.project` label is suitable if it uniquely identifies this deployment; repeat the label option when controller and workers belong to separate owned Compose projects. At least one supplied ownership label must match, in addition to the exact container name. `--docker-context name` selects the Docker host without changing the default context. Container names are explicit; no container is discovered and enrolled for recovery automatically.
+
+Only a matching name and ownership label with Docker state `exited` qualifies. Three consecutive observations are required; start attempts have a ten-minute cooldown and a maximum of three per hour, retained across watchdog restarts. The watchdog starts the observed container ID, preserving its volumes; it never recreates containers, restarts running containers, or acts on a connection wobble. A recorded intentional fleet pause suppresses container starts, including while the controller is unreachable. Startup without an observation, no active coordination, and blindness exceeding the stall interval also suppress starts. A recent running observation permits bounded recovery of a controller that just exited. It never grants approvals, edits model settings, acknowledges unknown delivery, or replays tasks. Provider routing and session recovery still belong to the control plane and require their recorded evidence.
+
+Run the foreground process under a service manager, with one service per state file. An exclusive lock rejects duplicate instances. Example unit settings (replace paths and add the intended container allowlist):
+
+```ini
+[Service]
+Type=simple
+User=agentcontrol
+ExecStart=/usr/bin/python3 /srv/agentcontrol/scripts/agentcontrol-watchdog.py --url http://127.0.0.1:5054 --password-file /srv/agentcontrol/secrets/owner-password --state-file /srv/agentcontrol/watchdog/state.json
+Restart=on-failure
+RestartSec=30
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=32
+```
+
+Use the host's bounded journald retention (for example, a chosen `SystemMaxUse` and `MaxRetentionSec`) instead of redirecting stdout to an unlimited file. Corrupt persisted watchdog state fails startup; inspect and restore it rather than silently clearing restart budgets. Validate this script with `python3 -m unittest discover -s tests -p 'test_agentcontrol_watchdog.py' -v`.
+
+Keep the installed script and state outside temporary directories. For a user systemd service, omit `User=`, enable the unit, and enable lingering for its owner if it must start at boot without an SSH login. See the [coordinator recovery playbook](operations/COORDINATOR_RECOVERY_PLAYBOOK.md) for failure classification and the end-to-end recovery evidence required before declaring the fleet healthy.
+
 For `DeliveryUnknown`, inspect the corresponding native message ID, transcript and files. Native identity can establish acceptance; prompt text similarity cannot. Unknown work blocks further prompts on that worker until evidence resolves it or the owner acknowledges uncertainty. Acknowledgement marks that command withdrawn without retry. Any later instruction is a new explicit request. Uncertain session creation is reconciled only by the exact application creation marker and workspace; otherwise its workspace claim remains held until explicit resolution.
 
 An abort receipt is **cancellation requested**. AgentControl waits for observed idle; a remote child process may have effects beyond that receipt. Other workers remain independent. Permissions are answered only by native request identity. A retried reply never grants a different request/scope; after native restart a formerly pending request may become `NoLongerPending` rather than falsely “answered.”
