@@ -1,13 +1,10 @@
 name: Dev Container runner
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
+  workflow_dispatch:
+  workflow_call:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Keep the same main/PR policy as the standard CI workflow.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-devcontainer-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
