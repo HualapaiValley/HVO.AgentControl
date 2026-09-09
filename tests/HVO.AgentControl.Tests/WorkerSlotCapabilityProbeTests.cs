@@ -133,7 +133,7 @@ public sealed class WorkerSlotCapabilityProbeTests
 
     private static Task<CommandRecord?> Claim(RuntimeSupervisor supervisor, string runtimeId) =>
         (Task<CommandRecord?>)typeof(RuntimeSupervisor).GetMethod("Claim", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(supervisor, [runtimeId, null])!;
+            .Invoke(supervisor, [runtimeId, null, CancellationToken.None, null])!;
 
     private static Task Dispatch(RuntimeSupervisor supervisor, CommandRecord command, RuntimeRecord runtime, IRuntimeTransport transport) =>
         (Task)typeof(RuntimeSupervisor).GetMethod("Dispatch", BindingFlags.Instance | BindingFlags.NonPublic)!

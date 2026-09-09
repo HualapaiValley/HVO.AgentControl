@@ -70,21 +70,23 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     if (!runtime.DesiredConnected)
                     {
                         var stoppedOwned = false;
-                        var stop = await Claim(id, "StopManagedServer");
-                        if (stop is not null)
+                        if (transport is not null)
                         {
-                            try
+                            var stop = await Claim(id, transport, token, "StopManagedServer");
+                            if (stop is not null)
                             {
-                                if (transport is null) throw new ControlException("Connect and inspect the owned server before requesting stop.");
-                                var lifecycle = Json.Read<RuntimeLifecycleInput>(stop.Payload);
-                                if (lifecycle.OwnedProcess is null || lifecycle.OwnedProcess.ObservedAt < ControlStore.Now - 60000)
-                                    throw new ControlException("Stop was not sent because fresh owned native-process evidence is unavailable.");
-                                if (!await StopStillCurrent(stop.Id, lifecycle)) continue;
-                                await transport.StopOwnedServer(lifecycle.OwnedProcess, token);
-                                stoppedOwned = true;
-                                await Complete(stop.Id, Delivery.Finished, "Owned server stopped; affected workers require reconciliation on next connect.");
+                                try
+                                {
+                                    var lifecycle = Json.Read<RuntimeLifecycleInput>(stop.Payload);
+                                    if (lifecycle.OwnedProcess is null || lifecycle.OwnedProcess.ObservedAt < ControlStore.Now - 60000)
+                                        throw new ControlException("Stop was not sent because fresh owned native-process evidence is unavailable.");
+                                    if (!await StopStillCurrent(stop.Id, lifecycle)) continue;
+                                    await transport.StopOwnedServer(lifecycle.OwnedProcess, token);
+                                    stoppedOwned = true;
+                                    await Complete(stop.Id, Delivery.Finished, "Owned server stopped; affected workers require reconciliation on next connect.");
+                                }
+                                catch (Exception ex) { await Complete(stop.Id, ex is ControlException ? Delivery.Failed : Delivery.Unknown, SafeError(ex)); }
                             }
-                            catch (Exception ex) { await Complete(stop.Id, ex is ControlException ? Delivery.Failed : Delivery.Unknown, SafeError(ex)); }
                         }
                         await Close();
                         if (runtime.Transport != "Disconnected") await MarkDisconnected(id, "Disconnected",
@@ -213,7 +215,7 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     if (!historyUnavailable) await FinishRuntimeCommands(id, "RefreshState");
                     await ReconcileControlCreation(runtime, transport, token);
                     await ReconcileCreation(runtime, transport, token);
-                    var next = await Claim(id);
+                    var next = await Claim(id, transport, token);
                     if (next is not null) await Dispatch(next, runtime, transport, token);
                     await Task.Delay(options.Value.PollMilliseconds, token);
                 }
@@ -234,22 +236,24 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
         finally { await Close(); }
     }
 
-    private Task<CommandRecord?> Claim(string runtimeId, string? kind = null) => store.Write(async db =>
+    private async Task<CommandRecord?> Claim(string runtimeId, IRuntimeTransport? transport, CancellationToken token, string? kind = null)
     {
-        var candidates = await db.Commands.Where(x => x.RuntimeId == runtimeId && x.State == Delivery.Queued)
-            .OrderBy(x => x.QueueOrder).ThenBy(x => x.Id).ToListAsync();
+        var candidates = await store.Read<List<CommandRecord>>(db => db.Commands.Where(x => x.RuntimeId == runtimeId && x.State == Delivery.Queued)
+            .OrderBy(x => x.QueueOrder).ThenBy(x => x.Id).ToListAsync());
         foreach (var command in candidates.OrderBy(x => x.Kind is "Abort" or "Reply" ? 0 : 1))
         {
             if (kind is not null ? command.Kind != kind : command.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer") continue;
             if (command.Kind is "EnsureServer" or "RefreshState" or "DisconnectRuntime" or "StopManagedServer")
             {
-                var runtime = (await db.Runtimes.FindAsync(runtimeId))!;
-                if (!IsCurrentLifecycle(command, runtime))
+                var runtime = await store.Read<RuntimeRecord?>(async db => await db.Runtimes.FindAsync(runtimeId).AsTask());
+                if (runtime is null || !IsCurrentLifecycle(command, runtime))
                 {
-                    command.State = Delivery.Cancelled;
-                    command.Detail = "Superseded by a newer runtime lifecycle intent; no destructive action was performed.";
-                    command.UpdatedAt = ControlStore.Now;
-                    ControlStore.Event(db, "RuntimeLifecycleSuperseded", runtimeId, commandId: command.Id);
+                    await store.Write<bool>(async db =>
+                    {
+                        var cmd = await db.Commands.FindAsync(command.Id);
+                        if (cmd is not null) { cmd.State = Delivery.Cancelled; cmd.Detail = "Superseded by a newer runtime lifecycle intent; no destructive action was performed."; cmd.UpdatedAt = ControlStore.Now; }
+                        return true;
+                    });
                     continue;
                 }
                 if (command.Kind == "StopManagedServer")
@@ -257,50 +261,106 @@ public sealed partial class RuntimeSupervisor(ControlStore store, IRuntimeTransp
                     var lifecycle = Json.Read<RuntimeLifecycleInput>(command.Payload);
                     if (lifecycle.OwnedProcess is null || lifecycle.OwnedProcess.ObservedAt < ControlStore.Now - 60000)
                     {
-                        command.State = Delivery.Failed;
-                        command.Detail = "Stop was not sent because fresh owned native-process evidence is unavailable.";
-                        command.UpdatedAt = ControlStore.Now;
-                        ControlStore.Event(db, "OwnedServerStopNotSent", runtimeId, commandId: command.Id);
+                        await store.Write<bool>(async db =>
+                        {
+                            var cmd = await db.Commands.FindAsync(command.Id);
+                            if (cmd is not null) { cmd.State = Delivery.Failed; cmd.Detail = "Stop was not sent because fresh owned native-process evidence is unavailable."; cmd.UpdatedAt = ControlStore.Now; }
+                            return true;
+                        });
                         continue;
                     }
                 }
             }
-            if (command.Kind == "ReinspectNativeProcess" && !IsCurrentReinspection(command, await db.Runtimes.FindAsync(runtimeId)))
+            if (command.Kind == "ReinspectNativeProcess" && !await IsCurrentReinspectionAsync(command.Id, runtimeId))
             {
-                command.State = Delivery.Cancelled;
-                command.Detail = "Native-process reinspection was superseded by changed runtime identity; no observation was recorded.";
-                command.UpdatedAt = ControlStore.Now;
-                ControlStore.Event(db, "NativeProcessReinspectionSuperseded", runtimeId, commandId: command.Id);
+                await store.Write<bool>(async db =>
+                {
+                    var cmd = await db.Commands.FindAsync(command.Id);
+                    if (cmd is not null) { cmd.State = Delivery.Cancelled; cmd.Detail = "Native-process reinspection was superseded by changed runtime identity; no observation was recorded."; cmd.UpdatedAt = ControlStore.Now; }
+                    return true;
+                });
                 continue;
             }
             if (command.Kind == "Prompt")
             {
-                var worker = await db.Workers.FindAsync(command.WorkerId);
+                var worker = await store.Read<WorkerRecord?>(async db => await db.Workers.FindAsync(command.WorkerId).AsTask());
                 if (worker is null || worker.Archived || worker.Stale || worker.Activity != "Idle") continue;
-                var inFlight = await db.Commands.Where(x => x.Kind == "Prompt" && (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)).ToListAsync();
+                var inFlight = await store.Read<List<CommandRecord>>(db => db.Commands.Where(x => x.Kind == "Prompt" && (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)).ToListAsync());
                 if (inFlight.Any(x => x.WorkerId == worker.Id)) continue;
-                var taskWorkers = await db.Workers.Where(x => x.Role == SessionRoles.Worker).Select(x => x.Id).ToListAsync();
-                var active = await db.Workers.Where(x => x.Role == SessionRoles.Worker && x.Activity != "Idle" && x.Activity != "Unknown" && x.Activity != "MissingSession").Select(x => x.Id).ToListAsync();
+                var taskWorkers = await store.Read<List<string>>(db => db.Workers.Where(x => x.Role == SessionRoles.Worker).Select(x => x.Id).ToListAsync());
+                var active = await store.Read<List<string>>(db => db.Workers.Where(x => x.Role == SessionRoles.Worker && x.Activity != "Idle" && x.Activity != "Unknown" && x.Activity != "MissingSession").Select(x => x.Id).ToListAsync());
                 var occupied = active.Concat(inFlight.Where(x => taskWorkers.Contains(x.WorkerId!)).Select(x => x.WorkerId!)).ToHashSet();
-                var runtime = (await db.Runtimes.FindAsync(runtimeId))!;
-                var runtimeWorkers = await db.Workers.Where(x => x.RuntimeId == runtimeId).Select(x => x.Id).ToListAsync();
+                var runtime = await store.Read<RuntimeRecord?>(async db => await db.Runtimes.FindAsync(runtimeId).AsTask());
+                if (runtime is null) continue;
+                var runtimeWorkers = await store.Read<List<string>>(db => db.Workers.Where(x => x.RuntimeId == runtimeId).Select(x => x.Id).ToListAsync());
                 if (worker.Role == SessionRoles.Worker && (occupied.Count >= options.Value.GlobalCapacity || runtimeWorkers.Count(occupied.Contains) >= runtime.Capacity)) continue;
                 if (runtime.ConnectionKind == RuntimeConnections.ControlHttp)
                 {
-                    var nativeBusy = await db.Workers.Where(x => x.RuntimeId == runtimeId && x.Activity != "Idle" && x.Activity != "Unknown" && x.Activity != "MissingSession").Select(x => x.Id).ToListAsync();
+                    var nativeBusy = await store.Read<List<string>>(db => db.Workers.Where(x => x.RuntimeId == runtimeId && x.Activity != "Idle" && x.Activity != "Unknown" && x.Activity != "MissingSession").Select(x => x.Id).ToListAsync());
                     var occupiedControl = nativeBusy.Concat(inFlight.Where(x => x.RuntimeId == runtimeId).Select(x => x.WorkerId!)).Distinct().Count();
                     if (occupiedControl >= runtime.Capacity) continue;
                 }
-                if ((await store.RequiredCapabilityGaps(db, worker)).Length > 0) continue;
-                if (!await ControlStore.ProviderDispatchAllowed(db, worker, command)) continue;
-                command.ProviderPoolId = ControlStore.PoolId(worker, command);
+                var gaps = await store.Read<string[]>(async db => await store.RequiredCapabilityGaps(db, worker));
+                if (gaps.Length > 0 && transport is not null && transport.Connected && runtime.ConnectionKind == RuntimeConnections.Ssh)
+                {
+                    var snapshot = CapabilityProbeCatalog.Default.Read(runtime.CapabilitiesJson);
+                    if (snapshot is null || snapshot.Source != "probe" ||
+                        snapshot.ObservedAt < DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 110_000)
+                    {
+                        var freshCapabilities = await transport.ProbeCapabilities(ControlStore.Roots(runtime)[0], token);
+                        await store.Write<bool>(async db =>
+                        {
+                            var rt = await db.Runtimes.FindAsync(runtimeId);
+                            if (rt is not null)
+                            {
+                                rt.CapabilitiesJson = Json.Write(freshCapabilities);
+                                rt.Generation++;
+                                ControlStore.Event(db, "RuntimeCapabilitiesRefreshed", runtimeId, generation: rt.Generation);
+                            }
+                            return true;
+                        });
+                        gaps = await store.Read<string[]>(async db => await store.RequiredCapabilityGaps(db, worker));
+                    }
+                }
+                if (gaps.Length > 0) continue;
+                if (!await store.Read<bool>(async db => await ControlStore.ProviderDispatchAllowed(db, worker, command))) continue;
+                var claimed = await store.Write<CommandRecord?>(async db =>
+                {
+                    var cmd = await db.Commands.FindAsync(command.Id);
+                    if (cmd is null) return null;
+                    cmd.State = Delivery.Dispatching; cmd.Attempts++; cmd.UpdatedAt = ControlStore.Now;
+                    ControlStore.Event(db, "CommandDispatching", runtimeId, cmd.WorkerId, cmd.Id);
+                    return cmd;
+                });
+                if (claimed is not null) return claimed;
             }
-            if (command.Kind is "Abort" or "Reply" && (await db.Workers.FindAsync(command.WorkerId))?.Stale != false) continue;
-            command.State = Delivery.Dispatching; command.Attempts++; command.UpdatedAt = ControlStore.Now;
-            ControlStore.Event(db, "CommandDispatching", runtimeId, command.WorkerId, command.Id);
-            return command;
+            if (command.Kind is "Abort" or "Reply")
+            {
+                var worker = await store.Read<WorkerRecord?>(async db => await db.Workers.FindAsync(command.WorkerId).AsTask());
+                if (worker?.Stale != false) continue;
+            }
+            var result = await store.Write<CommandRecord?>(async db =>
+            {
+                var cmd = await db.Commands.FindAsync(command.Id);
+                if (cmd is null) return null;
+                cmd.State = Delivery.Dispatching; cmd.Attempts++; cmd.UpdatedAt = ControlStore.Now;
+                ControlStore.Event(db, "CommandDispatching", runtimeId, cmd.WorkerId, cmd.Id);
+                return cmd;
+            });
+            if (result is not null) return result;
         }
         return null;
+    }
+
+    private Task<bool> IsCurrentReinspectionAsync(string commandId, string runtimeId) => store.Read(async db =>
+    {
+        var command = await db.Commands.FindAsync(commandId);
+        var runtime = command is null ? null : await db.Runtimes.FindAsync(command.RuntimeId);
+        if (command is not { Kind: "ReinspectNativeProcess", State: Delivery.Dispatching } || runtime is null) return false;
+        var request = Json.Read<NativeProcessReinspectionRequest>(command.ExecutionPayload);
+        return runtime.ConnectionKind == RuntimeConnections.Ssh && runtime.DesiredConnected &&
+               runtime.Revision == request.Input.ExpectedRuntimeRevision && runtime.ManagedServerId == request.Input.ManagedServerId &&
+               request.ExpectedProcessId > 0 && NativeProcessProbe.ValidMarker(request.Input.ExpectedIncarnation);
     });
 
     private async Task Dispatch(CommandRecord command, RuntimeRecord runtime, IRuntimeTransport transport, CancellationToken token)

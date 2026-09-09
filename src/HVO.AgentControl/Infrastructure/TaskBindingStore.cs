@@ -269,11 +269,20 @@ public sealed partial class ControlStore
 
     internal async Task<string[]> RequiredCapabilityGaps(ControlDb db, WorkerRecord worker)
     {
+        var activePrompt = await db.Commands
+            .Where(x => x.WorkerId == worker.Id && x.Kind == "Prompt" &&
+                       (x.State == Delivery.Queued || x.State == Delivery.Dispatching ||
+                        x.State == Delivery.Accepted || x.State == Delivery.Running ||
+                        x.State == Delivery.Unknown))
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync();
+        if (activePrompt is null) return [];
+
         var slots = await (from binding in db.TaskBindings
                            join session in db.TaskSessionBindings on binding.Id equals session.TaskBindingId
                            join candidate in db.WorkerSlots on binding.WorkerSlotId equals candidate.Id
                            join workspace in db.TaskWorkspaces on binding.WorkspaceId equals workspace.Id
-                           where session.LegacyWorkerId == worker.Id
+                           where session.LegacyWorkerId == worker.Id && binding.State == TaskBindingState.Active
                            select new { candidate, workspace.Directory }).ToListAsync();
         var required = slots.SelectMany(x => x.candidate.CapabilityProbeIds).Distinct(StringComparer.Ordinal).ToArray();
         if (required.Length == 0) return [];
