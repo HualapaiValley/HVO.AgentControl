@@ -530,15 +530,39 @@ public sealed class GitHubMergeTests
     public async Task PostCommitStartAttemptExceptionRetainsExactAttemptLeaseWithoutSendingAgain()
     {
         await using var fixture = await Fixture.Create();
-        var writes = 0;
-        fixture.App.Store.Changed += () =>
+        var factory = fixture.App.Services.GetRequiredService<IDbContextFactory<ControlDb>>();
+        var options = fixture.App.Services.GetRequiredService<IOptions<ControlOptions>>();
+        var secrets = fixture.App.Services.GetRequiredService<Secrets>();
+        var isolatedStore = new ControlStore(factory, options, secrets);
+        var isolatedService = new GitHubMergeService(isolatedStore, secrets, fixture.Client);
+        var injected = 0;
+        isolatedStore.Changed += () =>
         {
-            if (Interlocked.Increment(ref writes) == 3)
+            if (Volatile.Read(ref injected) != 0) return;
+            using var db = factory.CreateDbContext();
+            if (db.GitHubMergeAttempts.AsNoTracking().Any(x => x.IntentId == "intent" && x.State == "Attempted") &&
+                Interlocked.CompareExchange(ref injected, 1, 0) == 0)
                 throw new DbUpdateException("Simulated notification after the attempt transaction committed.");
         };
+        // Unrelated advisory notifications, including the runtime supervisor's idle
+        // lifecycle sweep, must not consume the failure intended for StartAttempt.
+        await isolatedStore.Write(_ => Task.FromResult(true));
+        var globalWrites = 0;
+        var noise = Task.Run(async () =>
+        {
+            for (var index = 0; index < 16; index++)
+            {
+                await fixture.App.Store.Write(_ => Task.FromResult(true));
+                Interlocked.Increment(ref globalWrites);
+                await Task.Yield();
+            }
+        });
 
-        var held = await fixture.Service.Merge("intent", new("intent", 0));
+        var held = await isolatedService.Merge("intent", new("intent", 0));
+        await noise;
 
+        Assert.Equal(1, Volatile.Read(ref injected));
+        Assert.Equal(16, Volatile.Read(ref globalWrites));
         Assert.Equal("Attempted", held.State);
         Assert.Equal(0, fixture.Remote.MergeCalls);
         var attempt = await fixture.App.Store.Read(db => db.GitHubMergeAttempts.AsNoTracking().SingleAsync());

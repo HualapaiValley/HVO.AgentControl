@@ -11,6 +11,12 @@ secret value.
 ## Validation
 
 ```bash
-dotnet build HVO.AgentControl.slnx --configuration Release --warnaserror
-dotnet format HVO.AgentControl.slnx --verify-no-changes
+dotnet restore HVO.AgentControl.slnx
+dotnet build HVO.AgentControl.slnx --no-restore --configuration Release --warnaserror
+dotnet test HVO.AgentControl.slnx --no-build --configuration Release
+dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
 ```
+
+Record the tested commit, commands, results and environment-gated skips in the PR. Code changes need local tests and independent review. Documentation/workflow-only changes need validation appropriate to those files; they do not require another full run of unchanged application tests.
+
+Prerelease PR automation runs only the short `build` check once the PR is ready for review. Expensive integration checks are manually selectable and do not run again automatically after a merge. See [validation policy](docs/VALIDATION_POLICY.md) for commands, review requirements and deployment evidence.

@@ -77,7 +77,7 @@ The original repository's [Dev Container and Docker context instructions](docs/D
 
 ## Validation
 
-CI and Dev Container acceptance finish an already-running `main` validation when another PR merges. GitHub keeps the newest pending run for that workflow and branch; superseded PR runs are still cancelled. Release checks must match the deployed commit in both workflows, since each queue progresses independently.
+During prerelease development, ready-for-review PRs run one short `build` check: restore, Release compilation with warnings as errors, formatting and quick script regressions. Drafts skip automatic builds; marking them ready starts the check. Merges do not trigger another run. Workers still validate code changes and obtain independent review. Full .NET/SSH tests, browser checks, sidecar checks and official Dev Container acceptance are available through the manual **Full validation** workflow. Record exact-source evidence for relevant checks before deployment; see [validation policy](docs/VALIDATION_POLICY.md).
 
 ```bash
 dotnet test HVO.AgentControl.slnx --configuration Release --no-restore
