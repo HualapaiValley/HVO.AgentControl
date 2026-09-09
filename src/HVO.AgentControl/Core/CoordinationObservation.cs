@@ -8,15 +8,35 @@ public static class CoordinationObservation
     // Progress prose changes frequently. A scheduling review is bounded by actual
     // task/capacity/policy changes, not by another token or native retry observation.
     public static string PlanningKey(string instruction, IEnumerable<string> availableWorkers,
-        IEnumerable<CommandRecord> commands, IEnumerable<PendingRequest> requests, IEnumerable<CoordinatorGitHubAccess> github) =>
+        IEnumerable<CommandRecord> commands, IEnumerable<PendingRequest> requests, IEnumerable<CoordinatorGitHubAccess> github,
+        CoordinatorProviderEvidence? providers = null) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
         {
             instruction,
             availableWorkers = availableWorkers.Order(),
             commands = commands.OrderBy(x => x.Id).Select(x => new { x.Id, x.State }),
             requests = requests.OrderBy(x => x.Id).Select(x => new { x.Id, x.State }),
-            github = GitHubKey(github)
+            github = GitHubKey(github),
+            providers = ProviderKey(providers)
         }))));
+
+    public static string ProviderKey(CoordinatorProviderEvidence? evidence) => evidence is null ? "" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Write(new
+    {
+        pools = evidence.Pools.OrderBy(x => x.Id).Select(x => new
+        {
+            x.Id,
+            x.State,
+            x.Revision,
+            x.RetryAt,
+            x.RecoveryCommandId,
+            x.RecoveryOwnershipUnknown,
+            x.AdmissionState,
+            failure = x.LastFailure is null ? null : new { x.LastFailure.ReceiptId, x.LastFailure.Category, x.LastFailure.Status }
+        }),
+        readiness = evidence.Readiness.OrderBy(x => x.RuntimeId).ThenBy(x => x.ProviderId),
+        catalogs = evidence.Catalogs.OrderBy(x => x.WorkerId),
+        evidence.PoolsTruncated
+    }))));
 
     public static string GitHubKey(IEnumerable<CoordinatorGitHubAccess> github) => Json.Write(github.OrderBy(x => x.RuntimeId)
         .Select(x => new { x.RuntimeId, x.CiInspectionState, x.ChecksPermission, x.CommitStatusesPermission, x.ActionsPermission }));

@@ -70,7 +70,10 @@ public sealed record ProviderFailure(string Category, int? Status, long? RetryAt
                 using var document = JsonDocument.Parse(body);
                 var root = document.RootElement;
                 if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var nested) && nested.ValueKind == JsonValueKind.Object)
+                {
                     providerCode = Text(nested, "code");
+                    if (providerCode.Length == 0) providerCode = Text(nested, "type");
+                }
             }
             catch (JsonException) { }
         }
@@ -209,6 +212,12 @@ public sealed partial class ControlStore
         return "provider:" + (prompt.ProviderId ?? worker.ProviderId);
     }
 
+    internal static async Task<bool> ProviderRecoveryEligible(ControlDb db, ProviderPool pool, string? commandId = null) =>
+        pool.State is "Throttled" or "Unavailable" && pool.RetryAt <= Now && pool.ConsecutiveFailures < 3 &&
+        !pool.RecoveryOwnershipUnknown && (pool.RecoveryCommandId.Length == 0 || pool.RecoveryCommandId == commandId) &&
+        (pool.RecoveryCommandId.Length > 0 || !await db.Commands.AnyAsync(x => x.Id == pool.LastCommandId &&
+            (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)));
+
     internal static async Task<bool> ProviderDispatchAllowed(ControlDb db, WorkerRecord worker, CommandRecord command)
     {
         var providerId = PoolId(worker, command)["provider:".Length..];
@@ -245,11 +254,8 @@ public sealed partial class ControlStore
         }
         if (pool.State == "Available") return true;
         if (pool.State == "Recovering" && pool.RecoveryCommandId == command.Id) return true;
-        if (pool.State is "Throttled" or "Unavailable" && pool.RetryAt <= Now && pool.ConsecutiveFailures < 3)
+        if (await ProviderRecoveryEligible(db, pool, command.Id))
         {
-            if (pool.RecoveryCommandId.Length == 0 && await db.Commands.AnyAsync(x => x.Id == pool.LastCommandId &&
-                (x.State == Delivery.Dispatching || x.State == Delivery.Accepted || x.State == Delivery.Running || x.State == Delivery.Unknown)))
-                return false;
             // Admit one managed attempt after cooldown. Other runtimes wait until its
             // terminal evidence arrives; a restart never releases this lease silently.
             pool.State = "Recovering"; pool.RecoveryCommandId = command.Id; pool.Revision++;
