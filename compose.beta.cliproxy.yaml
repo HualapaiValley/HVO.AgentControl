@@ -1,0 +1,26 @@
+# Opt-in CLIProxy overlay for development workers.
+# Apply only after active native turns are settled; changing OPENCODE_CONFIG
+# requires a worker process restart for the provider catalog to load.
+services:
+  dev1:
+    environment:
+      OPENCODE_CONFIG: /etc/opencode/cliproxy.json
+    volumes:
+      - ./docker/development/opencode-cliproxy.json:/etc/opencode/cliproxy.json:ro
+    secrets: [cliproxy-api-key]
+  dev2:
+    environment:
+      OPENCODE_CONFIG: /etc/opencode/cliproxy.json
+    volumes:
+      - ./docker/development/opencode-cliproxy.json:/etc/opencode/cliproxy.json:ro
+    secrets: [cliproxy-api-key]
+  dev3:
+    environment:
+      OPENCODE_CONFIG: /etc/opencode/cliproxy.json
+    volumes:
+      - ./docker/development/opencode-cliproxy.json:/etc/opencode/cliproxy.json:ro
+    secrets: [cliproxy-api-key]
+
+secrets:
+  cliproxy-api-key:
+    file: ${CONTROL_CLIPROXY_API_KEY_FILE:?Set CONTROL_CLIPROXY_API_KEY_FILE to a protected CLIProxy API-key file}
