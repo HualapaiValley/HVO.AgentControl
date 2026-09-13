@@ -38,10 +38,12 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
-- Resolve exact tmux session names to session IDs for option commands, which do
-  not support the same exact-name syntax as `has-session`. Add real private-
+- Resolve exact tmux session names to session IDs only for `set-option` and
+  `show-options`, which reject the same exact-name syntax as `has-session`; all
+  other commands keep the `=name` target so a restarted server that reuses a
+  numeric id cannot redirect a write to an unrelated session. Add real private-
   socket tmux coverage for ownership, marker persistence and prefix isolation
-  after deployment exposed the mocked-test gap (#238).
+  after deployment exposed the mocked-test gap (#238, #239).
 - Stop writing executable ACP fixture files while tests run. Per-test symlinks
   and scenario sidecars use one build-copied script, avoiding Linux `ETXTBSY`
   from writable descriptors inherited by concurrent process starts (#232).

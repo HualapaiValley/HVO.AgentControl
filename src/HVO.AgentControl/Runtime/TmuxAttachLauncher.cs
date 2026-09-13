@@ -35,9 +35,11 @@ public sealed class TmuxAttachLauncher
     private TmuxAttachResult _lastResult = new(false, false, null);
     private TmuxAttachRequest? _lastRequest;
     private string? _paneId;
-    // The immutable tmux session id ("$N") resolved for the current attempt.
-    // It is never persisted across attempts: ids restart at $0 when a tmux
-    // server restarts, so a cached id could alias a different session.
+    // The immutable tmux session id ("$N") resolved for the option commands
+    // (set-option/show-options), which reject the '=' exact-name target. It is
+    // never persisted across attempts: ids restart at $0 when a tmux server
+    // restarts, so a cached id could alias a different session. Every command
+    // that supports '=' addresses the exact name instead of this id.
     private string? _sessionTarget;
     private (string PaneId, TmuxAttachRequest Request)? _pendingPane;
 
@@ -104,8 +106,10 @@ public sealed class TmuxAttachLauncher
             // Real tmux accepts '=' only for commands that parse a session target
             // through the fuzzy matcher. set-option/show-options treat it as part
             // of the literal name ("no such session: =agentcontrol") or silently
-            // return nothing, so every later command addresses the immutable
-            // session id resolved by an exact name lookup instead.
+            // return nothing, so only those option commands address the immutable
+            // session id resolved by an exact name lookup. Every other command
+            // keeps the exact-name target, so a restart that reuses a numeric id
+            // can never redirect a write to an unrelated session.
             _sessionTarget = (await ResolveSessionAsync(cancellationToken).ConfigureAwait(false)).Target;
             if (_sessionTarget is null)
             {
@@ -173,7 +177,7 @@ public sealed class TmuxAttachLauncher
         // An existing tmux server has its own (possibly credential-bearing) global
         // environment. Clear it again inside the pane, not just in the tmux client.
         var arguments = exists.ExitCode == 0
-            ? new List<string> { "new-window", "-d", "-t", _sessionTarget + ":" }
+            ? new List<string> { "new-window", "-d", "-t", "=" + _sessionName + ":" }
             : new List<string> { "new-session", "-d", "-s", _sessionName, "-e", $"{OwnerEnvironmentVariable}={request.OwnerToken}" };
         // Report the owning session id with the pane id so creation never has to
         // re-resolve the name, and a new session's id is known before any
@@ -239,7 +243,7 @@ public sealed class TmuxAttachLauncher
 
     private async Task<bool?> ProbePaneAsync(CancellationToken cancellationToken)
     {
-        var panes = await RunAsync(["list-panes", "-s", "-t", _sessionTarget!, "-F", "#{pane_id} #{pane_dead}"], cancellationToken).ConfigureAwait(false);
+        var panes = await RunAsync(["list-panes", "-s", "-t", "=" + _sessionName, "-F", "#{pane_id} #{pane_dead}"], cancellationToken).ConfigureAwait(false);
         if (panes.ExitCode != 0)
         {
             return null;
@@ -308,12 +312,10 @@ public sealed class TmuxAttachLauncher
 
     private async Task<bool> MatchesOwnerAsync(string ownerToken, CancellationToken cancellationToken)
     {
-        if (_sessionTarget is null)
-        {
-            return false;
-        }
+        // show-environment parses its target through tmux's fuzzy matcher, so
+        // '=name' selects only the exact session and never a prefix overlap.
         var environment = await RunAsync(
-            ["show-environment", "-t", _sessionTarget, OwnerEnvironmentVariable], cancellationToken).ConfigureAwait(false);
+            ["show-environment", "-t", "=" + _sessionName, OwnerEnvironmentVariable], cancellationToken).ConfigureAwait(false);
         return environment.ExitCode == 0
             && string.Equals(environment.StandardOutput.Trim(), $"{OwnerEnvironmentVariable}={ownerToken}", StringComparison.Ordinal);
     }
@@ -349,13 +351,14 @@ public sealed class TmuxAttachLauncher
             return false;
         }
         // Explicit shutdown retains the owner-matched whole-session policy;
-        // recovery deliberately never invokes this operation.
+        // recovery deliberately never invokes this operation. Kill by exact name
+        // so a server restart cannot redirect the kill to a reused numeric id.
         if (!await MatchesOwnerAsync(ownerToken, cancellationToken).ConfigureAwait(false))
         {
             _owned = false;
             return false;
         }
-        var kill = await RunAsync(["kill-session", "-t", target], cancellationToken).ConfigureAwait(false);
+        var kill = await RunAsync(["kill-session", "-t", "=" + _sessionName], cancellationToken).ConfigureAwait(false);
         _owned = false;
         return kill.ExitCode == 0;
     }

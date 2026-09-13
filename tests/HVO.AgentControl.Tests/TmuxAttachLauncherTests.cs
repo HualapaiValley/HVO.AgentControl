@@ -32,13 +32,17 @@ public sealed class TmuxAttachLauncherTests
             Assert.DoesNotContain(call.Env.Keys, key => key.StartsWith("GH_", StringComparison.OrdinalIgnoreCase) || key.StartsWith("Control__", StringComparison.OrdinalIgnoreCase));
             if (call.Args.Contains("-t"))
             {
-                // Only has-session/show-environment/list-panes/kill-session may use
-                // '='; option and window commands must use the immutable session id.
+                // Only set-option/show-options need the immutable session id; every
+                // command that parses a session target keeps the exact-name '=' syntax.
                 var value = call.Args[Array.IndexOf(call.Args, "-t") + 1];
-                Assert.Contains(value, new[] { "=test", "$0", "$0:", "%1" });
-                if (call.Args[0] is "set-option" or "show-options" or "new-window")
+                Assert.Contains(value, new[] { "=test", "=test:", "$0", "%1" });
+                if (call.Args[0] is "set-option" or "show-options")
                 {
                     Assert.StartsWith("$", value, StringComparison.Ordinal);
+                }
+                if (call.Args[0] == "new-window")
+                {
+                    Assert.Equal("=test:", value);
                 }
             }
         }
@@ -306,20 +310,28 @@ public sealed class TmuxAttachLauncherTests
         if (foreignAtShutdown) fake.State("foreign", false);
         var before = fake.Calls().Length;
         Assert.Equal(!foreignAtShutdown, await launcher.KillOwnedAsync("owner", CancellationToken.None));
-        // Shutdown re-resolves the exact name to an id before rechecking the owner.
+        // Shutdown re-resolves the exact name only to decide whether it still
+        // exists, then rechecks the owner before killing by exact name.
         Assert.Equal("list-sessions", fake.Calls()[before].Args[0]);
         Assert.Equal("show-environment", fake.Calls()[before + 1].Args[0]);
         Assert.Equal(foreignAtShutdown ? 0 : 1, fake.Calls().Count(call => call.Args[0] == "kill-session"));
+        if (!foreignAtShutdown)
+        {
+            var kill = Assert.Single(fake.Calls(), call => call.Args[0] == "kill-session");
+            Assert.Equal("=test", kill.Args[Array.IndexOf(kill.Args, "-t") + 1]);
+        }
     }
 
     /// <summary>
-    /// Regression for #238: real tmux 3.4 rejects '=name' for set-option
-    /// ("no such session: =agentcontrol") and returns silent success for
-    /// show-options -qv, which left terminalReady=false in the deployed image.
-    /// Option and window commands must address the immutable session id.
+    /// Regression for #238 and the #239 follow-up: real tmux 3.4 rejects '=name'
+    /// for set-option ("no such session: =agentcontrol") and returns silent
+    /// success for show-options -qv, so those two option commands must address
+    /// the immutable session id. Commands that do route their target through the
+    /// fuzzy matcher keep '=name', so a restarted server reusing the old numeric
+    /// id can never redirect a write to an unrelated session.
     /// </summary>
     [Fact]
-    public async Task OptionAndWindowCommandsUseTheResolvedSessionIdNotExactNameSyntax()
+    public async Task OptionCommandsUseResolvedSessionIdWhileTargetCommandsKeepExactName()
     {
         using var fake = new FakeTmux();
         var clock = new Clock();
@@ -333,14 +345,61 @@ public sealed class TmuxAttachLauncherTests
         foreach (var call in fake.Calls().Where(call => call.Args.Contains("-t")))
         {
             var value = call.Args[Array.IndexOf(call.Args, "-t") + 1];
-            if (call.Args[0] is "set-option" or "show-options" or "new-window")
+            if (call.Args[0] is "set-option" or "show-options")
             {
                 Assert.StartsWith("$0", value, StringComparison.Ordinal);
             }
+            if (call.Args[0] is "new-window" or "show-environment" or "list-panes" or "kill-session")
+            {
+                Assert.Equal("=test", value.TrimEnd(':'));
+            }
         }
         Assert.Contains(fake.Calls(), call => call.Args.SequenceEqual(new[] { "list-sessions", "-F", "#{session_id} #{session_name}" }));
-        Assert.Contains(fake.Calls(), call => call.Args[0] == "new-window" && call.Args[Array.IndexOf(call.Args, "-t") + 1] == "$0:");
+        Assert.Contains(fake.Calls(), call => call.Args[0] == "new-window" && call.Args[Array.IndexOf(call.Args, "-t") + 1] == "=test:");
         Assert.Contains(fake.Calls(), call => call.Args[0] == "set-option" && call.Args[2] == "$0");
+    }
+
+    /// <summary>
+    /// #239 cycle-2 regression: a tmux server restart between the recovery owner
+    /// recheck and <c>new-window</c> can make the previously resolved numeric id
+    /// (<c>$0</c>) name a different, unrelated session. Addressing the exact name
+    /// means the creation fails instead of modifying that foreign session. This
+    /// does not claim to remove every check-to-use race: it only ensures the
+    /// launcher never writes through a stale numeric alias.
+    /// </summary>
+    [Fact]
+    public async Task ServerRestartBetweenOwnerRecheckAndCreationNeverWritesToAForeignNumericAlias()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        // Owned session with a dead attach pane forces the recovery creation path.
+        fake.State("owner", true);
+        fake.ArmServerRestartAfterOwnerRecheck("foreign");
+        clock.Advance(5);
+        var before = fake.Calls().Length;
+
+        var result = await launcher.EnsureAsync(fake.Request, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Contains("creation failed", result.Error);
+        // Creation addressed the exact name, never the stale numeric alias.
+        var created = Assert.Single(fake.Calls().Skip(before), call => call.Args[0] == "new-window");
+        Assert.Equal("=test:", created.Args[Array.IndexOf(created.Args, "-t") + 1]);
+        // The replacement server's unrelated $0 session was never touched: no
+        // window or pane was added, selected, renamed or marked.
+        using var state = JsonDocument.Parse(File.ReadAllText(fake.StatePath));
+        Assert.Equal("foreign", state.RootElement.GetProperty("name").GetString());
+        var panes = state.RootElement.GetProperty("panes");
+        var pane = Assert.Single(panes.EnumerateObject());
+        Assert.Equal("%50", pane.Name);
+        Assert.Equal(0, pane.Value.GetInt32());
+        Assert.False(state.RootElement.TryGetProperty("selectedWindow", out _));
+        Assert.False(state.RootElement.TryGetProperty("selectedPane", out _));
+        Assert.Equal("foreign:%50", state.RootElement.GetProperty("identity").GetString());
+        Assert.DoesNotContain(fake.Calls().Skip(before), call =>
+            call.Args[0] is "set-option" or "select-window" or "select-pane" or "kill-session");
     }
 
     /// <summary>
@@ -398,9 +457,12 @@ public sealed class TmuxAttachLauncherTests
             call.Args[0] is "new-window" or "new-session" or "set-option" or "select-window" or "select-pane" or "kill-session");
     }
 
-    /// <summary>A kill after a tmux server restart must not reuse a stale id.</summary>
+    /// <summary>
+    /// A kill after a tmux server restart must never reuse a stale numeric id:
+    /// when the exact name can no longer be resolved, the launcher refuses.
+    /// </summary>
     [Fact]
-    public async Task KillReResolvesSessionIdAndRefusesWhenTheNameIsGone()
+    public async Task KillNeverReusesAStaleIdWhenTheExactNameIsGone()
     {
         using var fake = new FakeTmux();
         var launcher = fake.Launcher();
@@ -630,6 +692,8 @@ public sealed class TmuxAttachLauncherTests
                     log.write(json.dumps({'Args': args, 'Env': dict(os.environ)}) + '\n')
                 path = os.path.join(ROOT, 'state.json')
                 others_path = os.path.join(ROOT, 'others.json')
+                arm_path = os.path.join(ROOT, 'arm')
+                arm_seen_path = os.path.join(ROOT, 'arm-seen')
                 state = json.load(open(path)) if os.path.exists(path) else None
                 others = json.load(open(others_path)) if os.path.exists(others_path) else []
                 command = args[0]
@@ -671,6 +735,14 @@ public sealed class TmuxAttachLauncherTests
                     s = resolve(target(), True)
                     if not s: sys.exit(1)
                     print('AGENTCONTROL_OWNER=' + s['owner'])
+                    # Deterministic server restart: once list-panes has passed
+                    # (the last probe before the recovery owner recheck), replace
+                    # this server after the recheck succeeds with an unrelated
+                    # session that reuses id $0 under a different name.
+                    if os.path.exists(arm_seen_path):
+                        os.remove(arm_seen_path)
+                        state = {'id': '$0', 'name': open(arm_path).read().strip(), 'owner': 'foreign', 'panes': {'%50': 0}, 'identity': 'foreign:%50'}
+                        save()
                 elif command == 'show-options':
                     s = resolve(target(), False)
                     if s is None: sys.exit(0)  # -qv: silent and successful.
@@ -691,6 +763,8 @@ public sealed class TmuxAttachLauncherTests
                     s = resolve(target(), True)
                     if not s: sys.exit(1)
                     for pane, dead in s['panes'].items(): print(pane + ' ' + str(dead))
+                    if os.path.exists(arm_path):
+                        open(arm_seen_path, 'w').write('1')
                 elif command in ('new-session', 'new-window'):
                     assert args[args.index('-F') + 1] == '#{session_id} #{pane_id}' and '-P' in args
                     if command == 'new-session':
@@ -743,6 +817,16 @@ public sealed class TmuxAttachLauncherTests
                 identity = target == "unknown" ? "" : owner + ":%1",
             }));
         }
+
+        /// <summary>
+        /// Arms a deterministic server restart for
+        /// <see cref="ServerRestartBetweenOwnerRecheckAndCreationNeverWritesToAForeignNumericAlias"/>:
+        /// after the next <c>list-panes</c> and the owner recheck that follows it,
+        /// the current server is replaced by an unrelated session reusing id
+        /// <c>$0</c> under <paramref name="name"/>.
+        /// </summary>
+        public void ArmServerRestartAfterOwnerRecheck(string name) =>
+            File.WriteAllText(Path.Combine(_directory, "arm"), name);
 
         /// <summary>Adds an unowned session whose name merely shares our prefix.</summary>
         public void AddOverlappingSession(string name) => File.WriteAllText(
