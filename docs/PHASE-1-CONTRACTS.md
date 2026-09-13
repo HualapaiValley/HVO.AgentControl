@@ -168,7 +168,10 @@ not OS isolation, and another executable can read the secret.
 Concrete separation inside the same container:
 
 - Distinct OS identities: a controller UID owning the database and owner secret,
-  and a separate agent/OpenCode UID with its own private store.
+  and one separate unprivileged agent/OpenCode UID for the initial combined
+  Operations/IT role. Future process-per-role placement allocates a distinct UID
+  and private `0700` store per internal role in the same container. Shared-process
+  placement is allowed only after all Section 5 isolation gates pass.
 - The agent private store is owned by the agent UID, mode `0700`. A narrow
   runtime supervisor provides launch, orientation installation, inspection and
   termination for registered bindings; it does not expose arbitrary commands or
@@ -197,12 +200,22 @@ Concrete separation inside the same container:
   supervisor. The supervisor retains only lifecycle privileges it needs; the
   bridge has no root/setuid capability. ACP stdio descriptors are handed to the
   bridge, not to the connector. The bridge persists a new process generation
-  before requesting a child start; the supervisor binds that generation to the
-  child and reports its PID/exit. Uncertain start acknowledgment is reconciled
-  against the supervisor's owned child, never blindly relaunched. Supervisor
-  failure holds lifecycle operations; recover/reap existing children before a
-  replacement supervisor may start another one. This is deterministic worker
-  infrastructure, not another full controller or model agent.
+  before requesting an ACP process-slot start; the supervisor binds that
+  generation to the owned child and reports its PID/exit as observations only.
+  TUI/viewer starts receive separate opaque supervisor lifecycle handles and do
+  not advance ACP generation or invalidate pending permissions. Uncertain start
+  acknowledgment is reconciled against the still-live supervisor's owned child
+  handle, never a bare reusable PID and never blindly relaunched.
+  The persistent supervisor is the worker container's PID 1, responsible for
+  reaping children. Its failure terminates the container and remaining processes
+  in that private PID namespace; no replacement supervisor adopts old PIDs.
+  Disable automatic container restart for Phase 1. The host marks work interrupted
+  or uncertain, holds dispatch, observes container termination and reconciles
+  effects before an explicit restart. A new container process lifetime starts
+  with no surviving children; durable bridge state advances generations and
+  invalidates old permissions/leases. Worker restart does not resume tool stacks.
+  This is deterministic worker infrastructure, not another full controller or
+  model agent.
   The connector runs as the bridge UID and connects to the bridge socket, but
   does not own or launch ACP. Validate real UID, descriptor, `/proc` and private
   path access from alternate employee executables before enrollment.
@@ -256,7 +269,9 @@ Design constraints:
   fails closed for owner reconciliation/re-enrollment. Resume the recorded
   operation to finish an interrupted two-copy replacement, then verify both sides
   and obtain the new lease before clearing the maintenance hold. An interrupted rotation
-  stays held; reject old keys, no automatic dual-key fallback. Compromise requires
+  stays held; reject old keys for bridge authentication, with no automatic
+  dual-key fallback. Expected-old-ID replacement is allowed only through the
+  separately authenticated maintenance channel. Compromise requires
   revoking access and explicit re-enrollment, not trusting a request signed only
   with the compromised key. Validate key delivery/rotation before claiming them
   implemented; loss of the key cannot be repaired by reading worker model data.
@@ -273,8 +288,9 @@ Design constraints:
   increments a durable worker generation at every bridge start; events use
   `(workerGeneration, sequence)` with sequence increasing within that generation.
   The OpenCode process slot has a separate durable process generation, advanced
-  at each child start even if the bridge did not restart. A bridge restart may
-  therefore advance both generations. Controller restart itself changes no
+  at each ACP process-slot start even if the bridge did not restart, never for
+  a TUI/viewer client. A bridge restart may therefore advance both generations.
+  Controller restart itself changes no
   worker counter. Its subsequent successful lease acquisition advances the
   bridge-owned ownership epoch, but not worker/process generations; it records
   the returned epoch during reconciliation. New terminal viewers reuse the
@@ -313,12 +329,21 @@ Design constraints:
   insufficient, stop for a new grant; a daemon-side rootless/restricted service is
   a separately approved hardening option, not an assumed existing service.
 - Terminal traffic uses a separate SSH/Docker connector to the exact registered
-  worker's private bridge socket. After authentication the bridge asks its
-  supervisor to launch only an employee-UID attach client for the bound
-  TUI/session; it accepts bounded input/resize
-  frames, streams terminal bytes to the authenticated same-origin portal WebSocket,
-  and enforces one viewer per session. Detach reaps the viewer only. The connector
-  never launches an arbitrary command, alternate session or fallback shell; this
+  worker's private bridge socket. Authenticate it as a `viewer` channel, not
+  a controller lease-acquisition/reconnect operation. C# supplies the active
+  controller/worker IDs, epoch and connection nonce through protected connector
+  stdin; bind these fields and the viewer channel role into the existing mutual
+  challenge. The bridge requires an exact match to its live lease, never issues a
+  new lease for this channel, and closes viewer channels when that lease expires
+  or is replaced. A viewer cannot dispatch ACP prompts or mutate ownership via
+  the bridge protocol. Authorized owner keystrokes retain the TUI behavior below.
+  After authentication the bridge asks its supervisor to launch only an
+  employee-UID attach client for the bound TUI/session. It accepts bounded
+  input/resize frames, streams bytes to the authenticated same-origin WebSocket,
+  and enforces one viewer per session. Detach asks the supervisor to stop/reap
+  only that viewer's lifecycle handle; the bound TUI and ACP remain unaffected.
+  The connector never launches an arbitrary command, alternate session or
+  fallback shell; this
   is a launch-routing guarantee, not a claim that keystrokes cannot execute code.
   An authenticated owner using an interactive tmux/TUI may execute employee tools
   and tmux commands under the unprivileged employee UID. Do not market frame
@@ -355,14 +380,18 @@ Design constraints:
 
 ## 9. Readiness versus availability
 
-- **Availability** is a control-plane claim: the host process is alive and owns a
-  live ACP child and established session. The existing `canControl` semantics
+- **Control-host availability** is a control-plane claim: the host process owns
+  a live ACP child and established session. The existing `canControl` semantics
   apply — `degraded` is still controllable for inspection/recovery.
-- **Readiness** requires the exact owned session **and** the attached TUI, with
-  unknown native state failing closed to 503. It is not a database, worker or
+- **Control-host `/health/ready`** requires the exact owned control session
+  **and** the attached TUI, with unknown native state failing closed to 503.
+  It is not a database, worker or
   provider probe, and must never trigger a destructive restart.
-- Per employee: an employee is `Ready` only when its binding is ready, its current
-  orientation is acknowledged and comprehended, and dispatch is not held. The
+- **Employee readiness** is a separate host-computed state based on observed
+  binding/lease status and persisted orientation/hold records, not a worker probe
+  added to the control-host endpoint. An employee is `Ready` only when its binding
+  is ready, its current orientation is acknowledged and comprehended, and dispatch
+  is not held. The
   organization can be available while an employee is provisioning/orienting and
   therefore not ready for task dispatch.
 
@@ -478,6 +507,10 @@ These are open and must not be presented as decided or owner-accepted:
   container.
 - Worker-image UID separation and bridge-key bootstrap/rotation interruption,
   private-file/descriptor isolation, and compromise re-enrollment tests.
+- Supervisor PID1 termination/reaping, channel authentication, child capability
+  and descriptor stripping, generation-bound start reconciliation and explicit
+  container-restart recovery. Test viewer attach/detach with a pending permission
+  to prove no ACP generation/lease mutation, and reject stale viewer challenges.
 - Whether the existing authorized SSH/Docker credential can be used without new
   grants; secure key custody/rotation and measured host-adapter restrictions.
 - Implementation and adversarial validation of the specified bridge challenge,
