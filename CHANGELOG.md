@@ -24,6 +24,9 @@ Changes after the first portal release are collected here.
 
 ### Changed
 
+- Update the active SDK and Docker build image together to .NET `10.0.401`
+  (#221, superseding Dependabot #209). Retain supported Node 22 across Docker
+  and CI; assess Node major upgrades separately.
 - API errors now use RFC 9457 ProblemDetails; added protected OpenAPI JSON
   at `/openapi/v1.json` and runtime/TUI readiness at `/health/ready`.
 - Every terminal subprocess now uses the shared credential environment filter;

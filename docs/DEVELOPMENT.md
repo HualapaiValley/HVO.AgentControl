@@ -18,25 +18,36 @@ than a machine-wide latest.
 
 | Tool | Pin | Source of truth |
 | --- | --- | --- |
-| .NET SDK | `10.0.400` (stable only, `rollForward: disable`) | [`global.json`](../global.json) |
+| .NET SDK | `10.0.401` (stable only, `rollForward: disable`) | [`global.json`](../global.json) |
 | Target framework | `net10.0` | [`Directory.Build.props`](../Directory.Build.props) |
 | NuGet package versions | centralized, no per-project `Version` | [`Directory.Packages.props`](../Directory.Packages.props) |
 | Node.js | `22` in CI/browser jobs; `engines.node >= 20` | [`.github/workflows/build.yml`](../.github/workflows/build.yml), [`tests/Browser/package.json`](../tests/Browser/package.json) |
 | Playwright | `1.63.0` | [`tests/Browser/package.json`](../tests/Browser/package.json) |
 | Python | `3.12` for CI/release validation | [`.github/workflows/build.yml`](../.github/workflows/build.yml), [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
 | Docker / Compose | Compose v2 (`docker compose`); buildx for release | [`compose.yaml`](../compose.yaml), [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
-| Runtime base images | `mcr.microsoft.com/dotnet/sdk:10.0.400`, `mcr.microsoft.com/dotnet/aspnet:10.0`, `node:22-bookworm-slim` | [`Dockerfile`](../Dockerfile) |
+| Runtime base images | `mcr.microsoft.com/dotnet/sdk:10.0.401`, `mcr.microsoft.com/dotnet/aspnet:10.0`, `node:22-bookworm-slim` | [`Dockerfile`](../Dockerfile) |
 | OpenCode | `1.18.30` | [`Dockerfile`](../Dockerfile) (`OPENCODE_VERSION`) |
 | Runtime `python3` / `tmux` | provided by the runtime base image (no separate pin); verified `Python 3.12.3` and `tmux 3.4` in the local CI image | [`Dockerfile`](../Dockerfile) |
 
 `tmux` and OpenCode are runtime/container dependencies. They are not required
 on the host for the standard .NET and browser workflow.
 
+Phase 1 retains Node 22 across Docker and CI: it is Maintenance LTS through
+2027-04-30. The Node 26 major update proposed in Dependabot #209 is not part
+of the SDK patch update; Node 26 reaches its scheduled LTS start on 2026-10-28.
+A major upgrade needs a coordinated compatibility assessment, not just an
+OpenCode install-stage change. Docker Node major proposals are held by a scoped
+Dependabot ignore. The floating `22-bookworm-slim` tag receives Node patches
+through refreshed image pulls/rebuilds, not patch-version PRs. The ignore also
+suppresses proposals requiring a newer Node major, so reassess it before Node 22
+support ends or an advisory requires migration. Other dependencies and update
+ecosystems remain enabled.
+
 ## Clean machine setup
 
 Prerequisites for host-side development:
 
-- .NET SDK `10.0.400` (the `global.json` pin refuses other SDKs)
+- .NET SDK `10.0.401` (the `global.json` pin refuses other SDKs)
 - Node.js 22 for the browser checks
 - Python 3.12 for the PTY-bridge contract test
 - Docker Engine with Compose v2 for container work
@@ -45,7 +56,7 @@ Prerequisites for host-side development:
 Verify the SDK before doing anything else:
 
 ```bash
-dotnet --version   # must print 10.0.400
+dotnet --version   # must print 10.0.401
 ```
 
 ### Build, test, format

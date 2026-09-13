@@ -20,6 +20,9 @@ updates:
         patterns: ["*"]
   - package-ecosystem: docker
     directory: /
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
     exclude-paths:
       - archive/**
     schedule:
