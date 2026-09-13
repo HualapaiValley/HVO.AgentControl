@@ -560,27 +560,52 @@ public sealed class AcpControlHostTests
                 path = os.path.join(ROOT, 'state.json')
                 state = json.load(open(path)) if os.path.exists(path) else None
                 command = args[0]
+                target = args[args.index('-t') + 1] if '-t' in args else None
+
+                # Mirrors real tmux 3.4 (see issue #238): session ids resolve for
+                # every command, while '=name' is only understood by commands that
+                # parse a session target through the fuzzy matcher. set-option and
+                # show-options treat it as a literal name.
+                def resolve(value, exact_ok):
+                    if state is None or value is None: return None
+                    value = value[:-1] if value.endswith(':') else value
+                    if value == state['id']: return state
+                    if value.startswith('='):
+                        return state if exact_ok and value[1:] == state['name'] else None
+                    return state if value == state['name'] else None
+
                 if command == 'has-session':
-                    sys.exit(0 if state else 1)
+                    sys.exit(0 if resolve(target, True) else 1)
+                elif command == 'list-sessions':
+                    if state is None: sys.exit(1)
+                    assert args[args.index('-F') + 1] == '#{session_id} #{session_name}'
+                    print(state['id'] + ' ' + state['name'])
                 elif command == 'show-environment':
-                    if not state: sys.exit(1)
+                    if not resolve(target, True): sys.exit(1)
                     print('AGENTCONTROL_OWNER=' + state['owner'])
                 elif command == 'show-options':
-                    print(state.get('identity', ''))
+                    s = resolve(target, False)
+                    if s is None: sys.exit(0)
+                    print(s.get('identity', ''))
                 elif command == 'set-option':
-                    state['identity'] = args[-1]
+                    s = resolve(target, False)
+                    if s is None: sys.exit(1)
+                    s['identity'] = args[-1]
                     json.dump(state, open(path, 'w'))
                 elif command in ('select-window', 'select-pane'):
-                    if args[-1] not in state['panes']: sys.exit(1)
+                    if state is None or args[-1] not in state['panes']: sys.exit(1)
                 elif command == 'list-panes':
-                    if not state: sys.exit(1)
+                    if not resolve(target, True): sys.exit(1)
                     for pane, dead in state['panes'].items(): print(pane + ' ' + str(dead))
                 elif command == 'new-session':
                     if state: sys.exit(1)
+                    assert args[args.index('-F') + 1] == '#{session_id} #{pane_id}'
                     owner = args[args.index('-e') + 1].split('=', 1)[1]
-                    json.dump({'owner': owner, 'panes': {'%1': 0}, 'identity': ''}, open(path, 'w'))
-                    print('%1')
+                    name = args[args.index('-s') + 1]
+                    json.dump({'id': '$0', 'name': name, 'owner': owner, 'panes': {'%1': 0}, 'identity': ''}, open(path, 'w'))
+                    print('$0 %1')
                 elif command == 'kill-session':
+                    if not resolve(target, True): sys.exit(1)
                     os.remove(path)
                 else:
                     sys.exit(2)

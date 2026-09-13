@@ -32,6 +32,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # TmuxRealIntegrationTests drives a real tmux on a private socket, which is
+      # what caught the '=name' target defect in #238 that the fake accepted.
+      # Missing tmux fails the tests; real command coverage is required.
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+          tmux -V
       - name: Restore
         run: dotnet restore HVO.AgentControl.slnx
       - name: Build
