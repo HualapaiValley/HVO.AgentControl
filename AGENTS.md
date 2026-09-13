@@ -24,7 +24,7 @@ tested behavior in code, tests and docs.
 
 Pinned versions and clean-machine commands are in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Do not substitute a machine-wide
-latest for a pin: .NET SDK `10.0.400` (`global.json`), target `net10.0`,
+latest for a pin: .NET SDK `10.0.401` (`global.json`), target `net10.0`,
 central package versions (`Directory.Packages.props`), Node 22 and Playwright
 `1.63.0` (`tests/Browser`), Python 3.12 for CI validation, and OpenCode
 `1.18.30` with the container's `python3`/`tmux` (`Dockerfile`).

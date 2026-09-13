@@ -7,7 +7,7 @@ using the PR template; attach redacted screenshots for visible UI changes.
 ## Toolchain and setup
 
 Pinned versions and clean-machine commands live in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). In short: .NET SDK `10.0.400`
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). In short: .NET SDK `10.0.401`
 (`global.json`), Node 22 with Playwright `1.63.0` for browser checks, Python
 3.12 for CI validation, and Docker Compose v2 for containers. Package versions
 are centralized in `Directory.Packages.props`.
