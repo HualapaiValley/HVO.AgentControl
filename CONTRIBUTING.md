@@ -39,6 +39,11 @@ Keep one issue per branch/PR and prefer [Conventional Commits](https://www.conve
 
 ## Pull request process
 
+Phase 1 requires the [two-model review protocol](docs/REVIEW-PROTOCOL.md): two
+independent reviewers, randomly selected distinct approved models excluding the
+coordinator, with recorded model provenance and no silent fallback. Both reviews
+together count as one cycle. Generic agent names do not establish model identity.
+
 Review is independent of the implementing agent and bound to an exact head SHA.
 PR #208 Round 1 baseline is `002e826`. The process is intentionally bounded:
 

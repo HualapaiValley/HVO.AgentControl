@@ -32,4 +32,7 @@ Status reflects the active code, not the standalone POC.
    babysitting.
 
 None of the not-implemented milestones may be claimed complete merely because
-the standalone connectivity POC passed.
+the standalone connectivity POC passed. The concrete Phase 1 contracts for
+organization identity, internal-role placement, storage, orientation, authority,
+transport and the disposable two-host test are proposed (not implemented) in
+[Phase 1 contracts](PHASE-1-CONTRACTS.md).

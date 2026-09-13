@@ -47,7 +47,9 @@ leaves the container. The browser talks only to the portal.
 
 There is **no worker bridge or reconnection implementation in the active code**.
 The standalone POC demonstrated the transport idea only; see
-[POC findings](POC-FINDINGS.md).
+[POC findings](POC-FINDINGS.md). The concrete Phase 1 organization, placement,
+storage, orientation and transport contracts are proposed (not implemented) in
+[Phase 1 contracts](PHASE-1-CONTRACTS.md).
 
 ## Control contract (design)
 
