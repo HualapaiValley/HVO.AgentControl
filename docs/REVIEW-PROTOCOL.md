@@ -7,7 +7,7 @@ Exclude the coordinator's model, including aliases of that same model. Both
 review tasks together count as one cycle. Record the pool, draw, exact provider
 and model IDs, coordinator identity, head SHA, session IDs and result references.
 Do not silently redraw when a selected model is unavailable; report the failure
-and obtain operator direction. Do not substitute generic Task agent types as
+and obtain repository-owner direction. Do not substitute generic Task agent types as
 proof that different models ran.
 
 The approved names currently map to these local catalog entries:
@@ -51,7 +51,9 @@ IDs as sufficient evidence, with upstream proxy routing uncertainty disclosed.
 This does not permit a known fallback or substitution. Sol and Deepseek passed
 selection smoke calls on 2026-09-13; their assistant-message metadata recorded
 `cliproxy/gpt-5.6-sol` and `cliproxy/deepseek-v4.1-flash`, respectively. Other
-catalog entries still require successful explicit selection when drawn.
+catalog entries still require successful explicit selection when drawn. For
+alias exclusion, Big Pickle also appears as `cliproxy/big-pickle`; these are not
+two independent review models.
 
 The development CLIProxy catalog relies on a provider plugin for connection
 configuration. A plugin-free reviewer needs an explicit process-local provider

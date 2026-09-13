@@ -24,6 +24,8 @@ labels and are never used as identity.
 | Role | `role-<hex>` | `slug`, `displayName`, profile refs | Belongs to one department; holds instruction + permission profile refs. |
 | Employee | `emp-<hex>` | `slug`, `displayName` | Binds org + department + role + one runtime binding. |
 | Runtime binding | `rtb-<hex>` | placement, refs, epoch | Separates durable identity from where it runs. |
+| Runtime process | `proc-<hex>` | native PID, generation, status | One supervised OpenCode process slot; PID is observation, not identity. |
+| ACP session | `acps-<hex>` | native session ID, title, status | Employee-owned conversation; native ID is returned by OpenCode. |
 
 - IDs are generated once and never reused or re-slugged.
 - A runtime binding records `placement` (`InternalSharedContainer` or
@@ -31,12 +33,23 @@ labels and are never used as identity.
   references, and a monotonic `runtimeEpoch` used for ownership fencing.
 - Current cardinality is 1 employee : 1 runtime binding; the separate record
   exists so placement can be replaced without changing employee identity.
+- Explicit mapping: employee -> binding -> process slot and employee-owned ACP
+  session. One process may host several sessions only under the isolation gate
+  below; a session is attached to at most one live process generation. A process
+  restart keeps its slot ID but increments generation and changes PID; loading
+  persisted conversation keeps the session IDs. Explicit new conversation creates
+  a new session record. Placement replacement creates a new binding/process slot
+  and never changes employee identity or silently selects different history.
 
 ## 2. Initial organization and employees
 
 - One organization: display name **AgentControl Development**, slug
   **`agentcontrol-development`**, adopting the existing persisted
-  `organizationId`. The company identity is not invented or replaced.
+  `organizationId`. The name is the existing development display name from the
+  PR #208 deployment; the slug is a new development default, not a field claimed
+  to exist in the old JSON. The owner accepted development naming latitude on
+  2026-09-13 and authorized bounded work on #211. Import preserves any actual
+  persisted display-name difference and reports it rather than silently renaming.
 - Adoption is deterministic: the existing `runtime.json` `organizationId`,
   `sessionId`, `sessionTitle` and `tmuxOwnerToken` are imported unchanged into
   the new records, so the existing session and tmux pane keep working.
@@ -54,8 +67,8 @@ Chosen: **one small SQLite database file** owned by the C# host, for example
 
 - Single writer: the host process. A cross-process file lock plus
   `busy_timeout` makes a second writer fail closed rather than interleave.
-- WAL mode, foreign keys on, `synchronous=FULL` for the durability-critical
-  hire/task records.
+- WAL mode, foreign keys on, `synchronous=FULL` on every writer connection for
+  all writes, including the durability-critical hire/task records.
 - Rationale: a hire writes employee + binding + orientation assignment
   together; SQLite transactions give atomic multi-record commits and real
   crash semantics. A rewrite of one JSON document is smaller but must reimplement
@@ -125,6 +138,13 @@ Chosen: **one small SQLite database file** owned by the C# host, for example
 - The role split itself is later work. This phase does not claim per-session
   config isolation is proven, and does not claim a co-located internal process
   survives replacement of its own container.
+- Conversation and task history belong to the stable employee and session IDs,
+  not a selected UI tab or current working directory. The host must reject a
+  session/history lookup through another employee binding. A shared-process
+  option requires both configuration and history access-isolation tests, including
+  model tools/native HTTP; host routing alone is insufficient. If these fail,
+  use distinct per-role process identities and private home/history directories
+  in the same container. Retain history on restart; new sessions are explicit.
 
 ## 6. Credential and process isolation prerequisite
 
@@ -176,17 +196,67 @@ Design constraints:
   **worker-owned bridge UNIX socket**. The connector does not exec an
   ACP process owned by the controller; the bridge is started and owned by the
   worker and owns OpenCode ACP stdio.
-- Bridge protocol must address: authenticated bridge peer (mutual auth), owner
-  **epochs** with monotonic fencing tokens, heartbeat, replay bounds, ACK,
-  buffer **overflow** recovery, and **uncertain dispatch** recorded and never
-  blindly retried.
+- The connector opens a bridge-owned UNIX socket inaccessible to the worker
+  OpenCode UID. Bridge and connector perform a versioned mutual HMAC challenge
+  over independent random nonces, controller/worker IDs and protocol version,
+  using a per-worker random key stored only in controller and bridge-private
+  files. Role-specific challenge labels prevent reflection; reject reused or
+  expired nonces and compare MACs in constant time. The SSH tunnel authenticates
+  the remote host and protects bytes. This key is a scoped newly provisioned
+  worker's internal control credential, not a provider or infrastructure grant.
+  It is never exposed to worker tools or supplied as a command argument.
+- The bridge durably allocates monotonically increasing ownership epochs in its
+  own store, transactionally with a controller ID and connection nonce. Every
+  mutation carries that epoch and nonce. Only an authenticated matching controller
+  may reconnect; replacing its live connection advances the epoch and fences the
+  old one. Different controller identity needs explicit enrollment approval.
+  Heartbeats every 5 seconds maintain a 20-second monotonic lease. Lease expiry
+  holds new dispatch, not the running tool; a restarted bridge invalidates all
+  prior leases and requires reauthentication. Timing values are testable options.
+- Before acknowledging a request the bridge durably stores its ID and payload
+  hash; the same ID/hash queries the recorded outcome and never repeats an ACP
+  prompt, while a changed hash is rejected. Record forwarding intent before ACP
+  write; a crash in the write/response gap is `Uncertain`, not retry-safe.
+- Events are ordered by persisted worker generation and sequence. The controller
+  acknowledges only after its own transaction commits the event/cursor. Replay
+  starts after that cursor; duplicates are ignored by generation/sequence. Bound
+  retained replay to 64 MiB and 10,000 events initially. An overflow or missing
+  cursor returns an explicit replay gap, holds dispatch and requires status/effect
+  reconciliation, never truncates silently or drops request/permission state.
+- Status includes session/process generations, active request, pending permission,
+  lease, replay bounds and hold state. Permission decisions are keyed by original
+  request and decision ID; conflicting repeats fail closed. Automatic model retry
+  cannot resolve an uncertain permission response.
 - A **pending permission request survives controller disconnect** and is
   re-delivered on reconnect.
 - A **worker crash does not resume** the in-flight turn; only durable state is
   reloaded. Loading history is not resuming a command.
-- Least-privilege host provisioning (scoped remote user / broker rather than
-  full root daemon for model-facing paths) is required; the exact mechanism is
-  open.
+- The C#-owned SSH credential may use an already-authorized development Docker
+  account for this bounded test, with its actual root-equivalent authority
+  disclosed. A dedicated host allowlist, typed operation validation, approved
+  image/digest/resource limits, no privileged/host namespaces/host bind mounts,
+  no arbitrary exec, and identity-checked resource removal constrain the host
+  provisioning adapter. This is not daemon-enforced least privilege. Never give
+  that credential or raw adapter to a model. If existing authorization/access is
+  insufficient, stop for a new grant; a daemon-side rootless/restricted service is
+  a separately approved hardening option, not an assumed existing service.
+- Terminal traffic uses a separate SSH/Docker connector to the exact registered
+  worker's private bridge socket. After authentication the bridge launches only
+  an attach client for the bound TUI/session; it accepts bounded input/resize
+  frames, streams terminal bytes to the authenticated same-origin portal WebSocket,
+  and enforces one viewer per session. Detach reaps the viewer only; no public
+  port, alternate session, arbitrary command or fallback shell is permitted.
+- Before provisioning, probe and persist Docker API/daemon version, Linux OS and
+  architecture, selected image platform, usable non-shared volume storage/free
+  space, memory/CPU capacity and enforceable limits, SSH host identity, and required
+  image tools (OpenCode pin, bridge, tmux, PTY support). Reject incompatible or
+  unknown mandatory capabilities before creation. Hardware access is not granted
+  merely because a host advertises it.
+- Disposable workers default to `opencode/big-pickle`, already measured with no
+  injected provider credentials in the standalone POC. Validate that availability
+  again; it is not guaranteed service. Do not copy coordinator CLIProxy credentials
+  into workers. Provider failure is explicit; a paid/authenticated provider or new
+  infrastructure credential requires owner direction, not silent fallback.
 - Docker Desktop Mac hosts run Linux containers; treat them as Linux execution,
   not native macOS.
 
@@ -317,12 +387,13 @@ These are open and must not be presented as decided or owner-accepted:
 - The concrete UID/ownership model for Section 6, and whether the existing
   `/data` volume can be re-permissioned without disrupting the running dev
   container.
-- The remote Docker least-privilege mechanism (socket proxy, scoped user or
-  rootless) and SSH key custody/rotation.
-- Bridge peer authentication, epoch/fencing storage, and whether pending-
-  permission re-delivery is safe versus re-prompting the user.
-- SQLite over JSON as an explicit package/architecture decision; WAL behavior on
-  the actual volume filesystem; enforcing single-writer across restarts.
+- Whether the existing authorized SSH/Docker credential can be used without new
+  grants; secure key custody/rotation and measured host-adapter restrictions.
+- Implementation and adversarial validation of the specified bridge challenge,
+  epoch/fencing, replay and pending-permission contracts.
+- SQLite is the selected proposed storage scheme, not an unresolved alternative.
+  Validate WAL behavior on the actual volume filesystem and single-writer locking;
+  justify the package version in #215.
 - The definition and reliability of "comprehension" evidence.
 - Reachability and collateral of `home-dev-02`, and whether the disposable
   worker path can run without touching existing services.
