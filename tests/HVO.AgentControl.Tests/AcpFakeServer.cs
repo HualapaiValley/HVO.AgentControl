@@ -60,6 +60,10 @@ internal static class AcpFakeServer
             if method == "initialize":
                 if SCENARIO == "init_error":
                     send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "initialize exploded"}})
+                elif SCENARIO.startswith("init_version_"):
+                    raw = SCENARIO[len("init_version_"):]
+                    result = {} if raw == "missing" else {"protocolVersion": "1" if raw == "string" else json.loads(raw)}
+                    send({"jsonrpc": "2.0", "id": request_id, "result": result})
                 else:
                     send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
             elif method == "session/new":

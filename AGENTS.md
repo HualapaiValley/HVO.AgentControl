@@ -20,6 +20,32 @@ tested behavior in code, tests and docs.
 - Architecture generation (`generation = 2`) is distinct from the semantic
   release version.
 
+## Development toolchain and standards
+
+Pinned versions and clean-machine commands are in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Do not substitute a machine-wide
+latest for a pin: .NET SDK `10.0.400` (`global.json`), target `net10.0`,
+central package versions (`Directory.Packages.props`), Node 22 and Playwright
+`1.63.0` (`tests/Browser`), Python 3.12 for CI validation, and OpenCode
+`1.18.30` with the container's `python3`/`tmux` (`Dockerfile`).
+
+`docs/DEVELOPMENT.md` also records the general C#, Blazor, and API standards
+adopted from other HVO repositories:
+
+- Blazor components with logic use sibling `.razor` (markup), `.razor.cs`
+  (code-behind) and `.razor.css` (scoped styles). Keep the global design system
+  in `wwwroot/css/portal.css`; do not theme with inline styles.
+- APIs use the built-in ASP.NET ProblemDetails pipeline
+  (`AddProblemDetails` + `UseExceptionHandler` + `UseStatusCodePages`) and the
+  built-in OpenAPI JSON document at `/openapi/v1.json` behind owner auth when
+  configured; no Swagger UI dependency.
+- `/health/live` is process liveness only. `/health/ready` is readiness of the
+  exact owned ACP session and attached TUI, not a database or worker probe.
+
+Distinguish the target standard from what the baseline actually implements.
+`docs/DEVELOPMENT.md` carries a baseline-versus-target table; keep it accurate
+and never claim an endpoint is implemented or validated before it is.
+
 ## Versioning
 
 - The application version has a **single source**: the `<Version>` property in
@@ -60,6 +86,21 @@ portal; they can submit prompts and change session state. See `tests/Browser/REA
 Test outcomes and failure/recovery boundaries. Receipt is not execution; turn
 completion is not verified task success; cancellation is not rollback. Do not
 retry uncertain writes without reconciling effects.
+
+## Pull request process
+
+Keep changes focused and one issue per branch/PR. Review is independent of the
+implementer and bound to an exact head SHA; PR #208 Round 1 baseline is
+`002e826`. Triage every finding, including all owner comments, and answer each
+fix in its own thread with the change, the validation that exercised it, and the
+exact head it applies to. Defer a finding only with owner approval and a linked
+follow-up issue; security, data-loss, acceptance, failing-CI and
+material-correctness findings are never deferrable. Allow at most three review
+rounds, then pause and ask the owner before a fourth; route remaining
+non-blocking findings to one linked issue. CI must be green on the exact
+reviewed head, but green CI is necessary, not sufficient. Do not amend or
+force-push a reviewed head. Merge only when the owner explicitly authorizes it;
+never auto-merge, and never treat a merge as a release.
 
 ## Secrets and data
 

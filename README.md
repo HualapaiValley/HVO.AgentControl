@@ -33,6 +33,9 @@ Do not expose this portal to untrusted networks or the Internet.
 
 ### Run locally
 
+Pinned tool versions, clean-machine setup, and the C#/Blazor/API standards are
+in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 ```bash
 dotnet restore HVO.AgentControl.slnx
 dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
@@ -77,6 +80,12 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/terminal`: same-origin authenticated terminal WebSocket, one viewer at a time
 - `/health/live`: process health, not worker/provider readiness
 - `/api/version`: semantic version and architecture direction
+
+HTTP errors use RFC 9457 ProblemDetails. The built-in OpenAPI JSON document
+at `/openapi/v1.json` and the `/health/ready` runtime/TUI readiness probe are
+protected by owner authentication when configured. Readiness is distinct from
+process liveness; a failed readiness probe must not trigger a destructive
+restart. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the API contract.
 
 Model display reads the native session, not the startup default. OpenCode
 1.18.30's attached TUI keeps its picker selection local until submission, so the
@@ -131,5 +140,6 @@ The release process (manual GHCR publish to
 [docs/EXTERNAL-ISSUES.md](docs/EXTERNAL-ISSUES.md); filing guidance is in
 [docs/UPSTREAM-OPENCODE.md](docs/UPSTREAM-OPENCODE.md).
 
-See [architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md), and
+See [development guide](docs/DEVELOPMENT.md),
+[architecture](docs/ARCHITECTURE.md), [roadmap](docs/ROADMAP.md), and
 [POC findings](docs/POC-FINDINGS.md).

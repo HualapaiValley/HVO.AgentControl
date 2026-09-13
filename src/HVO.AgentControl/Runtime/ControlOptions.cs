@@ -1,3 +1,6 @@
+using System.Net;
+using HVO.AgentControl.Terminal;
+
 namespace HVO.AgentControl.Runtime;
 
 /// <summary>
@@ -72,9 +75,9 @@ public sealed class ControlOptions
             errors.Add($"{nameof(Model)} must not be empty.");
         }
 
-        if (string.IsNullOrWhiteSpace(Hostname))
+        if (!IsLoopbackHostname(Hostname))
         {
-            errors.Add($"{nameof(Hostname)} must not be empty.");
+            errors.Add($"{nameof(Hostname)} must be a loopback address (127.0.0.0/8 or ::1) or localhost.");
         }
 
         if (NativePort is < 1 or > 65535)
@@ -82,12 +85,11 @@ public sealed class ControlOptions
             errors.Add($"{nameof(NativePort)} must be between 1 and 65535.");
         }
 
-        if (string.IsNullOrWhiteSpace(TmuxSessionName)
-            || TmuxSessionName.Contains(':', StringComparison.Ordinal)
-            || TmuxSessionName.Contains('.', StringComparison.Ordinal)
-            || TmuxSessionName.Any(char.IsWhiteSpace))
+        // Share the terminal target rule so an accepted session name cannot be
+        // rejected (or silently reinterpreted) by tmux later.
+        if (!TerminalProtocol.IsValidSessionName(TmuxSessionName))
         {
-            errors.Add($"{nameof(TmuxSessionName)} must be a valid tmux session name without ':', '.' or whitespace.");
+            errors.Add($"{nameof(TmuxSessionName)} must be 1-{TerminalProtocol.MaxSessionNameLength} characters using only letters, digits, '_' or '-'.");
         }
 
         if (ShutdownGraceSeconds < 0)
@@ -111,5 +113,25 @@ public sealed class ControlOptions
         }
 
         return errors;
+    }
+
+    /// <summary>
+    /// Accepts only numeric loopback addresses plus the exact host name
+    /// <c>localhost</c>. The native HTTP server must never be reachable off the
+    /// container; anything that resolves or routes elsewhere fails closed.
+    /// </summary>
+    private static bool IsLoopbackHostname(string? hostname)
+    {
+        if (string.IsNullOrWhiteSpace(hostname))
+        {
+            return false;
+        }
+
+        if (IPAddress.TryParse(hostname, out var address))
+        {
+            return IPAddress.IsLoopback(address);
+        }
+
+        return string.Equals(hostname, "localhost", StringComparison.OrdinalIgnoreCase);
     }
 }

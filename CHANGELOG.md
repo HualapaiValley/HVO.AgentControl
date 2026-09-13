@@ -7,7 +7,37 @@ portal release is `0.1.0` and is **unreleased**.
 
 ## Unreleased
 
-Changes after the first portal release will be collected here.
+Changes after the first portal release are collected here.
+
+### Added
+
+- `docs/DEVELOPMENT.md`: pinned toolchain (.NET SDK 10.0.400, target
+  `net10.0`, Node 22, Playwright 1.63.0, Python 3.12, OpenCode 1.18.30, and the
+  runtime image's `python3`/`tmux`), clean-machine build/test/browser/container
+  and opt-in live-check commands, C# guidance, Blazor code-behind/scoped-style
+  separation, and the API framework standard.
+- Bounded PR process guardrails in `AGENTS.md`, `CONTRIBUTING.md` and the PR
+  template: independent exact-SHA review (PR #208 Round 1 baseline `002e826`),
+  full triage including owner comments, per-thread fix evidence,
+  owner-approved linked-issue deferrals, a three-round review cap, CI as a
+  necessary-but-insufficient gate, and owner-authorized merge only.
+
+### Changed
+
+- API errors now use RFC 9457 ProblemDetails; added protected OpenAPI JSON
+  at `/openapi/v1.json` and runtime/TUI readiness at `/health/ready`.
+- Every terminal subprocess now uses the shared credential environment filter;
+  pane startup clears an existing tmux server's inherited environment too.
+  Ambient provider keys are no longer passed through: configure authorized
+  providers in the runtime's private OpenCode home, not controller environment.
+
+### Fixed
+
+- Require numeric ACP protocol version 1 before establishing a session.
+- Enforce loopback-only native binding and consistent tmux name validation.
+- Use the configured OpenCode executable for the attached TUI.
+- Monitor TUI readiness and recover missing/dead owned tmux sessions with
+  bounded restart backoff, without restarting native ACP or replacing foreign sessions.
 
 ## [0.1.0] - unreleased
 

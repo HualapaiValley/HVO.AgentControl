@@ -63,7 +63,7 @@ public sealed class AcpControlHost : BackgroundService
     public string DataDirectory => Path.GetFullPath(_options.DataDirectory);
 
     /// <summary>Loopback URL of the native OpenCode HTTP server exposed by ACP.</summary>
-    public string NativeUrl => $"http://{_options.Hostname}:{_options.NativePort}";
+    public string NativeUrl => new UriBuilder("http", _options.Hostname, _options.NativePort).Uri.GetLeftPart(UriPartial.Authority);
 
     /// <summary>tmux session name the optional attach client runs under.</summary>
     public string TmuxSessionName => _options.TmuxSessionName;
@@ -450,9 +450,13 @@ public sealed class AcpControlHost : BackgroundService
             timeout,
             token).ConfigureAwait(false);
 
-        if (!initialize.TryGetProperty("protocolVersion", out _))
+        if (initialize.ValueKind != JsonValueKind.Object
+            || !initialize.TryGetProperty("protocolVersion", out var protocolVersion)
+            || protocolVersion.ValueKind != JsonValueKind.Number
+            || !protocolVersion.TryGetInt32(out var version)
+            || version != 1)
         {
-            throw new AcpProtocolException("ACP initialize response did not include protocolVersion.");
+            throw new AcpProtocolException("ACP initialize response must include numeric protocolVersion 1.");
         }
 
         string sessionId;
@@ -550,8 +554,7 @@ public sealed class AcpControlHost : BackgroundService
 
     private async Task StartTerminalAsync(CancellationToken cancellationToken)
     {
-        _terminal = new TmuxAttachLauncher(_options.TmuxSessionName);
-        SetTerminalReady(false);
+        _terminal ??= new TmuxAttachLauncher(_options.TmuxSessionName);
 
         var request = new TmuxAttachRequest(
             NativeUrl,
@@ -561,15 +564,11 @@ public sealed class AcpControlHost : BackgroundService
             "opencode",
             _password,
             _ownerToken ?? string.Empty,
-            _options.EnableTerminal);
+            _options.EnableTerminal,
+            _options.OpenCodeExecutable);
 
         var result = await _terminal.EnsureAsync(request, cancellationToken).ConfigureAwait(false);
-        if (result.Started && result.Owned)
-        {
-            SetTerminalReady(true);
-            _logger.LogInformation("tmux attach client '{Session}' is ready.", _options.TmuxSessionName);
-            return;
-        }
+        SetTerminalReady(result.Started && result.Owned);
 
         if (result.Error is not null)
         {
@@ -832,7 +831,21 @@ public sealed class AcpControlHost : BackgroundService
         var sessionCompletion = session.Completion;
         var hostLifetime = Task.Delay(Timeout.Infinite, cancellationToken);
 
-        var completed = await Task.WhenAny(processExit, sessionCompletion, hostLifetime).ConfigureAwait(false);
+        Task completed;
+        while (true)
+        {
+            var terminalTick = Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            completed = await Task.WhenAny(processExit, sessionCompletion, hostLifetime, terminalTick).ConfigureAwait(false);
+            if (completed != terminalTick || cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            if (_options.EnableTerminal)
+            {
+                // Terminal recovery is independent of the native ACP process/session.
+                await StartTerminalAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
         if (cancellationToken.IsCancellationRequested)
         {
             return;

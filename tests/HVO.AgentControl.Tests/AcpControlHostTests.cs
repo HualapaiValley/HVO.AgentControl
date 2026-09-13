@@ -255,6 +255,35 @@ public sealed class AcpControlHostTests
         await host.StopAsync(CancellationToken.None);
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("null")]
+    [InlineData("string")]
+    [InlineData("2")]
+    [InlineData("true")]
+    public async Task InvalidInitializeVersionIsRejectedBeforeAnySessionCall(string version)
+    {
+        foreach (var recorded in new[] { false, true })
+        {
+            var data = Directory.CreateTempSubdirectory("acp-version-").FullName;
+            if (recorded)
+            {
+                var state = RuntimeStateStore.CreateNew("AgentControl Development");
+                state.SessionId = "ses_recorded";
+                RuntimeStateStore.Save(Path.Combine(data, "runtime.json"), state);
+            }
+            using var host = CreateHost(ReadyOptions(data, "init_version_" + version));
+            await host.StartAsync(CancellationToken.None);
+            var status = await WaitForStateAsync(host, "faulted", TimeSpan.FromSeconds(30));
+            Assert.Contains("numeric protocolVersion 1", status.Error, StringComparison.Ordinal);
+            Assert.Null(status.SessionId);
+            Assert.False(status.TerminalReady);
+            await host.StopAsync(CancellationToken.None);
+            var calls = File.ReadAllLines(Path.Combine(data, "home", "calls.log"));
+            Assert.Equal(new[] { "initialize" }, calls);
+        }
+    }
+
     private static ControlOptions ReadyOptions(string dataDirectory, string scenario = "happy")
     {
         return new ControlOptions

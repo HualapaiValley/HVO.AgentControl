@@ -8,36 +8,73 @@ namespace HVO.AgentControl.Runtime;
 /// </summary>
 public static class ChildEnvironment
 {
+    // Credential/control families are matched by prefix (case-insensitively) so
+    // a newly added token in a known family is stripped without a code change.
+    // Config locations are included so a child cannot re-open the host's
+    // OpenCode or XDG configuration; callers re-add the private locations they
+    // own through overrides.
     private static readonly string[] DeniedPrefixes =
     [
+        // Upstream/control plane and harness runtime.
         "FLEET_",
         "CLIPROXY_",
         "HERDR_",
-        "OPENCODE_CONFIG",
-        "OPENCODE_SERVER_",
-        "GITHUB_",
-        "GH_",
         "Control__",
         "CONTROL__",
+        // OpenCode harness configuration and server credentials.
+        "OPENCODE_",
+        // Source-control credentials.
+        "GITHUB_",
+        "GH_",
+        "GIT_",
+        // Model provider credentials.
+        "ANTHROPIC_",
+        "OPENAI_",
+        "GEMINI_",
+        "GOOGLE_",
+        "AZURE_",
+        "AWS_",
+        "GCP_",
+        "HF_",
+        "HUGGINGFACE_",
+        "MISTRAL_",
+        "GROQ_",
+        "OPENROUTER_",
+        "XAI_",
+        "DEEPSEEK_",
+        "PERPLEXITY_",
+        "COHERE_",
+        "REPLICATE_",
+        "TOGETHER_",
+        "FIREWORKS_",
+        "CEREBRAS_",
+        "SAMBANOVA_",
+        // Package-registry and infrastructure credentials.
+        "NPM_",
+        "NODE_AUTH_",
+        "YARN_NPM_AUTH",
+        "PIP_",
+        "PYPI_",
+        "TWINE_",
+        "CARGO_REGISTRIES_",
+        "NUGET_",
+        "DOCKER_",
+        "KUBE",
+        "VAULT_",
+        "CONSUL_",
+        "NOMAD_",
+        "SSH_",
     ];
 
     private static readonly HashSet<string> DeniedExact = new(StringComparer.OrdinalIgnoreCase)
     {
         "OPENCODE",
         "OPENCODE_PID",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GITHUB_APP_ID",
-        "GITHUB_APP_PRIVATE_KEY",
-        "GITHUB_APP_INSTALLATION_ID",
-        "GITHUB_WEBHOOK_SECRET",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "AZURE_CLIENT_SECRET",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-        "NPM_TOKEN",
-        "NODE_AUTH_TOKEN",
+        "NETRC",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
     };
 
     /// <summary>

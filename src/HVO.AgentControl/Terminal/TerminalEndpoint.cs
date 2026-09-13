@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using HVO.AgentControl.Runtime;
 
 namespace HVO.AgentControl.Terminal;
 
@@ -23,6 +24,8 @@ public static class TerminalEndpoint
     private const string BridgeFileName = "pty_bridge.py";
     private const string PythonExecutable = "python3";
     private const string TerminalType = "xterm-256color";
+    private const string ColorTerm = "truecolor";
+    private const string DefaultLocale = "C.UTF-8";
 
     private const int BridgeReadBufferBytes = 16 * 1024;
     private const int MaxBridgeLineBytes = 512 * 1024;
@@ -154,6 +157,37 @@ public static class TerminalEndpoint
 
     private static Process StartBridge(string homeDirectory, string bridgePath, string sessionName)
     {
+        var startInfo = CreateBridgeStartInfo(homeDirectory, bridgePath, sessionName);
+
+        var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            process.Dispose();
+            throw new InvalidOperationException("The terminal bridge process did not start.");
+        }
+
+        _ = DrainStandardErrorAsync(process.StandardError.BaseStream);
+        return process;
+    }
+
+    /// <summary>
+    /// Builds the bridge child's start info with the shared credential-stripped
+    /// environment (<see cref="ChildEnvironment.Build"/>) plus the terminal
+    /// values the PTY bridge and tmux require. <paramref name="bridgePath"/> and
+    /// <paramref name="sessionName"/> are passed through the argument list, never
+    /// a shell. Exposed internally so the environment contract can be asserted
+    /// without spawning a process.
+    /// </summary>
+    internal static ProcessStartInfo CreateBridgeStartInfo(
+        string homeDirectory,
+        string bridgePath,
+        string sessionName,
+        IReadOnlyDictionary<string, string?>? baseEnvironment = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(homeDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bridgePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionName);
+
         var startInfo = new ProcessStartInfo
         {
             FileName = PythonExecutable,
@@ -169,20 +203,29 @@ public static class TerminalEndpoint
         startInfo.ArgumentList.Add("-u");
         startInfo.ArgumentList.Add(bridgePath);
         startInfo.ArgumentList.Add(sessionName);
-        startInfo.Environment["HOME"] = homeDirectory;
-        startInfo.Environment["TERM"] = TerminalType;
-        startInfo.Environment.Remove("TMUX");
-        startInfo.Environment.Remove("TMUX_PANE");
 
-        var process = new Process { StartInfo = startInfo };
-        if (!process.Start())
+        var overrides = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            process.Dispose();
-            throw new InvalidOperationException("The terminal bridge process did not start.");
+            ["HOME"] = homeDirectory,
+            ["TERM"] = TerminalType,
+            ["COLORTERM"] = ColorTerm,
+            ["LANG"] = DefaultLocale,
+        };
+
+        // Rebuild rather than mutate the inherited process block: the parent
+        // environment carries host credentials and tmux state that must not
+        // reach the bridge or its tmux attach client.
+        var environment = ChildEnvironment.Build(overrides, baseEnvironment);
+        environment.Remove("TMUX");
+        environment.Remove("TMUX_PANE");
+
+        startInfo.Environment.Clear();
+        foreach (var (key, value) in environment)
+        {
+            startInfo.Environment[key] = value;
         }
 
-        _ = DrainStandardErrorAsync(process.StandardError.BaseStream);
-        return process;
+        return startInfo;
     }
 
     private static async Task PumpOutputAsync(WebSocket socket, Stream output, CancellationToken token)

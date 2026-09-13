@@ -2,4 +2,10 @@
   <ItemGroup>
     <None Update="Terminal/pty_bridge.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="HVO.AgentControl.Tests" />
+  </ItemGroup>
 </Project>

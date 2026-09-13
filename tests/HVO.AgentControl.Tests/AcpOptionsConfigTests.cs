@@ -1,11 +1,23 @@
 using System.Text.Json;
 using HVO.AgentControl.Runtime;
+using HVO.AgentControl.Terminal;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
 
 public sealed class AcpOptionsConfigTests
 {
+    [Theory]
+    [InlineData("127.0.0.1", "http://127.0.0.1:4096")]
+    [InlineData("::1", "http://[::1]:4096")]
+    public void NativeUrlSupportsValidatedIpLiterals(string hostname, string expected)
+    {
+        using var host = new AcpControlHost(
+            Microsoft.Extensions.Options.Options.Create(new ControlOptions { Hostname = hostname }),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AcpControlHost>.Instance);
+        Assert.Equal(expected, host.NativeUrl);
+    }
+
     [Fact]
     public void ControlOptionsDefaultsMatchV2Contract()
     {
@@ -34,6 +46,78 @@ public sealed class AcpOptionsConfigTests
     public void ValidateAcceptsDefaultOptions()
     {
         Assert.Empty(new ControlOptions().Validate());
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("127.0.0.53")]
+    [InlineData("127.255.255.254")]
+    [InlineData("::1")]
+    [InlineData("0:0:0:0:0:0:0:1")]
+    [InlineData("localhost")]
+    [InlineData("LOCALHOST")]
+    public void ValidateAcceptsLoopbackHostnames(string hostname)
+    {
+        var options = new ControlOptions { Hostname = hostname };
+
+        Assert.DoesNotContain(
+            options.Validate(),
+            error => error.Contains(nameof(ControlOptions.Hostname), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0")]
+    [InlineData("10.0.0.5")]
+    [InlineData("192.168.1.20")]
+    [InlineData("172.16.0.1")]
+    [InlineData("8.8.8.8")]
+    [InlineData("255.255.255.255")]
+    [InlineData("example.com")]
+    [InlineData("localhost.example.com")]
+    [InlineData("localhost.")]
+    [InlineData("::")]
+    [InlineData("fe80::1")]
+    [InlineData("2001:db8::1")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ValidateRejectsNonLoopbackHostnames(string hostname)
+    {
+        var options = new ControlOptions { Hostname = hostname };
+
+        Assert.Contains(
+            options.Validate(),
+            error => error.Contains(nameof(ControlOptions.Hostname), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ValidateUsesSharedTerminalSessionNameRule()
+    {
+        // The options gate and the terminal attach gate must agree exactly;
+        // otherwise a name accepted here can be rejected (or reinterpreted) by tmux.
+        string[] names =
+        [
+            "agentcontrol",
+            "agent-control_2",
+            "ABC123",
+            "agent control",
+            "agentcontrol:1",
+            "agentcontrol.0",
+            "agent;rm -rf /",
+            "session\nname",
+            new string('a', TerminalProtocol.MaxSessionNameLength),
+            new string('a', TerminalProtocol.MaxSessionNameLength + 1),
+            string.Empty,
+            "   ",
+        ];
+
+        foreach (var name in names)
+        {
+            var options = new ControlOptions { TmuxSessionName = name };
+            var rejected = options.Validate()
+                .Any(error => error.Contains(nameof(ControlOptions.TmuxSessionName), StringComparison.Ordinal));
+
+            Assert.Equal(!TerminalProtocol.IsValidSessionName(name), rejected);
+        }
     }
 
     [Fact]
