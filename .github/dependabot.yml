@@ -20,6 +20,8 @@ updates:
         patterns: ["*"]
   - package-ecosystem: docker
     directory: /
+    exclude-paths:
+      - archive/**
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
@@ -28,6 +30,8 @@ updates:
         patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
+    exclude-paths:
+      - archive/**
     schedule:
       interval: weekly
     open-pull-requests-limit: 3

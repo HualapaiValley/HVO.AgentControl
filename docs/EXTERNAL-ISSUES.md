@@ -22,6 +22,10 @@ Last checked: **2026-09-13** (UTC) via read-only `gh api`.
 
 ## Notes
 
+- Before enabling model selection, align the API and UI availability rules:
+  degraded sessions may expose terminal/cancel recovery, but model writes
+  currently require full readiness. Keep that distinction in selector tests.
+
 - **48759** is this project's submitted feature request. It is the primary
   bidirectional model/agent selection item and gates enabling the portal model
   selector. It remains open with no maintainer response.

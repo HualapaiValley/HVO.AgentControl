@@ -17,12 +17,10 @@ builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = Tim
 // malformed request as a server fault.
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 
-var passwordFile = builder.Configuration["Control:OwnerPasswordFile"];
-var ownerPassword = string.IsNullOrEmpty(passwordFile) ? null : File.ReadAllText(passwordFile).Trim();
-if (builder.Configuration.GetValue<bool>("Control:Enabled") && (ownerPassword?.Length ?? 0) < 24)
-{
-    throw new InvalidOperationException("An owner password file containing at least 24 characters is required when the runtime is enabled.");
-}
+var controlEnabled = builder.Configuration.GetValue<bool>("Control:Enabled");
+var ownerPassword = Program.ResolveOwnerPassword(
+    builder.Configuration["Control:OwnerPasswordFile"],
+    controlEnabled);
 var ownerAuthConfigured = ownerPassword is not null;
 
 // RFC 9457 ProblemDetails is the single error contract. Instance and traceId
@@ -250,11 +248,11 @@ app.MapPost("/api/control/cancel", async (HttpContext context, AcpControlHost ho
             statusCode: StatusCodes.Status403Forbidden,
             title: "Cross-origin request rejected.",
             detail: "Cancellation must originate from the portal origin.");
-    if (host.GetStatus().State != "ready")
+    if (!host.GetStatus().CanControl)
         return Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
-            title: "Runtime not ready.",
-            detail: "The control runtime must be ready before cancellation.");
+            title: "Runtime unavailable.",
+            detail: "An established control session is required before cancellation.");
     if (!await host.CancelAsync(context.RequestAborted))
         return Results.Problem(
             statusCode: StatusCodes.Status503ServiceUnavailable,
@@ -273,7 +271,8 @@ app.MapPost("/api/control/cancel", async (HttpContext context, AcpControlHost ho
 
 app.Map("/terminal", async (HttpContext context, AcpControlHost host) =>
 {
-    if (host.GetStatus().State != "ready" || !host.GetStatus().TerminalReady)
+    var status = host.GetStatus();
+    if (!status.CanControl || !status.TerminalReady)
     {
         context.Response.StatusCode = 503;
         return;
@@ -330,6 +329,65 @@ app.Run();
 
 public partial class Program
 {
+    /// <summary>Minimum length required of a configured owner password, after trimming.</summary>
+    public const int MinimumOwnerPasswordLength = 24;
+
+    /// <summary>
+    /// Resolves the configured owner password for the startup auth gate.
+    /// </summary>
+    /// <remarks>
+    /// Reads and validates <paramref name="passwordFile"/> independently of the
+    /// runtime switch. A configured file must be readable and contain at least
+    /// <see cref="MinimumOwnerPasswordLength"/> trimmed characters; a blank or
+    /// short file is rejected even when the runtime is disabled, because a
+    /// configured credential is always expected to be usable. When no file is
+    /// configured, the runtime-enabled mode still requires one, while a disabled
+    /// runtime may run without owner auth for local development. Every failure is
+    /// a sanitized <see cref="InvalidOperationException"/> that never includes the
+    /// file contents, so calling this before <c>builder.Build()</c> fails closed
+    /// before any runtime or model provider starts.
+    /// </remarks>
+    public static string? ResolveOwnerPassword(string? passwordFile, bool controlEnabled)
+    {
+        if (string.IsNullOrWhiteSpace(passwordFile))
+        {
+            if (controlEnabled)
+            {
+                throw new InvalidOperationException(
+                    "Control:OwnerPasswordFile must be configured with a readable file containing at least "
+                    + $"{MinimumOwnerPasswordLength} characters when the runtime is enabled.");
+            }
+
+            return null;
+        }
+
+        string contents;
+        try
+        {
+            contents = File.ReadAllText(passwordFile);
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException
+            or System.Security.SecurityException)
+        {
+            throw new InvalidOperationException(
+                "The configured Control:OwnerPasswordFile could not be read. Refusing to start with an unverifiable owner password.",
+                exception);
+        }
+
+        var password = contents.Trim();
+        if (password.Length < MinimumOwnerPasswordLength)
+        {
+            throw new InvalidOperationException(
+                $"The configured Control:OwnerPasswordFile must contain at least {MinimumOwnerPasswordLength} "
+                + "non-whitespace characters; it is blank or too short.");
+        }
+
+        return password;
+    }
+
     /// <summary>
     /// Pure readiness predicate for the owned OpenCode ACP session and attached
     /// TUI. Terminal readiness is required regardless of whether the terminal

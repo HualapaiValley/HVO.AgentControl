@@ -92,9 +92,9 @@ public sealed class ControlOptions
             errors.Add($"{nameof(TmuxSessionName)} must be 1-{TerminalProtocol.MaxSessionNameLength} characters using only letters, digits, '_' or '-'.");
         }
 
-        if (ShutdownGraceSeconds < 0)
+        if (ShutdownGraceSeconds < 1)
         {
-            errors.Add($"{nameof(ShutdownGraceSeconds)} must not be negative.");
+            errors.Add($"{nameof(ShutdownGraceSeconds)} must be at least one second.");
         }
 
         if (StartupTimeoutSeconds < 1)

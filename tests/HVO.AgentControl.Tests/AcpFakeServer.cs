@@ -85,6 +85,11 @@ internal static class AcpFakeServer
                     send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "invalid prompt"}})
                 elif SCENARIO == "prompt_stop":
                     send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "max_tokens"}})
+                elif SCENARIO == "prompt_hang":
+                    # Never answers. The host's prompt deadline must bound the
+                    # wait; the transport stays open so the session remains
+                    # usable (and cancellable) afterwards.
+                    pass
                 else:
                     send({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission", "params": {"sessionId": SESSION_ID, "toolCall": {"toolCallId": "tc-1", "title": "Read secret", "kind": "read", "status": "pending"}, "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}, {"optionId": "reject_once", "name": "Reject once", "kind": "reject_once"}]}})
                     permission_response = None

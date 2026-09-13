@@ -8,6 +8,16 @@ namespace HVO.AgentControl.Tests;
 public sealed class AcpOptionsConfigTests
 {
     [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ShutdownRequiresTimeForBoundedCleanup(int seconds)
+    {
+        Assert.Contains(new ControlOptions { ShutdownGraceSeconds = seconds }.Validate(),
+            error => error.Contains(nameof(ControlOptions.ShutdownGraceSeconds), StringComparison.Ordinal));
+        Assert.Empty(new ControlOptions { ShutdownGraceSeconds = 1 }.Validate());
+    }
+
+    [Theory]
     [InlineData("127.0.0.1", "http://127.0.0.1:4096")]
     [InlineData("::1", "http://[::1]:4096")]
     public void NativeUrlSupportsValidatedIpLiterals(string hostname, string expected)

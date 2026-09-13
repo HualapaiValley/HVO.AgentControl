@@ -154,6 +154,8 @@ class TerminalPortal {
         this.running = false;
         this.terminalReady = false;
         this.runtimeState = "";
+        this.runtimeSessionId = "";
+        this.canControl = false;
         this.runtimeKind = "unknown";
         this.manualDetach = false;
         this.everAttached = false;
@@ -175,6 +177,10 @@ class TerminalPortal {
         this.modelTimedOut = false;
         this.modelGuard = null;
         this.modelAwaiting = null;
+        // A non-2xx (or interrupted) model request is not proof the change did
+        // not apply. While set, a status poll may still observe the requested
+        // model and turn the uncertainty into a confirmed receipt.
+        this.modelUnconfirmed = null;
 
         // Bounded auto-reattach backoff.
         this.connectFailures = 0;
@@ -253,12 +259,30 @@ class TerminalPortal {
 
     // ---- readiness gates -------------------------------------------------
 
+    // An established session is one the runtime has actually handed us a session
+    // id for. Both ready and degraded qualify: a degraded bootstrap is still an
+    // attached, recoverable session, and locking the operator out of terminal
+    // recovery or cancellation would strand the session. Starting, faulted,
+    // stopped and unknown states never qualify.
+    //
+    // `canControl` is the parent's gate. It is deliberately never trusted on its
+    // own: a status payload must also carry a ready/degraded state and a session
+    // id, so a fake/foreign status cannot turn the controls on.
+    isRuntimeEstablished() {
+        return (this.runtimeState === "ready" || this.runtimeState === "degraded")
+            && Boolean(this.runtimeSessionId);
+    }
+
     isRuntimeReady() {
-        return this.runtimeState === "ready";
+        return this.isRuntimeEstablished();
+    }
+
+    isRuntimeControllable() {
+        return this.isRuntimeEstablished() && this.canControl === true;
     }
 
     canAttach() {
-        return this.isRuntimeReady() && this.terminalReady === true;
+        return this.isRuntimeEstablished() && this.terminalReady === true;
     }
 
     // ---- terminal --------------------------------------------------------
@@ -662,6 +686,8 @@ class TerminalPortal {
         const previousKind = this.root.dataset.runtimeState;
         this.runtimeKind = kind;
         this.runtimeState = typeof data.state === "string" ? data.state.trim().toLowerCase() : "";
+        this.runtimeSessionId = typeof data.sessionId === "string" ? data.sessionId.trim() : "";
+        this.canControl = data.canControl === true;
         this.root.dataset.runtimeState = kind;
 
         this.setField("organizationName", data.organizationName || DEFAULT_ORGANIZATION);
@@ -759,8 +785,9 @@ class TerminalPortal {
     // ---- cancel (interrupt) ----------------------------------------------
 
     async interrupt() {
-        // Gated on a ready runtime; the button is disabled otherwise.
-        if (this.cancelInFlight || !this.isRuntimeReady()) {
+        // Gated on a controllable session (ready or degraded); the button is
+        // disabled otherwise.
+        if (this.cancelInFlight || !this.isRuntimeControllable()) {
             return;
         }
         this.cancelInFlight = true;
@@ -882,6 +909,7 @@ class TerminalPortal {
         }
         this.updateModelDisabled();
         this.resolveModelAwaiting(actual);
+        this.resolveUnconfirmedModel(actual);
     }
 
     renderModelOptions(actual) {
@@ -969,6 +997,27 @@ class TerminalPortal {
         }
     }
 
+    // A non-2xx (502, 409, ...) or timed-out change request cannot prove the
+    // change was not applied. Until a status poll actually observes the
+    // requested model we keep the uncertainty receipt and never claim the old
+    // model is still in effect or retry on the operator's behalf.
+    resolveUnconfirmedModel(actual) {
+        if (!this.modelUnconfirmed || this.modelChangeInFlight) {
+            return;
+        }
+        if (actual && actual === this.modelUnconfirmed.target) {
+            this.modelUnconfirmed = null;
+            this.setModelReceipt(`Runtime later confirmed the active model: ${actual}.`, "ok");
+            return;
+        }
+        if (Date.now() - this.modelUnconfirmed.at > MODEL_CONFIRM_GUARD_MS) {
+            // Stop watching after the bounded window. The receipt already tells
+            // the operator to re-check, and we deliberately never convert this
+            // into an "unchanged" claim.
+            this.modelUnconfirmed = null;
+        }
+    }
+
     handleModelChange() {
         const select = this.modelSelect;
         if (!select || this.modelChangeInFlight) {
@@ -1010,6 +1059,7 @@ class TerminalPortal {
     async requestModelChange(id) {
         this.modelChangeInFlight = true;
         this.modelAwaiting = null;
+        this.modelUnconfirmed = null;
         this.updateModelDisabled();
         this.setModelReceipt(
             `Model change requested: ${id}. Awaiting runtime confirmation\u2026`,
@@ -1041,8 +1091,16 @@ class TerminalPortal {
             }
 
             if (!response.ok) {
+                // A non-2xx does not prove the change was not applied. A 502
+                // (SetModelAsync returned false) or a rejected/aborted request
+                // can still have reached the session, and even the API detail
+                // says to check before retrying. Record the uncertainty and let
+                // a status poll decide; never retry automatically.
+                this.modelUnconfirmed = { target: id, status: response.status, at: Date.now() };
                 this.setModelReceipt(
-                    `Model change not accepted (HTTP ${response.status}). The active model is unchanged.`,
+                    `Model change could not be confirmed (HTTP ${response.status}). ` +
+                    "It may have applied; re-check the active model before retrying. " +
+                    "No retry was sent automatically.",
                     "error",
                 );
                 this.refreshStatus();
@@ -1075,16 +1133,20 @@ class TerminalPortal {
             }
         } catch (error) {
             if (this.modelTimedOut) {
+                this.modelUnconfirmed = { target: id, status: "timeout", at: Date.now() };
                 this.setModelReceipt(
-                    "Model change timed out after 10s. The active model is unknown; re-check the header.",
+                    "Model change timed out after 10s without confirmation. It may have applied; " +
+                    "re-check the active model before retrying. No retry was sent automatically.",
                     "error",
                 );
             } else if (error && error.name === "AbortError") {
                 // Aborted by pagehide; the page is going away, so stay quiet.
             } else {
                 const detail = error && error.message ? error.message : "network error";
+                this.modelUnconfirmed = { target: id, status: "network", at: Date.now() };
                 this.setModelReceipt(
-                    `Model change failed: ${detail}. The active model is unchanged.`,
+                    `Model change failed: ${detail}. The request may or may not have reached the runtime; ` +
+                    "re-check the active model before retrying. No retry was sent automatically.",
                     "error",
                 );
             }
@@ -1096,6 +1158,7 @@ class TerminalPortal {
             }
             this.modelChangeInFlight = false;
             this.updateModelDisabled();
+            this.resolveUnconfirmedModel(this.authoritativeModel);
             if (!this.isModelSelectFocused()) {
                 this.selectModelValue(this.authoritativeModel);
             }
@@ -1197,7 +1260,7 @@ class TerminalPortal {
             this.buttons.clear.disabled = !this.term;
         }
         if (this.buttons.interrupt) {
-            this.buttons.interrupt.disabled = !this.isRuntimeReady() || this.cancelInFlight;
+            this.buttons.interrupt.disabled = !this.isRuntimeControllable() || this.cancelInFlight;
         }
     }
 

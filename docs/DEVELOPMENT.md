@@ -212,6 +212,11 @@ except `/health/live` sit behind owner Basic authentication.
 
 ### Health
 
+Control availability is separate from readiness: an established `degraded`
+session allows terminal/cancel recovery while retaining its error and 503
+readiness. A timeout does not prove an operation never ran; a failed model
+readback is uncertain and must not be reported as an unchanged selection.
+
 Health is deliberately split and must not overstate dependency coverage:
 
 - `/health/live` — process liveness only. It answers whether the web process is

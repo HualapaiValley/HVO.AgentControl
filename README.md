@@ -46,7 +46,9 @@ dotnet run --project src/HVO.AgentControl --urls http://127.0.0.1:5054
 
 The runtime is disabled by default for host-side development. Running without
 `Control:Enabled=true` serves the portal and health/info endpoints but never
-launches OpenCode.
+launches OpenCode. With no password configured this development mode has no
+authentication; use loopback only. If a password file is configured, it must
+contain at least 24 characters after trimming in either runtime mode.
 
 ### Container
 
@@ -65,7 +67,8 @@ docker --context home-docker compose exec -T control python3 -c \
 ```
 
 Secrets initialization creates a volume and preserves an existing owner
-password. Compose enables the runtime, installs OpenCode 1.18.30 and uses its
+password. Blank/short or unreadable existing files fail closed and are not
+replaced automatically. Compose enables the runtime, installs OpenCode 1.18.30 and uses its
 default Big Pickle provider. The container publishes only the portal on all
 Docker-host IPv4 interfaces (`0.0.0.0:5054`); OpenCode's native HTTP stays on
 container loopback. Nothing starts or migrates the archived V1 deployment.
@@ -100,6 +103,11 @@ volume retains workspace and native conversation state. A failed session load is
 surfaced, not silently replaced. Detaching the browser leaves the TUI/runtime
 alive. Container restart restores conversation history, not a running command.
 Only an initial new-session readiness prompt is automatic.
+
+A failed bootstrap leaves the runtime `degraded`, not ready. When its ACP
+session remains established, terminal/cancel controls remain available for
+inspection and recovery (`canControl`); `/health/ready` still returns 503.
+Faulted, starting, disabled and stopped runtimes do not expose these controls.
 
 ## Development security boundary
 

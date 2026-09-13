@@ -33,16 +33,46 @@ public enum ControlState
 
 public static class ControlStateExtensions
 {
+    /// <summary>Wire value of <see cref="ControlState.Ready"/>.</summary>
+    public const string ReadyWireValue = "ready";
+
+    /// <summary>Wire value of <see cref="ControlState.Degraded"/>.</summary>
+    public const string DegradedWireValue = "degraded";
+
     public static string ToWireValue(this ControlState state) => state switch
     {
         ControlState.Disabled => "disabled",
         ControlState.Starting => "starting",
-        ControlState.Ready => "ready",
-        ControlState.Degraded => "degraded",
+        ControlState.Ready => ReadyWireValue,
+        ControlState.Degraded => DegradedWireValue,
         ControlState.Faulted => "faulted",
         ControlState.Stopped => "stopped",
         _ => state.ToString().ToLowerInvariant(),
     };
+
+    /// <summary>
+    /// The single availability rule shared by the status snapshot and the host
+    /// operation: the runtime owns a live ACP child and an established session.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ControlState.Degraded"/> qualifies deliberately. A degraded
+    /// runtime failed a readiness step (typically a transient provider/model
+    /// failure during the bootstrap turn) but still owns the session and the
+    /// transport, so locking the operator out would remove exactly the controls
+    /// needed to inspect and recover it. <see cref="ControlState.Starting"/> has
+    /// no established session yet, and Disabled/Faulted/Stopped have no live
+    /// child — a protocol fault is therefore never controllable.
+    /// </remarks>
+    public static bool AllowsControl(this ControlState state)
+        => state is ControlState.Ready or ControlState.Degraded;
+
+    /// <summary>
+    /// Wire-value form of <see cref="AllowsControl(ControlState)"/>, used by the
+    /// serialized snapshot so both sides of the contract cannot drift apart.
+    /// </summary>
+    public static bool AllowsControl(string? wireState)
+        => string.Equals(wireState, ReadyWireValue, StringComparison.Ordinal)
+            || string.Equals(wireState, DegradedWireValue, StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -105,6 +135,33 @@ public sealed record ControlStatus
     /// <summary>Best-effort native session status: "idle", "busy" or null when unknown.</summary>
     [JsonPropertyName("sessionState")]
     public string? SessionState { get; init; }
+
+    /// <summary>
+    /// Whether session-scoped control operations (cancel, terminal attach) may
+    /// be offered for this snapshot: an established session on a live host.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Derived, never set: it is true only when <see cref="State"/> is
+    /// <c>ready</c> or <c>degraded</c> <em>and</em> <see cref="SessionId"/> is
+    /// non-empty. It is deliberately not a promotion of <c>degraded</c> to
+    /// <c>ready</c> — <see cref="State"/> and <see cref="Error"/> stay honest,
+    /// and <see cref="ModelSyncSupported"/> plus the parent's own readiness
+    /// predicate continue to gate model writes and <c>/health/ready</c>
+    /// separately.
+    /// </para>
+    /// <para>
+    /// This is an availability claim about the control plane, not a claim that
+    /// the model provider works, that the last turn succeeded, or that a
+    /// cancellation will complete. A caller must still treat
+    /// <see cref="AcpControlHost.CancelAsync"/> returning false as "not
+    /// accepted", and terminal attach additionally requires
+    /// <see cref="TerminalReady"/>.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("canControl")]
+    public bool CanControl =>
+        ControlStateExtensions.AllowsControl(State) && !string.IsNullOrEmpty(SessionId);
 
     // Stock OpenCode 1.18.30 keeps the attached TUI picker client-local.
     [JsonPropertyName("modelSyncSupported")]

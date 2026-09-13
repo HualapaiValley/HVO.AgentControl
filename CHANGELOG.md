@@ -33,6 +33,17 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Final full-review corrections: reject blank/short configured owner passwords
+  regardless of runtime enablement; atomically initialize secrets and refuse
+  damaged existing files without overwriting them.
+- Keep terminal and cancellation controls available for established degraded
+  sessions while preserving the bootstrap error and failed readiness signal.
+  Bootstrap timeouts request bounded cancellation rather than silently orphaning work.
+- Report unconfirmed model changes as uncertain, never as proof the selection
+  is unchanged. Do not retry automatically.
+- Require at least one second of shutdown grace; explicitly exclude archived
+  Docker/Actions files from dependency updates.
+
 - Round 3: retain a just-created TUI pane through marker-persistence or selection
   failures and retry those steps with backoff before advertising readiness.
   Retries do not create duplicate attach clients or replace unrelated panes.

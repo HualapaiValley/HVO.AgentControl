@@ -19,6 +19,13 @@
 //   6. HTTP 200 without a returned model is not reported as success
 //   7. pagehide aborts an in-flight request quietly
 //   8. a request that never settles fails loudly after the 10s bound
+//   9. a 502 (SetModelAsync returned false) is reported as unconfirmed, never
+//      as "the active model is unchanged", and never selects the request
+//      optimistically or retries automatically
+//  10. a degraded established session stays controllable (terminal + cancel)
+//      and keeps its error banner, while faulted/disabled do not; a fake
+//      canControl:true on a faulted status must not enable the controls
+//  11. modelSyncSupported:false keeps the model selector disabled
 //
 // Usage: node tests/Browser/model-sync.mjs
 import { chromium } from 'playwright';
@@ -200,6 +207,12 @@ const receipt = () =>
     status: el.dataset.status || '',
     hidden: el.hidden,
   }));
+const buttonDisabled = (action) => page.$eval(`[data-action="${action}"]`, (el) => el.disabled);
+const errorBanner = () =>
+  page.$eval('[data-field="error-banner"]', (el) => ({
+    hidden: el.hidden,
+    text: (el.querySelector('[data-field="error"]') || {}).textContent?.trim() || '',
+  }));
 
 async function waitFor(predicate, label, timeoutMs = 6000) {
   const deadline = Date.now() + timeoutMs;
@@ -261,8 +274,12 @@ try {
   await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ modelPlan: { status: 500, mode: 'echo', delayMs: 0, body: null }, resetRequests: true }) });
   await page.selectOption('#model-select', 'anthropic/claude');
   await waitFor(async () => (await receipt()).status === 'error', 'failed receipt');
-  record('a rejected change surfaces a visible failure and does not claim success',
-    (await receipt()).status === 'error' && (await receipt()).text.includes('not accepted') && (await headerModel()) === 'openai/gpt-5',
+  record('a rejected change surfaces a visible failure and does not claim success or "unchanged"',
+    (await receipt()).status === 'error'
+      && (await receipt()).text.includes('could not be confirmed')
+      && (await receipt()).text.includes('may have applied')
+      && !(await receipt()).text.includes('unchanged')
+      && (await headerModel()) === 'openai/gpt-5',
     { receipt: await receipt(), header: await headerModel() });
   await page.$eval('[data-model-select]', (el) => el.blur());
   await waitFor(async () => (await valueOf('#model-select')) === 'openai/gpt-5', 'revert after failure');
@@ -319,6 +336,135 @@ try {
   record('a request that never settles fails loudly after the ~10s bound',
     (await receipt()).text.includes('timed out') && (await headerModel()) === 'openai/gpt-5',
     { receipt: await receipt(), header: await headerModel() });
+
+  // ---- 10. 502 is unconfirmed, never "unchanged" ------------------------
+  // Step 9 left an orphaned 12s stub response in flight; let it settle, then
+  // reset the authoritative model and reload so this section starts clean.
+  await sleep(2600);
+  await fetch(`${base}/__stub`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      control: {
+        model: 'openai/gpt-5',
+        state: 'ready',
+        sessionId: 'stub-session',
+        terminalReady: false,
+        error: null,
+        models: CATALOG,
+      },
+      modelPlan: { status: 200, mode: 'echo', delayMs: 0, body: null },
+      resetRequests: true,
+    }),
+  });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await waitFor(async () => (await valueOf('#model-select')) === 'openai/gpt-5', 'reload before 502');
+
+  await fetch(`${base}/__stub`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ modelPlan: { status: 502, mode: 'echo', delayMs: 0, body: null }, resetRequests: true }),
+  });
+  await page.selectOption('#model-select', 'anthropic/claude');
+  await waitFor(async () => (await receipt()).status === 'error', '502 uncertainty receipt');
+  const r502 = await receipt();
+  record('a 502 reports uncertainty and never claims the active model is unchanged',
+    r502.status === 'error'
+      && r502.text.includes('could not be confirmed')
+      && r502.text.includes('may have applied')
+      && r502.text.includes('re-check')
+      && r502.text.includes('No retry was sent automatically')
+      && !r502.text.includes('unchanged'),
+    { receipt: r502 });
+  await page.$eval('[data-model-select]', (el) => el.blur());
+  await waitFor(async () => (await valueOf('#model-select')) === 'openai/gpt-5', '502 reverts selection');
+  record('a 502 does not optimistically select the requested model or auto-retry',
+    (await headerModel()) === 'openai/gpt-5'
+      && (await valueOf('#model-select')) === 'openai/gpt-5'
+      && state.modelRequests.length === 1,
+    { header: await headerModel(), select: await valueOf('#model-select'), requests: state.modelRequests.length });
+
+  // ---- 11. degraded is controllable; faulted/disabled are not -----------
+  // Faulted: a (fake) canControl:true must not enable control because the
+  // runtime state is not ready/degraded.
+  await fetch(`${base}/__stub`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      control: {
+        state: 'faulted',
+        sessionId: 'stub-session',
+        terminalReady: true,
+        canControl: true,
+        error: 'synthetic fault',
+      },
+    }),
+  });
+  await waitFor(async () => (await buttonDisabled('interrupt')) === true, 'faulted locks interrupt');
+  record('a faulted runtime cannot control even when the wire claims canControl',
+    (await buttonDisabled('interrupt')) === true && (await buttonDisabled('reconnect')) === true,
+    { interrupt: await buttonDisabled('interrupt'), reconnect: await buttonDisabled('reconnect') });
+
+  // Degraded: an established session must stay recoverable.
+  await fetch(`${base}/__stub`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      control: {
+        state: 'degraded',
+        sessionId: 'stub-session',
+        terminalReady: true,
+        canControl: true,
+        error: 'synthetic degraded bootstrap',
+      },
+    }),
+  });
+  await waitFor(async () => (await buttonDisabled('interrupt')) === false, 'degraded allows interrupt');
+  record('a degraded established session can control the terminal and cancel',
+    (await buttonDisabled('interrupt')) === false && (await buttonDisabled('reconnect')) === false,
+    { interrupt: await buttonDisabled('interrupt'), reconnect: await buttonDisabled('reconnect') });
+  record('a degraded status keeps its error banner visible',
+    (await errorBanner()).hidden === false && (await errorBanner()).text.includes('synthetic degraded'),
+    { banner: await errorBanner() });
+
+  // Disabled: no session control at all.
+  await fetch(`${base}/__stub`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      control: {
+        state: 'disabled',
+        sessionId: 'stub-session',
+        terminalReady: true,
+        canControl: false,
+        error: null,
+      },
+    }),
+  });
+  await waitFor(async () => (await buttonDisabled('interrupt')) === true, 'disabled locks interrupt');
+  record('a disabled runtime cannot control',
+    (await buttonDisabled('interrupt')) === true && (await buttonDisabled('reconnect')) === true,
+    { interrupt: await buttonDisabled('interrupt'), reconnect: await buttonDisabled('reconnect') });
+
+  // ---- 12. modelSyncSupported still disables the selector ----------------
+  await fetch(`${base}/__stub`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      control: {
+        state: 'ready',
+        sessionId: 'stub-session',
+        terminalReady: false,
+        canControl: true,
+        modelSyncSupported: false,
+        models: CATALOG,
+        error: null,
+      },
+    }),
+  });
+  await waitFor(async () => (await disabled()) === true, 'modelSyncSupported false disables');
+  record('modelSyncSupported false keeps the model selector disabled',
+    (await disabled()) === true, { disabled: await disabled() });
 
   record('no uncaught page errors during the model sync suite', pageErrors.length === 0, { pageErrors });
 } catch (error) {

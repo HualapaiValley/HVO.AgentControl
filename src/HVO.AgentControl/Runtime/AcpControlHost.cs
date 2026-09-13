@@ -96,6 +96,16 @@ public sealed class AcpControlHost : BackgroundService
     /// linked to <paramref name="cancellationToken"/>. Cancellation does not roll
     /// back external effects; the caller maps false to an unavailable response.
     /// </summary>
+    /// <remarks>
+    /// This deliberately gates on the owned session and a live child rather than
+    /// on <see cref="ControlState.Ready"/>. A <see cref="ControlState.Degraded"/>
+    /// runtime — for example one whose bootstrap turn failed against a transient
+    /// provider error — still owns a live transport, and that is precisely when
+    /// an operator needs to interrupt an orphaned turn. Refusing here would make
+    /// the degraded state unrecoverable. A protocol fault is a different case:
+    /// it tears the child down through <see cref="Fault"/>, after which this
+    /// returns false because no live process remains.
+    /// </remarks>
     public async Task<bool> CancelAsync(CancellationToken cancellationToken)
     {
         var session = _session;
@@ -814,6 +824,22 @@ public sealed class AcpControlHost : BackgroundService
                         SetStatus(ControlState.Degraded, $"Bootstrap prompt failed (code {exception.Code}).");
                     }
                 }
+                catch (TimeoutException)
+                {
+                    // The deadline abandons the local correlation only; the agent
+                    // may still be mid-turn. Reconcile the effect we know about
+                    // instead of leaving an orphaned turn running against the
+                    // owned session. This is best effort and never upgrades or
+                    // downgrades the honest Degraded outcome below.
+                    SetSessionState(null);
+                    _logger.LogError(
+                        "Bootstrap prompt timed out after {Seconds}s; requesting cancellation of the abandoned turn.",
+                        _options.PromptTimeoutSeconds);
+                    await TryCancelAbandonedTurnAsync().ConfigureAwait(false);
+                    SetStatus(
+                        ControlState.Degraded,
+                        $"Bootstrap prompt timed out after {_options.PromptTimeoutSeconds}s; the turn may still have run.");
+                }
                 catch (Exception exception)
                 {
                     SetSessionState(null);
@@ -822,6 +848,28 @@ public sealed class AcpControlHost : BackgroundService
                 }
             },
             CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Best-effort <c>session/cancel</c> for a turn this host stopped waiting on.
+    /// Bounded by <see cref="CancelDeadline"/> and independent of the host
+    /// lifetime token, because the reconcile runs exactly when the prompt's own
+    /// deadline has already expired. The result is intentionally not promoted
+    /// into status: a receipt is not proof the turn stopped.
+    /// </summary>
+    private async Task TryCancelAbandonedTurnAsync()
+    {
+        try
+        {
+            if (!await CancelAsync(CancellationToken.None).ConfigureAwait(false))
+            {
+                _logger.LogDebug("Abandoned bootstrap turn could not be cancelled; the session may be gone.");
+            }
+        }
+        catch (Exception exception) when (exception is AcpProtocolException or OperationCanceledException or IOException)
+        {
+            _logger.LogDebug("Cancellation of the abandoned bootstrap turn failed.");
+        }
     }
 
     private async Task MonitorAsync(CancellationToken cancellationToken)
