@@ -193,6 +193,45 @@ public sealed class TmuxRealIntegrationTests
         Assert.Equal(string.Empty, tmux.ShowOption(tmux.SessionId(neighbour)));
     }
 
+    /// <summary>
+    /// The wrapper launches tmux with <c>-f /dev/null</c> and drops inherited
+    /// <c>TMUX</c>/<c>TMUX_TMPDIR</c>, so a custom configuration in the client's
+    /// HOME must never be sourced into the private test server.
+    /// </summary>
+    [Fact]
+    public void WrapperNeverLoadsACustomTmuxConfiguration()
+    {
+        using var tmux = RealTmux.Create();
+        tmux.WriteHomeConfig("set -g @agentcontrol_fixture_config loaded\n");
+
+        tmux.Run("new-session", "-d", "-s", tmux.SessionName, "/bin/sleep", "300");
+
+        // Unset, tmux rejects the user option; a sourced config would print it.
+        Assert.NotEqual(0, tmux.ExitCodeOf("show-options", "-gv", "@agentcontrol_fixture_config"));
+    }
+
+    /// <summary>
+    /// A foreign session whose name embeds a newline and our exact name must not
+    /// synthesize a second <c>list-sessions</c> line that resolves as ours. Real
+    /// tmux escapes the newline, so exactly one session resolves.
+    /// </summary>
+    [Fact]
+    public async Task ForeignNewlineNameDoesNotSynthesizeAConfiguredSessionEntry()
+    {
+        using var tmux = RealTmux.Create();
+        tmux.Run("new-session", "-d", "-s", "evil\n$9 " + tmux.SessionName, "/bin/sleep", "300");
+
+        var clock = new Clock();
+        var launcher = tmux.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(tmux.Request, CancellationToken.None)).Started);
+        clock.Advance(5);
+        var adopted = await launcher.EnsureAsync(tmux.Request, CancellationToken.None);
+
+        Assert.Null(adopted.Error);
+        Assert.True(adopted.Started);
+        Assert.Equal(2, tmux.SessionNames().Length);
+    }
+
     private sealed class Clock : TimeProvider
     {
         private DateTimeOffset _now = DateTimeOffset.UnixEpoch;
@@ -212,6 +251,7 @@ public sealed class TmuxRealIntegrationTests
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "fake-opencode.sh");
 
         private readonly string _root;
+        private readonly string _home;
         private readonly string _wrapper;
         private readonly string _readyPath;
         private readonly FileSystemWatcher _watcher;
@@ -232,6 +272,7 @@ public sealed class TmuxRealIntegrationTests
             var home = Path.Combine(_root, "home");
             Directory.CreateDirectory(workspace);
             Directory.CreateDirectory(home);
+            _home = home;
 
             // Both executables are checked-in fixtures reached through a unique
             // per-test symlink. The executable inodes are shared and never
@@ -316,6 +357,10 @@ public sealed class TmuxRealIntegrationTests
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            // Isolation: the wrapper must ignore any host configuration, so run
+            // the client under this test's private HOME where a stray tmux.conf
+            // would otherwise be sourced.
+            startInfo.Environment["HOME"] = _home;
             foreach (var argument in arguments)
             {
                 startInfo.ArgumentList.Add(argument);
@@ -375,6 +420,9 @@ public sealed class TmuxRealIntegrationTests
 
         public string ShowOption(string sessionId) =>
             Run("show-options", "-qv", "-t", sessionId, "@agentcontrol_attach_pane").Trim();
+
+        /// <summary>Writes a user configuration file into this test's private HOME.</summary>
+        public void WriteHomeConfig(string content) => File.WriteAllText(Path.Combine(_home, ".tmux.conf"), content);
 
         public async Task<Dictionary<string, string>> ChildEnvironmentAsync()
         {

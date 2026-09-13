@@ -20,4 +20,7 @@ directory=${0%/*}
     read -r socket
 } < "$directory/tmux-wrapper.side"
 
-exec "$real_tmux" -S "$socket" "$@"
+# Isolation: never attach to a developer/CI server through an inherited tmux
+# environment, and never source the user's or host's tmux configuration.
+unset TMUX TMUX_TMPDIR
+exec "$real_tmux" -f /dev/null -S "$socket" "$@"

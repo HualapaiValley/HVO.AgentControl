@@ -333,7 +333,6 @@ public sealed class TmuxAttachLauncherTests
         foreach (var call in fake.Calls().Where(call => call.Args.Contains("-t")))
         {
             var value = call.Args[Array.IndexOf(call.Args, "-t") + 1];
-            Assert.DoesNotContain(call.Args[0], new[] { "set-option", "show-options" }.Where(_ => value.StartsWith('=')));
             if (call.Args[0] is "set-option" or "show-options" or "new-window")
             {
                 Assert.StartsWith("$0", value, StringComparison.Ordinal);
@@ -409,10 +408,73 @@ public sealed class TmuxAttachLauncherTests
         File.Delete(fake.StatePath);
         var before = fake.Calls().Length;
         Assert.False(await launcher.KillOwnedAsync("owner", CancellationToken.None));
-        Assert.False(launcher.IsOwned);
+        // A failed listing cannot distinguish a stopped server from an access
+        // error; retain ownership but never act on the old session ID.
+        Assert.True(launcher.IsOwned);
         Assert.Equal("list-sessions", fake.Calls()[before].Args[0]);
         Assert.DoesNotContain(fake.Calls(), call => call.Args[0] == "kill-session");
     }
+
+    /// <summary>
+    /// A launcher that never owned a session (disabled or never launched) must
+    /// not spawn tmux at all when asked to kill.
+    /// </summary>
+    [Fact]
+    public async Task NeverOwnedKillSpawnsNoTmuxCommands()
+    {
+        using var fake = new FakeTmux();
+        var launcher = fake.Launcher();
+        Assert.False(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        Assert.False(launcher.IsOwned);
+        Assert.Empty(fake.Calls());
+    }
+
+    /// <summary>
+    /// A transient session-id lookup failure is not loss of ownership: the first
+    /// kill must leave ownership intact and a later retry must still kill.
+    /// </summary>
+    [Fact]
+    public async Task TransientResolutionFailureRetainsOwnershipForRetry()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+
+        fake.Fail("list-sessions");
+        Assert.False(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        Assert.True(launcher.IsOwned);
+        Assert.DoesNotContain(fake.Calls(), call => call.Args[0] == "kill-session");
+
+        fake.Fail(null);
+        Assert.True(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        Assert.False(launcher.IsOwned);
+        Assert.Single(fake.Calls(), call => call.Args[0] == "kill-session");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("has space")]
+    [InlineData("has:colon")]
+    [InlineData("has.dot")]
+    [InlineData("line\nbreak")]
+    [InlineData("tab\tchar")]
+    [InlineData("/slash")]
+    public void ConstructorRejectsUnsafeSessionNames(string sessionName) =>
+        Assert.Throws<ArgumentException>(() => new TmuxAttachLauncher(sessionName));
+
+    [Fact]
+    public void ConstructorRejectsOverlongSessionName() =>
+        Assert.Throws<ArgumentException>(
+            () => new TmuxAttachLauncher(new string('a', HVO.AgentControl.Terminal.TerminalProtocol.MaxSessionNameLength + 1)));
+
+    [Theory]
+    [InlineData("agentcontrol")]
+    [InlineData("a")]
+    [InlineData("A-1_")]
+    public void ConstructorAcceptsValidSessionNames(string sessionName) =>
+        Assert.False(new TmuxAttachLauncher(sessionName).IsOwned);
 
     [Fact]
     public async Task DisabledTerminalNeverLaunchesOrProbes()
