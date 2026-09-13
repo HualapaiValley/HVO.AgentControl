@@ -29,8 +29,9 @@ than a machine-wide latest.
 | OpenCode | `1.18.30` | [`Dockerfile`](../Dockerfile) (`OPENCODE_VERSION`) |
 | Runtime `python3` / `tmux` | provided by the runtime base image (no separate pin); verified `Python 3.12.3` and `tmux 3.4` in the local CI image | [`Dockerfile`](../Dockerfile) |
 
-`tmux` and OpenCode are runtime/container dependencies. They are not required
-on the host for the standard .NET and browser workflow.
+OpenCode is a runtime/container dependency and is not required on the host for
+standard tests. The .NET suite requires `tmux` for isolated real-command tests
+(private sockets, no user sessions or inference); CI installs it explicitly.
 
 Phase 1 retains Node 22 across Docker and CI: it is Maintenance LTS through
 2027-04-30. The Node 26 major update proposed in Dependabot #209 is not part
@@ -50,6 +51,7 @@ Prerequisites for host-side development:
 - .NET SDK `10.0.401` (the `global.json` pin refuses other SDKs)
 - Node.js 22 for the browser checks
 - Python 3.12 for the PTY-bridge contract test
+- tmux (validated with 3.4) for isolated command integration tests
 - Docker Engine with Compose v2 for container work
 - Git
 

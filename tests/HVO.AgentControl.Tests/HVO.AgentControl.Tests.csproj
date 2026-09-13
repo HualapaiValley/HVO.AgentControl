@@ -5,6 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <None Update="Fixtures/fake_acp.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures/tmux-wrapper.sh" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures/fake-opencode.sh" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HVO.AgentControl.Terminal;
 
 namespace HVO.AgentControl.Runtime;
 
@@ -34,11 +35,25 @@ public sealed class TmuxAttachLauncher
     private TmuxAttachResult _lastResult = new(false, false, null);
     private TmuxAttachRequest? _lastRequest;
     private string? _paneId;
+    // The immutable tmux session id ("$N") resolved for the option commands
+    // (set-option/show-options), which reject the '=' exact-name target. It is
+    // never persisted across attempts: ids restart at $0 when a tmux server
+    // restarts, so a cached id could alias a different session. Every command
+    // that supports '=' addresses the exact name instead of this id.
+    private string? _sessionTarget;
     private (string PaneId, TmuxAttachRequest Request)? _pendingPane;
 
     public TmuxAttachLauncher(string sessionName, string tmuxExecutable = "tmux", TimeProvider? timeProvider = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionName);
+        // Reuse the shared terminal target rule so an accepted session name can
+        // never be reinterpreted by tmux as an option, a target qualifier, or a
+        // target with a different name (whitespace, ':', '.' or a newline).
+        if (!TerminalProtocol.IsValidSessionName(sessionName))
+        {
+            throw new ArgumentException(
+                $"The tmux session name must be 1-{TerminalProtocol.MaxSessionNameLength} characters using only letters, digits, '_' or '-'.",
+                nameof(sessionName));
+        }
         ArgumentException.ThrowIfNullOrWhiteSpace(tmuxExecutable);
         _sessionName = sessionName;
         _tmuxExecutable = tmuxExecutable;
@@ -76,7 +91,8 @@ public sealed class TmuxAttachLauncher
             ["OPENCODE_SERVER_PASSWORD"] = request.Password,
         });
 
-        // '=' prevents tmux's prefix matching from selecting an unrelated session.
+        // '=' disables tmux's prefix matching for has-session, so a session whose
+        // name merely starts with ours can never satisfy this probe.
         var exists = await RunAsync(["has-session", "-t", "=" + _sessionName], cancellationToken).ConfigureAwait(false);
         if (exists.ExitCode is not (0 or 1))
         {
@@ -87,6 +103,19 @@ public sealed class TmuxAttachLauncher
 
         if (exists.ExitCode == 0)
         {
+            // Real tmux accepts '=' only for commands that parse a session target
+            // through the fuzzy matcher. set-option/show-options treat it as part
+            // of the literal name ("no such session: =agentcontrol") or silently
+            // return nothing, so only those option commands address the immutable
+            // session id resolved by an exact name lookup. Every other command
+            // keeps the exact-name target, so a restart that reuses a numeric id
+            // can never redirect a write to an unrelated session.
+            _sessionTarget = (await ResolveSessionAsync(cancellationToken).ConfigureAwait(false)).Target;
+            if (_sessionTarget is null)
+            {
+                return Complete(false, "tmux session id resolution failed.");
+            }
+
             _owned = await MatchesOwnerAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false);
             if (!_owned)
             {
@@ -106,7 +135,7 @@ public sealed class TmuxAttachLauncher
                 return await FinishPendingPaneAsync(request, cancellationToken).ConfigureAwait(false);
             }
 
-            var identity = await RunAsync(["show-options", "-qv", "-t", "=" + _sessionName, PaneOption], cancellationToken).ConfigureAwait(false);
+            var identity = await RunAsync(["show-options", "-qv", "-t", _sessionTarget, PaneOption], cancellationToken).ConfigureAwait(false);
             if (identity.ExitCode != 0)
             {
                 return Complete(false, "tmux attach-pane identity check failed.");
@@ -142,6 +171,7 @@ public sealed class TmuxAttachLauncher
             _owned = false;
             _paneId = null;
             _pendingPane = null;
+            _sessionTarget = null;
         }
 
         // An existing tmux server has its own (possibly credential-bearing) global
@@ -149,17 +179,27 @@ public sealed class TmuxAttachLauncher
         var arguments = exists.ExitCode == 0
             ? new List<string> { "new-window", "-d", "-t", "=" + _sessionName + ":" }
             : new List<string> { "new-session", "-d", "-s", _sessionName, "-e", $"{OwnerEnvironmentVariable}={request.OwnerToken}" };
-        arguments.AddRange(["-P", "-F", "#{pane_id}", "-c", request.Workspace, "/usr/bin/env", "-i"]);
+        // Report the owning session id with the pane id so creation never has to
+        // re-resolve the name, and a new session's id is known before any
+        // option/selection command targets it.
+        arguments.AddRange(["-P", "-F", "#{session_id} #{pane_id}", "-c", request.Workspace, "/usr/bin/env", "-i"]);
         arguments.AddRange(_environment.Select(pair => $"{pair.Key}={pair.Value}"));
         arguments.Add("TERM=tmux-256color");
         arguments.AddRange([request.OpenCodeExecutable, "attach", request.NativeUrl, "--dir", request.Workspace, "--session", request.SessionId]);
         var start = await RunAsync(arguments, cancellationToken).ConfigureAwait(false);
-        if (start.ExitCode != 0 || !IsPaneId(start.StandardOutput.Trim()))
+        var created = start.StandardOutput.Trim().Split(' ');
+        if (start.ExitCode != 0 || created.Length != 2 || !IsSessionId(created[0]) || !IsPaneId(created[1]))
         {
             return Complete(false, "tmux attach-pane creation failed.");
         }
+        // A window created in the wrong session must never be adopted or selected.
+        if (_sessionTarget is not null && !string.Equals(created[0], _sessionTarget, StringComparison.Ordinal))
+        {
+            return Complete(false, "tmux attach-pane creation targeted an unexpected session.");
+        }
 
-        _paneId = start.StandardOutput.Trim();
+        _sessionTarget = created[0];
+        _paneId = created[1];
         _pendingPane = (_paneId, request);
         _owned = await MatchesOwnerAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false);
         if (!_owned)
@@ -175,7 +215,7 @@ public sealed class TmuxAttachLauncher
         {
             return Complete(false, "tmux pending attach pane is not live; operator recovery required.");
         }
-        var saved = await RunAsync(["set-option", "-t", "=" + _sessionName, PaneOption, request.OwnerToken + ":" + _paneId], cancellationToken).ConfigureAwait(false);
+        var saved = await RunAsync(["set-option", "-t", _sessionTarget!, PaneOption, request.OwnerToken + ":" + _paneId], cancellationToken).ConfigureAwait(false);
         if (saved.ExitCode != 0)
         {
             return Complete(false, "tmux attach-pane identity persistence failed.");
@@ -213,6 +253,55 @@ public sealed class TmuxAttachLauncher
 
     private static bool IsPaneId(string value) => value.Length > 1 && value[0] == '%' && value.AsSpan(1).IndexOfAnyExceptInRange('0', '9') < 0;
 
+    private static bool IsSessionId(string value) => value.Length > 1 && value[0] == '$' && value.AsSpan(1).IndexOfAnyExceptInRange('0', '9') < 0;
+
+    /// <summary>
+    /// Resolves the immutable session id for the exact configured session name.
+    /// Names are compared in full, so a session whose name merely shares our
+    /// prefix is never selected. Returns a null target when the lookup is
+    /// inconclusive or the name is absent; callers must fail closed.
+    /// </summary>
+    private async Task<SessionLookup> ResolveSessionAsync(CancellationToken cancellationToken)
+    {
+        var sessions = await RunAsync(
+            ["list-sessions", "-F", "#{session_id} #{session_name}"], cancellationToken).ConfigureAwait(false);
+        if (sessions.ExitCode != 0)
+        {
+            // Exit code 1 also covers connection/permission errors. Only a
+            // successful listing can establish that the exact name is absent.
+            return new(null, Inconclusive: true);
+        }
+
+        string? resolved = null;
+        // tmux escapes non-printable characters (for example a newline in a
+        // foreign session name) in -F output, so a foreign name cannot synthesize
+        // an extra line that aliases the configured name. Only the line
+        // terminator is removed; the name suffix is compared verbatim.
+        foreach (var raw in sessions.StandardOutput.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            if (line.Length == 0)
+            {
+                continue;
+            }
+            var separator = line.IndexOf(' ', StringComparison.Ordinal);
+            if (separator < 0 || !string.Equals(line[(separator + 1)..], _sessionName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            var id = line[..separator];
+            if (!IsSessionId(id) || resolved is not null)
+            {
+                // Malformed output or an impossible duplicate name is ambiguous:
+                // never guess which session to operate on.
+                return new(null, Inconclusive: true);
+            }
+            resolved = id;
+        }
+
+        return new(resolved, Inconclusive: false);
+    }
+
     private TmuxAttachResult Complete(bool started, string? error)
     {
         _lastResult = new(started, _owned, error);
@@ -223,6 +312,8 @@ public sealed class TmuxAttachLauncher
 
     private async Task<bool> MatchesOwnerAsync(string ownerToken, CancellationToken cancellationToken)
     {
+        // show-environment parses its target through tmux's fuzzy matcher, so
+        // '=name' selects only the exact session and never a prefix overlap.
         var environment = await RunAsync(
             ["show-environment", "-t", "=" + _sessionName, OwnerEnvironmentVariable], cancellationToken).ConfigureAwait(false);
         return environment.ExitCode == 0
@@ -233,9 +324,36 @@ public sealed class TmuxAttachLauncher
     {
         _lastRequest = null;
         _lastResult = new(false, false, null);
+        // A disabled or never-owned launcher has no tmux session of ours to
+        // remove; do not spawn tmux just to discover that.
+        if (!_owned)
+        {
+            return false;
+        }
+        // Session ids are only unique within one tmux server, so a target
+        // resolved by an earlier attempt may name a different session after a
+        // server restart. Re-resolve the exact name before the owner recheck.
+        var lookup = await ResolveSessionAsync(cancellationToken).ConfigureAwait(false);
+        var target = lookup.Target;
+        _sessionTarget = target;
+        if (target is null)
+        {
+            if (lookup.Inconclusive)
+            {
+                // A transient lookup failure is not loss of ownership; keep it so
+                // a later shutdown attempt can retry the recheck and cleanup.
+                return false;
+            }
+            // The exact name is conclusively gone; drop stale ownership.
+            _owned = false;
+            _paneId = null;
+            _pendingPane = null;
+            return false;
+        }
         // Explicit shutdown retains the owner-matched whole-session policy;
-        // recovery deliberately never invokes this operation.
-        if (!_owned || !await MatchesOwnerAsync(ownerToken, cancellationToken).ConfigureAwait(false))
+        // recovery deliberately never invokes this operation. Kill by exact name
+        // so a server restart cannot redirect the kill to a reused numeric id.
+        if (!await MatchesOwnerAsync(ownerToken, cancellationToken).ConfigureAwait(false))
         {
             _owned = false;
             return false;
@@ -301,4 +419,11 @@ public sealed class TmuxAttachLauncher
 
     public sealed record TmuxAttachResult(bool Started, bool Owned, string? Error);
     private readonly record struct ProcessResult(int ExitCode, string StandardOutput);
+
+    /// <summary>
+    /// Outcome of resolving the configured name to a session id.
+    /// <see cref="Inconclusive"/> distinguishes a transient lookup failure from a
+    /// conclusive absence so shutdown can retain ownership and retry.
+    /// </summary>
+    private readonly record struct SessionLookup(string? Target, bool Inconclusive);
 }

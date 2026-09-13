@@ -32,7 +32,18 @@ public sealed class TmuxAttachLauncherTests
             Assert.DoesNotContain(call.Env.Keys, key => key.StartsWith("GH_", StringComparison.OrdinalIgnoreCase) || key.StartsWith("Control__", StringComparison.OrdinalIgnoreCase));
             if (call.Args.Contains("-t"))
             {
-                Assert.Contains(call.Args[Array.IndexOf(call.Args, "-t") + 1], new[] { "=test", "=test:", "%1" });
+                // Only set-option/show-options need the immutable session id; every
+                // command that parses a session target keeps the exact-name '=' syntax.
+                var value = call.Args[Array.IndexOf(call.Args, "-t") + 1];
+                Assert.Contains(value, new[] { "=test", "=test:", "$0", "%1" });
+                if (call.Args[0] is "set-option" or "show-options")
+                {
+                    Assert.StartsWith("$", value, StringComparison.Ordinal);
+                }
+                if (call.Args[0] == "new-window")
+                {
+                    Assert.Equal("=test:", value);
+                }
             }
         }
     }
@@ -84,11 +95,12 @@ public sealed class TmuxAttachLauncherTests
     }
 
     [Theory]
-    [InlineData("foreign", 2)]
+    [InlineData("foreign", 3)]
     [InlineData("has-session", 1)]
-    [InlineData("show-environment", 2)]
-    [InlineData("show-options", 3)]
-    [InlineData("list-panes", 4)]
+    [InlineData("list-sessions", 2)]
+    [InlineData("show-environment", 3)]
+    [InlineData("show-options", 4)]
+    [InlineData("list-panes", 5)]
     public async Task AllFailedProbesBackOffAndNeverClobber(string failure, int commandsPerAttempt)
     {
         using var fake = new FakeTmux();
@@ -168,9 +180,9 @@ public sealed class TmuxAttachLauncherTests
             Assert.Equal(before, fake.Calls().Length);
             clock.Advance(1);
             Assert.Equal(result, await launcher.EnsureAsync(fake.Request, CancellationToken.None));
-            Assert.Equal(before + 3, fake.Calls().Length);
+            Assert.Equal(before + 4, fake.Calls().Length);
         }
-        Assert.All(fake.Calls(), call => Assert.Contains(call.Args[0], new[] { "has-session", "show-environment", "show-options" }));
+        Assert.All(fake.Calls(), call => Assert.Contains(call.Args[0], new[] { "has-session", "list-sessions", "show-environment", "show-options" }));
     }
 
     [Fact]
@@ -298,9 +310,233 @@ public sealed class TmuxAttachLauncherTests
         if (foreignAtShutdown) fake.State("foreign", false);
         var before = fake.Calls().Length;
         Assert.Equal(!foreignAtShutdown, await launcher.KillOwnedAsync("owner", CancellationToken.None));
-        Assert.Equal("show-environment", fake.Calls()[before].Args[0]);
+        // Shutdown re-resolves the exact name only to decide whether it still
+        // exists, then rechecks the owner before killing by exact name.
+        Assert.Equal("list-sessions", fake.Calls()[before].Args[0]);
+        Assert.Equal("show-environment", fake.Calls()[before + 1].Args[0]);
         Assert.Equal(foreignAtShutdown ? 0 : 1, fake.Calls().Count(call => call.Args[0] == "kill-session"));
+        if (!foreignAtShutdown)
+        {
+            var kill = Assert.Single(fake.Calls(), call => call.Args[0] == "kill-session");
+            Assert.Equal("=test", kill.Args[Array.IndexOf(kill.Args, "-t") + 1]);
+        }
     }
+
+    /// <summary>
+    /// Regression for #238 and the #239 follow-up: real tmux 3.4 rejects '=name'
+    /// for set-option ("no such session: =agentcontrol") and returns silent
+    /// success for show-options -qv, so those two option commands must address
+    /// the immutable session id. Commands that do route their target through the
+    /// fuzzy matcher keep '=name', so a restarted server reusing the old numeric
+    /// id can never redirect a write to an unrelated session.
+    /// </summary>
+    [Fact]
+    public async Task OptionCommandsUseResolvedSessionIdWhileTargetCommandsKeepExactName()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        fake.State("owner", true);
+        clock.Advance(5);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        Assert.True(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+
+        foreach (var call in fake.Calls().Where(call => call.Args.Contains("-t")))
+        {
+            var value = call.Args[Array.IndexOf(call.Args, "-t") + 1];
+            if (call.Args[0] is "set-option" or "show-options")
+            {
+                Assert.StartsWith("$0", value, StringComparison.Ordinal);
+            }
+            if (call.Args[0] is "new-window" or "show-environment" or "list-panes" or "kill-session")
+            {
+                Assert.Equal("=test", value.TrimEnd(':'));
+            }
+        }
+        Assert.Contains(fake.Calls(), call => call.Args.SequenceEqual(new[] { "list-sessions", "-F", "#{session_id} #{session_name}" }));
+        Assert.Contains(fake.Calls(), call => call.Args[0] == "new-window" && call.Args[Array.IndexOf(call.Args, "-t") + 1] == "=test:");
+        Assert.Contains(fake.Calls(), call => call.Args[0] == "set-option" && call.Args[2] == "$0");
+    }
+
+    /// <summary>
+    /// #239 cycle-2 regression: a tmux server restart between the recovery owner
+    /// recheck and <c>new-window</c> can make the previously resolved numeric id
+    /// (<c>$0</c>) name a different, unrelated session. Addressing the exact name
+    /// means the creation fails instead of modifying that foreign session. This
+    /// does not claim to remove every check-to-use race: it only ensures the
+    /// launcher never writes through a stale numeric alias.
+    /// </summary>
+    [Fact]
+    public async Task ServerRestartBetweenOwnerRecheckAndCreationNeverWritesToAForeignNumericAlias()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        // Owned session with a dead attach pane forces the recovery creation path.
+        fake.State("owner", true);
+        fake.ArmServerRestartAfterOwnerRecheck("foreign");
+        clock.Advance(5);
+        var before = fake.Calls().Length;
+
+        var result = await launcher.EnsureAsync(fake.Request, CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Contains("creation failed", result.Error);
+        // Creation addressed the exact name, never the stale numeric alias.
+        var created = Assert.Single(fake.Calls().Skip(before), call => call.Args[0] == "new-window");
+        Assert.Equal("=test:", created.Args[Array.IndexOf(created.Args, "-t") + 1]);
+        // The replacement server's unrelated $0 session was never touched: no
+        // window or pane was added, selected, renamed or marked.
+        using var state = JsonDocument.Parse(File.ReadAllText(fake.StatePath));
+        Assert.Equal("foreign", state.RootElement.GetProperty("name").GetString());
+        var panes = state.RootElement.GetProperty("panes");
+        var pane = Assert.Single(panes.EnumerateObject());
+        Assert.Equal("%50", pane.Name);
+        Assert.Equal(0, pane.Value.GetInt32());
+        Assert.False(state.RootElement.TryGetProperty("selectedWindow", out _));
+        Assert.False(state.RootElement.TryGetProperty("selectedPane", out _));
+        Assert.Equal("foreign:%50", state.RootElement.GetProperty("identity").GetString());
+        Assert.DoesNotContain(fake.Calls().Skip(before), call =>
+            call.Args[0] is "set-option" or "select-window" or "select-pane" or "kill-session");
+    }
+
+    /// <summary>
+    /// A session whose name merely shares our prefix must never be resolved,
+    /// probed, marked, or killed, in either direction of the overlap.
+    /// </summary>
+    [Theory]
+    [InlineData("testing")]
+    [InlineData("test-other")]
+    public async Task PrefixOverlappingSessionsAreNeverResolvedOrTouched(string overlapping)
+    {
+        using var fake = new FakeTmux();
+        fake.AddOverlappingSession(overlapping);
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        clock.Advance(5);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        Assert.True(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+
+        // Our own session was created and removed; the foreign one is untouched.
+        using var others = JsonDocument.Parse(File.ReadAllText(fake.OthersPath));
+        var foreign = Assert.Single(others.RootElement.EnumerateArray());
+        Assert.Equal(overlapping, foreign.GetProperty("name").GetString());
+        Assert.Equal("foreign:%77", foreign.GetProperty("identity").GetString());
+        Assert.False(File.Exists(fake.StatePath));
+        Assert.All(fake.Calls().Where(call => call.Args.Contains("-t")), call =>
+        {
+            var value = call.Args[Array.IndexOf(call.Args, "-t") + 1];
+            Assert.DoesNotContain("$7", value);
+            Assert.DoesNotContain("%77", value);
+        });
+    }
+
+    /// <summary>
+    /// When the exact session name cannot be resolved to exactly one id the
+    /// launcher fails closed instead of guessing a target.
+    /// </summary>
+    [Fact]
+    public async Task UnresolvableSessionIdFailsClosedWithoutCreatingOrSelecting()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        var before = fake.Calls().Length;
+        fake.Fail("list-sessions");
+        clock.Advance(5);
+        var result = await launcher.EnsureAsync(fake.Request, CancellationToken.None);
+        Assert.False(result.Started);
+        Assert.Equal("tmux session id resolution failed.", result.Error);
+        // Ownership is retained for a shutdown recheck; nothing was created.
+        Assert.True(launcher.IsOwned);
+        Assert.DoesNotContain(fake.Calls().Skip(before), call =>
+            call.Args[0] is "new-window" or "new-session" or "set-option" or "select-window" or "select-pane" or "kill-session");
+    }
+
+    /// <summary>
+    /// A kill after a tmux server restart must never reuse a stale numeric id:
+    /// when the exact name can no longer be resolved, the launcher refuses.
+    /// </summary>
+    [Fact]
+    public async Task KillNeverReusesAStaleIdWhenTheExactNameIsGone()
+    {
+        using var fake = new FakeTmux();
+        var launcher = fake.Launcher();
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        File.Delete(fake.StatePath);
+        var before = fake.Calls().Length;
+        Assert.False(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        // A failed listing cannot distinguish a stopped server from an access
+        // error; retain ownership but never act on the old session ID.
+        Assert.True(launcher.IsOwned);
+        Assert.Equal("list-sessions", fake.Calls()[before].Args[0]);
+        Assert.DoesNotContain(fake.Calls(), call => call.Args[0] == "kill-session");
+    }
+
+    /// <summary>
+    /// A launcher that never owned a session (disabled or never launched) must
+    /// not spawn tmux at all when asked to kill.
+    /// </summary>
+    [Fact]
+    public async Task NeverOwnedKillSpawnsNoTmuxCommands()
+    {
+        using var fake = new FakeTmux();
+        var launcher = fake.Launcher();
+        Assert.False(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        Assert.False(launcher.IsOwned);
+        Assert.Empty(fake.Calls());
+    }
+
+    /// <summary>
+    /// A transient session-id lookup failure is not loss of ownership: the first
+    /// kill must leave ownership intact and a later retry must still kill.
+    /// </summary>
+    [Fact]
+    public async Task TransientResolutionFailureRetainsOwnershipForRetry()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+
+        fake.Fail("list-sessions");
+        Assert.False(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        Assert.True(launcher.IsOwned);
+        Assert.DoesNotContain(fake.Calls(), call => call.Args[0] == "kill-session");
+
+        fake.Fail(null);
+        Assert.True(await launcher.KillOwnedAsync("owner", CancellationToken.None));
+        Assert.False(launcher.IsOwned);
+        Assert.Single(fake.Calls(), call => call.Args[0] == "kill-session");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("has space")]
+    [InlineData("has:colon")]
+    [InlineData("has.dot")]
+    [InlineData("line\nbreak")]
+    [InlineData("tab\tchar")]
+    [InlineData("/slash")]
+    public void ConstructorRejectsUnsafeSessionNames(string sessionName) =>
+        Assert.Throws<ArgumentException>(() => new TmuxAttachLauncher(sessionName));
+
+    [Fact]
+    public void ConstructorRejectsOverlongSessionName() =>
+        Assert.Throws<ArgumentException>(
+            () => new TmuxAttachLauncher(new string('a', HVO.AgentControl.Terminal.TerminalProtocol.MaxSessionNameLength + 1)));
+
+    [Theory]
+    [InlineData("agentcontrol")]
+    [InlineData("a")]
+    [InlineData("A-1_")]
+    public void ConstructorAcceptsValidSessionNames(string sessionName) =>
+        Assert.False(new TmuxAttachLauncher(sessionName).IsOwned);
 
     [Fact]
     public async Task DisabledTerminalNeverLaunchesOrProbes()
@@ -432,55 +668,131 @@ public sealed class TmuxAttachLauncherTests
     {
         private readonly string _directory = Directory.CreateTempSubdirectory("tmux-fake-").FullName;
         private readonly string _executable;
+        public string OthersPath => Path.Combine(_directory, "others.json");
         public string StatePath => Path.Combine(_directory, "state.json");
         public TmuxAttachRequest Request { get; }
 
         public FakeTmux()
         {
             _executable = Path.Combine(_directory, "fake tmux");
+            // This fake reproduces the real tmux 3.4 target grammar that issue #238
+            // exposed, verified against tmux 3.4 on a private socket:
+            //   * '=' exact-match syntax is honoured only by commands that resolve a
+            //     session through the fuzzy target parser (has-session,
+            //     show-environment, list-panes, kill-session, new-window).
+            //   * set-option treats '=' as part of a literal name and fails with
+            //     "no such session: =name".
+            //   * show-options -qv treats it the same way but stays SILENT with exit
+            //     code 0, which is why the original defect never surfaced in tests.
+            // Session ids ("$N") always resolve exactly for every command.
             File.WriteAllText(_executable, "#!/usr/bin/python3\n" + "ROOT = " + JsonSerializer.Serialize(_directory) + "\n" + """
                 import json, os, sys
                 args = sys.argv[1:]
                 with open(os.path.join(ROOT, 'calls.jsonl'), 'a') as log:
                     log.write(json.dumps({'Args': args, 'Env': dict(os.environ)}) + '\n')
                 path = os.path.join(ROOT, 'state.json')
+                others_path = os.path.join(ROOT, 'others.json')
+                arm_path = os.path.join(ROOT, 'arm')
+                arm_seen_path = os.path.join(ROOT, 'arm-seen')
                 state = json.load(open(path)) if os.path.exists(path) else None
+                others = json.load(open(others_path)) if os.path.exists(others_path) else []
                 command = args[0]
                 failure = os.path.join(ROOT, 'failure')
                 if os.path.exists(failure) and open(failure).read() == command: sys.exit(2)
+
+                def save():
+                    if state is not None: json.dump(state, open(path, 'w'))
+                    json.dump(others, open(others_path, 'w'))
+
+                def sessions():
+                    return ([state] if state is not None else []) + others
+
+                def target(flag='-t'):
+                    return args[args.index(flag) + 1] if flag in args else None
+
+                def resolve(value, exact_ok):
+                    # Strip the trailing window component of a 'session:' target.
+                    value = value[:-1] if value.endswith(':') else value
+                    if value.startswith('$'):
+                        found = [s for s in sessions() if s['id'] == value]
+                        return found[0] if found else None
+                    if value.startswith('='):
+                        if not exact_ok: return None  # '=' is a literal name character here.
+                        found = [s for s in sessions() if s['name'] == value[1:]]
+                        return found[0] if found else None
+                    found = [s for s in sessions() if s['name'] == value]
+                    if found: return found[0]
+                    found = [s for s in sessions() if s['name'].startswith(value)]
+                    return found[0] if len(found) == 1 else None
+
                 if command == 'has-session':
-                    sys.exit(0 if state else 1)
+                    sys.exit(0 if resolve(target(), True) else 1)
+                elif command == 'list-sessions':
+                    if not sessions(): sys.exit(1)
+                    assert args[args.index('-F') + 1] == '#{session_id} #{session_name}'
+                    for s in sessions(): print(s['id'] + ' ' + s['name'])
                 elif command == 'show-environment':
-                    if not state: sys.exit(1)
-                    print('AGENTCONTROL_OWNER=' + state['owner'])
+                    s = resolve(target(), True)
+                    if not s: sys.exit(1)
+                    print('AGENTCONTROL_OWNER=' + s['owner'])
+                    # Deterministic server restart: once list-panes has passed
+                    # (the last probe before the recovery owner recheck), replace
+                    # this server after the recheck succeeds with an unrelated
+                    # session that reuses id $0 under a different name.
+                    if os.path.exists(arm_seen_path):
+                        os.remove(arm_seen_path)
+                        state = {'id': '$0', 'name': open(arm_path).read().strip(), 'owner': 'foreign', 'panes': {'%50': 0}, 'identity': 'foreign:%50'}
+                        save()
                 elif command == 'show-options':
-                    print(state.get('identity', ''))
+                    s = resolve(target(), False)
+                    if s is None: sys.exit(0)  # -qv: silent and successful.
+                    print(s.get('identity', ''))
                 elif command == 'set-option':
-                    state['identity'] = args[-1]
-                    json.dump(state, open(path, 'w'))
+                    s = resolve(target(), False)
+                    if s is None:
+                        sys.stderr.write('no such session: ' + str(target()) + '\n')
+                        sys.exit(1)
+                    s['identity'] = args[-1]
+                    save()
                 elif command in ('select-window', 'select-pane'):
-                    if args[-1] not in state['panes']: sys.exit(1)
-                    state['selectedWindow' if command == 'select-window' else 'selectedPane'] = args[-1]
-                    json.dump(state, open(path, 'w'))
+                    owner = [s for s in sessions() if args[-1] in s['panes']]
+                    if not owner: sys.exit(1)
+                    owner[0]['selectedWindow' if command == 'select-window' else 'selectedPane'] = args[-1]
+                    save()
                 elif command == 'list-panes':
-                    if not state: sys.exit(1)
-                    for pane, dead in state['panes'].items(): print(pane + ' ' + str(dead))
+                    s = resolve(target(), True)
+                    if not s: sys.exit(1)
+                    for pane, dead in s['panes'].items(): print(pane + ' ' + str(dead))
+                    if os.path.exists(arm_path):
+                        open(arm_seen_path, 'w').write('1')
                 elif command in ('new-session', 'new-window'):
-                    assert args[args.index('-F') + 1] == '#{pane_id}' and '-P' in args
+                    assert args[args.index('-F') + 1] == '#{session_id} #{pane_id}' and '-P' in args
                     if command == 'new-session':
-                        if state: sys.exit(1)
+                        name = args[args.index('-s') + 1]
+                        if any(s['name'] == name for s in sessions()): sys.exit(1)
+                        used = {s['id'] for s in sessions()}
+                        ident = next('$' + str(n) for n in range(100) if '$' + str(n) not in used)
                         owner = args[args.index('-e') + 1].split('=', 1)[1]
-                        state = {'owner': owner, 'panes': {}, 'identity': ''}
+                        state = {'id': ident, 'name': name, 'owner': owner, 'panes': {}, 'identity': ''}
+                        s = state
                         pane = '%1'
                     else:
-                        assert args[args.index('-t') + 1] == '=test:'
-                        pane = '%' + str(state.get('nextPane', 2))
-                        state['nextPane'] = int(pane[1:]) + 1
-                    state['panes'][pane] = 0
-                    json.dump(state, open(path, 'w'))
-                    print(pane)
+                        s = resolve(target(), True)
+                        if not s: sys.exit(1)
+                        pane = '%' + str(s.get('nextPane', 2))
+                        s['nextPane'] = int(pane[1:]) + 1
+                    s['panes'][pane] = 0
+                    save()
+                    print(s['id'] + ' ' + pane)
                 elif command == 'kill-session':
-                    os.remove(path)
+                    s = resolve(target(), True)
+                    if not s: sys.exit(1)
+                    if state is not None and s is state:
+                        state = None
+                        os.remove(path)
+                    else:
+                        others.remove(s)
+                    save()
                 else:
                     sys.exit(2)
                 """);
@@ -496,8 +808,33 @@ public sealed class TmuxAttachLauncherTests
         {
             var panes = new Dictionary<string, int> { ["%99"] = 0 };
             if (target != "missing") panes["%1"] = dead ? 1 : 0;
-            File.WriteAllText(StatePath, JsonSerializer.Serialize(new { owner, panes, identity = target == "unknown" ? "" : owner + ":%1" }));
+            File.WriteAllText(StatePath, JsonSerializer.Serialize(new
+            {
+                id = "$0",
+                name = "test",
+                owner,
+                panes,
+                identity = target == "unknown" ? "" : owner + ":%1",
+            }));
         }
+
+        /// <summary>
+        /// Arms a deterministic server restart for
+        /// <see cref="ServerRestartBetweenOwnerRecheckAndCreationNeverWritesToAForeignNumericAlias"/>:
+        /// after the next <c>list-panes</c> and the owner recheck that follows it,
+        /// the current server is replaced by an unrelated session reusing id
+        /// <c>$0</c> under <paramref name="name"/>.
+        /// </summary>
+        public void ArmServerRestartAfterOwnerRecheck(string name) =>
+            File.WriteAllText(Path.Combine(_directory, "arm"), name);
+
+        /// <summary>Adds an unowned session whose name merely shares our prefix.</summary>
+        public void AddOverlappingSession(string name) => File.WriteAllText(
+            OthersPath,
+            JsonSerializer.Serialize(new[]
+            {
+                new { id = "$7", name, owner = "foreign", panes = new Dictionary<string, int> { ["%77"] = 0 }, identity = "foreign:%77" },
+            }));
         public void Fail(string? command) => File.WriteAllText(Path.Combine(_directory, "failure"), command ?? "");
         public Call[] Calls()
         {
