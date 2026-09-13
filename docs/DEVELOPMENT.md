@@ -270,6 +270,59 @@ automatic restart signal; `/health/live` is the process liveness probe.
 No existing runtime data schema (for example `/data/runtime.json`) changes as
 part of the API framework work.
 
+## Execution workflow
+
+A **development batch** is the dependency-ordered set of issues being delivered
+under an owner request. A **review cycle** is one independent reviewer pair on
+one PR's exact base/head. An authorized fourth review cycle is not a new batch
+or permission to carry deferred work indefinitely. Deferred issues enter the
+next development batch and must be assessed in that batch's relevant PR reviews.
+
+1. Establish the starting point: inspect worktree changes, target/base SHA,
+   issue prerequisites, open deferrals, recorded authorization and applicable CI.
+   Verify the pinned toolchain before implementation. If a required SDK/tool is
+   missing, use an explicitly provisioned isolated toolchain or the pinned CI
+   environment; never silently substitute a version. Distinguish local checks
+   from CI evidence and state which were not run.
+2. Translate the issue into a small acceptance checklist and focused regression
+   tests. Keep one implementation issue per PR. Prefer a bounded vertical slice
+   over a speculative framework. Contracts specify decisions, interfaces and
+   safety/failure boundaries; add implementation detail only where necessary for
+   feasibility or safe execution. If scope must split or expand, update linked
+   issues/dependencies before doing the extra work and obtain approval where it
+   exceeds the owner's request.
+3. Implement and validate outcomes, including denial and failure paths. Keep a
+   previously green baseline green after the change. Investigate every discovered
+   failure, including intermittent or apparently pre-existing failures. Capture
+   the error and environment, reproduce or compare baselines where feasible,
+   and add a regression for the diagnosed cause. Do not disable coverage, add
+   masking sleeps/retries, or rerun until a failure disappears. A bounded rerun
+   after an evidenced infrastructure interruption can be diagnostic; retain both
+   results and do not use it to waive an unexplained repeatable failure.
+4. If a separate defect blocks the PR, track/fix it in a focused issue/PR, then
+   update the blocked branch and revalidate/review the changed base/head. A
+   pre-existing cause is not a reason to merge red. Do not call a fix complete
+   based only on publication, local success or a previous head's green CI.
+5. Use the [review protocol](REVIEW-PROTOCOL.md). Keep the PR body current after
+   head/base changes and review/validation results: scope, current SHA pair,
+   checks, reviewer evidence, finding dispositions, deferrals and authorization.
+   Comments preserve history; the body is the current summary, not a stale plan.
+6. After an authorized merge, verify the actual merge SHA and issue closure,
+   ensure unfinished/deferred issues remain open, update original finding links
+   when follow-ups truly finish, and reconcile local/remote branch state without
+   overwriting unrelated changes. Inspect the resulting main CI; investigate a
+   failure before relying on that baseline or deploying it. A pending run is not
+   a pass. Record the next dependency-ready issue and continue authorized work.
+
+Adapt the batch to evidence, not convenience: fix blocking regressions first,
+carry approved deferrals first in the next batch, and parallelize only independent
+work with clear file/resource ownership. Pause for new credentials/permissions,
+unapproved destructive operations, expanded scope, unavailable selected models
+without an approved fallback, exhausted review cycles, or unresolved safety/data
+integrity decisions. State the blocker and the decision needed, not just that
+progress stopped. A routine issue completion does not require another start
+request when the owner already authorized continuing the batch.
+
 ## Pull request process guardrails
 
 These bounds are agreed with the repository owner. They keep review and delivery
@@ -278,8 +331,9 @@ predictable while the project is small.
 - **Phase 1 reviewer selection.** Follow the [two-model protocol](REVIEW-PROTOCOL.md).
   Two distinct randomly selected approved models, excluding the coordinator,
   review independently; record verifiable selection and routing limits. The
-  pair counts as one cycle. Unavailable models require owner direction, not a
-  hidden substitution.
+  pair counts as one cycle. Failed review/task models may be replaced from the
+  applicable approved list under the recorded replacement procedure; disclose
+  every replacement and preserve independence and partial-effect reconciliation.
 - **Independent review.** Review is performed by a party other than the
   implementing agent (a separate agent/harness or a human), against an immutable
   exact head SHA. A review result is valid only for the SHA it reviewed. PR #208

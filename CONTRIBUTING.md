@@ -37,6 +37,12 @@ Use `feature/<issue#>-<short-desc>` or `fix/<issue#>-<short-desc>` from `main`.
 Keep one issue per branch/PR and prefer [Conventional Commits](https://www.conventionalcommits.org/)
 (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`).
 
+Use the [execution workflow](docs/DEVELOPMENT.md#execution-workflow) for baseline
+checks, acceptance-first changes, failure diagnosis and post-merge verification.
+Keep design contracts focused on decisions and safety/acceptance boundaries;
+implementation mechanics belong in the implementing issue unless needed to
+establish feasibility or safety. Do not grow scope just to satisfy review nits.
+
 ## Pull request process
 
 Phase 1 requires the [two-model review protocol](docs/REVIEW-PROTOCOL.md): two
@@ -52,7 +58,8 @@ Review is independent of the implementing agent and bound to an exact head SHA.
 PR #208 Round 1 baseline is `002e826`. The process is intentionally bounded:
 
 - Triage every finding, including all owner comments. Nothing is silently
-  ignored.
+  ignored. Verify it against repository context and scope; record fixed,
+  rejected-with-evidence, or explicitly owner-approved deferred disposition.
 - Answer each fix in its own thread with the change, the validation that
   exercised it, and the exact head it applies to. Resolve a thread only after
   the response is posted.

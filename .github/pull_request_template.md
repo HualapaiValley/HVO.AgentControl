@@ -10,6 +10,8 @@ What changed and why?
 - [ ] Version history and documentation updated when needed.
 
 Commands/results:
+- Starting baseline SHA/checks and pinned toolchain:
+- Failures encountered, diagnosis/fix, and final exact-head results:
 
 ## Review
 
@@ -19,6 +21,8 @@ Commands/results:
 - [ ] Independent review (not the implementing agent) ran against the same exact
       immutable merge-base/head SHA pair recorded below.
 - [ ] Every finding, including all owner comments, is triaged.
+- [ ] Findings were checked against actual repository context and acceptance
+      criteria; rejected suggestions have specific evidence/scope reasoning.
 - [ ] Each fix is answered in its own thread with the change, the validation
       that exercised it, and the exact head it applies to, before resolving it.
 - [ ] Deferrals have owner approval and a linked follow-up issue; no security,
@@ -33,6 +37,8 @@ Commands/results:
       a fourth.
 - [ ] Required CI is green on the exact reviewed head (necessary, not
       sufficient).
+- [ ] Reviewer packets include relevant unchanged context and state omissions;
+      the PR body reflects the current head, checks and review dispositions.
 
 - Reviewed head SHA:
 - Immutable review base SHA (both reviewers attest this same base):
@@ -60,3 +66,10 @@ Include recovery, compatibility, security, or deployment considerations.
 - Authorization reference (Phase 1 standing authorization is valid only after
   both independent reviews and exact-head required CI pass):
 - [ ] No auto-merge. Merging does not trigger a release.
+
+## Post-Merge Record
+
+Complete after merge, not as a claim that these checks already passed:
+- Actual merge SHA and resulting main CI:
+- Issue closure verified; unfinished/deferred issues still open:
+- Local/remote branch state and next dependency-ready issue:

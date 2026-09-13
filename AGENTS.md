@@ -87,6 +87,21 @@ Test outcomes and failure/recovery boundaries. Receipt is not execution; turn
 completion is not verified task success; cancellation is not rollback. Do not
 retry uncertain writes without reconciling effects.
 
+## Implementation discipline
+
+Follow the [execution workflow](docs/DEVELOPMENT.md#execution-workflow): record
+the baseline and acceptance criteria, make the smallest verifiable change, and
+finish green. A failure discovered during the work is ours to investigate even
+if it predates the diff; do not waive it as unrelated or rerun until green.
+Reviewers provide evidence, not votes. Verify findings against the actual code
+and scope before fixing, rejecting with evidence, or owner-approved deferral.
+Keep the PR summary current and verify issue/branch/CI state after merge.
+
+Continue dependency-ready work within recorded owner authorization until the
+requested batch is complete or a real blocker requires a decision. Routine
+merges are progress updates, not automatic stopping points. Never broaden scope,
+credentials, destructive actions or review-cycle exceptions to avoid a pause.
+
 ## Pull request process
 
 Phase 1 uses two independent reviewers on randomly selected, distinct approved
@@ -94,6 +109,9 @@ models, excluding the coordinator model. Verify explicit model selection and
 record provenance; generic Task agent types do not prove model identity. See
 [review protocol](docs/REVIEW-PROTOCOL.md). The pair is one review cycle, with a
 maximum of three cycles before owner direction. No silent model fallback.
+The owner-approved pool uses Fable 5.1 instead of Fable 5. Failed review/task
+models may be replaced from the applicable approved list under the protocol;
+record the failure/replacement and reconcile partial task effects before retry.
 Record and attest the same immutable merge-base/head pair for both reviewers.
 Mark owner-approved deferrals explicitly in the source thread with a follow-up
 issue number, keep the issue open with `status:deferred`, and carry it into the

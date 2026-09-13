@@ -2,14 +2,28 @@
 
 ## Selection
 
+Terminology: a review cycle is one reviewer pair for one exact PR base/head;
+a development batch is the dependency-ordered issue queue. See the
+[execution workflow](DEVELOPMENT.md#execution-workflow). Next-cycle deferrals
+mean the next development batch and its relevant reviews, not an unrequested
+extra review of a merged PR.
+
 For each cycle, randomly draw two distinct eligible models without replacement.
 Exclude the coordinator's model, including aliases of that same model. Both
 review tasks together count as one cycle. Record the pool, draw, exact provider
 and model IDs, coordinator identity, immutable base/head SHAs, session IDs and
 result references.
-Do not silently redraw when a selected model is unavailable; report the failure
-and obtain repository-owner direction. Do not substitute generic Task agent
-types as proof that different models ran.
+If a selected review or task model fails, the owner authorizes choosing another
+from the applicable approved list without asking again. Record the failure,
+original model/session, replacement and reason; never substitute silently.
+For reviews, randomly draw from remaining eligible models, excluding the
+coordinator, the other reviewer and aliases of either, and models that already
+failed in this cycle. Stop for owner direction if no eligible model remains.
+A failed attempt is not a completed review or a new review cycle. A replacement
+gets the same immutable packet in a fresh session, without the other review's
+findings. For tasks, reconcile any partial edits/tool effects before handing off;
+model replacement does not authorize replay of uncertain writes. Do not use
+generic Task agent types as proof of model identity.
 
 The approved names currently map to these local catalog entries:
 
@@ -17,7 +31,7 @@ The approved names currently map to these local catalog entries:
 | --- | --- |
 | Astra | `cliproxy/gpt-6-astra` |
 | 5.6 Sol | `cliproxy/gpt-5.6-sol` |
-| Fabel 5 | `cliproxy/claude-fable-5` |
+| Fable 5.1 | `cliproxy/claude-fable-5.1` |
 | Opus 5 | `cliproxy/claude-opus-5` |
 | Deepseek v4.1 Flash | `cliproxy/deepseek-v4.1-flash` |
 | Big Pickle | `opencode/big-pickle` (alias `cliproxy/big-pickle`) |
@@ -28,11 +42,21 @@ that every environment supplies them. Exclude both Big Pickle provider aliases
 if Big Pickle is coordinating. Never use `auto` or `default` routing as an
 independent named model.
 
+The owner replaced Fable 5 with `cliproxy/claude-fable-5.1` in the approved pool
+after its successful PR #231 review. Do not draw the retired Fable 5 entry.
+Other provider spellings are not additional independent reviewer slots.
+
 ## Isolation And Evidence
 
 Reviewers do not implement changes, edit the branch, or see one another's
 findings before both finish. Supply the same immutable head and base, issue
 acceptance criteria, relevant source, complete diff and validation evidence.
+Include the unchanged context needed to evaluate the diff: relevant complete
+configuration, callers, tests and contracts. A missing line in a diff is not
+evidence that a setting or safeguard does not exist. State packet scope/omissions;
+if a finding depends on omitted context, inspect it before accepting the finding
+and supply the necessary context for subsequent review. Do not expose either
+reviewer's findings to the other while their independent reviews are in flight.
 The review base is the recorded merge-base of the PR head and target branch,
 not the previous reviewed head used to compute a correction diff. Both reviewers
 attest the same base/head pair. If the merge-base changes, record the new pair
@@ -55,13 +79,13 @@ Smoke calls only validate selection/connectivity; they are not code reviews.
 
 For Phase 1 the owner explicitly accepted OpenCode's recorded requested model
 IDs as sufficient evidence, with upstream proxy routing uncertainty disclosed.
-This does not permit a known fallback or substitution. For every review in
+This does not permit undisclosed upstream fallback. For every review in
 every cycle, verify the actual completed review session's assistant-message
 provider/model metadata against that draw. Historical smoke results never waive
 this check, even with unchanged provider configuration. An incomplete/timed-out
 response does not count as a review; reconcile the original session and retry
-the same selected model when safe, recording both attempts. Substituting another
-model requires repository-owner direction. Big Pickle aliases are not two
+the same selected model when safe, recording both attempts, or use the approved
+replacement procedure above. Big Pickle aliases are not two
 independent review models.
 
 The development CLIProxy catalog relies on a provider plugin for connection
@@ -82,6 +106,16 @@ summary and actionable inline findings with severity, location, reproduction or
 reasoning, and acceptance impact. Triage owner comments too. Reply to every fix
 thread with its change, exercising validation and exact head before resolving
 the thread. Do not label deferred work fixed.
+
+Reviewers provide evidence, not authority or a majority vote. Verify each finding
+against the actual repository, acceptance criteria and applicable safety rules.
+Consolidate duplicates without losing distinct concerns. Disposition every item:
+**Fixed** with commit/test evidence, **Rejected** with specific contrary evidence
+or scope reasoning, or **Deferred** with owner approval and a linked issue.
+Stylistic suggestions are not automatically defects or new backlog. Disagreement
+between reviewers is resolved by investigation, not by choosing the favorable
+review. Do not dismiss an established security/correctness problem as cosmetic
+or defer it simply to end a review loop.
 
 Mark each owner-approved deferred finding **Deferred, not fixed** in a comment
 on its original review thread, and include the follow-up issue number. The issue
@@ -128,3 +162,9 @@ data. Pause for repository-owner direction on those actions or any expanded scop
 
 Record the reviewed SHA and this standing authorization on each merge. Other
 work remains subject to the repository's explicit authorization requirements.
+
+Before merge, reconcile the current PR body with the actual reviewed head,
+required checks and all finding dispositions. After merge, follow the execution
+workflow's issue/branch/main-CI checks. Thread resolution records a disposition;
+issue closure records completed acceptance (or an explicit owner alternative);
+merge records integration. None substitutes for the others or for a release.
