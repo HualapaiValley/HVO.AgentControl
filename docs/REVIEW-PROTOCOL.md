@@ -81,6 +81,13 @@ CI is green. At most three cycles are allowed; pause for the owner before cycle
 four. A deferral needs explicit owner approval and a linked issue. Security,
 data-loss, acceptance, failing-CI and material-correctness findings block.
 
+For PR #223, the owner explicitly authorized cycle four after the three-cycle
+pause recorded in #224. After that cycle, remaining non-critical findings may
+be deferred to linked follow-up issues with their actual status disclosed, and
+the PR may merge with required exact-head CI green. This exception does not
+waive blocking security, data-loss, acceptance or material-correctness findings,
+nor does it authorize a fifth cycle or change other PRs' three-cycle default.
+
 ## Authorization
 
 One implementation issue per branch/PR. Do not amend or force-push a reviewed

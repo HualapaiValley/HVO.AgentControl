@@ -20,8 +20,7 @@ Commands/results:
       SHA recorded below.
 - [ ] Every finding, including all owner comments, is triaged.
 - [ ] Each fix is answered in its own thread with the change, the validation
-      that exercised it, and the exact head it applies to; resolved threads are
-      responded to first.
+      that exercised it, and the exact head it applies to, before resolving it.
 - [ ] Deferrals have owner approval and a linked follow-up issue; no security,
       data-loss, acceptance, failing-CI or material-correctness finding is
       deferred.
@@ -31,11 +30,12 @@ Commands/results:
       sufficient).
 
 - Reviewed head SHA:
+- Immutable review base SHA (both reviewers attest this same base):
 - Review round: 1 / 2 / 3 (pause before 4)
 - Coordinator provider/model:
 - Eligible model pool and random selection:
-- Reviewer A provider/model, session/evidence, scope:
-- Reviewer B provider/model, session/evidence, scope:
+- Reviewer A provider/model, session/evidence, scope, base/head attestation:
+- Reviewer B provider/model, session/evidence, scope, base/head attestation:
 - Upstream routing/fallback evidence or unresolved provenance limits:
 - Deferred findings and linked issues:
 

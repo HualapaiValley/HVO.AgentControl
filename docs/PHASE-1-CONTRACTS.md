@@ -152,6 +152,11 @@ Chosen: **one small SQLite database file** owned by the C# host, for example
   model tools/native HTTP; host routing alone is insufficient. If these fail,
   use distinct per-role process identities and private home/history directories
   in the same container. Retain history on restart; new sessions are explicit.
+- The shared-process gate also requires cross-employee credential-isolation tests
+  covering private stores, environment, inherited descriptors, provider credentials
+  and native HTTP credentials. Failure of any configuration, history or credential
+  isolation test requires distinct per-role process identities and private stores
+  in the same container, not host routing alone. Section 6 applies to every role.
 
 ## 6. Credential and process isolation prerequisite
 
@@ -183,8 +188,21 @@ Concrete separation inside the same container:
 - Apply the same separation to the worker image: bridge-private key, socket and
   journal directories owned by a dedicated bridge UID with mode `0700` and key
   files `0600`; OpenCode/TUI/tools run as a different unprivileged employee UID.
-  A narrowly constrained launcher establishes those identities then drops
-  unnecessary capabilities; employee children have no privilege-escalation path.
+  A persistent minimal privileged worker supervisor owns employee-UID child
+  launch, stop and restart, including ACP, TUI and viewer clients. It accepts only
+  registered binding operations from the authenticated bridge UID over a private
+  local channel, never arbitrary executable, UID, environment or path parameters.
+  It establishes child identities and strips their capabilities and inherited
+  privileged descriptors before execution; employee children cannot invoke the
+  supervisor. The supervisor retains only lifecycle privileges it needs; the
+  bridge has no root/setuid capability. ACP stdio descriptors are handed to the
+  bridge, not to the connector. The bridge persists a new process generation
+  before requesting a child start; the supervisor binds that generation to the
+  child and reports its PID/exit. Uncertain start acknowledgment is reconciled
+  against the supervisor's owned child, never blindly relaunched. Supervisor
+  failure holds lifecycle operations; recover/reap existing children before a
+  replacement supervisor may start another one. This is deterministic worker
+  infrastructure, not another full controller or model agent.
   The connector runs as the bridge UID and connects to the bridge socket, but
   does not own or launch ACP. Validate real UID, descriptor, `/proc` and private
   path access from alternate employee executables before enrollment.
@@ -210,7 +228,7 @@ Design constraints:
 - The controller launches a **short-lived connector** from C# that attaches to a
   **worker-owned bridge UNIX socket**. The connector does not exec an
   ACP process owned by the controller; the bridge is started and owned by the
-  worker and owns OpenCode ACP stdio.
+  worker and owns the ACP stdio channel provided by its local supervisor.
 - The connector opens a bridge-owned UNIX socket inaccessible to the worker
   OpenCode UID. Bridge and connector perform a versioned mutual HMAC challenge
   over independent random nonces, controller/worker IDs and protocol version,
@@ -225,10 +243,19 @@ Design constraints:
   fixed bootstrap operation running as the bridge UID, writing atomically into
   the private bridge volume before starting OpenCode. Do not use Docker inspect-
   visible environment variables, image layers, logs or command arguments. A
-  duplicate bootstrap verifies the existing key ID rather than overwriting it.
+  duplicate bootstrap verifies the existing key ID rather than overwriting it;
+  this rule applies only to initial enrollment.
   Rotation is an owner-approved maintenance operation: hold dispatch, reconcile
   active work, stop bridge access, replace both copies through this out-of-band
-  channel, advance ownership epoch and reauthenticate. An interrupted rotation
+  channel, advance ownership epoch and reauthenticate. Rotation uses a distinct
+  conditional replace operation carrying expected current and new key IDs under
+  the separately authenticated SSH/Docker maintenance channel, not the rotating
+  bridge key. Persist the operation ID and protected new key before either write;
+  each side atomically records the new key and ID. Repeating with the new ID is a
+  verified no-op; an expected-old-ID match permits replacement, and any other ID
+  fails closed for owner reconciliation/re-enrollment. Resume the recorded
+  operation to finish an interrupted two-copy replacement, then verify both sides
+  and obtain the new lease before clearing the maintenance hold. An interrupted rotation
   stays held; reject old keys, no automatic dual-key fallback. Compromise requires
   revoking access and explicit re-enrollment, not trusting a request signed only
   with the compromised key. Validate key delivery/rotation before claiming them
@@ -247,8 +274,11 @@ Design constraints:
   `(workerGeneration, sequence)` with sequence increasing within that generation.
   The OpenCode process slot has a separate durable process generation, advanced
   at each child start even if the bridge did not restart. A bridge restart may
-  therefore advance both generations. Controller restart changes none of these
-  worker counters; it reads them during reconciliation and obtains a new lease.
+  therefore advance both generations. Controller restart itself changes no
+  worker counter. Its subsequent successful lease acquisition advances the
+  bridge-owned ownership epoch, but not worker/process generations; it records
+  the returned epoch during reconciliation. New terminal viewers reuse the
+  active lease rather than fencing the dispatch connection.
 - Before acknowledging a request the bridge durably stores its ID and payload
   hash; the same ID/hash queries the recorded outcome and never repeats an ACP
   prompt, while a changed hash is rejected. Record forwarding intent before ACP
@@ -283,8 +313,9 @@ Design constraints:
   insufficient, stop for a new grant; a daemon-side rootless/restricted service is
   a separately approved hardening option, not an assumed existing service.
 - Terminal traffic uses a separate SSH/Docker connector to the exact registered
-  worker's private bridge socket. After authentication the bridge launches only
-  an attach client for the bound TUI/session; it accepts bounded input/resize
+  worker's private bridge socket. After authentication the bridge asks its
+  supervisor to launch only an employee-UID attach client for the bound
+  TUI/session; it accepts bounded input/resize
   frames, streams terminal bytes to the authenticated same-origin portal WebSocket,
   and enforces one viewer per session. Detach reaps the viewer only. The connector
   never launches an arbitrary command, alternate session or fallback shell; this

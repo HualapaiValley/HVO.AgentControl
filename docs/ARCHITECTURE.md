@@ -59,7 +59,9 @@ per session. Treat unconfirmed delivery as uncertain, not safe to retry.
 Shutdown/recovery must hold new dispatch, cancel running turns when required,
 await observed termination, reconcile effects, persist resumable task state and
 only then stop or restart. Loading conversation history is not resuming a
-suspended command. An ACK is explicit readiness, not just any model reply.
+suspended command. A transport ACK is not employee readiness. Phase 1 requires
+the current orientation to be both Acknowledged and Comprehended, the exact
+owned runtime/TUI to be ready, and no dispatch hold before Ready or task dispatch.
 
 Bridge/controller reconnection needs durable sequence receipts, ownership
 leases, replay bounds and stale-owner fencing. None of this is implemented in the
