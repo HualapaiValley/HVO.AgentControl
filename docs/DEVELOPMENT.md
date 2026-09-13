@@ -264,6 +264,11 @@ part of the API framework work.
 These bounds are agreed with the repository owner. They keep review and delivery
 predictable while the project is small.
 
+- **Phase 1 reviewer selection.** Follow the [two-model protocol](REVIEW-PROTOCOL.md).
+  Two distinct randomly selected approved models, excluding the coordinator,
+  review independently; record verifiable selection and routing limits. The
+  pair counts as one cycle. Unavailable models require owner direction, not a
+  hidden substitution.
 - **Independent review.** Review is performed by a party other than the
   implementing agent (a separate agent/harness or a human), against an immutable
   exact head SHA. A review result is valid only for the SHA it reviewed. PR #208

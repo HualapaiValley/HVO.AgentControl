@@ -13,12 +13,14 @@ Commands/results:
 
 ## Review
 
+- [ ] Two independent reviewers used randomly selected distinct approved models,
+      excluding the coordinator; model provenance and any routing/fallback limits
+      are recorded under the Phase 1 review protocol.
 - [ ] Independent review (not the implementing agent) ran against the exact head
       SHA recorded below.
 - [ ] Every finding, including all owner comments, is triaged.
 - [ ] Each fix is answered in its own thread with the change, the validation
-      that exercised it, and the exact head it applies to; resolved threads are
-      responded to first.
+      that exercised it, and the exact head it applies to, before resolving it.
 - [ ] Deferrals have owner approval and a linked follow-up issue; no security,
       data-loss, acceptance, failing-CI or material-correctness finding is
       deferred.
@@ -28,7 +30,13 @@ Commands/results:
       sufficient).
 
 - Reviewed head SHA:
+- Immutable review base SHA (both reviewers attest this same base):
 - Review round: 1 / 2 / 3 (pause before 4)
+- Coordinator provider/model:
+- Eligible model pool and random selection:
+- Reviewer A provider/model, session/evidence, scope, base/head attestation:
+- Reviewer B provider/model, session/evidence, scope, base/head attestation:
+- Upstream routing/fallback evidence or unresolved provenance limits:
 - Deferred findings and linked issues:
 
 ## UI Evidence
@@ -42,4 +50,6 @@ Include recovery, compatibility, security, or deployment considerations.
 ## Merge Authorization
 
 - [ ] Owner has explicitly authorized merge for this exact head.
+- Authorization reference (Phase 1 standing authorization is valid only after
+  both independent reviews and exact-head required CI pass):
 - [ ] No auto-merge. Merging does not trigger a release.

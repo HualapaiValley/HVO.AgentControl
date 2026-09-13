@@ -89,6 +89,12 @@ retry uncertain writes without reconciling effects.
 
 ## Pull request process
 
+Phase 1 uses two independent reviewers on randomly selected, distinct approved
+models, excluding the coordinator model. Verify explicit model selection and
+record provenance; generic Task agent types do not prove model identity. See
+[review protocol](docs/REVIEW-PROTOCOL.md). The pair is one review cycle, with a
+maximum of three cycles before owner direction. No silent model fallback.
+
 Keep changes focused and one issue per branch/PR. Review is independent of the
 implementer and bound to an exact head SHA; PR #208 Round 1 baseline is
 `002e826`. Triage every finding, including all owner comments, and answer each

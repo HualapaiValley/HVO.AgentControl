@@ -47,7 +47,9 @@ leaves the container. The browser talks only to the portal.
 
 There is **no worker bridge or reconnection implementation in the active code**.
 The standalone POC demonstrated the transport idea only; see
-[POC findings](POC-FINDINGS.md).
+[POC findings](POC-FINDINGS.md). The concrete Phase 1 organization, placement,
+storage, orientation and transport contracts are proposed (not implemented) in
+[Phase 1 contracts](PHASE-1-CONTRACTS.md).
 
 ## Control contract (design)
 
@@ -57,7 +59,9 @@ per session. Treat unconfirmed delivery as uncertain, not safe to retry.
 Shutdown/recovery must hold new dispatch, cancel running turns when required,
 await observed termination, reconcile effects, persist resumable task state and
 only then stop or restart. Loading conversation history is not resuming a
-suspended command. An ACK is explicit readiness, not just any model reply.
+suspended command. A transport ACK is not employee readiness. Phase 1 requires
+the current orientation to be both Acknowledged and Comprehended, the exact
+owned runtime/TUI to be ready, and no dispatch hold before Ready or task dispatch.
 
 Bridge/controller reconnection needs durable sequence receipts, ownership
 leases, replay bounds and stale-owner fencing. None of this is implemented in the
