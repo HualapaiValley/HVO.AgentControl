@@ -24,8 +24,16 @@ public sealed class TmuxAttachLauncher
     private readonly TimeProvider _timeProvider;
     private bool _owned;
     private Dictionary<string, string> _environment = [];
-    private DateTimeOffset _nextStart;
+    private const string PaneOption = "@agentcontrol_attach_pane";
+    // A crash between creation and identity persistence leaves ownership of the
+    // attach pane unknown. Do not inspect commands (which may contain secrets)
+    // or create duplicates; an operator must reconcile the session instead.
+    private const string UnknownPaneError = "tmux attach-pane identity is missing or invalid; operator recovery required.";
+    private DateTimeOffset _nextProbe;
     private int _retrySeconds = 2;
+    private TmuxAttachResult _lastResult = new(false, false, null);
+    private TmuxAttachRequest? _lastRequest;
+    private string? _paneId;
 
     public TmuxAttachLauncher(string sessionName, string tmuxExecutable = "tmux", TimeProvider? timeProvider = null)
     {
@@ -47,6 +55,14 @@ public sealed class TmuxAttachLauncher
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(request.OpenCodeExecutable);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request == _lastRequest && _timeProvider.GetUtcNow() < _nextProbe)
+        {
+            return _lastResult;
+        }
+        _lastRequest = request;
+        // Never retain a healthy result if this attempt fails or is cancelled.
+        _lastResult = new(false, _owned, null);
         _environment = ChildEnvironment.Build(new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["HOME"] = request.Home,
@@ -63,7 +79,9 @@ public sealed class TmuxAttachLauncher
         var exists = await RunAsync(["has-session", "-t", "=" + _sessionName], cancellationToken).ConfigureAwait(false);
         if (exists.ExitCode is not (0 or 1))
         {
-            return new(false, false, "tmux has-session failed.");
+            // Inconclusive health is not loss of ownership. Shutdown must still
+            // be able to recheck the owner token before cleaning up.
+            return Complete(false, "tmux has-session failed.");
         }
 
         if (exists.ExitCode == 0)
@@ -71,63 +89,108 @@ public sealed class TmuxAttachLauncher
             _owned = await MatchesOwnerAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false);
             if (!_owned)
             {
-                return new(false, false, $"tmux session '{_sessionName}' is not owned by this runtime; refusing to replace it.");
+                _paneId = null;
+                return Complete(false, $"tmux session '{_sessionName}' is not owned by this runtime; refusing to replace it.");
             }
 
-            var panes = await RunAsync(["list-panes", "-s", "-t", "=" + _sessionName, "-F", "#{pane_dead}"], cancellationToken).ConfigureAwait(false);
-            if (panes.ExitCode == 0 && panes.StandardOutput.Split('\n', StringSplitOptions.TrimEntries).Contains("0"))
+            var identity = await RunAsync(["show-options", "-qv", "-t", "=" + _sessionName, PaneOption], cancellationToken).ConfigureAwait(false);
+            if (identity.ExitCode != 0)
             {
-                _retrySeconds = 2;
-                return new(true, true, null);
+                return Complete(false, "tmux attach-pane identity check failed.");
             }
-
-            // A failed probe is not evidence that it is safe to destroy a session.
-            if (panes.ExitCode != 0)
+            var prefix = request.OwnerToken + ":";
+            var value = identity.StandardOutput.Trim();
+            _paneId = value.StartsWith(prefix, StringComparison.Ordinal) && IsPaneId(value[prefix.Length..])
+                ? value[prefix.Length..] : null;
+            if (_paneId is null)
             {
-                return new(false, true, "tmux live-pane check failed.");
+                return Complete(false, UnknownPaneError);
             }
-            if (_timeProvider.GetUtcNow() < _nextStart)
+            var live = await ProbePaneAsync(cancellationToken).ConfigureAwait(false);
+            if (live is null)
             {
-                return new(false, true, null);
+                return Complete(false, "tmux live-pane check failed.");
             }
-            if (!await KillOwnedAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false))
+            if (live.Value)
             {
-                return new(false, false, "tmux dead-session cleanup failed.");
+                // Health checks must not steal the user's selected window/pane.
+                return Complete(true, null);
+            }
+            // Recovery never kills a session, window, or even a retained dead pane:
+            // an unknown pane is not ours, and other windows may contain user work.
+            if (!await MatchesOwnerAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false))
+            {
+                _owned = false;
+                return Complete(false, "tmux ownership changed before recovery.");
             }
         }
         else
         {
             _owned = false;
+            _paneId = null;
         }
-
-        if (_timeProvider.GetUtcNow() < _nextStart)
-        {
-            return new(false, false, null);
-        }
-        _nextStart = _timeProvider.GetUtcNow().AddSeconds(_retrySeconds);
-        _retrySeconds = Math.Min(30, _retrySeconds * 2);
 
         // An existing tmux server has its own (possibly credential-bearing) global
         // environment. Clear it again inside the pane, not just in the tmux client.
-        var arguments = new List<string>
-        {
-            "new-session", "-d", "-s", _sessionName, "-c", request.Workspace,
-            "-e", $"{OwnerEnvironmentVariable}={request.OwnerToken}",
-            "/usr/bin/env", "-i",
-        };
+        var arguments = exists.ExitCode == 0
+            ? new List<string> { "new-window", "-d", "-t", "=" + _sessionName + ":" }
+            : new List<string> { "new-session", "-d", "-s", _sessionName, "-e", $"{OwnerEnvironmentVariable}={request.OwnerToken}" };
+        arguments.AddRange(["-P", "-F", "#{pane_id}", "-c", request.Workspace, "/usr/bin/env", "-i"]);
         arguments.AddRange(_environment.Select(pair => $"{pair.Key}={pair.Value}"));
         arguments.Add("TERM=tmux-256color");
         arguments.AddRange([request.OpenCodeExecutable, "attach", request.NativeUrl, "--dir", request.Workspace, "--session", request.SessionId]);
         var start = await RunAsync(arguments, cancellationToken).ConfigureAwait(false);
-        if (start.ExitCode != 0)
+        if (start.ExitCode != 0 || !IsPaneId(start.StandardOutput.Trim()))
         {
-            return new(false, false, "tmux new-session failed.");
+            return Complete(false, "tmux attach-pane creation failed.");
         }
 
-        _owned = true;
-        // Successful creation alone does not prove that the attach client stayed alive.
-        var live = await RunAsync(["list-panes", "-s", "-t", "=" + _sessionName, "-F", "#{pane_dead}"], cancellationToken).ConfigureAwait(false);
-        return new(live.ExitCode == 0 && live.StandardOutput.Split('\n', StringSplitOptions.TrimEntries).Contains("0"), true, null);
+        _paneId = start.StandardOutput.Trim();
+        _owned = await MatchesOwnerAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false);
+        if (!_owned)
+        {
+            return Complete(false, "tmux ownership check after creation failed.");
+        }
+        var saved = await RunAsync(["set-option", "-t", "=" + _sessionName, PaneOption, request.OwnerToken + ":" + _paneId], cancellationToken).ConfigureAwait(false);
+        if (saved.ExitCode != 0)
+        {
+            return Complete(false, "tmux attach-pane identity persistence failed.");
+        }
+        // The endpoint attaches to the session, so select the replacement TUI window.
+        if (!await SelectPaneAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return Complete(false, "tmux attach window selection failed.");
+        }
+        return await ProbePaneAsync(cancellationToken).ConfigureAwait(false) == true
+            ? Complete(true, null)
+            : Complete(false, "tmux attach pane is not live.");
+    }
+
+    private async Task<bool> SelectPaneAsync(CancellationToken cancellationToken)
+    {
+        var window = await RunAsync(["select-window", "-t", _paneId!], cancellationToken).ConfigureAwait(false);
+        var pane = await RunAsync(["select-pane", "-t", _paneId!], cancellationToken).ConfigureAwait(false);
+        return window.ExitCode == 0 && pane.ExitCode == 0;
+    }
+
+    private async Task<bool?> ProbePaneAsync(CancellationToken cancellationToken)
+    {
+        var panes = await RunAsync(["list-panes", "-s", "-t", "=" + _sessionName, "-F", "#{pane_id} #{pane_dead}"], cancellationToken).ConfigureAwait(false);
+        if (panes.ExitCode != 0)
+        {
+            return null;
+        }
+        return _paneId is not null && panes.StandardOutput.Split('\n', StringSplitOptions.TrimEntries).Contains(_paneId + " 0", StringComparer.Ordinal);
+    }
+
+    private static bool IsPaneId(string value) => value.Length > 1 && value[0] == '%' && value.AsSpan(1).IndexOfAnyExceptInRange('0', '9') < 0;
+
+    private TmuxAttachResult Complete(bool started, string? error)
+    {
+        _lastResult = new(started, _owned, error);
+        _nextProbe = _timeProvider.GetUtcNow().AddSeconds(started ? 5 : _retrySeconds);
+        _retrySeconds = started ? 2 : Math.Min(30, _retrySeconds * 2);
+        return _lastResult;
     }
 
     private async Task<bool> MatchesOwnerAsync(string ownerToken, CancellationToken cancellationToken)
@@ -140,6 +203,10 @@ public sealed class TmuxAttachLauncher
 
     public async Task<bool> KillOwnedAsync(string ownerToken, CancellationToken cancellationToken)
     {
+        _lastRequest = null;
+        _lastResult = new(false, false, null);
+        // Explicit shutdown retains the owner-matched whole-session policy;
+        // recovery deliberately never invokes this operation.
         if (!_owned || !await MatchesOwnerAsync(ownerToken, cancellationToken).ConfigureAwait(false))
         {
             _owned = false;

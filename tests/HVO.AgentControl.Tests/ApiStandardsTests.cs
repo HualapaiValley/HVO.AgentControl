@@ -2,8 +2,11 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using HVO.AgentControl.Runtime;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -271,5 +274,138 @@ public sealed class OwnerAuthFactory : WebApplicationFactory<Program>
         catch (UnauthorizedAccessException)
         {
         }
+    }
+}
+
+/// <summary>
+/// Readiness contract for the pure predicate that backs <c>/health/ready</c>.
+/// Exercised directly so the exact session+TUI rule can be checked without a
+/// live OpenCode process.
+/// </summary>
+public sealed class ReadinessPredicateTests
+{
+    [Fact]
+    public void TerminalLaunchDisabledStillFailsClosedWhenNoTerminalIsAttached()
+    {
+        // Control:EnableTerminal=false skips the tmux attach client, so
+        // TerminalReady stays false even for an otherwise valid session. The
+        // session+TUI contract requires the attached terminal regardless of
+        // that configuration, so readiness must not consult it.
+        Assert.False(Program.IsRuntimeReady(Status(terminalReady: false)));
+    }
+
+    [Fact]
+    public void ExactIdleSessionWithAttachedTerminalIsReady()
+    {
+        Assert.True(Program.IsRuntimeReady(Status()));
+    }
+
+    [Theory]
+    [InlineData("starting", "ses_exact", "idle", true)]
+    [InlineData("degraded", "ses_exact", "idle", true)]
+    [InlineData("faulted", "ses_exact", "idle", true)]
+    [InlineData("ready", null, "idle", true)]
+    [InlineData("ready", "", "idle", true)]
+    [InlineData("ready", "ses_exact", null, true)]
+    [InlineData("ready", "ses_exact", "unknown", true)]
+    [InlineData("ready", "ses_exact", "idle", false)]
+    public void IncompleteOrUnknownReadinessInputsAreNotReady(
+        string state,
+        string? sessionId,
+        string? sessionState,
+        bool terminalReady)
+    {
+        Assert.False(Program.IsRuntimeReady(Status(state, sessionId, sessionState, terminalReady)));
+    }
+
+    private static ControlStatus Status(
+        string state = "ready",
+        string? sessionId = "ses_exact",
+        string? sessionState = "idle",
+        bool terminalReady = true) => new()
+        {
+            State = state,
+            OrganizationName = "AgentControl Development",
+            SessionId = sessionId,
+            SessionState = sessionState,
+            TerminalReady = terminalReady,
+        };
+}
+
+/// <summary>
+/// Disabled runtime with a test-only middleware that throws. The middleware is
+/// injected through an <see cref="IStartupFilter"/> and appended after the
+/// application pipeline so the failure is handled by the registered
+/// ProblemDetails exception handler. No test-only route is added to production.
+/// </summary>
+public sealed class ExceptionPathFactory : WebApplicationFactory<Program>
+{
+    public const string InjectedFailure = "injected-sensitive-failure-detail";
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseSetting("Control:Enabled", "false");
+        builder.ConfigureServices(services =>
+            services.AddSingleton<IStartupFilter>(new ThrowingStartupFilter()));
+    }
+
+    private sealed class ThrowingStartupFilter : IStartupFilter
+    {
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            next(app);
+            app.Use(async (context, nextMiddleware) =>
+            {
+                if (context.Request.Path.Equals("/__test/fault", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(InjectedFailure);
+                }
+
+                await nextMiddleware(context);
+            });
+        };
+    }
+}
+
+/// <summary>
+/// Sanitized 500 contract: every unexpected failure is a ProblemDetails with
+/// <c>instance</c> and <c>traceId</c>, served as <c>application/problem+json</c>
+/// for both clients that accept JSON and clients that decline it, and it never
+/// leaks the exception.
+/// </summary>
+public sealed class ExceptionPathTests : IClassFixture<ExceptionPathFactory>
+{
+    private readonly ExceptionPathFactory _factory;
+
+    public ExceptionPathTests(ExceptionPathFactory factory)
+    {
+        _factory = factory;
+    }
+
+    [Theory]
+    [InlineData("application/json")]
+    [InlineData("text/plain")]
+    public async Task UnexpectedFailureIsSanitizedProblemDetails(string accept)
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/__test/fault");
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(accept));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+
+        var raw = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(ExceptionPathFactory.InjectedFailure, raw, StringComparison.Ordinal);
+        Assert.DoesNotContain(nameof(InvalidOperationException), raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("stackTrace", raw, StringComparison.OrdinalIgnoreCase);
+
+        using var document = JsonDocument.Parse(raw);
+        var problem = document.RootElement;
+        Assert.Equal(500, problem.GetProperty("status").GetInt32());
+        Assert.Equal("/__test/fault", problem.GetProperty("instance").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(problem.GetProperty("traceId").GetString()));
+        Assert.False(problem.TryGetProperty("exception", out _));
     }
 }

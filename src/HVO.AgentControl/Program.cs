@@ -3,7 +3,6 @@ using HVO.AgentControl.Runtime;
 using HVO.AgentControl.Terminal;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
-using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
 using System.Security.Cryptography;
 using System.Text;
@@ -99,7 +98,14 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
         Status = StatusCodes.Status500InternalServerError,
         Title = "An unexpected error occurred.",
         Type = "https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.1",
+        // The default writer applies CustomizeProblemDetails, but a client that
+        // declines application/problem+json makes TryWriteAsync return false.
+        // Populate the required contract fields before either write path so the
+        // fallback still carries instance and traceId.
+        Instance = context.Request.Path,
     };
+    problemDetails.Extensions["traceId"] =
+        System.Diagnostics.Activity.Current?.Id ?? context.TraceIdentifier;
 
     var problemDetailsService = context.RequestServices.GetRequiredService<IProblemDetailsService>();
     if (!await problemDetailsService.TryWriteAsync(new ProblemDetailsContext
@@ -108,8 +114,13 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
         ProblemDetails = problemDetails,
     }))
     {
-        context.Response.ContentType = "application/problem+json";
-        await context.Response.WriteAsJsonAsync(problemDetails, context.RequestAborted);
+        // The explicit media type stops WriteAsJsonAsync from downgrading the
+        // response to application/json.
+        await context.Response.WriteAsJsonAsync(
+            problemDetails,
+            options: null,
+            contentType: "application/problem+json",
+            cancellationToken: context.RequestAborted);
     }
 }));
 
@@ -287,19 +298,10 @@ app.MapGet("/health/live", () => Results.Ok(new HealthResponse("healthy")))
 
 // Readiness of the exact owned ACP session and attached TUI. It is not a
 // database, worker, or provider check and must not claim one.
-app.MapGet("/health/ready", (AcpControlHost host, IOptions<ControlOptions> options) =>
+app.MapGet("/health/ready", (AcpControlHost host) =>
 {
     var status = host.GetStatus();
-    var terminalRequired = options.Value.EnableTerminal;
-    var sessionStateKnown = string.Equals(status.SessionState, "idle", StringComparison.Ordinal)
-        || string.Equals(status.SessionState, "busy", StringComparison.Ordinal);
-    var terminalReady = !terminalRequired || status.TerminalReady;
-    var ready = string.Equals(status.State, "ready", StringComparison.Ordinal)
-        && !string.IsNullOrEmpty(status.SessionId)
-        && sessionStateKnown
-        && terminalReady;
-
-    return ready
+    return IsRuntimeReady(status)
         ? Results.Ok(new HealthResponse("ready"))
         : Results.Problem(
             statusCode: StatusCodes.Status503ServiceUnavailable,
@@ -326,7 +328,32 @@ app.MapGet("/api/version", () => Results.Ok(new VersionResponse(
 
 app.Run();
 
-public partial class Program;
+public partial class Program
+{
+    /// <summary>
+    /// Pure readiness predicate for the owned OpenCode ACP session and attached
+    /// TUI. Terminal readiness is required regardless of whether the terminal
+    /// launcher is configured, so a runtime started with
+    /// <c>Control:EnableTerminal=false</c> is never reported ready by
+    /// <c>/health/ready</c>.
+    /// </summary>
+    /// <remarks>
+    /// Readiness fails closed: an unknown native session state is not ready, and
+    /// the check never probes a database, worker, or model provider.
+    /// </remarks>
+    public static bool IsRuntimeReady(ControlStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        var sessionStateKnown = string.Equals(status.SessionState, "idle", StringComparison.Ordinal)
+            || string.Equals(status.SessionState, "busy", StringComparison.Ordinal);
+
+        return string.Equals(status.State, "ready", StringComparison.Ordinal)
+            && !string.IsNullOrEmpty(status.SessionId)
+            && sessionStateKnown
+            && status.TerminalReady;
+    }
+}
 
 public sealed record ModelSelection(string? Model);
 

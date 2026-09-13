@@ -39,6 +39,7 @@ public sealed class AcpControlHost : BackgroundService
     private string _model = "unknown";
     private IReadOnlyList<ControlModel>? _models;
     private bool _terminalReady;
+    private string? _terminalError;
     private bool _isNewSession;
     private string _password = string.Empty;
     private string? _ownerToken;
@@ -570,10 +571,11 @@ public sealed class AcpControlHost : BackgroundService
         var result = await _terminal.EnsureAsync(request, cancellationToken).ConfigureAwait(false);
         SetTerminalReady(result.Started && result.Owned);
 
-        if (result.Error is not null)
+        if (result.Error is not null && !string.Equals(_terminalError, result.Error, StringComparison.Ordinal))
         {
             _logger.LogWarning("tmux attach client not ready: {Error}", result.Error);
         }
+        _terminalError = result.Error;
     }
 
     private void StartStatusPolling(CancellationToken cancellationToken)

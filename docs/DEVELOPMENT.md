@@ -224,6 +224,12 @@ V2 currently has no database; readiness must not require one. This differs from
 archived V1, whose `/health/ready` checked control-plane database connectivity.
 Do not reintroduce a database probe into the V2 readiness signal.
 
+The portal readiness contract always requires its TUI. Setting
+`Control:EnableTerminal=false` intentionally leaves `/health/ready` at 503,
+even with a functioning headless ACP session. An existing tmux session with a
+missing/invalid owned-pane marker requires operator recovery; it is not silently
+adopted or replaced. Normal recovery preserves other windows and retained dead panes.
+
 ### Status codes
 
 Keep the existing contract semantics: `400` validation, `401` authentication,

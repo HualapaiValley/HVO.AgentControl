@@ -33,6 +33,14 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Round 2: readiness requires an attached terminal even when terminal launch is
+  disabled. Exceptional ProblemDetails responses retain their media type,
+  instance and trace ID when content negotiation declines the default writer.
+- Track the exact owned TUI pane rather than any live pane; recover without
+  destroying other windows or stealing the user's selection on healthy probes.
+  Missing pane identity requires operator recovery rather than creating duplicates.
+- Back off failed tmux probes and log terminal warnings only on error transitions.
+
 - Require numeric ACP protocol version 1 before establishing a session.
 - Enforce loopback-only native binding and consistent tmux name validation.
 - Use the configured OpenCode executable for the attached TUI.
