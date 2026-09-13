@@ -1,0 +1,22 @@
+/* Scoped refinements for the Home portal surface.
+   The complete design system and layout live in wwwroot/css/portal.css so the
+   shell renders without isolated assets. This file only adds component-scoped
+   touches to elements that belong to Home.razor. */
+
+.terminal-mount {
+    overscroll-behavior: contain;
+}
+
+.receipt {
+    white-space: pre-wrap;
+}
+
+/* xterm injects its accessible helper text into the component subtree; keep it
+   above the canvas without capturing pointer input. */
+.terminal-mount ::deep .xterm-accessibility {
+    z-index: 1;
+}
+
+.terminal-mount ::deep .xterm-helper-textarea {
+    caret-color: transparent;
+}

@@ -2,10 +2,24 @@ name: agentcontrol-v2
 services:
   control:
     build: .
+    environment:
+      Control__Enabled: "true"
+      Control__DataDirectory: /data
+      Control__OrganizationName: AgentControl Development
+      Control__OwnerPasswordFile: /run/agentcontrol-secrets/owner-password
+    volumes:
+      - control-data:/data
+      - control-secrets:/run/agentcontrol-secrets:ro
+    stop_grace_period: 60s
     ports:
-      - "127.0.0.1:5054:8080"
+      - "0.0.0.0:5054:8080"
     networks:
       - agents
 networks:
   agents:
     driver: bridge
+volumes:
+  control-data:
+  control-secrets:
+    external: true
+    name: agentcontrol-v2-secrets

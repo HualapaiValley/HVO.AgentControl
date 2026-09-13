@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a reproducible V2 defect
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior. Do not paste credentials or private transcripts.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and environment
+      placeholder: AgentControl version, OpenCode version, Docker host/platform
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Redacted screenshots, request IDs, logs, or test results.

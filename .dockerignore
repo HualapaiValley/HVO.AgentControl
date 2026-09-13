@@ -6,3 +6,5 @@
 !src/**
 src/**/bin/
 src/**/obj/
+src/**/__pycache__/
+src/**/*.pyc
