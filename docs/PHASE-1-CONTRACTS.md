@@ -30,7 +30,8 @@ labels and are never used as identity.
 - IDs are generated once and never reused or re-slugged.
 - A runtime binding records `placement` (`InternalSharedContainer` or
   `DeveloperContainer`), the container/volume/session/home/workspace
-  references, and a monotonic `runtimeEpoch` used for ownership fencing.
+  references, and the last observed bridge ownership epoch (Section 7). The
+  controller does not allocate a competing worker fencing counter.
 - Current cardinality is 1 employee : 1 runtime binding; the separate record
   exists so placement can be replaced without changing employee identity.
 - Explicit mapping: employee -> binding -> process slot and employee-owned ACP
@@ -55,6 +56,12 @@ labels and are never used as identity.
   the new records, so the existing session and tmux pane keep working.
 - At inception, seed **one combined Operations / IT employee** in Operations,
   bound to the existing control runtime.
+- This seed adopts the existing owner-approved PR #208 control runtime, not an
+  unapproved new hire. Persist an adoption audit record with source identity,
+  owner authorization reference and timestamp; do not forge a historical hire
+  transition. For a fresh disposable organization, the authorized test/bootstrap
+  request explicitly approves this one internal seed and records that approval
+  before binding it. Neither case approves subsequent development hires.
 - **Development** and **QA** departments initially exist but are **empty**.
   The first Development employee is provisioned later in Phase 1 through #219,
   not by organization initialization or this documentation slice.
@@ -173,6 +180,14 @@ Concrete separation inside the same container:
   Docker socket, `DOCKER_HOST`, or docker-group membership enters an
   agent-owned process. Any Docker/provisioning access is a narrowly scoped
   broker used by the controller only.
+- Apply the same separation to the worker image: bridge-private key, socket and
+  journal directories owned by a dedicated bridge UID with mode `0700` and key
+  files `0600`; OpenCode/TUI/tools run as a different unprivileged employee UID.
+  A narrowly constrained launcher establishes those identities then drops
+  unnecessary capabilities; employee children have no privilege-escalation path.
+  The connector runs as the bridge UID and connects to the bridge socket, but
+  does not own or launch ACP. Validate real UID, descriptor, `/proc` and private
+  path access from alternate employee executables before enrollment.
 
 This is a gating prerequisite for Phase 1 provisioning, not an optional
 hardening item.
@@ -205,6 +220,19 @@ Design constraints:
   the remote host and protects bytes. This key is a scoped newly provisioned
   worker's internal control credential, not a provider or infrastructure grant.
   It is never exposed to worker tools or supplied as a command argument.
+- During provisioning, C# generates the key and persists its protected copy
+  before enrollment. Deliver it over authenticated SSH/Docker exec stdin to a
+  fixed bootstrap operation running as the bridge UID, writing atomically into
+  the private bridge volume before starting OpenCode. Do not use Docker inspect-
+  visible environment variables, image layers, logs or command arguments. A
+  duplicate bootstrap verifies the existing key ID rather than overwriting it.
+  Rotation is an owner-approved maintenance operation: hold dispatch, reconcile
+  active work, stop bridge access, replace both copies through this out-of-band
+  channel, advance ownership epoch and reauthenticate. An interrupted rotation
+  stays held; reject old keys, no automatic dual-key fallback. Compromise requires
+  revoking access and explicit re-enrollment, not trusting a request signed only
+  with the compromised key. Validate key delivery/rotation before claiming them
+  implemented; loss of the key cannot be repaired by reading worker model data.
 - The bridge durably allocates monotonically increasing ownership epochs in its
   own store, transactionally with a controller ID and connection nonce. Every
   mutation carries that epoch and nonce. Only an authenticated matching controller
@@ -213,6 +241,14 @@ Design constraints:
   Heartbeats every 5 seconds maintain a 20-second monotonic lease. Lease expiry
   holds new dispatch, not the running tool; a restarted bridge invalidates all
   prior leases and requires reauthentication. Timing values are testable options.
+- Counter ownership is explicit: the bridge database owns the authoritative
+  lease epoch; the binding stores only its last observed value. The bridge also
+  increments a durable worker generation at every bridge start; events use
+  `(workerGeneration, sequence)` with sequence increasing within that generation.
+  The OpenCode process slot has a separate durable process generation, advanced
+  at each child start even if the bridge did not restart. A bridge restart may
+  therefore advance both generations. Controller restart changes none of these
+  worker counters; it reads them during reconciliation and obtains a new lease.
 - Before acknowledging a request the bridge durably stores its ID and payload
   hash; the same ID/hash queries the recorded outcome and never repeats an ACP
   prompt, while a changed hash is rejected. Record forwarding intent before ACP
@@ -224,11 +260,14 @@ Design constraints:
   cursor returns an explicit replay gap, holds dispatch and requires status/effect
   reconciliation, never truncates silently or drops request/permission state.
 - Status includes session/process generations, active request, pending permission,
-  lease, replay bounds and hold state. Permission decisions are keyed by original
-  request and decision ID; conflicting repeats fail closed. Automatic model retry
-  cannot resolve an uncertain permission response.
+  lease, replay bounds and hold state. Pending permission and decisions bind the
+  employee session, OpenCode process generation, originating turn/request and
+  decision ID. A generation change invalidates pending permissions; never replay
+  decisions into a replacement child or a vanished turn. Conflicting repeats fail
+  closed. Automatic model retry cannot resolve an uncertain permission response.
 - A **pending permission request survives controller disconnect** and is
-  re-delivered on reconnect.
+  re-delivered only if the original child generation and turn are still live.
+  Otherwise report invalidated/interrupted status and require explicit recovery.
 - A **worker crash does not resume** the in-flight turn; only durable state is
   reloaded. Loading history is not resuming a command.
 - The C#-owned SSH credential may use an already-authorized development Docker
@@ -237,15 +276,24 @@ Design constraints:
   image/digest/resource limits, no privileged/host namespaces/host bind mounts,
   no arbitrary exec, and identity-checked resource removal constrain the host
   provisioning adapter. This is not daemon-enforced least privilege. Never give
-  that credential or raw adapter to a model. If existing authorization/access is
+  that credential or raw adapter to a model. The credential may enter the control
+  container only after Section 6 isolation is implemented and tested; until then
+  keep it outside agent-accessible identities and enable no provisioning authority.
+  If existing authorization/access is
   insufficient, stop for a new grant; a daemon-side rootless/restricted service is
   a separately approved hardening option, not an assumed existing service.
 - Terminal traffic uses a separate SSH/Docker connector to the exact registered
   worker's private bridge socket. After authentication the bridge launches only
   an attach client for the bound TUI/session; it accepts bounded input/resize
   frames, streams terminal bytes to the authenticated same-origin portal WebSocket,
-  and enforces one viewer per session. Detach reaps the viewer only; no public
-  port, alternate session, arbitrary command or fallback shell is permitted.
+  and enforces one viewer per session. Detach reaps the viewer only. The connector
+  never launches an arbitrary command, alternate session or fallback shell; this
+  is a launch-routing guarantee, not a claim that keystrokes cannot execute code.
+  An authenticated owner using an interactive tmux/TUI may execute employee tools
+  and tmux commands under the unprivileged employee UID. Do not market frame
+  bounds as a sandbox; process/credential isolation remains the security boundary.
+  If a future non-owner read-only view is added, it needs separately enforced
+  read-only input semantics and cannot inherit this owner-interactive endpoint.
 - Before provisioning, probe and persist Docker API/daemon version, Linux OS and
   architecture, selected image platform, usable non-shared volume storage/free
   space, memory/CPU capacity and enforceable limits, SSH host identity, and required
@@ -321,6 +369,16 @@ Ready -> Degraded / Stopped / Orienting
   Precedence is host policy > organization > department > role > employee, and
   restrictions accumulate (deny wins). A lower layer cannot grant what a higher
   layer denied.
+- Evaluate scoped exceptions in this order: collect restrictions from all layers;
+  reject any matching non-waivable deny (host-policy denies are non-waivable in
+  Phase 1); evaluate active owner-approved grants only against explicitly marked
+  waivable restriction IDs at the permitted organization/employee/tool/resource
+  scope; then reject any remaining matching restriction and apply the effective
+  allow/ask policy. A grant names restriction IDs and policy revision, expires,
+  and never erases a deny from another layer. Missing/mismatched/revoked grants
+  fail closed. Natural-language permission requests and lower-layer instructions
+  cannot mark their own restrictions waivable. Revoke or reapprove grants when
+  their policy revision changes; audit each use under host authority.
 - Per assignment the host records: `Assigned` (persisted) -> `Delivered`
   (runtime confirms exact artifact installation) -> `Acknowledged`
   (employee response names its employee/session identity and assigned version)
@@ -387,10 +445,13 @@ These are open and must not be presented as decided or owner-accepted:
 - The concrete UID/ownership model for Section 6, and whether the existing
   `/data` volume can be re-permissioned without disrupting the running dev
   container.
+- Worker-image UID separation and bridge-key bootstrap/rotation interruption,
+  private-file/descriptor isolation, and compromise re-enrollment tests.
 - Whether the existing authorized SSH/Docker credential can be used without new
   grants; secure key custody/rotation and measured host-adapter restrictions.
 - Implementation and adversarial validation of the specified bridge challenge,
-  epoch/fencing, replay and pending-permission contracts.
+  epoch/fencing, replay and pending-permission contracts, including redelivery
+  versus invalidation on child/turn changes and uncertain decision writes.
 - SQLite is the selected proposed storage scheme, not an unresolved alternative.
   Validate WAL behavior on the actual volume filesystem and single-writer locking;
   justify the package version in #215.

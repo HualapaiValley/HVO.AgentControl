@@ -7,8 +7,8 @@ Exclude the coordinator's model, including aliases of that same model. Both
 review tasks together count as one cycle. Record the pool, draw, exact provider
 and model IDs, coordinator identity, head SHA, session IDs and result references.
 Do not silently redraw when a selected model is unavailable; report the failure
-and obtain repository-owner direction. Do not substitute generic Task agent types as
-proof that different models ran.
+and obtain repository-owner direction. Do not substitute generic Task agent
+types as proof that different models ran.
 
 The approved names currently map to these local catalog entries:
 
@@ -19,7 +19,7 @@ The approved names currently map to these local catalog entries:
 | Fabel 5 | `cliproxy/claude-fable-5` |
 | Opus 5 | `cliproxy/claude-opus-5` |
 | Deepseek v4.1 Flash | `cliproxy/deepseek-v4.1-flash` |
-| Big Pickle | `opencode/big-pickle` |
+| Big Pickle | `opencode/big-pickle` (alias `cliproxy/big-pickle`) |
 
 Catalog presence is not a successful call or verified upstream identity. These
 are exact selectable IDs observed on the development machine, not a promise
@@ -48,12 +48,14 @@ Smoke calls only validate selection/connectivity; they are not code reviews.
 
 For Phase 1 the owner explicitly accepted OpenCode's recorded requested model
 IDs as sufficient evidence, with upstream proxy routing uncertainty disclosed.
-This does not permit a known fallback or substitution. Sol and Deepseek passed
-selection smoke calls on 2026-09-13; their assistant-message metadata recorded
-`cliproxy/gpt-5.6-sol` and `cliproxy/deepseek-v4.1-flash`, respectively. Other
-catalog entries still require successful explicit selection when drawn. For
-alias exclusion, Big Pickle also appears as `cliproxy/big-pickle`; these are not
-two independent review models.
+This does not permit a known fallback or substitution. For every review in
+every cycle, verify the actual completed review session's assistant-message
+provider/model metadata against that draw. Historical smoke results never waive
+this check, even with unchanged provider configuration. An incomplete/timed-out
+response does not count as a review; reconcile the original session and retry
+the same selected model when safe, recording both attempts. Substituting another
+model requires repository-owner direction. Big Pickle aliases are not two
+independent review models.
 
 The development CLIProxy catalog relies on a provider plugin for connection
 configuration. A plugin-free reviewer needs an explicit process-local provider
@@ -89,7 +91,7 @@ auto-merge or permission to bypass a failed gate. It includes the development
 deployment refresh and scoped disposable two-host, initial-hire and
 teardown/rebuild tests. It excludes production changes, release tags/registry
 publication, new credential grants, and destruction of existing development
-data. Pause for operator direction on those actions or any expanded scope.
+data. Pause for repository-owner direction on those actions or any expanded scope.
 
 Record the reviewed SHA and this standing authorization on each merge. Other
 work remains subject to the repository's explicit authorization requirements.
