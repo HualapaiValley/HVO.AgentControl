@@ -1,8 +1,8 @@
-FROM node:22-bookworm-slim AS opencode
+FROM node:26-bookworm-slim AS opencode
 ARG OPENCODE_VERSION=1.18.30
 RUN npm install --global opencode-ai@${OPENCODE_VERSION}
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.401 AS build
 WORKDIR /source
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
