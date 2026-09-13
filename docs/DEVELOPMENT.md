@@ -331,8 +331,9 @@ predictable while the project is small.
 - **Phase 1 reviewer selection.** Follow the [two-model protocol](REVIEW-PROTOCOL.md).
   Two distinct randomly selected approved models, excluding the coordinator,
   review independently; record verifiable selection and routing limits. The
-  pair counts as one cycle. Unavailable models require owner direction, not a
-  hidden substitution.
+  pair counts as one cycle. Failed review/task models may be replaced from the
+  applicable approved list under the recorded replacement procedure; disclose
+  every replacement and preserve independence and partial-effect reconciliation.
 - **Independent review.** Review is performed by a party other than the
   implementing agent (a separate agent/harness or a human), against an immutable
   exact head SHA. A review result is valid only for the SHA it reviewed. PR #208

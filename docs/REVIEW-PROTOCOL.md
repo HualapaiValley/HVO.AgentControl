@@ -13,9 +13,17 @@ Exclude the coordinator's model, including aliases of that same model. Both
 review tasks together count as one cycle. Record the pool, draw, exact provider
 and model IDs, coordinator identity, immutable base/head SHAs, session IDs and
 result references.
-Do not silently redraw when a selected model is unavailable; report the failure
-and obtain repository-owner direction. Do not substitute generic Task agent
-types as proof that different models ran.
+If a selected review or task model fails, the owner authorizes choosing another
+from the applicable approved list without asking again. Record the failure,
+original model/session, replacement and reason; never substitute silently.
+For reviews, randomly draw from remaining eligible models, excluding the
+coordinator, the other reviewer and aliases of either, and models that already
+failed in this cycle. Stop for owner direction if no eligible model remains.
+A failed attempt is not a completed review or a new review cycle. A replacement
+gets the same immutable packet in a fresh session, without the other review's
+findings. For tasks, reconcile any partial edits/tool effects before handing off;
+model replacement does not authorize replay of uncertain writes. Do not use
+generic Task agent types as proof of model identity.
 
 The approved names currently map to these local catalog entries:
 
@@ -23,7 +31,7 @@ The approved names currently map to these local catalog entries:
 | --- | --- |
 | Astra | `cliproxy/gpt-6-astra` |
 | 5.6 Sol | `cliproxy/gpt-5.6-sol` |
-| Fabel 5 | `cliproxy/claude-fable-5` |
+| Fable 5.1 | `cliproxy/claude-fable-5.1` |
 | Opus 5 | `cliproxy/claude-opus-5` |
 | Deepseek v4.1 Flash | `cliproxy/deepseek-v4.1-flash` |
 | Big Pickle | `opencode/big-pickle` (alias `cliproxy/big-pickle`) |
@@ -34,9 +42,9 @@ that every environment supplies them. Exclude both Big Pickle provider aliases
 if Big Pickle is coordinating. Never use `auto` or `default` routing as an
 independent named model.
 
-The owner-authorized replacement `cliproxy/claude-fable-5.1` successfully reviewed
-PR #231 after `cliproxy/claude-fable-5` failed. That recorded substitution is not
-a blanket change to the approved pool or permission for silent future fallback.
+The owner replaced Fable 5 with `cliproxy/claude-fable-5.1` in the approved pool
+after its successful PR #231 review. Do not draw the retired Fable 5 entry.
+Other provider spellings are not additional independent reviewer slots.
 
 ## Isolation And Evidence
 
@@ -71,13 +79,13 @@ Smoke calls only validate selection/connectivity; they are not code reviews.
 
 For Phase 1 the owner explicitly accepted OpenCode's recorded requested model
 IDs as sufficient evidence, with upstream proxy routing uncertainty disclosed.
-This does not permit a known fallback or substitution. For every review in
+This does not permit undisclosed upstream fallback. For every review in
 every cycle, verify the actual completed review session's assistant-message
 provider/model metadata against that draw. Historical smoke results never waive
 this check, even with unchanged provider configuration. An incomplete/timed-out
 response does not count as a review; reconcile the original session and retry
-the same selected model when safe, recording both attempts. Substituting another
-model requires repository-owner direction. Big Pickle aliases are not two
+the same selected model when safe, recording both attempts, or use the approved
+replacement procedure above. Big Pickle aliases are not two
 independent review models.
 
 The development CLIProxy catalog relies on a provider plugin for connection

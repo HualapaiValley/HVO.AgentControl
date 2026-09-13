@@ -109,6 +109,9 @@ models, excluding the coordinator model. Verify explicit model selection and
 record provenance; generic Task agent types do not prove model identity. See
 [review protocol](docs/REVIEW-PROTOCOL.md). The pair is one review cycle, with a
 maximum of three cycles before owner direction. No silent model fallback.
+The owner-approved pool uses Fable 5.1 instead of Fable 5. Failed review/task
+models may be replaced from the applicable approved list under the protocol;
+record the failure/replacement and reconcile partial task effects before retry.
 Record and attest the same immutable merge-base/head pair for both reviewers.
 Mark owner-approved deferrals explicitly in the source thread with a follow-up
 issue number, keep the issue open with `status:deferred`, and carry it into the
