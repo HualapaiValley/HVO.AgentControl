@@ -1,0 +1,24 @@
+name: V2 Build
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet restore HVO.AgentControl.slnx
+      - run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+      - run: dotnet test HVO.AgentControl.slnx --no-build -c Release
+      - run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
+      - run: docker compose config --quiet
+      - run: docker build -t agentcontrol-v2:ci .

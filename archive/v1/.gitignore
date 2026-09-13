@@ -1,0 +1,56 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+publish/
+
+# Test and coverage output
+[Tt]est[Rr]esults/
+coverage/
+*.coverage
+*.coveragexml
+*.trx
+
+# IDE and user files
+.vs/
+.idea/
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# NuGet packages
+*.nupkg
+*.snupkg
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.template
+appsettings.Local.json
+.devcontainer/devcontainer.local.env
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# AgentControl durable data, fixture credentials, browser tools
+data/
+.secrets/
+.fixture/
+node_modules/
+playwright-report/
+
+# Local .NET tool discovery cache
+dotnet/runfile-discovery/
+
+# Python tooling bytecode
+__pycache__/
+*.py[cod]

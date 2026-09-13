@@ -1,30 +1,33 @@
-# HVO.AgentControl Agent Guide
+# AgentControl V2 Development
 
-## Toolchain and validation
+The repository root is V2. `archive/v1/` is historical reference only; its
+instructions do not govern V2. Do not modify the archive, reactivate V1
+workflows, or run old deployment scripts without explicit owner direction.
 
-- Use the .NET SDK pinned in `global.json` and the `HVO.AgentControl.slnx` solution.
-- Keep NuGet package versions centralized in `Directory.Packages.props`.
-- Before handing off a change, run:
+## Scope
 
-  ```bash
-  dotnet restore HVO.AgentControl.slnx
-  dotnet build HVO.AgentControl.slnx --no-restore --configuration Release --warnaserror
-  dotnet test HVO.AgentControl.slnx --no-build --configuration Release
-  dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
-  ```
+Build a Docker-native controller for self-contained OpenCode workers using ACP.
+No Fleet dependency, Claude-specific adapter, shared worker checkout, or
+implicit reuse of existing infrastructure. The baseline does not implement
+the planned worker lifecycle yet; distinguish planned from tested behavior.
 
-## Repository structure
+## Validation
 
-- Application projects belong in `src/`.
-- Automated test projects belong in `tests/`.
-- Architecture notes, decisions, and operational documentation belong in `docs/`.
-- Keep Blazor component markup, code-behind, scoped CSS, and scoped JavaScript in sibling files.
+Use the SDK pinned in `global.json`; package versions belong in
+`Directory.Packages.props`. Active code belongs in `src/`, tests in `tests/`,
+and design notes in `docs/`.
 
-## Regression and UI validation
+```bash
+dotnet restore HVO.AgentControl.slnx
+dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+dotnet test HVO.AgentControl.slnx --no-build -c Release
+dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
+```
 
-- Add meaningful regression coverage for behavior changes and bug fixes; test outcomes and failure/recovery boundaries, not just implementation details.
-- For Blazor/UI changes, update Playwright checks in `tests/Browser/` and exercise desktop/mobile behavior against the published application. `package-smoke.cjs` supports an empty isolated database; `ui-recovery.cjs` requires seeded worker data.
-- During prerelease development, automatic CI is the short `build` check on a ready-for-review PR. Draft PRs skip it; marking a draft ready runs it. There is no duplicate push-to-main run. See [validation policy](docs/VALIDATION_POLICY.md).
-- Workers still run the validation above before handing off code changes. Record the exact commit, commands, pass/fail/skip counts, and timeouts in the PR; a skipped fixture or timed-out suite is incomplete validation. For documentation/workflow-only changes, validate the changed files and workflow commands instead of repeating the unchanged application's full test suite.
-- Obtain independent review of the proposed revision. Run the relevant manual integration suite when the change needs coverage unavailable on the worker, when the reviewer requests it, or before a deployment that depends on it. A successful short `build` check does not establish full integration coverage.
-- Use disposable data and credentials for browser tests; do not submit mutations to an active owner deployment unless the task explicitly calls for live validation.
+Test outcomes and failure/recovery boundaries. Receipt is not execution;
+turn completion is not verified task success; cancellation is not rollback.
+Do not retry uncertain writes without reconciling effects.
+
+Never commit credentials, runtime databases, provider transcripts, or local
+configuration. Use disposable resources for integration tests. Commits/pushes
+and production operations require explicit owner authorization.

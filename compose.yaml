@@ -1,22 +1,11 @@
+name: agentcontrol-v2
 services:
-  agentcontrol:
-    build:
-      context: .
-      args:
-        CONTROL_UID: ${CONTROL_UID:-1000}
-        CONTROL_GID: ${CONTROL_GID:-1000}
-    restart: unless-stopped
+  control:
+    build: .
     ports:
-      - "127.0.0.1:8080:8080"
-    environment:
-      # Local loopback demo. For public access terminate TLS at a trusted proxy;
-      # see docs/OPERATIONS.md before changing this binding.
-      Control__AllowInsecureLocalHttp: "true"
-      Logging__LogLevel__Default: Information
-      Logging__LogLevel__Microsoft.EntityFrameworkCore: Warning
-    volumes:
-      - agentcontrol-data:/data
-      - ./.secrets:/run/secrets:ro
-    stop_grace_period: 30s
-volumes:
-  agentcontrol-data:
+      - "127.0.0.1:5054:8080"
+    networks:
+      - agents
+networks:
+  agents:
+    driver: bridge

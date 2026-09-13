@@ -1,0 +1,12 @@
+**/bin
+**/obj
+.git
+.fixture
+.secrets
+data
+artifacts
+**/node_modules
+.env*
+**/appsettings.Local.json
+**/TestResults
+docs/compatibility
