@@ -1,0 +1,19 @@
+name: Feature request
+description: Suggest a scoped V2 improvement
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome and acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and scope boundaries

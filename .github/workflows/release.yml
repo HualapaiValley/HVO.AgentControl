@@ -1,0 +1,218 @@
+name: V2 Release (manual)
+
+# Manual, opt-in release. This workflow is prepared but is never triggered
+# automatically. It publishes a linux/amd64 image to GHCR and creates a GitHub
+# release only when a maintainer dispatches it from main with a version that
+# exactly matches <Version> in Directory.Build.props.
+#
+# No personal access token is stored: the workflow uses the ephemeral
+# GITHUB_TOKEN, and write permissions are granted only to the publish job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release; must match <Version> in Directory.Build.props (for example 0.1.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the GitHub release as a prerelease (recommended while the project is early development)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+# Serialize releases by version so a repeated dispatch cannot race the
+# existence checks or overwrite a tag, release, or image.
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/roysalisbury/hvo.agentcontrol
+
+jobs:
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require main branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases must be dispatched from main (got ${GITHUB_REF})."
+          exit 1
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # The version is passed through the environment, never interpolated into
+      # the shell command. check-release.py performs strict semver validation,
+      # requires an exact match with Directory.Build.props, and refuses to
+      # continue when the git tag already exists.
+      - name: Check version against Directory.Build.props
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/check-release.py --version "$RELEASE_VERSION" --props Directory.Build.props --repo .
+
+  verify:
+    name: Gate build, tests and format
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Restore
+        run: dotnet restore HVO.AgentControl.slnx
+      - name: Build
+        run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+      - name: Test
+        run: >-
+          dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory artifacts/test-results
+      - name: Format
+        run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - run: npm ci --prefix tests/Browser
+      - run: npx --prefix tests/Browser playwright install --with-deps chromium
+      - run: npm run ci --prefix tests/Browser
+      - run: docker compose config --quiet
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-test-results
+          path: artifacts/test-results
+          if-no-files-found: ignore
+
+  publish:
+    name: Publish image and GitHub release
+    needs: [validate, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Optional protection. Configure required reviewers on the "release"
+    # environment in repository settings; without setup the job runs
+    # unprotected.
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Resolve short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+      - name: Refuse to overwrite an existing git tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          python3 scripts/check-release.py --version "$VERSION"
+          python3 scripts/check-release.py --extract-notes "$VERSION" CHANGELOG.md > /tmp/release-notes.md
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR with the ephemeral workflow token
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Fail closed on auth/network errors; only manifest-not-found means absent.
+      - name: Refuse to overwrite an existing image tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for tag in "${VERSION}" "sha-${GITHUB_SHA:0:7}"; do
+            image="${IMAGE}:${tag}"
+            if docker buildx imagetools inspect "$image" >/tmp/manifest.out 2>/tmp/manifest.err; then
+              echo "::error::Image tag already exists: ${image}"
+              exit 1
+            fi
+            if ! grep -Eqi 'manifest unknown|not found' /tmp/manifest.err; then
+              echo "::error::Unable to verify image tag availability; refusing publication."
+              exit 1
+            fi
+          done
+      # No "latest" tag is published. The version tag and the tested-SHA tag
+      # are the only references created.
+      - name: Build and push linux/amd64 image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/roysalisbury/hvo.agentcontrol:${{ inputs.version }}
+            ghcr.io/roysalisbury/hvo.agentcontrol:sha-${{ steps.sha.outputs.short }}
+          labels: |
+            org.opencontainers.image.title=HVO.AgentControl
+            org.opencontainers.image.version=${{ inputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: Write image digest evidence
+        env:
+          VERSION: ${{ inputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHORT: ${{ steps.sha.outputs.short }}
+        run: |
+          set -euo pipefail
+          {
+            echo "image=${IMAGE}"
+            echo "version=${VERSION}"
+            echo "revision=${GITHUB_SHA}"
+            echo "sha_tag=sha-${SHORT}"
+            echo "platform=linux/amd64"
+            echo "digest=${DIGEST}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } | tee image-digest.txt
+      - name: Upload image digest evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-image-digest-${{ inputs.version }}
+          path: image-digest.txt
+          if-no-files-found: error
+      # Tag and release are created server-side at the exact tested SHA. The
+      # tag is created by `gh release create --target`, so it always points at
+      # the commit evaluated by the gate above.
+      - name: Create GitHub release and tag at tested SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          releases=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].tag_name')
+          if grep -Fxq "$tag" <<< "$releases"; then
+            echo "::error::GitHub release ${tag} already exists; refusing to overwrite."
+            exit 1
+          fi
+          args=(--target "${GITHUB_SHA}" --title "HVO.AgentControl ${tag}" --latest=false)
+          if [ "${PRERELEASE}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          args+=(--notes-file /tmp/release-notes.md)
+          gh release create "$tag" "${args[@]}"

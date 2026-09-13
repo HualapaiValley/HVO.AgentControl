@@ -1,0 +1,20 @@
+{
+  "name": "hvo-agentcontrol-browser-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Portable Playwright browser checks for the AgentControl V2 portal. CI runs ci-smoke.mjs against a locally built app; the *-live suites are intentional operator-only checks against a running container.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "ci": "node ci-smoke.mjs",
+    "model-sync": "node model-sync.mjs",
+    "portal-layout": "node portal-layout.mjs",
+    "portal-smoke": "node portal-smoke.mjs",
+    "model-sync-live": "node model-sync-live.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

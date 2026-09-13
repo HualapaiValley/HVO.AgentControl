@@ -1,0 +1,134 @@
+@page "/"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>AgentControl V2</PageTitle>
+
+@* The server render is static. Every dynamic value below starts as a neutral
+   placeholder and is replaced from GET /api/control by the external module.
+   Nothing about workers, tasks or sessions is fabricated client-side. *@
+<div class="portal" data-portal data-runtime-state="unknown">
+    <a class="skip-link" href="#terminal-surface">Skip to terminal</a>
+
+    <header class="app-bar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true"><span class="brand-led"></span></span>
+            <span class="brand-copy">
+                <h1 class="brand-name">AgentControl <em>V2</em></h1>
+                <span class="brand-org" data-field="organizationName">AgentControl Development</span>
+            </span>
+        </div>
+
+        <dl class="app-bar-meta" aria-label="Runtime summary">
+            <div class="meta-item meta-item--state">
+                <dt>Runtime</dt>
+                <dd>
+                    <span class="state-pill" data-field="state" data-state="unknown">
+                        <span class="state-led" aria-hidden="true"></span>
+                        <span class="state-text">Synchronizing</span>
+                    </span>
+                </dd>
+            </div>
+            <div class="meta-item">
+                <dt>Native session</dt>
+                <dd><code class="mono" data-field="sessionId">&mdash;</code></dd>
+            </div>
+            <div class="meta-item">
+                <dt>Transport</dt>
+                <dd><code class="mono" data-field="transport">ACP</code></dd>
+            </div>
+            <div class="meta-item">
+                <dt>Session model</dt>
+                <dd><code class="mono" data-field="model">&mdash;</code></dd>
+            </div>
+        </dl>
+    </header>
+
+    <p class="error-banner" data-field="error-banner" role="alert" hidden>
+        <span class="error-tag">Runtime fault</span>
+        <span class="error-text" data-field="error"></span>
+    </p>
+
+    <main class="control-deck">
+        <section class="telemetry" aria-labelledby="telemetry-title">
+            <h2 id="telemetry-title" class="panel-title">Control console</h2>
+
+            <dl class="telemetry-grid">
+                <div class="telemetry-row">
+                    <dt>Workspace</dt>
+                    <dd><span class="tag tag-scope">Manager-only</span></dd>
+                </div>
+                <div class="telemetry-row">
+                    <dt>Runtime state</dt>
+                    <dd data-field="state-detail">Synchronizing</dd>
+                </div>
+                <div class="telemetry-row">
+                    <dt>Native session</dt>
+                    <dd><code class="mono" data-field="sessionId">&mdash;</code></dd>
+                </div>
+                <div class="telemetry-row">
+                    <dt>Transport</dt>
+                    <dd><code class="mono" data-field="transport">ACP</code></dd>
+                </div>
+                <div class="telemetry-row telemetry-row--model">
+                    <dt><label for="model-select">Session model</label></dt>
+                    <dd class="model-control">
+                        <select id="model-select" class="model-select" data-model-select disabled>
+                            <option value="" disabled selected>Synchronizing&hellip;</option>
+                        </select>
+                        <p class="model-receipt" data-model-receipt role="status" aria-live="polite" hidden></p>
+                        <p class="control-note" data-model-sync-note hidden>OpenCode's TUI picker is client-local. This is the server session model, not an immediate mirror of the picker. Web selection is unavailable until both can synchronize.</p>
+                    </dd>
+                </div>
+                <div class="telemetry-row">
+                    <dt>Last sync</dt>
+                    <dd><time data-field="syncedAt">&mdash;</time></dd>
+                </div>
+            </dl>
+
+            <div class="controls" role="group" aria-label="Terminal controls">
+                <button type="button" class="btn btn-primary" data-action="reconnect" disabled>
+                    Reconnect terminal
+                </button>
+                <button type="button" class="btn" data-action="detach" disabled>
+                    Detach
+                </button>
+                <button type="button" class="btn" data-action="clear">
+                    Clear view
+                </button>
+                <button type="button" class="btn btn-interrupt" data-action="interrupt" disabled>
+                    Interrupt turn
+                </button>
+            </div>
+            <p class="control-note">
+                <strong>Detach</strong> closes this browser attachment only; the native session keeps running.
+            </p>
+
+            <p class="receipt" data-field="receipt" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="terminal-surface" id="terminal-surface" aria-labelledby="terminal-title">
+            <div class="terminal-head">
+                <div class="terminal-heading">
+                    <span class="terminal-lamp" data-connection-led aria-hidden="true"></span>
+                    <h2 id="terminal-title" class="terminal-title">Native terminal</h2>
+                    <span class="terminal-link-state" data-field="connection" role="status" aria-live="polite">Idle</span>
+                </div>
+                <p class="terminal-hint">Type to send &middot; resize follows the pane &middot; output is streamed, not buffered</p>
+            </div>
+
+            <div class="terminal-stage" data-field="terminal-stage">
+                <div id="terminal" class="terminal-mount" data-terminal tabindex="0" role="application"
+                     aria-label="Interactive ACP terminal session"></div>
+                <div class="terminal-overlay" data-field="terminal-overlay" hidden>
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span class="overlay-text" data-field="overlay-text">Waiting for runtime</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-foot">
+        <span>AgentControl V2 &middot; @HVO.AgentControl.ApplicationVersion.Current &middot; manager workspace</span>
+        <span class="mono">GET /api/control &middot; WS /terminal</span>
+    </footer>
+</div>

@@ -1,24 +1,97 @@
-name: V2 Build
+name: V2 CI
+
+# Pull-request and main-branch validation. This workflow never receives
+# secrets and never publishes or pushes anything. Release publication lives in
+# release.yml and is manual-only.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  build-test:
+    name: Build and test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-      - run: dotnet restore HVO.AgentControl.slnx
-      - run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
-      - run: dotnet test HVO.AgentControl.slnx --no-build -c Release
-      - run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
-      - run: docker compose config --quiet
-      - run: docker build -t agentcontrol-v2:ci .
+      # The bridge contract test executes src/HVO.AgentControl/Terminal/pty_bridge.py.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Restore
+        run: dotnet restore HVO.AgentControl.slnx
+      - name: Build
+        run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+      - name: Test
+        run: >-
+          dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory artifacts/test-results
+      - name: Format
+        run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: ignore
+
+  docker:
+    name: Docker config and image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate compose configuration
+        run: docker compose config --quiet
+      - name: Build image without publishing
+        run: docker build --tag hvo-agentcontrol:ci .
+
+  browser-smoke:
+    name: Browser smoke (disabled runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Restore
+        run: dotnet restore HVO.AgentControl.slnx
+      - name: Build
+        run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+      - name: Install browser test dependencies
+        run: npm ci --prefix tests/Browser
+      - name: Install Playwright Chromium
+        run: npx --prefix tests/Browser playwright install --with-deps chromium
+      # ci-smoke.mjs is hermetic: it spawns the locally built app on a free
+      # loopback port with Control__Enabled=false and no owner password, then
+      # drives the real portal. No Docker, model provider, credentials, or
+      # runtime mutations are involved. Its artifacts go to artifacts/browser-ci.
+      - name: Run hermetic browser smoke
+        run: npm run ci --prefix tests/Browser
+      - name: Upload browser artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-smoke-artifacts
+          path: artifacts/browser-ci
+          if-no-files-found: ignore
