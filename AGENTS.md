@@ -94,6 +94,11 @@ models, excluding the coordinator model. Verify explicit model selection and
 record provenance; generic Task agent types do not prove model identity. See
 [review protocol](docs/REVIEW-PROTOCOL.md). The pair is one review cycle, with a
 maximum of three cycles before owner direction. No silent model fallback.
+Record and attest the same immutable merge-base/head pair for both reviewers.
+Mark owner-approved deferrals explicitly in the source thread with a follow-up
+issue number, keep the issue open with `status:deferred`, and carry it into the
+next development/review cycle. A resolved thread or merged PR is not a fixed
+deferred item.
 
 Keep changes focused and one issue per branch/PR. Review is independent of the
 implementer and bound to an exact head SHA; PR #208 Round 1 baseline is

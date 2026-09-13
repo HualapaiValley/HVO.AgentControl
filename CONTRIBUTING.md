@@ -43,6 +43,10 @@ Phase 1 requires the [two-model review protocol](docs/REVIEW-PROTOCOL.md): two
 independent reviewers, randomly selected distinct approved models excluding the
 coordinator, with recorded model provenance and no silent fallback. Both reviews
 together count as one cycle. Generic agent names do not establish model identity.
+Both reviewers attest the same immutable merge-base/head pair. Explicitly mark
+deferred findings in their source threads with follow-up issue numbers; keep
+those issues open and labeled `status:deferred` until completed, and include
+their fixes and interactions in the next development/review cycle.
 
 Review is independent of the implementing agent and bound to an exact head SHA.
 PR #208 Round 1 baseline is `002e826`. The process is intentionally bounded:
