@@ -24,6 +24,8 @@ Changes after the first portal release are collected here.
 
 ### Changed
 
+- Update centralized ASP.NET Core testing/OpenAPI packages to `10.0.12` and
+  Microsoft.NET.Test.Sdk to `18.10.0` (#222, superseding Dependabot #210).
 - Update the active SDK and Docker build image together to .NET `10.0.401`
   (#221, superseding Dependabot #209). Retain supported Node 22 across Docker
   and CI; assess Node major upgrades separately.
