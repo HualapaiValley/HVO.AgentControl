@@ -33,6 +33,9 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Reject cancellation as soon as the control runtime reports an unavailable
+  state, even while its ACP child is still being reaped. Degraded sessions keep
+  their recovery controls (#228).
 - Final full-review corrections: reject blank/short configured owner passwords
   regardless of runtime enablement; atomically initialize secrets and refuse
   damaged existing files without overwriting them.
