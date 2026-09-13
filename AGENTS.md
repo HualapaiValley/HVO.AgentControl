@@ -87,6 +87,21 @@ Test outcomes and failure/recovery boundaries. Receipt is not execution; turn
 completion is not verified task success; cancellation is not rollback. Do not
 retry uncertain writes without reconciling effects.
 
+## Implementation discipline
+
+Follow the [execution workflow](docs/DEVELOPMENT.md#execution-workflow): record
+the baseline and acceptance criteria, make the smallest verifiable change, and
+finish green. A failure discovered during the work is ours to investigate even
+if it predates the diff; do not waive it as unrelated or rerun until green.
+Reviewers provide evidence, not votes. Verify findings against the actual code
+and scope before fixing, rejecting with evidence, or owner-approved deferral.
+Keep the PR summary current and verify issue/branch/CI state after merge.
+
+Continue dependency-ready work within recorded owner authorization until the
+requested batch is complete or a real blocker requires a decision. Routine
+merges are progress updates, not automatic stopping points. Never broaden scope,
+credentials, destructive actions or review-cycle exceptions to avoid a pause.
+
 ## Pull request process
 
 Phase 1 uses two independent reviewers on randomly selected, distinct approved

@@ -2,6 +2,12 @@
 
 ## Selection
 
+Terminology: a review cycle is one reviewer pair for one exact PR base/head;
+a development batch is the dependency-ordered issue queue. See the
+[execution workflow](DEVELOPMENT.md#execution-workflow). Next-cycle deferrals
+mean the next development batch and its relevant reviews, not an unrequested
+extra review of a merged PR.
+
 For each cycle, randomly draw two distinct eligible models without replacement.
 Exclude the coordinator's model, including aliases of that same model. Both
 review tasks together count as one cycle. Record the pool, draw, exact provider
@@ -28,11 +34,21 @@ that every environment supplies them. Exclude both Big Pickle provider aliases
 if Big Pickle is coordinating. Never use `auto` or `default` routing as an
 independent named model.
 
+The owner-authorized replacement `cliproxy/claude-fable-5.1` successfully reviewed
+PR #231 after `cliproxy/claude-fable-5` failed. That recorded substitution is not
+a blanket change to the approved pool or permission for silent future fallback.
+
 ## Isolation And Evidence
 
 Reviewers do not implement changes, edit the branch, or see one another's
 findings before both finish. Supply the same immutable head and base, issue
 acceptance criteria, relevant source, complete diff and validation evidence.
+Include the unchanged context needed to evaluate the diff: relevant complete
+configuration, callers, tests and contracts. A missing line in a diff is not
+evidence that a setting or safeguard does not exist. State packet scope/omissions;
+if a finding depends on omitted context, inspect it before accepting the finding
+and supply the necessary context for subsequent review. Do not expose either
+reviewer's findings to the other while their independent reviews are in flight.
 The review base is the recorded merge-base of the PR head and target branch,
 not the previous reviewed head used to compute a correction diff. Both reviewers
 attest the same base/head pair. If the merge-base changes, record the new pair
@@ -83,6 +99,16 @@ reasoning, and acceptance impact. Triage owner comments too. Reply to every fix
 thread with its change, exercising validation and exact head before resolving
 the thread. Do not label deferred work fixed.
 
+Reviewers provide evidence, not authority or a majority vote. Verify each finding
+against the actual repository, acceptance criteria and applicable safety rules.
+Consolidate duplicates without losing distinct concerns. Disposition every item:
+**Fixed** with commit/test evidence, **Rejected** with specific contrary evidence
+or scope reasoning, or **Deferred** with owner approval and a linked issue.
+Stylistic suggestions are not automatically defects or new backlog. Disagreement
+between reviewers is resolved by investigation, not by choosing the favorable
+review. Do not dismiss an established security/correctness problem as cosmetic
+or defer it simply to end a review loop.
+
 Mark each owner-approved deferred finding **Deferred, not fixed** in a comment
 on its original review thread, and include the follow-up issue number. The issue
 must link back to the finding, carry `status:deferred`, describe the remaining
@@ -128,3 +154,9 @@ data. Pause for repository-owner direction on those actions or any expanded scop
 
 Record the reviewed SHA and this standing authorization on each merge. Other
 work remains subject to the repository's explicit authorization requirements.
+
+Before merge, reconcile the current PR body with the actual reviewed head,
+required checks and all finding dispositions. After merge, follow the execution
+workflow's issue/branch/main-CI checks. Thread resolution records a disposition;
+issue closure records completed acceptance (or an explicit owner alternative);
+merge records integration. None substitutes for the others or for a release.
