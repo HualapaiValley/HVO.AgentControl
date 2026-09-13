@@ -60,8 +60,8 @@ public static class ControlStateExtensions
     /// failure during the bootstrap turn) but still owns the session and the
     /// transport, so locking the operator out would remove exactly the controls
     /// needed to inspect and recover it. <see cref="ControlState.Starting"/> has
-    /// no established session yet, and Disabled/Faulted/Stopped have no live
-    /// child — a protocol fault is therefore never controllable.
+    /// no established session yet. Disabled/Faulted/Stopped deny control even
+    /// while asynchronous teardown still owns a live child.
     /// </remarks>
     public static bool AllowsControl(this ControlState state)
         => state is ControlState.Ready or ControlState.Degraded;

@@ -92,22 +92,27 @@ public sealed class AcpControlHost : BackgroundService
     /// <summary>
     /// Sends <c>session/cancel</c> for the established session. Returns true only
     /// when the notification was written to a live child; false when there is no
-    /// session or the child is gone. The write is bounded by a 5 second deadline
+    /// controllable session or the child is gone. The write is bounded by a 5 second deadline
     /// linked to <paramref name="cancellationToken"/>. Cancellation does not roll
     /// back external effects; the caller maps false to an unavailable response.
     /// </summary>
     /// <remarks>
-    /// This deliberately gates on the owned session and a live child rather than
-    /// on <see cref="ControlState.Ready"/>. A <see cref="ControlState.Degraded"/>
+    /// This permits both <see cref="ControlState.Ready"/> and
+    /// <see cref="ControlState.Degraded"/> with an owned session and live child. A degraded
     /// runtime — for example one whose bootstrap turn failed against a transient
     /// provider error — still owns a live transport, and that is precisely when
     /// an operator needs to interrupt an orphaned turn. Refusing here would make
     /// the degraded state unrecoverable. A protocol fault is a different case:
-    /// it tears the child down through <see cref="Fault"/>, after which this
-    /// returns false because no live process remains.
+    /// it rejects new control requests as soon as faulted is published, even
+    /// while asynchronous teardown is still reaping the child.
     /// </remarks>
     public async Task<bool> CancelAsync(CancellationToken cancellationToken)
     {
+        if (!GetState().AllowsControl())
+        {
+            return false;
+        }
+
         var session = _session;
         var sessionId = _sessionId;
         if (session is null || string.IsNullOrEmpty(sessionId))

@@ -183,10 +183,43 @@ public sealed class AcpControlHostTests
         Assert.False(status.TerminalReady);
         Assert.False(Program.IsRuntimeReady(status));
 
-        // The transport is gone, so cancellation cannot be accepted either.
+        // Fault publication denies cancellation even before teardown completes.
         Assert.False(await host.CancelAsync(CancellationToken.None));
 
         await host.StopAsync(CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData(ControlState.Faulted)]
+    [InlineData(ControlState.Stopped)]
+    [InlineData(ControlState.Disabled)]
+    public async Task PublishedUnavailableStateRejectsCancelBeforeChildTeardown(ControlState state)
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-cancel-state-").FullName;
+        using var host = CreateHost(ReadyOptions(data));
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+
+        try
+        {
+            // Hold the publication-before-teardown condition without a timing race.
+            // Existing tests exercise the real Fault path and degraded recovery.
+            typeof(AcpControlHost)
+                .GetMethod("SetStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .Invoke(host, [state, "Test state published before teardown."]);
+            var process = (System.Diagnostics.Process)typeof(AcpControlHost)
+                .GetField("_process", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .GetValue(host)!;
+
+            Assert.False(process.HasExited);
+            Assert.False(host.GetStatus().CanControl);
+            Assert.False(await host.CancelAsync(CancellationToken.None));
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            await host.StopAsync(CancellationToken.None);
+        }
     }
 
     /// <summary>
