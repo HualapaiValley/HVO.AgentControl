@@ -33,6 +33,9 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Stop writing executable ACP fixture files while tests run. Per-test symlinks
+  and scenario sidecars use one build-copied script, avoiding Linux `ETXTBSY`
+  from writable descriptors inherited by concurrent process starts (#232).
 - Reject cancellation as soon as the control runtime reports an unavailable
   state, even while its ACP child is still being reaped. Degraded sessions keep
   their recovery controls (#228).
