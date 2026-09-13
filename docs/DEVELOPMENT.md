@@ -37,7 +37,11 @@ Phase 1 retains Node 22 across Docker and CI: it is Maintenance LTS through
 of the SDK patch update; Node 26 reaches its scheduled LTS start on 2026-10-28.
 A major upgrade needs a coordinated compatibility assessment, not just an
 OpenCode install-stage change. Docker Node major proposals are held by a scoped
-Dependabot ignore; patch/minor updates and other dependencies remain enabled.
+Dependabot ignore. The floating `22-bookworm-slim` tag receives Node patches
+through refreshed image pulls/rebuilds, not patch-version PRs. The ignore also
+suppresses proposals requiring a newer Node major, so reassess it before Node 22
+support ends or an advisory requires migration. Other dependencies and update
+ecosystems remain enabled.
 
 ## Clean machine setup
 
