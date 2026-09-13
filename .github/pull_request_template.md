@@ -16,14 +16,19 @@ Commands/results:
 - [ ] Two independent reviewers used randomly selected distinct approved models,
       excluding the coordinator; model provenance and any routing/fallback limits
       are recorded under the Phase 1 review protocol.
-- [ ] Independent review (not the implementing agent) ran against the exact head
-      SHA recorded below.
+- [ ] Independent review (not the implementing agent) ran against the same exact
+      immutable merge-base/head SHA pair recorded below.
 - [ ] Every finding, including all owner comments, is triaged.
 - [ ] Each fix is answered in its own thread with the change, the validation
       that exercised it, and the exact head it applies to, before resolving it.
 - [ ] Deferrals have owner approval and a linked follow-up issue; no security,
       data-loss, acceptance, failing-CI or material-correctness finding is
       deferred.
+- [ ] Deferred findings are commented as Deferred with issue numbers in their
+      original threads; linked issues remain open, labeled `status:deferred`,
+      and scheduled for the next development/review cycle.
+- [ ] Both reviewers assessed all carried-forward items and their interactions;
+      unfinished items have an explicit new owner disposition.
 - [ ] Review round count is within the three-round bound, or the owner approved
       a fourth.
 - [ ] Required CI is green on the exact reviewed head (necessary, not
@@ -31,13 +36,15 @@ Commands/results:
 
 - Reviewed head SHA:
 - Immutable review base SHA (both reviewers attest this same base):
-- Review round: 1 / 2 / 3 (pause before 4)
+- Review round: 1 / 2 / 3 / 4 (4 requires explicit owner authorization reference):
+- Additional-cycle authorization reference, if applicable:
 - Coordinator provider/model:
 - Eligible model pool and random selection:
 - Reviewer A provider/model, session/evidence, scope, base/head attestation:
 - Reviewer B provider/model, session/evidence, scope, base/head attestation:
 - Upstream routing/fallback evidence or unresolved provenance limits:
 - Deferred findings and linked issues:
+- Carried-forward issues, source findings, fixes and reviewer dispositions:
 
 ## UI Evidence
 

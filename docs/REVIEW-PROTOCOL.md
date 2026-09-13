@@ -5,7 +5,8 @@
 For each cycle, randomly draw two distinct eligible models without replacement.
 Exclude the coordinator's model, including aliases of that same model. Both
 review tasks together count as one cycle. Record the pool, draw, exact provider
-and model IDs, coordinator identity, head SHA, session IDs and result references.
+and model IDs, coordinator identity, immutable base/head SHAs, session IDs and
+result references.
 Do not silently redraw when a selected model is unavailable; report the failure
 and obtain repository-owner direction. Do not substitute generic Task agent
 types as proof that different models ran.
@@ -32,6 +33,12 @@ independent named model.
 Reviewers do not implement changes, edit the branch, or see one another's
 findings before both finish. Supply the same immutable head and base, issue
 acceptance criteria, relevant source, complete diff and validation evidence.
+The review base is the recorded merge-base of the PR head and target branch,
+not the previous reviewed head used to compute a correction diff. Both reviewers
+attest the same base/head pair. If the merge-base changes, record the new pair
+and review the new diff and changed interactions; prior evidence does not silently
+carry over. Advancing the target without changing the merge-base still requires
+the normal up-to-date CI and interaction checks before merge.
 Do not attach secrets, private runtime transcripts, owner-password files or
 unrelated repositories. Disable external plugins, delegation and writes; a
 no-tool review can receive a prepared complete review packet. A large packet
@@ -76,6 +83,22 @@ reasoning, and acceptance impact. Triage owner comments too. Reply to every fix
 thread with its change, exercising validation and exact head before resolving
 the thread. Do not label deferred work fixed.
 
+Mark each owner-approved deferred finding **Deferred, not fixed** in a comment
+on its original review thread, and include the follow-up issue number. The issue
+must link back to the finding, carry `status:deferred`, describe the remaining
+acceptance criteria, and be scheduled into the next development/review cycle.
+Resolving the original thread records that disposition, not a completed fix.
+Keep the follow-up open until its own implementation, validation and review are
+complete; avoid closing-keyword references from the source PR and verify issue
+state after merge so GitHub cannot silently close unfinished work.
+
+At the next cycle, explicitly list carried-forward issues in the review packet
+and require both reviewers to assess their fixes and interactions. Do not leave
+them as an unscheduled backlog. If a carried item still cannot be completed,
+report it for a new owner disposition; the prior deferral is not permission to
+defer it indefinitely. Remove `status:deferred` only after verified completion,
+or an explicit replacement disposition recorded by the owner.
+
 Stop when both reviews are clear, findings are resolved and exact-head required
 CI is green. At most three cycles are allowed; pause for the owner before cycle
 four. A deferral needs explicit owner approval and a linked issue. Security,
@@ -87,6 +110,9 @@ be deferred to linked follow-up issues with their actual status disclosed, and
 the PR may merge with required exact-head CI green. This exception does not
 waive blocking security, data-loss, acceptance or material-correctness findings,
 nor does it authorize a fifth cycle or change other PRs' three-cycle default.
+A blocking finding after an authorized fourth cycle keeps the PR unmerged;
+pause for a separate owner decision before further review. Non-critical
+deferrals still follow the next-cycle carry-forward rule above.
 
 ## Authorization
 
