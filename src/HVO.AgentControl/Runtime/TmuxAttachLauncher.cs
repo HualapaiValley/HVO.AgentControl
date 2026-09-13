@@ -34,6 +34,7 @@ public sealed class TmuxAttachLauncher
     private TmuxAttachResult _lastResult = new(false, false, null);
     private TmuxAttachRequest? _lastRequest;
     private string? _paneId;
+    private (string PaneId, TmuxAttachRequest Request)? _pendingPane;
 
     public TmuxAttachLauncher(string sessionName, string tmuxExecutable = "tmux", TimeProvider? timeProvider = null)
     {
@@ -93,6 +94,18 @@ public sealed class TmuxAttachLauncher
                 return Complete(false, $"tmux session '{_sessionName}' is not owned by this runtime; refusing to replace it.");
             }
 
+            // Finish a known partial creation before consulting a possibly stale
+            // persisted marker. Never create a second pane to retry metadata/UI work.
+            if (_pendingPane is { } pending)
+            {
+                if (pending.Request != request)
+                {
+                    return Complete(false, "tmux pending attach request changed; operator recovery required.");
+                }
+                _paneId = pending.PaneId;
+                return await FinishPendingPaneAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+
             var identity = await RunAsync(["show-options", "-qv", "-t", "=" + _sessionName, PaneOption], cancellationToken).ConfigureAwait(false);
             if (identity.ExitCode != 0)
             {
@@ -128,6 +141,7 @@ public sealed class TmuxAttachLauncher
         {
             _owned = false;
             _paneId = null;
+            _pendingPane = null;
         }
 
         // An existing tmux server has its own (possibly credential-bearing) global
@@ -146,10 +160,20 @@ public sealed class TmuxAttachLauncher
         }
 
         _paneId = start.StandardOutput.Trim();
+        _pendingPane = (_paneId, request);
         _owned = await MatchesOwnerAsync(request.OwnerToken, cancellationToken).ConfigureAwait(false);
         if (!_owned)
         {
             return Complete(false, "tmux ownership check after creation failed.");
+        }
+        return await FinishPendingPaneAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<TmuxAttachResult> FinishPendingPaneAsync(TmuxAttachRequest request, CancellationToken cancellationToken)
+    {
+        if (await ProbePaneAsync(cancellationToken).ConfigureAwait(false) != true)
+        {
+            return Complete(false, "tmux pending attach pane is not live; operator recovery required.");
         }
         var saved = await RunAsync(["set-option", "-t", "=" + _sessionName, PaneOption, request.OwnerToken + ":" + _paneId], cancellationToken).ConfigureAwait(false);
         if (saved.ExitCode != 0)
@@ -161,14 +185,18 @@ public sealed class TmuxAttachLauncher
         {
             return Complete(false, "tmux attach window selection failed.");
         }
-        return await ProbePaneAsync(cancellationToken).ConfigureAwait(false) == true
-            ? Complete(true, null)
-            : Complete(false, "tmux attach pane is not live.");
+        if (await ProbePaneAsync(cancellationToken).ConfigureAwait(false) != true)
+        {
+            return Complete(false, "tmux attach pane is not live.");
+        }
+        _pendingPane = null;
+        return Complete(true, null);
     }
 
     private async Task<bool> SelectPaneAsync(CancellationToken cancellationToken)
     {
         var window = await RunAsync(["select-window", "-t", _paneId!], cancellationToken).ConfigureAwait(false);
+        if (window.ExitCode != 0) return false;
         var pane = await RunAsync(["select-pane", "-t", _paneId!], cancellationToken).ConfigureAwait(false);
         return window.ExitCode == 0 && pane.ExitCode == 0;
     }

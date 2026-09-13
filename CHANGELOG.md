@@ -33,6 +33,10 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Round 3: retain a just-created TUI pane through marker-persistence or selection
+  failures and retry those steps with backoff before advertising readiness.
+  Retries do not create duplicate attach clients or replace unrelated panes.
+
 - Round 2: readiness requires an attached terminal even when terminal launch is
   disabled. Exceptional ProblemDetails responses retain their media type,
   instance and trace ID when content negotiation declines the default writer.

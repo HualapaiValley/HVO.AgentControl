@@ -190,6 +190,99 @@ public sealed class TmuxAttachLauncherTests
     }
 
     [Theory]
+    [InlineData("set-option", false)]
+    [InlineData("set-option", true)]
+    [InlineData("select-window", false)]
+    [InlineData("select-window", true)]
+    [InlineData("select-pane", false)]
+    [InlineData("select-pane", true)]
+    public async Task PartialCreationRetriesSamePaneUntilReady(string failure, bool recovery)
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        if (recovery)
+        {
+            Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+            fake.State("owner", true);
+            clock.Advance(5);
+        }
+        fake.Fail(failure);
+        var startCount = fake.Calls().Length;
+        Assert.False((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        var created = Assert.Single(fake.Calls().Skip(startCount), call => call.Args[0] is "new-session" or "new-window");
+        Assert.Equal(recovery ? "new-window" : "new-session", created.Args[0]);
+
+        foreach (var delay in new[] { 2, 4, 8, 16, 30 })
+        {
+            var count = fake.Calls().Length;
+            clock.Advance(delay - 1);
+            Assert.False((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+            Assert.Equal(count, fake.Calls().Length);
+            clock.Advance(1);
+            Assert.False((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        }
+
+        fake.Fail(null);
+        clock.Advance(30);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        var pane = recovery ? "%2" : "%1";
+        using var state = JsonDocument.Parse(File.ReadAllText(fake.StatePath));
+        Assert.Equal("owner:" + pane, state.RootElement.GetProperty("identity").GetString());
+        Assert.Equal(pane, state.RootElement.GetProperty("selectedWindow").GetString());
+        Assert.Equal(pane, state.RootElement.GetProperty("selectedPane").GetString());
+        if (recovery) Assert.Equal(0, state.RootElement.GetProperty("panes").GetProperty("%99").GetInt32());
+        Assert.Single(fake.Calls().Skip(startCount), call => call.Args[0] is "new-session" or "new-window");
+        Assert.DoesNotContain(fake.Calls(), call => call.Args[0].StartsWith("kill-", StringComparison.Ordinal));
+
+        var healthyStart = fake.Calls().Length;
+        clock.Advance(5);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        Assert.DoesNotContain(fake.Calls().Skip(healthyStart), call => call.Args[0] is "select-window" or "select-pane" or "set-option");
+    }
+
+    [Fact]
+    public async Task PendingCreationDoesNotCreateOrSelectAfterOwnershipChanges()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        fake.Fail("set-option");
+        Assert.False((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        fake.State("foreign", false);
+        fake.Fail(null);
+        var before = fake.Calls().Length;
+        clock.Advance(2);
+        Assert.False((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        Assert.DoesNotContain(fake.Calls().Skip(before), call => call.Args[0] is "new-window" or "new-session" or "select-window" or "select-pane" or "set-option");
+    }
+
+    [Fact]
+    public async Task PendingPaneThatDiesRemainsNotReadyWithoutCreatingAnother()
+    {
+        using var fake = new FakeTmux();
+        var clock = new Clock();
+        var launcher = fake.Launcher(clock);
+        Assert.True((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        fake.State("owner", true);
+        fake.Fail("set-option");
+        clock.Advance(5);
+        Assert.False((await launcher.EnsureAsync(fake.Request, CancellationToken.None)).Started);
+        var state = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(fake.StatePath))!;
+        state["panes"]!["%2"] = 1;
+        File.WriteAllText(fake.StatePath, state.ToJsonString());
+        fake.Fail(null);
+        foreach (var delay in new[] { 2, 4, 8 })
+        {
+            clock.Advance(delay);
+            var result = await launcher.EnsureAsync(fake.Request, CancellationToken.None);
+            Assert.False(result.Started);
+            Assert.Contains("operator recovery required", result.Error);
+        }
+        Assert.Single(fake.Calls(), call => call.Args[0] == "new-window");
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task InconclusiveProbePreservesOwnershipForShutdownRecheck(bool foreignAtShutdown)
@@ -367,6 +460,8 @@ public sealed class TmuxAttachLauncherTests
                     json.dump(state, open(path, 'w'))
                 elif command in ('select-window', 'select-pane'):
                     if args[-1] not in state['panes']: sys.exit(1)
+                    state['selectedWindow' if command == 'select-window' else 'selectedPane'] = args[-1]
+                    json.dump(state, open(path, 'w'))
                 elif command == 'list-panes':
                     if not state: sys.exit(1)
                     for pane, dead in state['panes'].items(): print(pane + ' ' + str(dead))
@@ -379,7 +474,8 @@ public sealed class TmuxAttachLauncherTests
                         pane = '%1'
                     else:
                         assert args[args.index('-t') + 1] == '=test:'
-                        pane = '%2'
+                        pane = '%' + str(state.get('nextPane', 2))
+                        state['nextPane'] = int(pane[1:]) + 1
                     state['panes'][pane] = 0
                     json.dump(state, open(path, 'w'))
                     print(pane)
