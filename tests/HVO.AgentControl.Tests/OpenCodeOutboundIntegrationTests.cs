@@ -20,7 +20,7 @@ public sealed class OpenCodeOutboundIntegrationTests
     private const string DisposableKey = "disposable-opencode-wire-key-243";
 
     [Fact]
-    public async Task PinnedOpenCodeEmitsSelectedModelAndMediumReasoningEffort()
+    public async Task PinnedOpenCodeComposePrimaryProfileWorkhorseEmitsTerraMedium()
     {
         var required = string.Equals(
             Environment.GetEnvironmentVariable("AGENTCONTROL_OPENCODE_WIRE_REQUIRED"),
@@ -43,13 +43,13 @@ public sealed class OpenCodeOutboundIntegrationTests
 
         var runtime = CliProxyRuntimeConfiguration.LoadRequired(new ControlOptions
         {
-            Model = "cliproxy/gpt-5.6-terra",
+            Model = "cliproxy/default",
             ModelVariant = "medium",
             CliProxyEndpoint = endpoint.BaseUrl,
             CliProxySecretFile = secretPath,
         });
         var config = AgentControlOpenCodeConfig.Build(
-            "cliproxy/gpt-5.6-terra",
+            "cliproxy/default",
             instructionsPath,
             runtime);
 
@@ -63,7 +63,7 @@ public sealed class OpenCodeOutboundIntegrationTests
         };
         foreach (var argument in new[]
         {
-            "run", "--pure", "--format", "json", "--agent", AgentControlOpenCodeConfig.RoleName,
+            "run", "--pure", "--format", "json", "--agent", "workhorse",
             "Reply with exactly OK and do not call tools.",
         })
         {
@@ -186,7 +186,9 @@ public sealed class OpenCodeOutboundIntegrationTests
 
                 if (context.Request.HttpMethod == "GET" && context.Request.RawUrl == "/v1/models")
                 {
-                    await WriteJsonAsync(context.Response, "{\"object\":\"list\",\"data\":[]}");
+                    await WriteJsonAsync(
+                        context.Response,
+                        "{\"object\":\"list\",\"data\":[{\"id\":\"default\"},{\"id\":\"gpt-5.6-terra\"}]}");
                     continue;
                 }
 

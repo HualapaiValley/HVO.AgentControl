@@ -118,6 +118,7 @@ target_name = sys.argv[2]
 control_uid = int(sys.argv[3])
 control_gid = int(sys.argv[4])
 minimum = int(sys.argv[5])
+fault_phase = sys.argv[6] if len(sys.argv) > 6 else None
 
 if not os.path.isabs(directory) or os.path.basename(target_name) != target_name or target_name in ("", ".", ".."):
     raise SystemExit("the CLIProxy target parent must be absolute and the target must be a fixed basename")
@@ -194,7 +195,30 @@ try:
             os.close(existing_fd)
 
     if existing == payload:
-        print("CLIProxy key is unchanged; no rotation performed (contents not printed).")
+        # Identical bytes are a metadata reconciliation, not an unconditional
+        # no-op. Repair ownership/mode through the already-verified descriptor so
+        # the inode and contents remain unchanged, then verify before success.
+        repair_fd = os.open(
+            target_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd
+        )
+        try:
+            before = os.fstat(repair_fd)
+            if (before.st_dev, before.st_ino) != (info.st_dev, info.st_ino):
+                fail("the CLIProxy key file changed before metadata repair; reconcile before retry")
+            if before.st_gid != control_gid:
+                os.fchown(repair_fd, control_uid, control_gid)
+            if stat.S_IMODE(before.st_mode) != 0o600:
+                os.fchmod(repair_fd, 0o600)
+            repaired = os.fstat(repair_fd)
+            if (repaired.st_dev, repaired.st_ino) != (info.st_dev, info.st_ino):
+                fail("the CLIProxy key file changed during metadata repair; reconcile before retry")
+            if repaired.st_uid != control_uid or repaired.st_gid != control_gid:
+                fail("the CLIProxy key file does not carry the controller ownership after metadata repair")
+            if stat.S_IMODE(repaired.st_mode) != 0o600:
+                fail("the CLIProxy key file does not carry mode 0600 after metadata repair")
+        finally:
+            os.close(repair_fd)
+        print("CLIProxy key is unchanged; metadata verified or repaired in place (contents not printed).")
         raise SystemExit(0)
 
     fd = None
@@ -219,8 +243,16 @@ try:
         os.fchown(fd, control_uid, control_gid)
         os.fchmod(fd, 0o600)
         os.fsync(fd)
+        if fault_phase == "before-publication":
+            fail("simulated failure before publication; the existing key is unchanged")
         os.replace(temporary, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         published = True
+        if fault_phase == "after-publication":
+            print(
+                "CLIProxy key publication may have occurred; reconcile the file before retrying.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
     finally:
         os.close(fd)
         if not published:
@@ -1695,7 +1727,7 @@ def main(argv):
 
     try:
         run_in_volumes(docker, args.image, code, mounts, arguments, interactive=interactive)
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as error:
         if args.revert_isolation:
             print(
                 "isolation rollback failed. Nothing was deleted and every step is idempotent: "
@@ -1711,17 +1743,24 @@ def main(argv):
                 file=sys.stderr,
             )
         elif args.provision_cliproxy_key:
-            print(
-                "CLIProxy key provisioning failed. No value was printed and any existing file "
-                "was left unchanged; the operation is safe to retry once the condition is fixed.",
-                file=sys.stderr,
-            )
+            if error.returncode == 2:
+                print(
+                    "CLIProxy key publication may have occurred; reconcile the file and stop all "
+                    "runtimes sharing the credential before deciding whether to retry.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "CLIProxy key provisioning failed before a confirmed publication. No value was "
+                    "printed; inspect the reported condition before retrying.",
+                    file=sys.stderr,
+                )
         else:
             print(
                 f"owner password {action} failed; no existing file was overwritten.",
                 file=sys.stderr,
             )
-        return 1
+        return error.returncode if args.provision_cliproxy_key and error.returncode == 2 else 1
     return 0
 
 

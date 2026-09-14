@@ -199,6 +199,62 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
+    public void DifferentValidSchemaV1BackupIsRejectedAndSourceRemainsUnchanged()
+    {
+        using var source = new TempStore();
+        using (var store = Open(source))
+        {
+            store.OpenAndAdopt("Source Organization", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV1(source.Path);
+        var sourceBefore = SnapshotCoreData(source.Path);
+
+        using var other = new TempStore();
+        using (var store = Open(other))
+        {
+            store.OpenAndAdopt("Different Organization", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV1(other.Path);
+        var backup = Path.Combine(source.Directory, OrganizationStore.SchemaV1BackupFileName);
+        CopySqliteDatabase(other.Path, backup);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant();
+        File.WriteAllText(Path.Combine(source.Directory, OrganizationStore.SchemaV1BackupHashFileName), hash + "\n");
+
+        using var reopened = Open(source);
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
+            reopened.OpenAndAdopt("Source Organization", "owner-approved:test", null, "seed://fresh"));
+        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, RawScalar(source.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(sourceBefore, SnapshotCoreData(source.Path));
+    }
+
+    [Fact]
+    public void SchemaV1WriteAfterFailedMigrationInvalidatesRetainedBackup()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV1(root.Path);
+        using (var faulted = Open(root))
+        {
+            faulted.BeforeMigrationCommit = () => throw new InvalidOperationException("simulated migration crash");
+            Assert.Throws<InvalidOperationException>(() =>
+                faulted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        }
+
+        ExecuteRaw(root.Path, "UPDATE organizations SET display_name = 'Changed after failed migration', revision = revision + 1;");
+        var sourceBefore = SnapshotCoreData(root.Path);
+        using var retry = Open(root);
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
+            retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(sourceBefore, SnapshotCoreData(root.Path));
+    }
+
+    [Fact]
     public void MigrationFaultRollsBackAndRestartCompletesFromUnchangedV1()
     {
         using var root = new TempStore();
@@ -241,7 +297,7 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
-    public void ProviderConfigurationRecordsOnlySanitizedRequestedMetadataIdempotently()
+    public void ProviderConfigurationRecordsOnlySanitizedConfiguredMetadataIdempotently()
     {
         using var root = new TempStore();
         using var store = Open(root);
@@ -259,7 +315,7 @@ public sealed class OrganizationStoreTests
             "gpt-6-astra",
             "medium");
         Assert.Equal("gpt-6-astra", RawScalarString(root.Path, "SELECT policy_lane_id FROM runtime_bindings;"));
-        Assert.Equal("medium", RawScalarString(root.Path, "SELECT requested_variant FROM runtime_bindings;"));
+        Assert.Equal("medium", RawScalarString(root.Path, "SELECT configured_variant FROM runtime_bindings;"));
         Assert.Equal("agentcontrol-control-phase1-v1", RawScalarString(root.Path, "SELECT provider_profile_id FROM runtime_bindings;"));
         Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
 
@@ -275,6 +331,44 @@ public sealed class OrganizationStoreTests
             "medium");
         Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name LIKE '%endpoint%' OR name LIKE '%key%' OR name LIKE '%secret%' OR name LIKE '%fingerprint%';"));
+    }
+
+    [Fact]
+    public void ObservedNativeModelIsSeparateNullableAndIdempotent()
+    {
+        using var root = new TempStore();
+        using var store = Open(root);
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        store.RecordProviderConfiguration(
+            "agentcontrol-system-phase1",
+            "opencode-1.18.30-openai-compatible-v1",
+            "agentcontrol-control-phase1-v1",
+            "configured",
+            "cliproxy-phase1-2026-09-14-v1",
+            "default",
+            "cliproxy",
+            "default",
+            "medium");
+        var revision = RawScalar(root.Path, "SELECT revision FROM runtime_bindings;");
+        var firstObservedAt = DateTimeOffset.Parse("2026-09-14T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+
+        store.RecordObservedModel("native-provider", "served-model", null, firstObservedAt);
+        Assert.Equal("cliproxy", RawScalarString(root.Path, "SELECT configured_provider_id FROM runtime_bindings;"));
+        Assert.Equal("default", RawScalarString(root.Path, "SELECT configured_model_id FROM runtime_bindings;"));
+        Assert.Equal("medium", RawScalarString(root.Path, "SELECT configured_variant FROM runtime_bindings;"));
+        Assert.Equal("native-provider", RawScalarString(root.Path, "SELECT observed_provider_id FROM runtime_bindings;"));
+        Assert.Equal("served-model", RawScalarString(root.Path, "SELECT observed_model_id FROM runtime_bindings;"));
+        Assert.True(RawIsNull(root.Path, "SELECT observed_variant FROM runtime_bindings;"));
+        Assert.Equal(firstObservedAt.ToString("O"), RawScalarString(root.Path, "SELECT observed_at FROM runtime_bindings;"));
+        Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+
+        store.RecordObservedModel("native-provider", "served-model", null, firstObservedAt.AddMinutes(1));
+        Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+        Assert.Equal(firstObservedAt.ToString("O"), RawScalarString(root.Path, "SELECT observed_at FROM runtime_bindings;"));
+
+        store.RecordObservedModel("native-provider", "served-model", "high", firstObservedAt.AddMinutes(2));
+        Assert.Equal("high", RawScalarString(root.Path, "SELECT observed_variant FROM runtime_bindings;"));
+        Assert.Equal(revision + 2, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
     }
 
     [Fact]
@@ -1183,6 +1277,27 @@ public sealed class OrganizationStoreTests
         Assert.False(File.Exists(backupPath + "-shm"));
     }
 
+    private static void CopySqliteDatabase(string sourcePath, string destinationPath)
+    {
+        var sourceBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        var destinationBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = destinationPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false,
+        };
+        using var source = new SqliteConnection(sourceBuilder.ToString());
+        using var destination = new SqliteConnection(destinationBuilder.ToString());
+        source.Open();
+        destination.Open();
+        source.BackupDatabase(destination);
+    }
+
     private static int CountSessions(string path) => RawScalar(path, "SELECT COUNT(*) FROM acp_sessions;");
 
     private static int CountActiveSessions(string path) =>
@@ -1207,6 +1322,21 @@ public sealed class OrganizationStoreTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static bool RawIsNull(string path, string sql)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar() is DBNull or null;
     }
 
     private static string RawScalarString(string path, string sql)

@@ -199,9 +199,20 @@ public static class AgentControlOpenCodeConfig
             agents[task.AgentName] = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["description"] = task.Description,
-                ["mode"] = "subagent",
+                // `all` keeps task delegation available and also makes explicit
+                // `opencode run --agent <task>` selection effective in 1.18.30.
+                ["mode"] = "all",
                 ["model"] = $"{CliProxyModelCatalog.ProviderId}/{task.LaneId}",
                 ["variant"] = task.Variant,
+                ["options"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["reasoningEffort"] = task.Variant,
+                },
+                // OpenCode 1.18.30 accepts `steps`; `maxSteps` is retained for
+                // compatibility with the alternate AgentConfig spelling used by
+                // clients/schema consumers. Both carry the same conservative cap.
+                ["steps"] = task.MaxSteps,
+                ["maxSteps"] = task.MaxSteps,
                 ["permission"] = BuildReadOnlyPermission(),
             };
         }
@@ -212,8 +223,8 @@ public static class AgentControlOpenCodeConfig
     /// <summary>
     /// The direct OpenAI-compatible provider document. It maps only the exposed
     /// policy lanes. Every advertised variant carries its actual
-    /// <c>reasoningEffort</c>, and the selected lane repeats the selected effort
-    /// in model-level <c>options</c>. OpenCode 1.18.30 otherwise applies its
+    /// <c>reasoningEffort</c>, and selected primary/task lanes repeat their
+    /// effective effort in model-level <c>options</c>. OpenCode 1.18.30 otherwise applies its
     /// built-in low default on the wire even when the selected variant object is
     /// correct; the pinned outbound integration test guards this exact behavior.
     /// </summary>
@@ -237,13 +248,7 @@ public static class AgentControlOpenCodeConfig
                         ["id"] = lane.Id,
                         ["name"] = lane.DisplayName,
                         ["reasoning"] = lane.AllowedVariants.Count > 0,
-                        ["options"] = string.Equals(lane.Id, cliProxy.Lane.Id, StringComparison.Ordinal)
-                            && !string.IsNullOrWhiteSpace(cliProxy.Variant)
-                            ? new Dictionary<string, object?>(StringComparer.Ordinal)
-                            {
-                                ["reasoningEffort"] = cliProxy.Variant,
-                            }
-                            : new Dictionary<string, object?>(StringComparer.Ordinal),
+                        ["options"] = BuildLaneOptions(lane, cliProxy),
                         ["variants"] = lane.AllowedVariants.ToDictionary(
                             variant => variant,
                             variant => (object?)new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -255,6 +260,23 @@ public static class AgentControlOpenCodeConfig
                     StringComparer.Ordinal),
             },
         };
+
+    private static Dictionary<string, object?> BuildLaneOptions(
+        CliProxyModelLane lane,
+        CliProxyRuntimeConfiguration cliProxy)
+    {
+        var effort = string.Equals(lane.Id, cliProxy.Lane.Id, StringComparison.Ordinal)
+            ? cliProxy.Variant
+            : CliProxyProfile.TaskClasses
+                .SingleOrDefault(task => string.Equals(task.LaneId, lane.Id, StringComparison.Ordinal))
+                ?.Variant;
+        return string.IsNullOrWhiteSpace(effort)
+            ? new Dictionary<string, object?>(StringComparer.Ordinal)
+            : new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["reasoningEffort"] = effort,
+            };
+    }
 
     /// <summary>
     /// Bounded, read-only task-agent permission. Task agents may read but not

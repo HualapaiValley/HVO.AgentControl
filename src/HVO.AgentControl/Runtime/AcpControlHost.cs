@@ -284,14 +284,14 @@ public sealed class AcpControlHost : BackgroundService
             }
 
             // Do not advertise a requested value as observed state when readback fails.
-            string? confirmed = null;
+            NativeModelReference? confirmed = null;
             var native = _native;
             if (native is not null)
             {
                 var snapshot = await native.GetSessionModelAsync(sessionId, token).ConfigureAwait(false);
                 if (snapshot.Available)
                 {
-                    confirmed = snapshot.Model?.Reference;
+                    confirmed = snapshot.Model;
                 }
             }
 
@@ -299,8 +299,8 @@ public sealed class AcpControlHost : BackgroundService
             {
                 return false;
             }
-            SetModel(confirmed);
-            return string.Equals(confirmed, reference.Reference, StringComparison.Ordinal);
+            SetObservedModel(confirmed);
+            return string.Equals(confirmed.Reference, reference.Reference, StringComparison.Ordinal);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -608,9 +608,9 @@ public sealed class AcpControlHost : BackgroundService
                 providerConfigStatus: "unconfigured",
                 modelCatalogVersion: null,
                 policyLaneId: null,
-                requestedProviderId: separator > 0 ? _options.Model[..separator] : "unknown",
-                requestedModelId: separator > 0 ? _options.Model[(separator + 1)..] : _options.Model,
-                requestedVariant: null);
+                configuredProviderId: separator > 0 ? _options.Model[..separator] : "unknown",
+                configuredModelId: separator > 0 ? _options.Model[(separator + 1)..] : _options.Model,
+                configuredVariant: null);
         }
 
         var configContent = AgentControlOpenCodeConfig.Build(_options.Model, instructionsPath, cliProxy);
@@ -954,7 +954,7 @@ public sealed class AcpControlHost : BackgroundService
             var snapshot = await native.GetSessionModelAsync(sessionId, cancellationToken).ConfigureAwait(false);
             if (snapshot.Available)
             {
-                SetModel(snapshot.Model?.Reference);
+                SetObservedModel(snapshot.Model);
             }
 
             if (GetModelsSnapshot() is null)
@@ -1396,11 +1396,20 @@ public sealed class AcpControlHost : BackgroundService
         }
     }
 
-    private void SetModel(string? model)
+    private void SetObservedModel(NativeModelReference? model)
     {
         lock (_gate)
         {
-            _model = string.IsNullOrWhiteSpace(model) ? "unknown" : model;
+            _model = model?.Reference ?? "unknown";
+        }
+
+        if (model is not null)
+        {
+            _organization?.RecordObservedModel(
+                model.ProviderId,
+                model.ModelId,
+                model.Variant,
+                DateTimeOffset.UtcNow);
         }
     }
 

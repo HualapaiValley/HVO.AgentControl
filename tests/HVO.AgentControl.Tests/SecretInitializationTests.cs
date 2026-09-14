@@ -1034,11 +1034,17 @@ public sealed class SecretInitializationTests
             File.GetUnixFileMode(target));
         var firstInode = Inode(python, target);
 
+        File.SetUnixFileMode(
+            target,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
         var identical = RunProvision(python, target, uid, gid, first);
         Assert.True(identical.ExitCode == 0, identical.StandardError);
         Assert.Contains("unchanged", identical.StandardOutput, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(firstInode, Inode(python, target));
         Assert.Equal(first + "\n", File.ReadAllText(target));
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            File.GetUnixFileMode(target));
 
         var rotated = RunProvision(python, target, uid, gid, second);
         Assert.True(rotated.ExitCode == 0, rotated.StandardError);
@@ -1048,6 +1054,70 @@ public sealed class SecretInitializationTests
         Assert.DoesNotContain(second, rotated.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain(second, rotated.StandardError, StringComparison.Ordinal);
         Assert.DoesNotContain("fingerprint", rotated.StandardOutput, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProvisionRepairsUnexpectedGroupOnIdenticalInputWithoutReplacingInode()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        var alternateGroup = SupplementaryGroup(python, gid);
+        if (alternateGroup is null)
+        {
+            return;
+        }
+
+        using var directory = new TempDirectory();
+        var target = Path.Combine(directory.Path, "cliproxy-api-key");
+        const string key = "disposable-group-repair-key-0001";
+        Assert.Equal(0, RunProvision(python, target, uid, gid, key).ExitCode);
+        var inode = Inode(python, target);
+        var changed = Run(
+            python,
+            ["-c", "import os,sys;os.chown(sys.argv[1], -1, int(sys.argv[2]))", target, alternateGroup.Value.ToString()]);
+        Assert.True(changed.ExitCode == 0, changed.StandardError);
+        Assert.Equal(alternateGroup.Value, GroupId(python, target));
+
+        var repaired = RunProvision(python, target, uid, gid, key);
+        Assert.True(repaired.ExitCode == 0, repaired.StandardError);
+        Assert.Equal(inode, Inode(python, target));
+        Assert.Equal(gid, GroupId(python, target));
+        Assert.Equal(key + "\n", File.ReadAllText(target));
+    }
+
+    [Fact]
+    public void ProvisionDistinguishesFailuresBeforeAndAfterPublication()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        using var directory = new TempDirectory();
+        var target = Path.Combine(directory.Path, "cliproxy-api-key");
+        const string original = "disposable-original-key-0001";
+        const string replacement = "disposable-replacement-key-0002";
+        Assert.Equal(0, RunProvision(python, target, uid, gid, original).ExitCode);
+        var originalInode = Inode(python, target);
+
+        var before = RunProvision(python, target, uid, gid, replacement, "before-publication");
+        Assert.Equal(1, before.ExitCode);
+        Assert.Contains("before publication", before.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(original + "\n", File.ReadAllText(target));
+        Assert.Equal(originalInode, Inode(python, target));
+
+        var after = RunProvision(python, target, uid, gid, replacement, "after-publication");
+        Assert.Equal(2, after.ExitCode);
+        Assert.Contains("publication may have occurred", after.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(replacement + "\n", File.ReadAllText(target));
+        Assert.NotEqual(originalInode, Inode(python, target));
     }
 
     [Theory]
@@ -1304,15 +1374,22 @@ public sealed class SecretInitializationTests
         string target,
         int uid,
         int gid,
-        string key)
+        string key,
+        string? faultPhase = null)
     {
         var code = LoadEmbeddedCode(python, "PROVISION_CODE");
         Assert.False(string.IsNullOrWhiteSpace(code));
+        var arguments = new List<string>
+        {
+            "-c", code, Path.GetDirectoryName(target)!, Path.GetFileName(target),
+            uid.ToString(), gid.ToString(), "16",
+        };
+        if (faultPhase is not null)
+        {
+            arguments.Add(faultPhase);
+        }
 
-        return RunWithInput(
-            python,
-            ["-c", code, Path.GetDirectoryName(target)!, Path.GetFileName(target), uid.ToString(), gid.ToString(), "16"],
-            key);
+        return RunWithInput(python, arguments, key);
     }
 
     private static (int UserId, int GroupId) CurrentUidGid(string python)
@@ -1329,6 +1406,25 @@ public sealed class SecretInitializationTests
         var result = Run(python, ["-c", "import os,sys;print(os.stat(sys.argv[1]).st_ino)", path]);
         Assert.True(result.ExitCode == 0, result.StandardError);
         return long.Parse(result.StandardOutput.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int GroupId(string python, string path)
+    {
+        var result = Run(python, ["-c", "import os,sys;print(os.stat(sys.argv[1]).st_gid)", path]);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        return int.Parse(result.StandardOutput.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int? SupplementaryGroup(string python, int primaryGroup)
+    {
+        var result = Run(python, ["-c", "import os;print(' '.join(str(x) for x in os.getgroups()))"]);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        return result.StandardOutput
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(value => int.Parse(value, System.Globalization.CultureInfo.InvariantCulture))
+            .FirstOrDefault(value => value != primaryGroup) is var group && group != 0
+                ? group
+                : null;
     }
 
     private static (int ExitCode, string StandardOutput, string StandardError) RunWithInput(

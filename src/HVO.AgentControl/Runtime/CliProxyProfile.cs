@@ -90,9 +90,10 @@ public static class CliProxyProfile
 
     /// <summary>
     /// Deterministic task classes. Each maps a task to one lane and one explicit
-    /// variant; the generated config turns each into a bounded, read-only
-    /// subagent. <c>default</c> is the non-attributable availability lane and is
-    /// never usable as an independent named review.
+    /// variant; the generated config turns each into a step/tool-bounded,
+    /// read-only subagent. <c>default</c> is the non-attributable availability
+    /// lane and is never usable as an independent named review. Process timeout
+    /// is policy metadata enforced by the external direct-session runner.
     /// </summary>
     public static IReadOnlyList<CliProxyTaskClass> TaskClasses { get; } =
     [
@@ -101,24 +102,32 @@ public static class CliProxyProfile
             "Heavy",
             "default",
             "medium",
+            64,
+            TimeSpan.FromMinutes(30),
             "Heavy availability work on the non-attributable default policy lane; never an independent named review."),
         new(
             "workhorse",
             "Workhorse",
             "gpt-5.6-terra",
             "medium",
+            64,
+            TimeSpan.FromMinutes(30),
             "Primary workhorse work on the Terra implementation policy lane."),
         new(
             "cheap",
             "Cheap",
             "gpt-5.6-luna",
             "low",
+            32,
+            TimeSpan.FromMinutes(15),
             "Low-cost work on the Luna implementation policy lane."),
         new(
             CorrectionAgentName,
             "Focused correction",
             "claude-sonnet-5",
             "medium",
+            32,
+            TimeSpan.FromMinutes(15),
             "Focused correction work on the Sonnet focused-correction policy lane."),
     ];
 
@@ -137,4 +146,6 @@ public sealed record CliProxyTaskClass(
     string DisplayName,
     string LaneId,
     string Variant,
+    int MaxSteps,
+    TimeSpan ProcessTimeout,
     string Description);

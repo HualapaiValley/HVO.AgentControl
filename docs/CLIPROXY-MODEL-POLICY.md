@@ -100,22 +100,35 @@ never exposed.
 
 ### Task classes (generated agents)
 
-Each task class becomes a bounded, read-only OpenCode subagent with an explicit
-model and variant; all tool writes, shell and network access are denied and only
-sensitive-path-safe reads are allowed.
+Each task class becomes a step/tool-bounded, read-only OpenCode subagent with an
+explicit model, variant and agent-level `options.reasoningEffort`; all tool
+writes, shell and network access are denied and only sensitive-path-safe reads
+are allowed. Both OpenCode AgentConfig step spellings (`steps` and `maxSteps`)
+are generated with the same conservative value.
 
-| Agent | Lane | Variant | Notes |
-| --- | --- | --- | --- |
-| `agentcontrol` (primary) | `Control:Model` (`cliproxy/default`) | `Control:ModelVariant` (`medium`) | Consolidated manager/operations/IT control role. |
-| `heavy` | `default` | medium | Non-attributable availability lane; never an independent named review. |
-| `workhorse` | `gpt-5.6-terra` | medium | Primary workhorse implementation-policy lane. |
-| `cheap` | `gpt-5.6-luna` | low | Low-cost implementation-policy lane. |
-| `correction` (focused correction) | `claude-sonnet-5` | medium | Focused correction task lane. |
+| Agent | Lane | Variant | Steps | External process timeout | Notes |
+| --- | --- | --- | ---: | ---: | --- |
+| `agentcontrol` (primary) | `Control:Model` (`cliproxy/default`) | `Control:ModelVariant` (`medium`) | n/a | host lifecycle | Consolidated manager/operations/IT control role. |
+| `heavy` | `default` | medium | 64 | 30 minutes | Non-attributable availability lane; never an independent named review. |
+| `workhorse` | `gpt-5.6-terra` | medium | 64 | 30 minutes | Primary workhorse implementation-policy lane. |
+| `cheap` | `gpt-5.6-luna` | low | 32 | 15 minutes | Low-cost implementation-policy lane. |
+| `correction` (focused correction) | `claude-sonnet-5` | medium | 32 | 15 minutes | Focused correction task lane. |
 
 No review agent is generated. An independent review must **explicitly** select
 one of `gpt-6-astra`, `gpt-5.6-sol`, `claude-fable-5.1`, `claude-opus-5`,
 `deepseek-v4.1-flash` or `claude-opus-5-1m`; `default`, `free`, `big-pickle` and
-`auto` are never a review draw.
+`auto` are never a review draw. Every review starts a fresh OpenCode session;
+compaction within that session does not authorize continuation after the step
+limit. Step exhaustion ends the attempt with no automatic continuation. The
+external runner must cancel and terminate the process tree at its declared
+15/30-minute policy deadline and record an incomplete review rather than treating
+a timeout as success.
+
+OpenCode 1.18.30 exposes no wire-verified per-agent context or output-token cap in
+this profile. Catalog context/output limits are currently `0` (unknown), so this
+contract is deliberately described as step/tool-bounded, not context/output-
+bounded. Concrete context/output enforcement remains unavailable until an
+authoritative provider limit or a real-binary-verified OpenCode option exists.
 
 ### Variants
 
@@ -131,11 +144,13 @@ local OpenAI-compatible endpoint. It verifies that model variant entries carryin
 
 An empty option object would request a variant with no effort and let the
 provider silently choose a default, so every advertised variant states its own
-value. OpenCode 1.18.30 additionally requires the selected lane's model-level
-`options.reasoningEffort` to be populated; the variant entry alone produced
-wire-level `low` in the real-binary test. The generated config therefore carries
-both, and the outbound test locks the selected `medium` request to
-`reasoning_effort: medium`. Big Pickle advertises no variants and is generated
+value. OpenCode 1.18.30 additionally requires the effective lane's model-level
+`options.reasoningEffort` to be populated; the variant entry and agent-level
+option alone produced wire-level `low` in the real-binary direct-agent test. The
+generated config therefore repeats each task class effort at model level, and
+the outbound test generates the actual Compose primary profile
+(`cliproxy/default` medium), invokes `--agent workhorse`, and locks Terra medium
+to `reasoning_effort: medium`. Big Pickle advertises no variants and is generated
 with an empty map.
 
 ## Configuration and secrets
@@ -166,9 +181,11 @@ make the key suitable for broader authority.
 
 Before OpenCode starts, the controller performs a bounded authenticated
 `GET /v1/models` and does not send an inference request. A 401/403 records the
-sanitized provider status `revoked`; network errors, timeouts and 5xx responses
-record `unavailable`; only a successful response records `configured`. Response
-bodies are not read or logged, and no key or fingerprint is persisted. If
+sanitized provider status `revoked`; network errors, timeouts, 5xx, wrong content,
+malformed/empty JSON, a missing exact selected lane ID, and responses over 1 MiB
+record `unavailable`. Only a bounded valid OpenAI-compatible model list containing
+the exact selected lane records `configured`. Response bodies are parsed but
+never logged, and no key or fingerprint is persisted. If
 endpoint, catalog lane, variant, secret or preflight validation fails, a runtime
 that selected `cliproxy/*` faults before OpenCode starts. It never substitutes
 `opencode/big-pickle`. Big Pickle is permitted only when explicitly selected as
@@ -184,8 +201,12 @@ The named **AgentControl** dashboard key is provisioned from stdin into the
 external secrets volume. It is never passed as an argument or environment value,
 never printed, and no fingerprint is stored. The provisioner validates length
 (>= 16 non-control characters), rejects symlinks, non-regular files, extra hard
-links and unexpected owners, preserves the inode on identical input, and
-atomically replaces on change.
+links and unexpected owners, repairs UID/GID/mode metadata on identical input
+through the same inode and verifies it, and atomically replaces on change. A
+failure before rename reports that publication did not occur; any directory
+fsync or verification failure after rename exits distinctly and reports
+`publication may have occurred; reconcile file before retry` rather than claiming
+the prior file is unchanged or a retry is automatically safe.
 
 Exact command shape (the operator supplies the named AgentControl key; no
 database password or raw query belongs in this repository). The key goes in on

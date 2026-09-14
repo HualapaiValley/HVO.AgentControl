@@ -1,3 +1,4 @@
+using HVO.AgentControl.Organization;
 using HVO.AgentControl.Runtime;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -439,6 +440,19 @@ public sealed class AcpControlHostTests
         Assert.False(await host.SetModelAsync("opencode/big-pickle", CancellationToken.None));
         await WaitForFileContainsAsync(callsPath, "session/set_config_option", TimeSpan.FromSeconds(5));
         Assert.Equal("unknown", host.GetStatus().Model);
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(data, OrganizationStore.DatabaseFileName)};Mode=ReadOnly"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT observed_provider_id, observed_model_id, observed_variant, observed_at FROM runtime_bindings";
+            using var reader = command.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.True(reader.IsDBNull(0));
+            Assert.True(reader.IsDBNull(1));
+            Assert.True(reader.IsDBNull(2));
+            Assert.True(reader.IsDBNull(3));
+        }
 
         // Receipt without authoritative readback is not confirmed session state.
         await Task.Delay(1500);

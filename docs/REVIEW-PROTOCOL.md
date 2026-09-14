@@ -107,7 +107,12 @@ provider/model metadata against that draw. Historical smoke results never waive
 this check, even with unchanged provider configuration. An incomplete/timed-out
 response does not count as a review; reconcile the original session and retry
 the same selected model when safe, recording both attempts, or use the approved
-replacement procedure above. Big Pickle aliases are not two
+replacement procedure above. Every review invocation starts a fresh session;
+never continue a prior review automatically after compaction or step exhaustion.
+The direct runner enforces the task class's 15/30-minute process deadline and,
+on cancellation or timeout, terminates the process tree and records the attempt
+as incomplete. Step/tool bounds do not imply a context-window or output-token
+bound; those remain provider-lane constraints while catalog limits are unknown. Big Pickle aliases are not two
 independent review models, and `default`/`auto` can never be the named review.
 
 The managed AgentControl runtime uses the committed direct
@@ -178,8 +183,8 @@ deferrals still follow the next-cycle carry-forward rule above.
 
 One implementation issue per branch/PR. Do not amend or force-push a reviewed
 head. On 2026-09-13 the owner explicitly authorized bounded Phase 1 commits,
-pushes and focused PRs, with merge only after both independent reviews and
-required exact-head CI pass. This is standing owner authorization, not GitHub
+pushes and focused PRs, with merge only after all reviews required by the risk
+classification and required exact-head CI pass. This is standing owner authorization, not GitHub
 auto-merge or permission to bypass a failed gate. It includes the development
 deployment refresh and scoped disposable two-host, initial-hire and
 teardown/rebuild tests. It excludes production changes, release tags/registry

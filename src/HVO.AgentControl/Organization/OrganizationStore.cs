@@ -236,9 +236,13 @@ public sealed class OrganizationStore : IDisposable
             provider_config_status TEXT NOT NULL DEFAULT 'unconfigured' CHECK (provider_config_status IN ('unconfigured', 'configured', 'unavailable', 'revoked')),
             model_catalog_version TEXT,
             policy_lane_id TEXT,
-            requested_provider_id TEXT,
-            requested_model_id TEXT,
-            requested_variant TEXT,
+            configured_provider_id TEXT,
+            configured_model_id TEXT,
+            configured_variant TEXT,
+            observed_provider_id TEXT,
+            observed_model_id TEXT,
+            observed_variant TEXT,
+            observed_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             revision INTEGER NOT NULL,
@@ -727,13 +731,13 @@ public sealed class OrganizationStore : IDisposable
         string providerConfigStatus,
         string? modelCatalogVersion,
         string? policyLaneId,
-        string requestedProviderId,
-        string requestedModelId,
-        string? requestedVariant)
+        string configuredProviderId,
+        string configuredModelId,
+        string? configuredVariant)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(providerConfigStatus);
-        ArgumentException.ThrowIfNullOrWhiteSpace(requestedProviderId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(requestedModelId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(configuredProviderId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(configuredModelId);
         TranslateStoreFaults(() =>
         {
             ThrowIfDisposed();
@@ -757,9 +761,9 @@ public sealed class OrganizationStore : IDisposable
                         provider_config_status = $status,
                         model_catalog_version = $catalogVersion,
                         policy_lane_id = $lane,
-                        requested_provider_id = $provider,
-                        requested_model_id = $model,
-                        requested_variant = $variant,
+                        configured_provider_id = $provider,
+                        configured_model_id = $model,
+                        configured_variant = $variant,
                         updated_at = CASE WHEN
                             credential_set_id IS $credential
                             AND provider_config_version IS $configVersion
@@ -767,9 +771,9 @@ public sealed class OrganizationStore : IDisposable
                             AND provider_config_status = $status
                             AND model_catalog_version IS $catalogVersion
                             AND policy_lane_id IS $lane
-                            AND requested_provider_id = $provider
-                            AND requested_model_id = $model
-                            AND requested_variant IS $variant
+                            AND configured_provider_id = $provider
+                            AND configured_model_id = $model
+                            AND configured_variant IS $variant
                             THEN updated_at ELSE $now END,
                         revision = CASE WHEN
                             credential_set_id IS $credential
@@ -778,9 +782,9 @@ public sealed class OrganizationStore : IDisposable
                             AND provider_config_status = $status
                             AND model_catalog_version IS $catalogVersion
                             AND policy_lane_id IS $lane
-                            AND requested_provider_id = $provider
-                            AND requested_model_id = $model
-                            AND requested_variant IS $variant
+                            AND configured_provider_id = $provider
+                            AND configured_model_id = $model
+                            AND configured_variant IS $variant
                             THEN revision ELSE revision + 1 END
                     WHERE id = $binding
                     """,
@@ -790,14 +794,68 @@ public sealed class OrganizationStore : IDisposable
                     ("$status", providerConfigStatus),
                     ("$catalogVersion", modelCatalogVersion),
                     ("$lane", policyLaneId),
-                    ("$provider", requestedProviderId),
-                    ("$model", requestedModelId),
-                    ("$variant", requestedVariant),
+                    ("$provider", configuredProviderId),
+                    ("$model", configuredModelId),
+                    ("$variant", configuredVariant),
                     ("$now", Timestamp()),
                     ("$binding", _bindingId));
                 if (affected != 1)
                 {
                     throw new OrganizationStoreException("Provider configuration did not update exactly one runtime binding.");
+                }
+
+                transaction.Commit();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Persists an authoritative native model observation independently from the
+    /// configured policy lane. Identical observations are a no-op so a status
+    /// poll does not create write churn. A missing variant remains SQL NULL.
+    /// </summary>
+    public void RecordObservedModel(string providerId, string modelId, string? variant, DateTimeOffset observedAt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+        TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                if (_bindingId is null)
+                {
+                    throw new OrganizationStoreException("The store has not been opened; an observed model cannot be recorded.");
+                }
+
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var timestamp = observedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+                var affected = Execute(
+                    connection,
+                    transaction,
+                    """
+                    UPDATE runtime_bindings
+                    SET observed_provider_id = $provider,
+                        observed_model_id = $model,
+                        observed_variant = $variant,
+                        observed_at = $observed,
+                        updated_at = $observed,
+                        revision = revision + 1
+                    WHERE id = $binding
+                        AND NOT (
+                            observed_provider_id IS $provider
+                            AND observed_model_id IS $model
+                            AND observed_variant IS $variant)
+                    """,
+                    ("$provider", providerId),
+                    ("$model", modelId),
+                    ("$variant", variant),
+                    ("$observed", timestamp),
+                    ("$binding", _bindingId));
+                if (affected is < 0 or > 1)
+                {
+                    throw new OrganizationStoreException("Observed model persistence updated an unexpected number of runtime bindings.");
                 }
 
                 transaction.Commit();
@@ -1270,6 +1328,13 @@ public sealed class OrganizationStore : IDisposable
             }
 
             ValidateSchemaSignature(verify, ExpectedSchemaV1);
+            var sourceDigest = ComputeLogicalContentDigest(source);
+            var backupDigest = ComputeLogicalContentDigest(verify);
+            if (!sourceDigest.AsSpan().SequenceEqual(backupDigest))
+            {
+                throw new OrganizationStoreCorruptException(
+                    "The retained schema-v1 backup is valid but does not match the current schema-v1 source. Refusing to reuse mismatched recovery evidence.");
+            }
         }
 
         var bytesAfterVerification = File.ReadAllBytes(backupPath);
@@ -1289,6 +1354,77 @@ public sealed class OrganizationStore : IDisposable
 
         RestrictFileMode(backupPath);
         RestrictFileMode(hashPath);
+    }
+
+    private static byte[] ComputeLogicalContentDigest(SqliteConnection connection)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        static void Append(IncrementalHash hash, string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            hash.AppendData(BitConverter.GetBytes(bytes.Length));
+            hash.AppendData(bytes);
+        }
+
+        var tables = new List<(string Name, string Sql)>();
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText =
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name COLLATE BINARY";
+            using var reader = schema.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add((reader.GetString(0), NormalizeSchemaSql(reader.GetString(1))));
+            }
+        }
+
+        foreach (var (table, sql) in tables)
+        {
+            Append(hash, "table");
+            Append(hash, table);
+            Append(hash, sql);
+
+            var columns = new List<string>();
+            using (var pragma = connection.CreateCommand())
+            {
+                pragma.CommandText = $"PRAGMA table_info(\"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\")";
+                using var reader = pragma.ExecuteReader();
+                while (reader.Read())
+                {
+                    columns.Add(reader.GetString(1));
+                }
+            }
+
+            var quotedColumns = string.Join(", ", columns.Select(column => $"\"{column.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
+            using var rows = connection.CreateCommand();
+            rows.CommandText = $"SELECT {quotedColumns} FROM \"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\" ORDER BY {quotedColumns}";
+            using var rowReader = rows.ExecuteReader();
+            while (rowReader.Read())
+            {
+                Append(hash, "row");
+                for (var index = 0; index < rowReader.FieldCount; index++)
+                {
+                    var value = rowReader.GetValue(index);
+                    switch (value)
+                    {
+                        case DBNull:
+                            Append(hash, "null");
+                            break;
+                        case byte[] blob:
+                            Append(hash, "blob");
+                            hash.AppendData(BitConverter.GetBytes(blob.Length));
+                            hash.AppendData(blob);
+                            break;
+                        default:
+                            Append(hash, value.GetType().FullName ?? "value");
+                            Append(hash, Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty);
+                            break;
+                    }
+                }
+            }
+        }
+
+        return hash.GetHashAndReset();
     }
 
     private void MigrateV1ToV2(SqliteConnection connection)

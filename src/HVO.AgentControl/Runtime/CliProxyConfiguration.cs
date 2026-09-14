@@ -1,5 +1,7 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.Json;
 
 namespace HVO.AgentControl.Runtime;
 
@@ -16,6 +18,8 @@ public sealed class CliProxyPreflightException : InvalidOperationException
 
 public sealed record CliProxyRuntimeConfiguration(Uri Endpoint, string Secret, CliProxyModelLane Lane, string? Variant)
 {
+    internal const int MaximumCatalogResponseBytes = 1024 * 1024;
+
     public static bool IsCliProxyModel(string model) =>
         model.StartsWith(CliProxyModelCatalog.ProviderId + "/", StringComparison.Ordinal);
 
@@ -28,8 +32,13 @@ public sealed record CliProxyRuntimeConfiguration(Uri Endpoint, string Secret, C
         }
 
         var laneId = options.Model[(CliProxyModelCatalog.ProviderId.Length + 1)..];
-        var lane = CliProxyModelCatalog.Find(laneId)
-            ?? throw new InvalidOperationException($"CLIProxy policy lane '{laneId}' is not in catalog {CliProxyModelCatalog.Version}.");
+        var lane = CliProxyProfile.SelectableLanes.SingleOrDefault(
+            candidate => string.Equals(candidate.Id, laneId, StringComparison.Ordinal));
+        if (lane is null)
+        {
+            throw new InvalidOperationException(
+                $"CLIProxy policy lane '{laneId}' is not selectable in profile {CliProxyProfile.Version}.");
+        }
         if (!Uri.TryCreate(options.CliProxyEndpoint, UriKind.Absolute, out var endpoint)
             || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps)
             || !string.IsNullOrEmpty(endpoint.Query)
@@ -100,17 +109,73 @@ public sealed record CliProxyRuntimeConfiguration(Uri Endpoint, string Secret, C
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 bounded.Token).ConfigureAwait(false);
-            if (response.IsSuccessStatusCode)
+            if (!response.IsSuccessStatusCode)
             {
-                return;
+                var status = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                    ? "revoked"
+                    : "unavailable";
+                throw new CliProxyPreflightException(
+                    status,
+                    $"CLIProxy catalog validation failed with HTTP {(int)response.StatusCode}; response content was not read.");
             }
 
-            var status = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
-                ? "revoked"
-                : "unavailable";
-            throw new CliProxyPreflightException(
-                status,
-                $"CLIProxy catalog validation failed with HTTP {(int)response.StatusCode}; response content was not read.");
+            if (!string.Equals(response.Content.Headers.ContentType?.MediaType, "application/json", StringComparison.OrdinalIgnoreCase))
+            {
+                throw CatalogUnavailable("CLIProxy catalog validation returned an unexpected content type.");
+            }
+
+            if (response.Content.Headers.ContentLength is > MaximumCatalogResponseBytes)
+            {
+                throw CatalogUnavailable("CLIProxy catalog validation returned an oversized response.");
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(bounded.Token).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var rented = ArrayPool<byte>.Shared.Rent(81920);
+            try
+            {
+                while (true)
+                {
+                    var remaining = MaximumCatalogResponseBytes + 1 - checked((int)buffer.Length);
+                    if (remaining <= 0)
+                    {
+                        throw CatalogUnavailable("CLIProxy catalog validation returned an oversized response.");
+                    }
+
+                    var read = await stream.ReadAsync(
+                        rented.AsMemory(0, Math.Min(rented.Length, remaining)),
+                        bounded.Token).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    buffer.Write(rented, 0, read);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+
+            if (buffer.Length == 0)
+            {
+                throw CatalogUnavailable("CLIProxy catalog validation returned an empty response.");
+            }
+
+            try
+            {
+                buffer.Position = 0;
+                using var document = await JsonDocument.ParseAsync(buffer, cancellationToken: bounded.Token).ConfigureAwait(false);
+                if (!ContainsExactLane(document.RootElement, Lane.Id))
+                {
+                    throw CatalogUnavailable("CLIProxy catalog validation did not advertise the selected policy lane.");
+                }
+            }
+            catch (JsonException exception)
+            {
+                throw CatalogUnavailable("CLIProxy catalog validation returned malformed JSON.", exception);
+            }
         }
         catch (CliProxyPreflightException)
         {
@@ -124,7 +189,37 @@ public sealed record CliProxyRuntimeConfiguration(Uri Endpoint, string Secret, C
         {
             throw new CliProxyPreflightException("unavailable", "CLIProxy catalog validation could not reach the configured endpoint.", exception);
         }
+        catch (IOException exception)
+        {
+            throw new CliProxyPreflightException("unavailable", "CLIProxy catalog validation could not read the configured endpoint response.", exception);
+        }
     }
+
+    private static bool ContainsExactLane(JsonElement root, string selectedLaneId)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("data", out var data)
+            || data.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var entry in data.EnumerateArray())
+        {
+            if (entry.ValueKind == JsonValueKind.Object
+                && entry.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.String
+                && string.Equals(id.GetString(), selectedLaneId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static CliProxyPreflightException CatalogUnavailable(string message, Exception? exception = null) =>
+        new("unavailable", message, exception);
 
     private static string RemoveSingleLineFraming(string value)
     {

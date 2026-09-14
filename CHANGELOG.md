@@ -14,7 +14,7 @@ Changes after the first portal release are collected here.
 - Portable CLIProxy managed-employee inference seam (#243). A commit-curated,
   sanitized policy-lane catalog (18 lanes) is separated from a deterministic
   control exposure profile (`agentcontrol-control-phase1-v1`) that generates only
-  the directly selectable lanes plus bounded, read-only task agents; the proxy's
+  the directly selectable lanes plus step/tool-bounded, read-only task agents; the proxy's
   internal fallback source aliases and `auto` are never exposed, and no implicit
   review agent exists. The generated direct `@ai-sdk/openai-compatible` provider
   references `{env:CLIPROXY_API_KEY}` and carries an explicit `reasoningEffort`

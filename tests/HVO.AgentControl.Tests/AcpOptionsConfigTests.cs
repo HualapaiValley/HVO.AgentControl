@@ -259,6 +259,14 @@ public sealed class AcpOptionsConfigTests
                     variant.Value.GetProperty("reasoningEffort").GetString());
                 inspected++;
             }
+
+            var task = CliProxyProfile.TaskClasses.SingleOrDefault(candidate => candidate.LaneId == lane.Id);
+            if (task is not null)
+            {
+                Assert.Equal(
+                    task.Variant,
+                    model.Value.GetProperty("options").GetProperty("reasoningEffort").GetString());
+            }
         }
 
         Assert.True(inspected > 0, "no advertised variants were inspected");
@@ -291,9 +299,15 @@ public sealed class AcpOptionsConfigTests
         foreach (var task in CliProxyProfile.TaskClasses)
         {
             var agent = agents.GetProperty(task.AgentName);
-            Assert.Equal("subagent", agent.GetProperty("mode").GetString());
+            Assert.Equal("all", agent.GetProperty("mode").GetString());
             Assert.Equal($"cliproxy/{task.LaneId}", agent.GetProperty("model").GetString());
             Assert.Equal(task.Variant, agent.GetProperty("variant").GetString());
+            Assert.Equal(
+                task.Variant,
+                agent.GetProperty("options").GetProperty("reasoningEffort").GetString());
+            Assert.Equal(task.MaxSteps, agent.GetProperty("steps").GetInt32());
+            Assert.Equal(task.MaxSteps, agent.GetProperty("maxSteps").GetInt32());
+            Assert.True(task.ProcessTimeout > TimeSpan.Zero);
             var permission = agent.GetProperty("permission");
             Assert.Equal("deny", permission.GetProperty("edit").GetString());
             Assert.Equal("deny", permission.GetProperty("bash").GetString());
@@ -359,6 +373,29 @@ public sealed class AcpOptionsConfigTests
             CliProxyRuntimeConfiguration.LoadRequired(options));
         Assert.Contains("exactly /v1", exception.Message, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [MemberData(nameof(NonSelectableCliProxyLanes))]
+    public void CliProxySelectionRejectsEveryNonExposedSourceAlias(string laneId)
+    {
+        using var root = new TemporaryDirectory();
+        var secretPath = Path.Combine(root.Path, "cliproxy.key");
+        File.WriteAllText(secretPath, "disposable-test-key-243");
+        var options = new ControlOptions
+        {
+            Model = $"cliproxy/{laneId}",
+            ModelVariant = "medium",
+            CliProxyEndpoint = "http://127.0.0.1:8317/v1",
+            CliProxySecretFile = secretPath,
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            CliProxyRuntimeConfiguration.LoadRequired(options));
+        Assert.Contains("not selectable", exception.Message, StringComparison.Ordinal);
+    }
+
+    public static IEnumerable<object[]> NonSelectableCliProxyLanes() =>
+        CliProxyProfile.NonExposedSourceAliases.Select(lane => new object[] { lane });
 
     [Fact]
     public void CliProxySelectionFailsClosedWithoutValidSecretAndNeverFallsBack()
