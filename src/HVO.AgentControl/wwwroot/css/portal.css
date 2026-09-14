@@ -893,3 +893,60 @@ body {
         transition-duration: 0.001ms !important;
     }
 }
+
+/* Minimal organization overview (authoritative store). Hidden until loaded. */
+.org-overview {
+    margin: 0 24px 24px;
+    padding: 18px 20px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+
+.org-overview[hidden] {
+    display: none;
+}
+
+.org-overview-meta {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    margin: 0 0 12px;
+}
+
+.org-overview-columns {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.org-overview-columns h3 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-mute);
+}
+
+.org-overview-list {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    margin: 0;
+}
+
+.org-overview-list dt {
+    color: var(--ink-dim);
+    font-size: 13px;
+}
+
+.org-overview-list dd {
+    margin: 0;
+    font-size: 13px;
+}
+
+@media (max-width: 720px) {
+    .org-overview-columns {
+        grid-template-columns: 1fr;
+    }
+}

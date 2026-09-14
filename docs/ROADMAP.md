@@ -7,12 +7,12 @@ Status reflects the active code, not the standalone POC.
    supervision and bounded cancellation.
 2. **Control-host portal — implemented (0.1.0 slice):** Blazor static SSR
    portal, owner Basic auth, embedded terminal, one owned OpenCode ACP runtime,
-   loopback native HTTP, durable `/data/runtime.json` and private persistent
-   data.
-3. **Durable controller — partial:** organization/session identity persists and
-   a failed load faults instead of being replaced. A member/task journal, one
-   active writer per session, uncertain-delivery reconciliation and explicit
-   resume decisions are not implemented.
+   loopback native HTTP, and an authoritative SQLite organization/session store
+   at `/control-data/control.db` (with `runtime.json` retained as evidence).
+3. **Durable controller — partial:** organization/session identity persists in
+   the authoritative store and a failed load faults instead of being replaced.
+   A member/task journal, one active writer per session, uncertain-delivery
+   reconciliation and explicit resume decisions are not implemented.
 4. **Self-contained worker lifecycle — not implemented:** devcontainer
    provisioning, independent persistent home/repo volumes, readiness,
    cancel/checkpoint/stop/restart.

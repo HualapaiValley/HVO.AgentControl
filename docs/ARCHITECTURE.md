@@ -13,10 +13,13 @@ from the `generation = 2` identity.
 - **Attach TUI:** a TUI client in tmux on the same OpenCode runtime. The browser
   terminal connects to it through the portal over a same-origin authenticated
   WebSocket; one viewer at a time. The TUI is a human view, not a second engine.
-- **Persistence:** `/control-data/runtime.json` holds organization/session
-  identity in the controller-private volume; the agent-owned `/data` volume
-  retains the workspace, the private OpenCode home and native conversation
-  state. A failed session load is surfaced, not silently replaced.
+- **Persistence:** `/control-data/control.db` is the authoritative SQLite store
+  for organization, department, role, employee, runtime-binding and ACP-session
+  identity in the controller-private volume. `/control-data/runtime.json` is
+  retained as adoption evidence only and is no longer written by the controller;
+  the agent-owned `/data` volume retains the workspace, the private OpenCode home
+  and native conversation state. A failed session load is surfaced, not silently
+  replaced.
 - **Access:** owner Basic authentication from a mounted password file, plus
   same-origin checks on WebSocket and mutation endpoints. The portal publishes
   on all Docker-host IPv4 interfaces (`0.0.0.0:5054`) for trusted-LAN use and is
@@ -103,15 +106,33 @@ account and starts its server through it, so with `nologin` a bare
 `tmux new-session` leaves "no server running" (measured). The controller never
 starts a shell and keeps `nologin`.
 
-- **Controller-private state.** `/control-data/runtime.json` is mode `0600` in a
-  `0700` directory, so the agent cannot read the organization/session identity or
-  the tmux owner token, and cannot rename or unlink the file through its parent.
-  It is the single authoritative runtime state while the isolated image runs.
-  `/data/runtime.json` is **not** a live mirror of it: the controller never
-  writes there, so that path holds the state as it was at adoption and is
-  root-owned `0600` precisely because that stale copy still carries a tmux owner
-  token. The byte-exact original is preserved once, at adoption, as
-  `/control-data/runtime.pre-isolation.json` with SHA-256 evidence beside it.
+- **Controller-private state.** `/control-data/control.db` is the authoritative
+  SQLite store, mode `0600` in a `0700` directory, so the agent cannot read or
+  edit the organization/session identity. It records the schema version, uses
+  WAL with `synchronous=FULL` and foreign keys, and is single-writer via a
+  bounded cross-process lock. The database, its WAL/SHM sidecars and the writer
+  lock are all `0600`: the runtime narrows its own creation mask in addition to
+  the explicit post-open mode, so a widened parent directory would not expose
+  them. Local and container tests assert the configured pragmas, the actual
+  sidecar modes and single-writer refusal. **Not validated:** crash durability of
+  WAL/`synchronous=FULL` on the real volume filesystem has not been
+  crash-tested; only the configured contract and the local/container test
+  filesystems are evidenced. A fresh database is never seeded in place: it is
+  built in a uniquely named controller-private temporary, checkpointed, closed,
+  cleared from the pool and atomically published as `control.db`, so a crash
+  before publication leaves no authoritative path and an existing empty or
+  header-only file fails closed instead of being reseeded.
+  Before the database is built from an existing runtime, the exact adoption
+  input is retained create-once as `/control-data/runtime.pre-database.json`
+  with its verified digest in `runtime.pre-database.sha256`. Both are `0600`,
+  exist before database publication, and conflicting evidence fails closed.
+  `/control-data/runtime.json` is **not** written by
+  the database-era controller: it is retained as the adoption evidence the store
+  was seeded from, along with the byte-exact `/control-data/runtime.pre-isolation.json`
+  snapshot and its SHA-256 evidence. `--revert-isolation` refuses once
+  `control.db` exists, because the pre-isolation image cannot read the database.
+  `/data/runtime.json` is root-owned `0600` and carries only the stale
+  pre-isolation copy.
 - **Owner secret.** Mounted read-only and owned by the controller. The entrypoint
   verifies from both sides that the controller can read it and the agent cannot,
   and refuses to start otherwise.
@@ -174,8 +195,18 @@ starts a shell and keeps `nologin`.
 
 ### Rollback and roll-forward (state, not just ownership)
 
-Ownership hand-back alone is not a correct rollback for the runtime state, and
-the distinction is a data-loss boundary rather than a detail:
+**Database era:** once `/control-data/control.db` exists, it is the sole
+authority and `--revert-isolation` **fails closed before changing anything**.
+The pre-isolation image understands only `runtime.json`, so republishing it
+would run old JSON-only code against stale session identity while the database
+held the real state. No compatible downgrade is provided; restoring a verified
+backup of the whole controller-private volume is the owner-run recovery path.
+`prepare-layout.py` likewise treats a JSON-only divergence as evidence rather
+than blocking the database-era start.
+
+The pre-database rollback contract below still applies only while no database
+exists. Ownership hand-back alone is not a correct rollback for the runtime
+state, and the distinction is a data-loss boundary rather than a detail:
 
 | Target | Rollback treatment |
 | --- | --- |
@@ -322,8 +353,8 @@ interrupted-adoption crash boundaries, the recorded
 reconciliation marker, the fail-closed roll-forward interlock and the recorded
 controller PID. CI runs them in the `docker` job with
 `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon fails the job instead
-of skipping the suite, and asserts the exact TRX counters (42
-discovered/executed/passed, 0 skipped — 40 container test cases plus 2
+of skipping the suite, and asserts the exact TRX counters (44
+discovered/executed/passed, 0 skipped — 42 container test cases plus 2
 structural wiring tests) rather than a lower bound.
 
 Separate credentials and process identities further before adding untrusted

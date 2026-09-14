@@ -58,6 +58,46 @@ public sealed class ControllerIsolationLayoutTests
     }
 
     [Fact]
+    public void DatabasePathDefaultsToControlDbInThePrivateDirectory()
+    {
+        var isolated = new ControlOptions
+        {
+            DataDirectory = "/data",
+            PrivateDataDirectory = "/control-data",
+        };
+        Assert.Equal("/control-data/control.db", isolated.ResolveDatabasePath());
+
+        // Single-identity host development keeps the database beside the runtime state.
+        var development = new ControlOptions { DataDirectory = "/tmp/hvo-dev" };
+        Assert.Equal(Path.Combine("/tmp/hvo-dev", "control.db"), development.ResolveDatabasePath());
+        Assert.Empty(development.Validate());
+    }
+
+    [Fact]
+    public void RelativeDatabasePathAndEmptyAdoptionReferenceAreRejected()
+    {
+        var relativeDatabase = new ControlOptions { DatabasePath = "data/control.db" };
+        Assert.NotEmpty(relativeDatabase.Validate());
+
+        var missingReference = new ControlOptions { AdoptionAuthorizationReference = "  " };
+        Assert.NotEmpty(missingReference.Validate());
+    }
+
+    /// <summary>
+    /// The initial Operations/IT seed is the owner-approved #211 adoption, and
+    /// the audit must carry that exact reference. It is not a model assertion and
+    /// it is not re-derived from the environment.
+    /// </summary>
+    [Fact]
+    public void AdoptionAuthorizationReferenceIsTheExactOwnerApprovedIssue211()
+    {
+        var options = new ControlOptions();
+
+        Assert.Equal("owner-approved:issue-211", options.AdoptionAuthorizationReference);
+        Assert.Empty(options.Validate());
+    }
+
+    [Fact]
     public void ComposeConfiguresTheIsolatedLayoutAndNotNoNewPrivileges()
     {
         var compose = File.ReadAllText(Path.Combine(RepositoryRoot(), "compose.yaml"));
@@ -164,12 +204,15 @@ public sealed class ControllerIsolationLayoutTests
             PrivateDataDirectory = privateData,
         });
 
-        var adopted = (PersistedRuntimeState)Invoke(host, "LoadOrCreateState")!;
+        var evidence = (PersistedRuntimeEvidence)Invoke(host, "LoadAdoptionEvidence")!;
+        var adopted = evidence.State;
 
         // Existing organization/session identity survives the move...
         Assert.Equal("org-legacy", adopted.OrganizationId);
         Assert.Equal("ses_existing", adopted.SessionId);
         Assert.Equal("legacy-owner-token", adopted.TmuxOwnerToken);
+        Assert.Equal(legacyBytes, evidence.Bytes);
+        Assert.Equal(Path.GetFullPath(legacyPath), evidence.Path);
 
         // ...and the legacy file is left untouched as the rollback copy.
         Assert.Equal(legacyBytes, File.ReadAllBytes(legacyPath));
@@ -199,7 +242,7 @@ public sealed class ControllerIsolationLayoutTests
             PrivateDataDirectory = privateData,
         });
 
-        var loaded = (PersistedRuntimeState)Invoke(host, "LoadOrCreateState")!;
+        var loaded = ((PersistedRuntimeEvidence)Invoke(host, "LoadAdoptionEvidence")!).State;
 
         Assert.Equal("org-current", loaded.OrganizationId);
         Assert.Equal("ses_current", loaded.SessionId);
@@ -223,6 +266,34 @@ public sealed class ControllerIsolationLayoutTests
         var exception = Assert.Throws<System.Reflection.TargetInvocationException>(
             () => Invoke(host, "PrepareDirectories"));
         Assert.IsType<AcpProtocolException>(exception.InnerException);
+    }
+
+    /// <summary>
+    /// Once the authoritative database exists, runtime.json is evidence only.
+    /// A JSON-only divergence that used to block the isolated start must not
+    /// fault the database-era image, while the refusal is still recorded (and
+    /// enforced) before any database exists.
+    /// </summary>
+    [Fact]
+    public void PrepareLayoutTreatsJsonAsEvidenceWhenTheDatabaseExists()
+    {
+        var layout = File.ReadAllText(Path.Combine(
+            RepositoryRoot(), "src", "container", "prepare-layout.py"));
+
+        Assert.Contains("database_authoritative = exists(control_fd, \"control.db\")", layout, StringComparison.Ordinal);
+        Assert.Contains(
+            "legacy_info.st_uid != 0 and private_payload != payload and not database_authoritative:",
+            layout,
+            StringComparison.Ordinal);
+
+        // The database-era tolerance is labelled with truthful provenance. The
+        // JSON divergence is not recorded anywhere, so the log must not claim it
+        // was, and the provenance label is what the container test asserts.
+        Assert.Contains("provenance=database-era-json-divergence", layout, StringComparison.Ordinal);
+        Assert.DoesNotContain("is recorded as evidence rather than blocking", layout, StringComparison.Ordinal);
+
+        // The non-database refusal is still present and still records the marker.
+        Assert.Contains("record_unrecorded_divergence(", layout, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -11,6 +11,31 @@ Changes after the first portal release are collected here.
 
 ### Added
 
+- Authoritative SQLite organization store (#215). `/control-data/control.db`
+  (controller UID, `0600` in the `0700` private volume) is the single source of
+  truth for organization, department, role, employee, runtime-binding and
+  ACP-session identity. A fresh store is seeded in one transaction with exactly
+  Operations, Development and QA; one combined Operations/IT role and one adopted
+  Operations employee bound to the existing internal shared container; no fake
+  Development/QA employees and no Finance. The existing `runtime.json`
+  `organizationId`, persisted display-name difference, `sessionId`,
+  `sessionTitle` and `tmuxOwnerToken` are adopted unchanged and the difference is
+  reported rather than renamed. The adoption audit records the source identity,
+  owner authorization reference and timestamp. Stable IDs are generated once and
+  never derived from a slug, process or container. Schema version, expected table
+  shape, `PRAGMA quick_check`, foreign keys, WAL, `synchronous=FULL`, a busy
+  timeout and a bounded cross-process single-writer lock guard the store; a
+  malformed, partial, corrupt, unknown or newer database faults the host instead
+  of being reseeded or reset. Optimistic revisions protect the owner-facing
+  rename. `Microsoft.Data.Sqlite` is centrally pinned to `10.0.12`, matching the
+  other 10.0 servicing packages. The owner-protected, same-origin
+  `GET /api/organization` overview and `PATCH /api/organization` rename, plus a
+  minimal portal overview panel, read only from this store. Unit coverage proves
+  restart idempotence, duplicate slug/id and invalid-reference rejection, rename
+  stability, optimistic conflicts, failed-write non-mutation, baseline adoption
+  without duplicates and malformed, newer, corrupt, partial and organization-less
+  stores failing closed; a real alternate-UID container test proves the
+  database-era rollback is refused byte- and inode-exact.
 - Controller/agent OS isolation inside the single control container (#240),
   the Section 6 prerequisite for #215. The controller runs as UID 1001 and owns
   `/control-data` (`0700`) and the owner secret; OpenCode, tmux, the TUI and the
@@ -69,6 +94,17 @@ Changes after the first portal release are collected here.
 
 ### Changed
 
+- The controller no longer writes `runtime.json` after cutover (#215): the
+  SQLite store is authoritative before OpenCode starts, session changes are
+  persisted transactionally before the bootstrap prompt, and a persisted
+  organization display name is never overwritten from configuration. The
+  existing file and the `runtime.pre-isolation.json` snapshot remain as
+  evidence. `scripts/init-secrets.py --revert-isolation` now fails closed before
+  any write or ownership hand-back when `control.db` exists, because the
+  pre-isolation image cannot read the database and would resume stale JSON
+  session identity; `prepare-layout.py` treats a JSON-only divergence as
+  evidence when the database is present. No dual-write compatibility authority
+  is introduced.
 - `scripts/init-secrets.py --revert-isolation` (#240) is the explicit rollback to
   the pre-isolation image. It **republishes the current controller-private
   runtime state** to `/data/runtime.json` and then hands it, `/data` and the
@@ -262,6 +298,47 @@ Changes after the first portal release are collected here.
   providers in the runtime's private OpenCode home, not controller environment.
 
 ### Fixed
+
+- First adoption of `control.db` is now atomic and can never leave an empty or
+  header-only authoritative file. A fresh store is seeded in a uniquely named
+  controller-private temporary, `wal_checkpoint(TRUNCATE)`-ed, closed, cleared
+  from the connection pool, restricted to `0600` and only then renamed to
+  `control.db`; a crash before publication leaves no authoritative path, and the
+  temporary created by that attempt is the only thing cleaned up. An existing
+  zero-length or header-only `control.db` fails closed and is never reseeded.
+  Existing-runtime adoption first retains the exact input bytes as controller-only
+  `runtime.pre-database.json` with verified create-once SHA-256 evidence; a
+  conflicting backup or digest blocks adoption before `control.db` is published.
+  Covered by a deterministic publication fault seam proving no authoritative
+  path appears before a committed, validated seed.
+- The database, its WAL/SHM sidecars and the writer lock are controller-only
+  `0600`: the controller narrows its process creation mask (`umask 0077` in the
+  entrypoint and `RestrictProcessFileCreation` in the host) and the store applies
+  explicit sidecar modes, so a widened parent directory would not expose them.
+  Unit tests assert the actual sidecar modes; the real alternate-UID container
+  suite asserts the controller mask, the created sidecar modes and agent denial.
+- `prepare-layout.py` labels the database-era JSON divergence with truthful
+  provenance (`database-era-json-divergence`) instead of claiming it was
+  recorded, and the real container test asserts the label appears exactly once:
+  a byte-identical legacy/private pair never emits it.
+- `RecordSession` demotes the prior active session in the same transaction; the
+  schema constrains `acp_sessions.status` and a partial unique index allows only
+  one active session per employee. Tests assert the single-active invariant and
+  both constraints.
+- `OrganizationStore`/identity publication on `AcpControlHost` is synchronized
+  under the host gate so a request never observes a half-published store with a
+  stale identity. Added enabled-runtime API integration tests (fake ACP,
+  temporary database) covering GET 200, successful PATCH, 409, 404,
+  ProblemDetails, owner auth, same-origin and the absence of secret fields.
+- The seeded organization text, role profiles and employee
+  purpose/instructions/rules/restrictions are asserted exactly, as is the
+  `owner-approved:issue-211` adoption reference whose source is documented on
+  the option; the uniqueness and foreign-key tests now populate every NOT NULL
+  column so they assert the intended constraint rather than a missing value.
+- Docs now scope the WAL claim precisely: WAL/`synchronous=FULL`, foreign keys,
+  the bounded single-writer lock and the `0600` modes are configured and tested
+  locally and in the container, while crash durability on the real volume
+  filesystem is explicitly **not** claimed as tested.
 
 - Bound the terminal bridge teardown so a failed cross-UID termination can no
   longer strand `/terminal` permanently (#240). `StopBridgeAsync` waited on

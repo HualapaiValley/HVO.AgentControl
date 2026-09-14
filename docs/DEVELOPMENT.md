@@ -263,6 +263,7 @@ unconfirmed upstream change, `503` not ready or cancellation not accepted.
 | `/health/live` | Implemented, returns `{ "status": "healthy" }`, process only, unauthenticated | Unchanged: process liveness only |
 | `/health/ready` | Not implemented | Readiness of the exact owned ACP session and attached TUI |
 | `/`, `/api/info`, `/api/control`, `/api/control/model`, `/api/control/cancel`, `/terminal`, `/api/version` | Implemented | Unchanged |
+| `/api/organization` | Not implemented | Owner-protected overview plus same-origin revision-guarded rename backed by the authoritative SQLite store |
 
 The new endpoints and ProblemDetails behavior have local regression coverage;
 publication remains subject to CI and PR review. `/health/ready` is a

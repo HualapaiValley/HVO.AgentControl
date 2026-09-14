@@ -291,11 +291,15 @@ public sealed class AcpControlHostTests
         Assert.Null(status.Error);
         Assert.False(status.TerminalReady);
 
-        var persisted = RuntimeStateStore.Load(Path.Combine(data, "runtime.json"));
-        Assert.NotNull(persisted);
-        Assert.Equal(AcpFakeServer.DefaultSessionId, persisted!.SessionId);
-        Assert.False(string.IsNullOrWhiteSpace(persisted.OrganizationId));
-        Assert.False(string.IsNullOrWhiteSpace(persisted.TmuxOwnerToken));
+        // The authoritative store, not runtime.json, holds the session now.
+        var store = host.Organization;
+        Assert.NotNull(store);
+        var overview = store!.GetOverview();
+        var employee = Assert.Single(overview.Employees);
+        Assert.Equal(AcpFakeServer.DefaultSessionId, employee.SessionId);
+        Assert.False(string.IsNullOrWhiteSpace(overview.Id));
+        Assert.False(string.IsNullOrWhiteSpace(host.OrganizationIdentity!.TmuxOwnerToken));
+        Assert.True(File.Exists(Path.Combine(data, "control.db")));
 
         var callsPath = Path.Combine(data, "home", "calls.log");
         await WaitForFileContainsAsync(callsPath, "session/prompt", TimeSpan.FromSeconds(15));
@@ -470,6 +474,73 @@ public sealed class AcpControlHostTests
             var calls = File.ReadAllLines(Path.Combine(data, "home", "calls.log"));
             Assert.Equal(new[] { "initialize" }, calls);
         }
+    }
+
+    [Fact]
+    public async Task PersistedOrganizationNameWinsOverConfiguration()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orgname-").FullName;
+        Directory.CreateDirectory(data);
+        var state = RuntimeStateStore.CreateNew("Contoso Development", () => "org-persisted");
+        RuntimeStateStore.Save(Path.Combine(data, "runtime.json"), state);
+
+        var options = ReadyOptions(data);
+        using var host = CreateHost(options);
+
+        await host.StartAsync(CancellationToken.None);
+        var status = await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+
+        // Configuration says "AgentControl Development"; the persisted name wins.
+        Assert.Equal("Contoso Development", status.OrganizationName);
+        Assert.Equal("Contoso Development", host.Organization!.GetOverview().DisplayName);
+
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task MalformedRuntimeJsonEvidenceDoesNotBlockAnExistingDatabase()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-evidence-").FullName;
+
+        // First start creates the authoritative database and records the session.
+        using (var first = CreateHost(ReadyOptions(data)))
+        {
+            await first.StartAsync(CancellationToken.None);
+            await WaitForStateAsync(first, "ready", TimeSpan.FromSeconds(30));
+            await first.StopAsync(CancellationToken.None);
+        }
+
+        // The JSON copy is evidence only; a malformed one must not fault the host.
+        File.WriteAllText(Path.Combine(data, "runtime.json"), "{ not json");
+
+        using var second = CreateHost(ReadyOptions(data));
+        await second.StartAsync(CancellationToken.None);
+        var status = await WaitForStateAsync(second, "ready", TimeSpan.FromSeconds(30));
+        Assert.Equal(AcpFakeServer.DefaultSessionId, status.SessionId);
+
+        await second.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task CorruptAuthoritativeStoreFaultsBeforeOpenCodeStarts()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-corrupt-").FullName;
+        Directory.CreateDirectory(data);
+        File.WriteAllText(Path.Combine(data, "control.db"), "not a database");
+        var options = ReadyOptions(data);
+        using var host = CreateHost(options);
+
+        await host.StartAsync(CancellationToken.None);
+        var status = await WaitForStateAsync(host, "faulted", TimeSpan.FromSeconds(30));
+
+        Assert.NotNull(status.Error);
+        Assert.Contains("control.db", status.Error!, StringComparison.Ordinal);
+
+        // The fake ACP server never ran: no session/initialize call was recorded.
+        var callsPath = Path.Combine(data, "home", "calls.log");
+        Assert.False(File.Exists(callsPath) && File.ReadAllText(callsPath).Contains("initialize", StringComparison.Ordinal));
+
+        await host.StopAsync(CancellationToken.None);
     }
 
     private static ControlOptions ReadyOptions(string dataDirectory, string scenario = "happy")

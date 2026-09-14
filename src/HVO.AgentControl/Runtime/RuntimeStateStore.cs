@@ -42,6 +42,9 @@ public sealed class PersistedRuntimeState
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+/// <summary>A parsed runtime state and the exact bytes it was parsed from.</summary>
+public sealed record PersistedRuntimeEvidence(PersistedRuntimeState State, byte[] Bytes, string Path);
+
 /// <summary>
 /// Small durable store for the control runtime. Loading a malformed or
 /// unreadable file throws <see cref="RuntimeStateException"/> so the host faults
@@ -57,6 +60,12 @@ public static class RuntimeStateStore
     /// <summary>Returns the persisted state, or null when the file does not exist.</summary>
     public static PersistedRuntimeState? Load(string path)
     {
+        return LoadEvidence(path)?.State;
+    }
+
+    /// <summary>Returns parsed state with its byte-exact source, or null when absent.</summary>
+    public static PersistedRuntimeEvidence? LoadEvidence(string path)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
         if (!File.Exists(path))
@@ -64,10 +73,10 @@ public static class RuntimeStateStore
             return null;
         }
 
-        string json;
+        byte[] bytes;
         try
         {
-            json = File.ReadAllText(path);
+            bytes = File.ReadAllBytes(path);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -77,7 +86,7 @@ public static class RuntimeStateStore
         PersistedRuntimeState? state;
         try
         {
-            state = JsonSerializer.Deserialize<PersistedRuntimeState>(json, SerializerOptions);
+            state = JsonSerializer.Deserialize<PersistedRuntimeState>(bytes, SerializerOptions);
         }
         catch (JsonException exception)
         {
@@ -94,7 +103,7 @@ public static class RuntimeStateStore
             throw new RuntimeStateException($"Runtime state '{path}' is missing organizationId.");
         }
 
-        return state;
+        return new PersistedRuntimeEvidence(state, bytes, Path.GetFullPath(path));
     }
 
     public static PersistedRuntimeState CreateNew(string organizationName, Func<string>? organizationIdFactory = null)

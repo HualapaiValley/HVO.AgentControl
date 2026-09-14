@@ -127,8 +127,35 @@
         </section>
     </main>
 
+    @* Minimal organization overview, populated from the authoritative store
+       through the owner-protected /api/organization endpoint. Hidden until the
+       data loads so the disabled runtime renders nothing fabricated. *@
+    <section class="org-overview" data-org-overview aria-labelledby="org-title" hidden>
+        <h2 id="org-title" class="panel-title">Organization</h2>
+        <p class="org-overview-meta">
+            <span class="brand-org" data-org-name>&mdash;</span>
+            <code class="mono" data-org-slug>&mdash;</code>
+        </p>
+        <div class="org-overview-columns">
+            <div>
+                <h3>Departments</h3>
+                <dl class="org-overview-list" data-org-departments></dl>
+            </div>
+            <div>
+                <h3>Employees</h3>
+                <dl class="org-overview-list" data-org-employees></dl>
+            </div>
+            <div>
+                <h3>Adoption audit</h3>
+                <dl class="org-overview-list" data-org-audit></dl>
+            </div>
+        </div>
+    </section>
+
     <footer class="app-foot">
         <span>AgentControl V2 &middot; @HVO.AgentControl.ApplicationVersion.Current &middot; manager workspace</span>
         <span class="mono">GET /api/control &middot; WS /terminal</span>
     </footer>
 </div>
+
+<script type="module" src="/js/organization.js"></script>
