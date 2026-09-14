@@ -277,7 +277,11 @@ app.Map("/terminal", async (HttpContext context, AcpControlHost host) =>
         context.Response.StatusCode = 503;
         return;
     }
-    await TerminalEndpoint.HandleAsync(context, Path.Combine(host.DataDirectory, "home"), host.TmuxSessionName);
+    await TerminalEndpoint.HandleAsync(
+        context,
+        Path.Combine(host.DataDirectory, "home"),
+        host.TmuxSessionName,
+        host.AgentLauncher);
 })
     .WithName("AttachTerminal")
     .WithTags("Terminal")

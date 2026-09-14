@@ -65,10 +65,99 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
       - name: Validate compose configuration
         run: docker compose config --quiet
       - name: Build image without publishing
         run: docker build --tag hvo-agentcontrol:ci .
+      # Controller/agent OS isolation (#240) is enforced by the kernel, so it can
+      # only be proven by running real processes under both UIDs in the built
+      # image. The suite reuses the image built above via
+      # AGENTCONTROL_ISOLATION_IMAGE instead of building a second time, and
+      # AGENTCONTROL_DOCKER_REQUIRED=1 makes an unavailable daemon or a missing
+      # image fail the job: a skipped security suite is not evidence, and it
+      # would otherwise read like a pass.
+      - name: Restore
+        run: dotnet restore HVO.AgentControl.slnx
+      - name: Build tests
+        run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+      - name: Alternate-UID isolation tests
+        env:
+          AGENTCONTROL_DOCKER_REQUIRED: "1"
+          AGENTCONTROL_ISOLATION_IMAGE: hvo-agentcontrol:ci
+        run: >-
+          dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --filter "FullyQualifiedName~AgentIsolationContainerTests"
+          --logger "trx;LogFileName=isolation-results.trx"
+          --results-directory artifacts/isolation-results
+      # A filter that stops matching (rename, namespace move) would silently run
+      # zero tests and still exit 0, and a `Skip` that starts applying would
+      # report "0 failed" just as cheerfully. Assert the exact expected count,
+      # all executed and all passing, with nothing skipped.
+      #
+      # The count is exact rather than a lower bound on purpose: a lower bound
+      # accepts a suite that quietly lost coverage as long as enough other tests
+      # remain, which is the "never a false green" failure this gate exists to
+      # prevent. Adding or removing a test in AgentIsolationContainerTests is a
+      # deliberate act, so updating EXPECTED here is part of that change.
+      #
+      # Scope note: the filter selects the whole AgentIsolationContainerTests
+      # class, which is 40 real alternate-UID container test cases plus 2
+      # structural source/Compose-wiring tests that need no daemon
+      # (LauncherSourceIsWiredIntoTheImageAndCi and
+      # ComposeGrantsExactlyTheCapabilitiesTheseTestsAssume). Both are asserted
+      # here; only the 40 prove the kernel-enforced boundary. The 40 are 36
+      # [DockerFact] methods plus the 4 [InlineData] cases of the planted-symlink
+      # [DockerTheory], which xUnit reports individually.
+      #
+      # The count moved from 35 to 37 with the rollback-marker ordering test
+      # (TheRollbackMarkerIsRecordedBeforeAnythingIsHandedBackToTheOldImage) and
+      # the resume archive-collision test
+      # (TwoResumeCyclesSharingATimestampPreserveBothArchivesExactly), and from
+      # 37 to 39 with the two crash-window tests added for the marker-before-
+      # republish fix (BothCrashWindowsAroundTheRootOwnedPublishAreClassified-
+      # AndConverge and RepublishHandsBackThePublishedInodeAndNotTheSupersededOne).
+      # The unsupported-marker-schema test then moved the count from 39 to 40.
+      - name: Assert the isolation suite executed
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          EXPECTED = 42  # see the scope note above: 40 container + 2 structural
+          files = glob.glob("artifacts/isolation-results/*.trx")
+          if not files:
+              sys.exit("no isolation test results were produced")
+          if len(files) != 1:
+              sys.exit(f"expected exactly one isolation TRX, found {len(files)}: {sorted(files)}")
+          ns = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
+          counters = ET.parse(files[0]).getroot().find(".//t:Counters", ns)
+          if counters is None:
+              sys.exit("the isolation TRX carries no Counters element")
+          total = int(counters.get("total"))
+          executed = int(counters.get("executed"))
+          passed = int(counters.get("passed"))
+          # A Skip on DockerFact/DockerTheory lands in notExecuted, which is the
+          # exact shape a skipped security suite takes in the summary.
+          not_executed = int(counters.get("notExecuted"))
+          print(
+              f"isolation tests total={total} executed={executed} "
+              f"passed={passed} notExecuted={not_executed}"
+          )
+          if (total, executed, passed, not_executed) != (EXPECTED, EXPECTED, EXPECTED, 0):
+              sys.exit(
+                  f"expected exactly {EXPECTED} discovered, executed and passing with none skipped; "
+                  f"got total={total} executed={executed} passed={passed} notExecuted={not_executed}. "
+                  "If a test was intentionally added or removed, update EXPECTED in this step."
+              )
+          PY
+      - name: Upload isolation test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: isolation-test-results
+          path: artifacts/isolation-results
+          if-no-files-found: ignore
 
   browser-smoke:
     name: Browser smoke (disabled runtime)

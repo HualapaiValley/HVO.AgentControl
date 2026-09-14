@@ -22,6 +22,7 @@ public sealed class TmuxAttachLauncher
 
     private readonly string _sessionName;
     private readonly string _tmuxExecutable;
+    private readonly AgentProcessLauncher _agentLauncher;
     private readonly TimeProvider _timeProvider;
     private bool _owned;
     private Dictionary<string, string> _environment = [];
@@ -43,7 +44,11 @@ public sealed class TmuxAttachLauncher
     private string? _sessionTarget;
     private (string PaneId, TmuxAttachRequest Request)? _pendingPane;
 
-    public TmuxAttachLauncher(string sessionName, string tmuxExecutable = "tmux", TimeProvider? timeProvider = null)
+    public TmuxAttachLauncher(
+        string sessionName,
+        string tmuxExecutable = "tmux",
+        TimeProvider? timeProvider = null,
+        AgentProcessLauncher? agentLauncher = null)
     {
         // Reuse the shared terminal target rule so an accepted session name can
         // never be reinterpreted by tmux as an option, a target qualifier, or a
@@ -57,6 +62,7 @@ public sealed class TmuxAttachLauncher
         ArgumentException.ThrowIfNullOrWhiteSpace(tmuxExecutable);
         _sessionName = sessionName;
         _tmuxExecutable = tmuxExecutable;
+        _agentLauncher = agentLauncher ?? AgentProcessLauncher.Direct;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -383,6 +389,10 @@ public sealed class TmuxAttachLauncher
             startInfo.ArgumentList.Add(argument);
         }
 
+        // Every tmux command runs under the agent identity so the tmux server,
+        // its socket and the attach client stay owned by the agent UID.
+        _agentLauncher.WrapTmux(startInfo);
+
         try
         {
             using var process = Process.Start(startInfo);
@@ -402,10 +412,9 @@ public sealed class TmuxAttachLauncher
             }
             catch (OperationCanceledException)
             {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                }
+                // Cross-UID: a launched tmux command is an agent process, so the
+                // termination goes through the verified launcher signal.
+                _agentLauncher.TryTerminate(process, force: true);
                 cancellationToken.ThrowIfCancellationRequested();
                 return new(-1, string.Empty);
             }

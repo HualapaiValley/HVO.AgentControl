@@ -32,6 +32,15 @@ public static class TerminalEndpoint
     private const int CloseGraceSeconds = 2;
 
     private static readonly TimeSpan StopGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Second, bounded wait after a forced termination was actually issued. The
+    /// whole teardown is therefore bounded by <see cref="StopGrace"/> plus this,
+    /// which matters because it runs inside the request's <c>finally</c> ahead of
+    /// the <see cref="ViewerSlot"/> release.
+    /// </summary>
+    private static readonly TimeSpan ForcedExitGrace = TimeSpan.FromSeconds(5);
+
     private static readonly SemaphoreSlim ViewerSlot = new(1, 1);
 
     /// <summary>
@@ -40,9 +49,14 @@ public static class TerminalEndpoint
     /// child's <c>HOME</c> so tmux, the TUI and ACP share one runtime home.
     /// <paramref name="sessionName"/> is the host-configured tmux session to attach.
     /// </summary>
-    public static async Task HandleAsync(HttpContext context, string homeDirectory, string sessionName = "agentcontrol")
+    public static async Task HandleAsync(
+        HttpContext context,
+        string homeDirectory,
+        string sessionName = "agentcontrol",
+        AgentProcessLauncher? agentLauncher = null)
     {
         ArgumentNullException.ThrowIfNull(context);
+        agentLauncher ??= AgentProcessLauncher.Direct;
 
         if (!context.WebSockets.IsWebSocketRequest)
         {
@@ -86,7 +100,7 @@ public static class TerminalEndpoint
         try
         {
             socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-            process = StartBridge(homeDirectory, bridgePath, sessionName);
+            process = StartBridge(homeDirectory, bridgePath, sessionName, agentLauncher);
 
             var output = PumpOutputAsync(socket, process.StandardOutput.BaseStream, lifetime.Token);
             var input = PumpInputAsync(socket, process.StandardInput, lifetime.Token);
@@ -133,7 +147,7 @@ public static class TerminalEndpoint
         {
             if (process is not null)
             {
-                await StopBridgeAsync(process, logger).ConfigureAwait(false);
+                await StopBridgeAsync(process, agentLauncher, logger).ConfigureAwait(false);
             }
 
             if (socket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
@@ -155,9 +169,13 @@ public static class TerminalEndpoint
         }
     }
 
-    private static Process StartBridge(string homeDirectory, string bridgePath, string sessionName)
+    private static Process StartBridge(
+        string homeDirectory,
+        string bridgePath,
+        string sessionName,
+        AgentProcessLauncher agentLauncher)
     {
-        var startInfo = CreateBridgeStartInfo(homeDirectory, bridgePath, sessionName);
+        var startInfo = CreateBridgeStartInfo(homeDirectory, bridgePath, sessionName, agentLauncher: agentLauncher);
 
         var process = new Process { StartInfo = startInfo };
         if (!process.Start())
@@ -182,7 +200,8 @@ public static class TerminalEndpoint
         string homeDirectory,
         string bridgePath,
         string sessionName,
-        IReadOnlyDictionary<string, string?>? baseEnvironment = null)
+        IReadOnlyDictionary<string, string?>? baseEnvironment = null,
+        AgentProcessLauncher? agentLauncher = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(homeDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(bridgePath);
@@ -225,7 +244,10 @@ public static class TerminalEndpoint
             startInfo.Environment[key] = value;
         }
 
-        return startInfo;
+        // The bridge and its tmux attach client belong to the agent identity, so
+        // the launcher (when configured) replaces the interpreter invocation with
+        // its fixed python/pty_bridge mapping.
+        return (agentLauncher ?? AgentProcessLauncher.Direct).WrapPty(startInfo, homeDirectory, sessionName);
     }
 
     private static async Task PumpOutputAsync(WebSocket socket, Stream output, CancellationToken token)
@@ -375,8 +397,41 @@ public static class TerminalEndpoint
         }
     }
 
-    private static async Task StopBridgeAsync(Process process, ILogger? logger)
+    /// <summary>
+    /// Tears the bridge child down within a bounded time and always releases the
+    /// <see cref="Process"/> handle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This runs inside the request's <c>finally</c>, ahead of the single
+    /// <see cref="ViewerSlot"/> release, so an unbounded wait here would not just
+    /// hang one request: it would strand the terminal for every later viewer with
+    /// a 409. Both waits are therefore bounded and neither observes
+    /// <see cref="CancellationToken.None"/>.
+    /// </para>
+    /// <para>
+    /// The forced termination is only meaningful when it was actually issued. A
+    /// controller running as UID 1001 cannot signal its UID 1000 bridge directly,
+    /// so <see cref="AgentProcessLauncher.TryTerminate"/> returns false when the
+    /// privileged launcher refused or failed - and waiting for an exit that was
+    /// never requested is waiting forever. That case logs a category-only warning
+    /// and returns; the surviving child is reaped by the container's init.
+    /// </para>
+    /// <para>
+    /// Exposed internally so the bound can be asserted with a real child process
+    /// and a launcher whose signal helper fails, rather than inferred.
+    /// </para>
+    /// </remarks>
+    internal static async Task StopBridgeAsync(
+        Process process,
+        AgentProcessLauncher agentLauncher,
+        ILogger? logger,
+        TimeSpan? stopGrace = null,
+        TimeSpan? forcedExitGrace = null)
     {
+        ArgumentNullException.ThrowIfNull(process);
+        ArgumentNullException.ThrowIfNull(agentLauncher);
+
         try
         {
             try
@@ -391,28 +446,44 @@ public static class TerminalEndpoint
             {
             }
 
-            using var grace = new CancellationTokenSource(StopGrace);
+            using var grace = new CancellationTokenSource(stopGrace ?? StopGrace);
             try
             {
                 await process.WaitForExitAsync(grace.Token).ConfigureAwait(false);
+                return;
             }
             catch (OperationCanceledException)
             {
-                try
+            }
+
+            // Cross-UID: an isolated bridge runs as the agent identity, so
+            // termination goes through the verified launcher signal.
+            if (!agentLauncher.TryTerminate(process, force: true))
+            {
+                if (HasExited(process))
                 {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
-                {
+                    // Not a failure: the child exited between the wait and the
+                    // signal, which is the whole point of the graceful close.
+                    return;
                 }
 
-                try
-                {
-                    await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
-                {
-                }
+                // Never log bridge stderr or terminal content; category only.
+                logger?.LogWarning(
+                    "Terminal bridge termination was not issued ({Category}); the viewer slot is released without waiting.",
+                    nameof(AgentProcessLauncher));
+                return;
+            }
+
+            using var forced = new CancellationTokenSource(forcedExitGrace ?? ForcedExitGrace);
+            try
+            {
+                await process.WaitForExitAsync(forced.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Terminal bridge did not exit within the forced grace ({Category}); the viewer slot is released anyway.",
+                    nameof(TimeoutException));
             }
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -423,6 +494,18 @@ public static class TerminalEndpoint
         finally
         {
             process.Dispose();
+        }
+    }
+
+    private static bool HasExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            return false;
         }
     }
 

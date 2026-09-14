@@ -15,8 +15,34 @@ public sealed class ControlOptions
     /// <summary>Whether the background control runtime should start. Defaults to disabled.</summary>
     public bool Enabled { get; set; }
 
-    /// <summary>Root directory for runtime state, workspace and the private OpenCode home.</summary>
+    /// <summary>
+    /// Root directory for the agent-owned workspace and private OpenCode home.
+    /// In the isolated container this tree belongs to the agent UID; the
+    /// controller neither writes to it nor stores its own state there.
+    /// </summary>
     public string DataDirectory { get; set; } = "/data";
+
+    /// <summary>
+    /// Controller-private state directory (mode <c>0700</c>, controller UID).
+    /// When empty the runtime state stays beside <see cref="DataDirectory"/>,
+    /// which is the host-development and single-identity layout.
+    /// </summary>
+    public string PrivateDataDirectory { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Host-owned, agent-readable orientation directory. The controller writes
+    /// the instruction file here (mode <c>0644</c> in a <c>0755</c> directory) so
+    /// the agent can read but never replace it. When empty the instructions stay
+    /// in the agent home, which is the single-identity layout.
+    /// </summary>
+    public string InstructionsDirectory { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Absolute path of the privileged launcher that starts agent-identity
+    /// children (<c>agentcontrol-launch</c>). Empty means direct, same-identity
+    /// launching: host development, unit tests and the disabled CI runtime.
+    /// </summary>
+    public string AgentLauncher { get; set; } = string.Empty;
 
     /// <summary>Human readable organization name used in instructions and the session title.</summary>
     public string OrganizationName { get; set; } = "AgentControl Development";
@@ -70,6 +96,24 @@ public sealed class ControlOptions
             errors.Add($"{nameof(OpenCodeExecutable)} must not be empty.");
         }
 
+        // The optional isolation paths are all absolute: a relative value would
+        // resolve against the controller's working directory and silently place
+        // private state, orientation or the privileged launcher somewhere else.
+        if (!IsAbsoluteOrEmpty(PrivateDataDirectory))
+        {
+            errors.Add($"{nameof(PrivateDataDirectory)} must be an absolute path when configured.");
+        }
+
+        if (!IsAbsoluteOrEmpty(InstructionsDirectory))
+        {
+            errors.Add($"{nameof(InstructionsDirectory)} must be an absolute path when configured.");
+        }
+
+        if (!IsAbsoluteOrEmpty(AgentLauncher))
+        {
+            errors.Add($"{nameof(AgentLauncher)} must be an absolute path when configured.");
+        }
+
         if (string.IsNullOrWhiteSpace(Model))
         {
             errors.Add($"{nameof(Model)} must not be empty.");
@@ -114,6 +158,13 @@ public sealed class ControlOptions
 
         return errors;
     }
+
+    /// <summary>Controller-private state root; falls back to <see cref="DataDirectory"/>.</summary>
+    public string ResolvePrivateDataDirectory() =>
+        string.IsNullOrWhiteSpace(PrivateDataDirectory) ? DataDirectory : PrivateDataDirectory;
+
+    private static bool IsAbsoluteOrEmpty(string value) =>
+        string.IsNullOrWhiteSpace(value) || Path.IsPathRooted(value);
 
     /// <summary>
     /// Accepts only numeric loopback addresses plus the exact host name

@@ -23,8 +23,10 @@ The .NET 10 Blazor portal (static server rendering) hosts a background
 `AcpControlHost` **inside the same control container**. That host owns one
 OpenCode ACP process, the loopback-only OpenCode native HTTP server, and the
 durable organization/session record. A TUI client runs in tmux on the same
-runtime; the browser terminal attaches to it over a same-origin WebSocket. All
-runtime state lives under the private persistent `/data` volume.
+runtime; the browser terminal attaches to it over a same-origin WebSocket.
+Controller-private state lives in the `/control-data` volume (controller UID
+1001); the agent-owned `/data` volume (UID 1000) holds the OpenCode home,
+workspace and conversation history.
 
 This is a development slice. **Developer provisioning and task routing are not
 implemented**, and the active code has **no worker bridge or reconnect
@@ -68,7 +70,183 @@ docker --context home-docker compose exec -T control python3 -c \
 
 Secrets initialization creates a volume and preserves an existing owner
 password. Blank/short or unreadable existing files fail closed and are not
-replaced automatically. Compose enables the runtime, installs OpenCode 1.18.30 and uses its
+replaced automatically.
+
+An existing deployment created before controller/agent isolation has its owner
+secret owned by the shared UID 1000. Re-own it once, before starting the new
+image — the container refuses to start while the agent identity can still read
+the secret:
+
+```bash
+# Preserve the exact currently deployed pre-isolation image before replacing
+# the Compose project image. Record the printed image ID with the deployment
+# evidence; refuse to proceed if this inspection/tag fails.
+docker --context home-docker image inspect agentcontrol-v2-control:latest \
+  --format '{{.Id}}'
+docker --context home-docker image tag agentcontrol-v2-control:latest \
+  agentcontrol-v2-control:rollback-pre-isolation
+
+python3 scripts/init-secrets.py --context home-docker --migrate-owner
+```
+
+This changes ownership and mode only: the credential is never read, rotated or
+rewritten, so it stays valid and the step is reversible. On first start the
+entrypoint copies `/data/runtime.json` into the controller-private volume;
+organization, session and conversation history are preserved. It also preserves
+the byte-exact original as `/control-data/runtime.pre-isolation.json` with a
+SHA-256 in a sibling `.meta.json`, written once at adoption and never
+overwritten.
+
+While the isolated image runs, `/data/runtime.json` is a **stale** root-owned
+`0600` leftover, not a live copy: the controller writes only the private state,
+so the legacy path keeps the organization, session and tmux owner token as they
+were at adoption. Root-only ownership matters because that stale copy still
+carries a token the agent must not read.
+
+### Rolling back to the pre-isolation image
+
+Run these exact steps in order; the script refuses to act while the controller
+is running.
+
+```bash
+# 1. Stop the isolated controller. The rollback must not run underneath it.
+docker --context home-docker compose down
+
+# 2. Republish the CURRENT controller-private runtime state to
+#    /data/runtime.json and hand it, /data and the owner secret to UID 1000.
+python3 scripts/init-secrets.py --context home-docker --revert-isolation
+
+# 3. Restore the retained image to the exact tag Compose uses and start without
+#    building or pulling a replacement.
+docker --context home-docker image tag \
+  agentcontrol-v2-control:rollback-pre-isolation agentcontrol-v2-control:latest
+docker --context home-docker compose up -d --no-build
+```
+
+Verify the running container's image ID equals the ID recorded before migration.
+Do not use plain `compose up`, `--build`, or a floating registry tag for rollback.
+If the retained local image is missing, stop: state ownership has been restored,
+but the old application artifact has not, so starting a different image is not
+a verified rollback.
+
+Step 2 is **not** a pure ownership change, and it cannot be. Re-owning the stale
+legacy file would resume the old image on the organization/session/token from
+adoption time and silently discard everything the isolated run did, so the
+rollback writes the current private bytes to `/data/runtime.json` atomically
+(`O_EXCL` temporary in the same directory, final ownership and mode applied
+before it is visible, `fsync`, `renameat`, directory `fsync`) and refuses any
+symlinked, hard-linked or unexpectedly owned path. The owner secret and `/data`
+remain metadata-only: the credential is never read, rotated or rewritten, and
+its inode is preserved.
+
+The three volumes cannot be changed in one transaction, so **the rollback is
+replayable rather than atomic**: nothing is deleted, every step is idempotent,
+and a failure part-way through is repaired by running the exact same command
+again. Do not start either image until it reports success.
+
+**The replay window closes when the pre-isolation image starts.** Replay is safe
+only while `/data/runtime.json` is still what the rollback put there. Once the
+old image has run it advances that file, and re-running `--revert-isolation`
+would republish the older controller-private bytes over the newer legacy state —
+the same data loss the roll-forward interlock prevents, reached from the other
+side. The command therefore checks the recorded `rollback.active` against the
+bytes actually on the legacy path **before writing or chowning anything**.
+
+That check needs the record to exist before the old image can observe anything
+the rollback did, so `rollback.active` is written **before the runtime state is
+republished** and before `/data`, the runtime state or the owner secret are
+handed back. Ordering only the ownership changes after the marker was not enough:
+the republish creates a new inode and renames it into place, and it used to give
+that inode its UID 1000 ownership at creation time, so publishing was itself a
+hand-back that ran first.
+
+The sequence is now: decide, record the marker, publish **root-owned `0600`**,
+hand back explicitly, then complete the marker. The marker records what the legacy
+path held before (`prepublicationLegacySha256`), what the rollback will publish
+(`intendedSha256`) and what it holds now (`publishedSha256`), so a replay can tell
+the three cases apart:
+
+- the legacy file still matches the pre-publication digest → the publication never
+  happened; the replay performs it;
+- it matches the intended digest → the publication already landed; the replay
+  re-applies only the remaining hand-backs and does not touch the inode;
+- it matches neither → the old image (or another writer) advanced it; the command
+  refuses with all three digests and nothing is changed.
+
+If the marker cannot be recorded the command aborts while the controller still
+owns everything — including the runtime state, which keeps its prior owner *and*
+its prior bytes — so neither image starts, nothing is lost, and re-running the
+identical command converges. A crash after the marker is the ordinary replayable
+case in both windows; until the explicit hand-back runs, the published bytes are
+root-owned and the old image cannot read a state the rollback has not finished.
+
+The deployment is already reverted when the refusal happens, so nothing needs
+repairing; to go back to the isolated image, resolve the interlock explicitly with
+`--resume-isolation --state-source legacy|private`.
+
+A deployment with no controller-private state (one that never started) fails
+closed; `--accept-missing-runtime-state` opts into handing back ownership only
+and letting the old image create a new organization. That path records the marker
+too, so a later replay is still bounded.
+
+### Rolling forward again after a rollback
+
+Once the pre-isolation image has run, `/data/runtime.json` and
+`/control-data/runtime.json` are two independent histories of the same
+organization. There is no automatic merge, so the isolated image **refuses to
+start** while the rollback recorded in `/control-data/rollback.active` is
+unresolved, rather than silently freezing the newer legacy state or discarding
+the isolated run. Choose the survivor explicitly:
+
+```bash
+docker --context home-docker compose down
+
+# legacy  = keep what the pre-isolation image wrote while it was running
+# private = keep the state the isolated run left behind
+python3 scripts/init-secrets.py --context home-docker \
+  --resume-isolation --state-source legacy
+
+docker --context home-docker compose up -d
+```
+
+The state that is not chosen is preserved next to the private store under a
+timestamped name, never deleted. The name carries a one-second timestamp, so two
+resumes inside the same second would otherwise collide; archives are created
+under the first unused name rather than written over an existing one, and both
+survive byte-exact. This command also returns the owner secret to UID 1001 and
+clears the interlock.
+
+The same fail-closed refusal applies if the legacy file was advanced outside
+isolation without a recorded rollback — an operator who started the old image by
+hand, for example. In that case the entrypoint **records the divergence itself**
+(with both SHA-256 digests and the detected owner) before failing, so the start
+is a decision point rather than a permanent refusal with nothing to resolve; the
+same `--resume-isolation --state-source` command then applies. Rolling back out
+of that state instead is also supported and keeps the diverged legacy bytes
+untouched.
+
+That marker is `reason: unrecorded-legacy-divergence` and is deliberately not an
+operator rollback: nothing was written to the legacy path, so it records no
+publication and no intent, and `--revert-isolation` branches on the reason rather
+than inferring one from the digests present. Treating the recorded diverged bytes
+as a publication record would republish the private state over exactly the bytes
+the operator is rolling back to keep. If the legacy file has moved on again since
+the divergence was detected, the rollback refuses rather than picking a survivor.
+
+A legacy file still owned by UID 1000 whose bytes are **identical** to the
+controller-private copy is not a divergence: it is a first adoption that was
+interrupted after the private copy was published but before the snapshot and the
+legacy re-own. The start completes those remaining steps instead of demanding a
+choice between two copies of the same state.
+
+`--revert-isolation`, `--resume-isolation` and `--migrate-owner` are mutually
+exclusive. `--project` derives the `<project>_control-data`,
+`<project>_control-private` volumes and the `<project>-control-1` container for
+a deployment under a non-default Compose project; the owner-secret volume is
+`external` and is set with `--secrets-volume`. Missing volumes fail before any
+container runs, because `docker run` would otherwise create an empty one and
+report a confident success against nothing. Compose enables the
+runtime, installs OpenCode 1.18.30 and uses its
 default Big Pickle provider. The container publishes only the portal on all
 Docker-host IPv4 interfaces (`0.0.0.0:5054`); OpenCode's native HTTP stays on
 container loopback. Nothing starts or migrates the archived V1 deployment.
@@ -98,8 +276,9 @@ synchronization is not available; an acknowledged ACP model-setting RPC alone
 does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/data/runtime.json` stores the organization/session mapping; the named data
-volume retains workspace and native conversation state. A failed session load is
+`/control-data/runtime.json` stores the organization/session mapping in the
+controller-private volume; the agent-owned data volume retains workspace and
+native conversation state. A failed session load is
 surfaced, not silently replaced. Detaching the browser leaves the TUI/runtime
 alive. Container restart restores conversation history, not a running command.
 Only an initial new-session readiness prompt is automatic.
@@ -117,11 +296,19 @@ tunnel. **HTTP does not encrypt the password or terminal traffic:** do not expos
 this port to untrusted networks or the Internet. TLS-terminating reverse proxy
 support still needs trusted forwarded-header configuration and validation;
 it is not supported by this slice. Use an SSH tunnel for encrypted remote access. To
-restrict it to SSH-only access again, bind `127.0.0.1:5054:8080`. The controller
-and OpenCode currently share a container OS user, so prompt/tool deny rules are
-defense-in-depth, **not OS isolation** from the mounted owner secret. Separate
-credentials and process identities before adding untrusted repository execution.
-No Docker socket or real repository is mounted in this slice.
+restrict it to SSH-only access again, bind `127.0.0.1:5054:8080`.
+
+The controller (UID 1001) and every agent process — OpenCode, tmux, the TUI and
+the PTY bridge (UID 1000) — now run as **separate OS identities** in the same
+container. The owner secret and `/control-data` are readable only by the
+controller; prompt/tool deny rules remain defense-in-depth on top of that
+boundary rather than standing in for it. Agent processes are started by a
+narrow setuid launcher exposing four fixed operations; the agent identity cannot
+execute it. Because that launcher is the elevation mechanism, the container runs
+without `no-new-privileges`, and every other setuid binary is stripped from the
+image. See [architecture](docs/ARCHITECTURE.md#access-and-isolation). Separate
+credentials further before adding untrusted repository execution. No Docker
+socket or real repository is mounted in this slice.
 
 ## Direction
 
