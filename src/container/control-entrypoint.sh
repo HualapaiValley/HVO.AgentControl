@@ -128,6 +128,25 @@ if [ -n "$SECRET_FILE" ]; then
     fi
 fi
 
+# CLIProxy is optional, but a configured file is verified under the same
+# controller-readable/agent-unreadable boundary before the host can export its
+# value to OpenCode. The value itself is never printed or placed in arguments.
+CLIPROXY_SECRET_FILE="${Control__CliProxySecretFile:-}"
+if [ -n "$CLIPROXY_SECRET_FILE" ]; then
+    case "$CLIPROXY_SECRET_FILE" in
+        /*) ;;
+        *) fail "CLIProxy secret file path must be absolute" ;;
+    esac
+    [ -f "$CLIPROXY_SECRET_FILE" ] || fail "CLIProxy secret file is missing"
+    setpriv --reuid "$CONTROL_UID" --regid "$CONTROL_GID" --clear-groups \
+        test -r "$CLIPROXY_SECRET_FILE" \
+        || fail "controller identity cannot read the CLIProxy secret file"
+    if setpriv --reuid "$AGENT_UID" --regid "$AGENT_GID" --clear-groups \
+        test -r "$CLIPROXY_SECRET_FILE" 2>/dev/null; then
+        fail "agent identity can read the CLIProxy secret file; refusing to start"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # The launcher is the whole privileged surface. Verify it before granting the
 # controller a way to call it.

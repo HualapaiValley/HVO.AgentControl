@@ -15,9 +15,13 @@ Commands/results:
 
 ## Review
 
-- [ ] Two independent reviewers used randomly selected distinct approved models,
-      excluding the coordinator; model provenance and any routing/fallback limits
-      are recorded under the Phase 1 review protocol.
+- Risk classification: routine / high-risk / focused correction
+- Classification rationale:
+- [ ] Reviewer count matches the owner-approved #243 practice: routine change =
+      one independent reviewer, high-risk change = two independent reviewers, and
+      focused correction = one independent reviewer. Approved lanes exclude the
+      coordinator; model provenance and any routing/fallback limits are recorded
+      under the Phase 1 review protocol.
 - [ ] Independent review (not the implementing agent) ran against the same exact
       immutable merge-base/head SHA pair recorded below.
 - [ ] Every finding, including all owner comments, is triaged.
@@ -31,8 +35,8 @@ Commands/results:
 - [ ] Deferred findings are commented as Deferred with issue numbers in their
       original threads; linked issues remain open, labeled `status:deferred`,
       and scheduled for the next development/review cycle.
-- [ ] Both reviewers assessed all carried-forward items and their interactions;
-      unfinished items have an explicit new owner disposition.
+- [ ] All required reviewers assessed all carried-forward items and their
+      interactions; unfinished items have an explicit new owner disposition.
 - [ ] Review round count is within the three-round bound, or the owner approved
       a fourth.
 - [ ] Required CI is green on the exact reviewed head (necessary, not
@@ -41,7 +45,7 @@ Commands/results:
       the PR body reflects the current head, checks and review dispositions.
 
 - Reviewed head SHA:
-- Immutable review base SHA (both reviewers attest this same base):
+- Immutable review base SHA (all required reviewers attest this same base):
 - Review round: 1 / 2 / 3 / 4 (4 requires explicit owner authorization reference):
 - Additional-cycle authorization reference, if applicable:
 - Coordinator provider/model:
@@ -64,7 +68,7 @@ Include recovery, compatibility, security, or deployment considerations.
 
 - [ ] Owner has explicitly authorized merge for this exact head.
 - Authorization reference (Phase 1 standing authorization is valid only after
-  both independent reviews and exact-head required CI pass):
+  all reviews required by the risk classification and exact-head required CI pass):
 - [ ] No auto-merge. Merging does not trigger a release.
 
 ## Post-Merge Record

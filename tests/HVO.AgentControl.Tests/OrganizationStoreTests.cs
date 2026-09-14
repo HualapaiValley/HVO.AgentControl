@@ -102,6 +102,276 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
+    public void SchemaVersionsHaveEqualCountsAndExactlyOneChangedObject()
+    {
+        var type = typeof(OrganizationStore);
+        var v1 = (string[])type.GetField("SchemaV1Statements", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        var v2 = (string[])type.GetField("SchemaV2Statements", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+
+        Assert.Equal(9, v1.Length);
+        Assert.Equal(v1.Length, v2.Length);
+        var changed = v1.Zip(v2).Where(pair => !string.Equals(pair.First, pair.Second, StringComparison.Ordinal)).ToArray();
+        var only = Assert.Single(changed);
+        Assert.Contains("CREATE TABLE runtime_bindings", only.First, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE runtime_bindings", only.Second, StringComparison.Ordinal);
+        Assert.DoesNotContain("credential_set_id", only.First, StringComparison.Ordinal);
+        Assert.Contains("credential_set_id", only.Second, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildExpectedSchemaRejectsDuplicateObjectKeys()
+    {
+        var method = typeof(OrganizationStore).GetMethod(
+            "BuildExpectedSchema",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var invocation = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+            method.Invoke(null, new object[] { new[] { "CREATE TABLE duplicate (id TEXT)", "CREATE TABLE duplicate (id TEXT)" } }));
+        Assert.IsType<InvalidOperationException>(invocation.InnerException);
+        Assert.Contains("duplicate", invocation.InnerException!.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SchemaV1MigratesTransactionallyWithVerifiedCreateOnceBackupAndPreservesData()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            store.RecordSession("ses_preserved", "Preserved");
+        }
+
+        DowngradeToCanonicalV1(root.Path);
+        var before = SnapshotCoreData(root.Path);
+        using (var migrated = Open(root))
+        {
+            var identity = migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            Assert.Equal("ses_preserved", identity.SessionId);
+            Assert.Equal(before, SnapshotCoreData(root.Path));
+        }
+
+        Assert.Equal(2, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
+        Assert.True(File.Exists(backup));
+        Assert.Equal(
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(),
+            File.ReadAllText(hash).Trim());
+        Assert.Equal(1, RawScalar(backup, "SELECT version FROM schema_version;"));
+
+        var backupBytes = File.ReadAllBytes(backup);
+        using var restarted = Open(root);
+        restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(backupBytes, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
+    public void FaultAfterBackupBeforeMigrationLeavesImmutableBackupAcrossTwoRestarts()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        DowngradeToCanonicalV1(root.Path);
+        using (var faulted = Open(root))
+        {
+            faulted.AfterMigrationBackup = () => throw new InvalidOperationException("simulated fault after backup");
+            Assert.Throws<InvalidOperationException>(() =>
+                faulted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        }
+
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
+        var retained = File.ReadAllBytes(backup);
+        var retainedHash = File.ReadAllBytes(hash);
+        AssertNoBackupSidecars(backup);
+
+        for (var restart = 0; restart < 2; restart++)
+        {
+            using var store = Open(root);
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            Assert.Equal(retained, File.ReadAllBytes(backup));
+            Assert.Equal(retainedHash, File.ReadAllBytes(hash));
+            AssertNoBackupSidecars(backup);
+        }
+    }
+
+    [Fact]
+    public void DifferentValidSchemaV1BackupIsRejectedAndSourceRemainsUnchanged()
+    {
+        using var source = new TempStore();
+        using (var store = Open(source))
+        {
+            store.OpenAndAdopt("Source Organization", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV1(source.Path);
+        var sourceBefore = SnapshotCoreData(source.Path);
+
+        using var other = new TempStore();
+        using (var store = Open(other))
+        {
+            store.OpenAndAdopt("Different Organization", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV1(other.Path);
+        var backup = Path.Combine(source.Directory, OrganizationStore.SchemaV1BackupFileName);
+        CopySqliteDatabase(other.Path, backup);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant();
+        File.WriteAllText(Path.Combine(source.Directory, OrganizationStore.SchemaV1BackupHashFileName), hash + "\n");
+
+        using var reopened = Open(source);
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
+            reopened.OpenAndAdopt("Source Organization", "owner-approved:test", null, "seed://fresh"));
+        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, RawScalar(source.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(sourceBefore, SnapshotCoreData(source.Path));
+    }
+
+    [Fact]
+    public void SchemaV1WriteAfterFailedMigrationInvalidatesRetainedBackup()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV1(root.Path);
+        using (var faulted = Open(root))
+        {
+            faulted.BeforeMigrationCommit = () => throw new InvalidOperationException("simulated migration crash");
+            Assert.Throws<InvalidOperationException>(() =>
+                faulted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        }
+
+        ExecuteRaw(root.Path, "UPDATE organizations SET display_name = 'Changed after failed migration', revision = revision + 1;");
+        var sourceBefore = SnapshotCoreData(root.Path);
+        using var retry = Open(root);
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
+            retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(1, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(sourceBefore, SnapshotCoreData(root.Path));
+    }
+
+    [Fact]
+    public void MigrationFaultRollsBackAndRestartCompletesFromUnchangedV1()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        DowngradeToCanonicalV1(root.Path);
+        using (var faulted = Open(root))
+        {
+            faulted.BeforeMigrationCommit = () => throw new InvalidOperationException("simulated migration crash");
+            Assert.Throws<InvalidOperationException>(() =>
+                faulted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        }
+
+        Assert.Equal(1, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
+        using var retry = Open(root);
+        retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(2, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+    }
+
+    [Fact]
+    public void NonCanonicalV1FailsClosedBeforeBackupOrMigration()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        DowngradeToCanonicalV1(root.Path);
+        ExecuteRaw(root.Path, "ALTER TABLE organizations ADD COLUMN partial TEXT;");
+        using var reopened = Open(root);
+        Assert.Throws<OrganizationStoreCorruptException>(() =>
+            reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName)));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+    }
+
+    [Fact]
+    public void ProviderConfigurationRecordsOnlySanitizedConfiguredMetadataIdempotently()
+    {
+        using var root = new TempStore();
+        using var store = Open(root);
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        var revision = RawScalar(root.Path, "SELECT revision FROM runtime_bindings;");
+
+        store.RecordProviderConfiguration(
+            "agentcontrol-system-phase1",
+            "opencode-1.18.30-openai-compatible-v1",
+            "agentcontrol-control-phase1-v1",
+            "configured",
+            "cliproxy-phase1-2026-09-14-v1",
+            "gpt-6-astra",
+            "cliproxy",
+            "gpt-6-astra",
+            "medium");
+        Assert.Equal("gpt-6-astra", RawScalarString(root.Path, "SELECT policy_lane_id FROM runtime_bindings;"));
+        Assert.Equal("medium", RawScalarString(root.Path, "SELECT configured_variant FROM runtime_bindings;"));
+        Assert.Equal("agentcontrol-control-phase1-v1", RawScalarString(root.Path, "SELECT provider_profile_id FROM runtime_bindings;"));
+        Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+
+        store.RecordProviderConfiguration(
+            "agentcontrol-system-phase1",
+            "opencode-1.18.30-openai-compatible-v1",
+            "agentcontrol-control-phase1-v1",
+            "configured",
+            "cliproxy-phase1-2026-09-14-v1",
+            "gpt-6-astra",
+            "cliproxy",
+            "gpt-6-astra",
+            "medium");
+        Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name LIKE '%endpoint%' OR name LIKE '%key%' OR name LIKE '%secret%' OR name LIKE '%fingerprint%';"));
+    }
+
+    [Fact]
+    public void ObservedNativeModelIsSeparateNullableAndIdempotent()
+    {
+        using var root = new TempStore();
+        using var store = Open(root);
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        store.RecordProviderConfiguration(
+            "agentcontrol-system-phase1",
+            "opencode-1.18.30-openai-compatible-v1",
+            "agentcontrol-control-phase1-v1",
+            "configured",
+            "cliproxy-phase1-2026-09-14-v1",
+            "default",
+            "cliproxy",
+            "default",
+            "medium");
+        var revision = RawScalar(root.Path, "SELECT revision FROM runtime_bindings;");
+        var firstObservedAt = DateTimeOffset.Parse("2026-09-14T12:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+
+        store.RecordObservedModel("native-provider", "served-model", null, firstObservedAt);
+        Assert.Equal("cliproxy", RawScalarString(root.Path, "SELECT configured_provider_id FROM runtime_bindings;"));
+        Assert.Equal("default", RawScalarString(root.Path, "SELECT configured_model_id FROM runtime_bindings;"));
+        Assert.Equal("medium", RawScalarString(root.Path, "SELECT configured_variant FROM runtime_bindings;"));
+        Assert.Equal("native-provider", RawScalarString(root.Path, "SELECT observed_provider_id FROM runtime_bindings;"));
+        Assert.Equal("served-model", RawScalarString(root.Path, "SELECT observed_model_id FROM runtime_bindings;"));
+        Assert.True(RawIsNull(root.Path, "SELECT observed_variant FROM runtime_bindings;"));
+        Assert.Equal(firstObservedAt.ToString("O"), RawScalarString(root.Path, "SELECT observed_at FROM runtime_bindings;"));
+        Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+
+        store.RecordObservedModel("native-provider", "served-model", null, firstObservedAt.AddMinutes(1));
+        Assert.Equal(revision + 1, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+        Assert.Equal(firstObservedAt.ToString("O"), RawScalarString(root.Path, "SELECT observed_at FROM runtime_bindings;"));
+
+        store.RecordObservedModel("native-provider", "served-model", "high", firstObservedAt.AddMinutes(2));
+        Assert.Equal("high", RawScalarString(root.Path, "SELECT observed_variant FROM runtime_bindings;"));
+        Assert.Equal(revision + 2, RawScalar(root.Path, "SELECT revision FROM runtime_bindings;"));
+    }
+
+    [Fact]
     public void AdoptionPreservesPersistedIdentityAndReportsTheNameDifference()
     {
         using var root = new TempStore();
@@ -882,6 +1152,63 @@ public sealed class OrganizationStoreTests
         Assert.DoesNotContain(root.Path, exception.Message, StringComparison.Ordinal);
     }
 
+    private static void DowngradeToCanonicalV1(string path)
+    {
+        ExecuteRaw(
+            path,
+            """
+            ALTER TABLE runtime_bindings RENAME TO runtime_bindings_v2;
+            CREATE TABLE runtime_bindings (
+                id TEXT PRIMARY KEY,
+                employee_id TEXT NOT NULL UNIQUE REFERENCES employees(id) ON DELETE RESTRICT,
+                placement TEXT NOT NULL CHECK (placement IN ('InternalSharedContainer', 'DeveloperContainer')),
+                container_ref TEXT,
+                volume_ref TEXT,
+                home_ref TEXT,
+                workspace_ref TEXT,
+                session_ref TEXT,
+                tmux_owner_token TEXT NOT NULL,
+                ownership_epoch INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                FOREIGN KEY (session_ref, employee_id) REFERENCES acp_sessions(id, employee_id) ON DELETE RESTRICT
+            );
+            INSERT INTO runtime_bindings (
+                id, employee_id, placement, container_ref, volume_ref, home_ref,
+                workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
+                created_at, updated_at, revision)
+            SELECT id, employee_id, placement, container_ref, volume_ref, home_ref,
+                workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
+                created_at, updated_at, revision
+            FROM runtime_bindings_v2;
+            DROP TABLE runtime_bindings_v2;
+            UPDATE schema_version SET version = 1;
+            """);
+    }
+
+    private static string SnapshotCoreData(string path)
+    {
+        var builder = new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, Pooling = false };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT group_concat(value, '|') FROM (
+                SELECT 'org:' || id || ':' || display_name AS value FROM organizations
+                UNION ALL SELECT 'dept:' || id || ':' || slug FROM departments
+                UNION ALL SELECT 'role:' || id || ':' || slug FROM roles
+                UNION ALL SELECT 'emp:' || id || ':' || slug FROM employees
+                UNION ALL SELECT 'binding:' || id || ':' || tmux_owner_token || ':' || ifnull(session_ref, '') FROM runtime_bindings
+                UNION ALL SELECT 'session:' || id || ':' || native_session_id || ':' || status FROM acp_sessions
+                UNION ALL SELECT 'audit:' || id || ':' || authorization_reference FROM adoption_audit
+                ORDER BY value
+            );
+            """;
+        return Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+    }
+
     private static void RewriteSchemaSql(string path, string name, string sql)
     {
         var builder = new SqliteConnectionStringBuilder
@@ -944,6 +1271,33 @@ public sealed class OrganizationStoreTests
         command.ExecuteNonQuery();
     }
 
+    private static void AssertNoBackupSidecars(string backupPath)
+    {
+        Assert.False(File.Exists(backupPath + "-wal"));
+        Assert.False(File.Exists(backupPath + "-shm"));
+    }
+
+    private static void CopySqliteDatabase(string sourcePath, string destinationPath)
+    {
+        var sourceBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        var destinationBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = destinationPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false,
+        };
+        using var source = new SqliteConnection(sourceBuilder.ToString());
+        using var destination = new SqliteConnection(destinationBuilder.ToString());
+        source.Open();
+        destination.Open();
+        source.BackupDatabase(destination);
+    }
+
     private static int CountSessions(string path) => RawScalar(path, "SELECT COUNT(*) FROM acp_sessions;");
 
     private static int CountActiveSessions(string path) =>
@@ -968,6 +1322,21 @@ public sealed class OrganizationStoreTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static bool RawIsNull(string path, string sql)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar() is DBNull or null;
     }
 
     private static string RawScalarString(string path, string sql)

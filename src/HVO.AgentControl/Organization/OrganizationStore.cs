@@ -87,19 +87,21 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed class OrganizationStore : IDisposable
 {
     /// <summary>Schema version this build writes and requires.</summary>
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
     public const string AdoptionBackupFileName = "runtime.pre-database.json";
     public const string AdoptionBackupHashFileName = "runtime.pre-database.sha256";
+    public const string SchemaV1BackupFileName = "control.schema-v1.db";
+    public const string SchemaV1BackupHashFileName = "control.schema-v1.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
 
     private static readonly TimeSpan DefaultLockTimeout = TimeSpan.FromSeconds(10);
 
-    private static readonly string[] SchemaStatements =
+    private static readonly string[] SchemaV1Statements =
     [
         """
         CREATE TABLE schema_version (
@@ -215,6 +217,55 @@ public sealed class OrganizationStore : IDisposable
         """,
     ];
 
+    private static readonly string RuntimeBindingsV2Statement =
+        """
+        CREATE TABLE runtime_bindings (
+            id TEXT PRIMARY KEY,
+            employee_id TEXT NOT NULL UNIQUE REFERENCES employees(id) ON DELETE RESTRICT,
+            placement TEXT NOT NULL CHECK (placement IN ('InternalSharedContainer', 'DeveloperContainer')),
+            container_ref TEXT,
+            volume_ref TEXT,
+            home_ref TEXT,
+            workspace_ref TEXT,
+            session_ref TEXT,
+            tmux_owner_token TEXT NOT NULL,
+            ownership_epoch INTEGER,
+            credential_set_id TEXT,
+            provider_config_version TEXT,
+            provider_profile_id TEXT,
+            provider_config_status TEXT NOT NULL DEFAULT 'unconfigured' CHECK (provider_config_status IN ('unconfigured', 'configured', 'unavailable', 'revoked')),
+            model_catalog_version TEXT,
+            policy_lane_id TEXT,
+            configured_provider_id TEXT,
+            configured_model_id TEXT,
+            configured_variant TEXT,
+            observed_provider_id TEXT,
+            observed_model_id TEXT,
+            observed_variant TEXT,
+            observed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            FOREIGN KEY (session_ref, employee_id) REFERENCES acp_sessions(id, employee_id) ON DELETE RESTRICT
+        )
+        """;
+
+    // Explicit object-for-object V2 schema. Index 5 is intentionally the sole
+    // changed object; deriving this with substring replacement could silently
+    // replace another statement that happened to mention runtime_bindings.
+    private static readonly string[] SchemaV2Statements =
+    [
+        SchemaV1Statements[0],
+        SchemaV1Statements[1],
+        SchemaV1Statements[2],
+        SchemaV1Statements[3],
+        SchemaV1Statements[4],
+        RuntimeBindingsV2Statement,
+        SchemaV1Statements[6],
+        SchemaV1Statements[7],
+        SchemaV1Statements[8],
+    ];
+
     /// <summary>
     /// Canonical, normalized definition of every table and explicit index this
     /// build creates, keyed by object type and name. An existing store is
@@ -225,13 +276,17 @@ public sealed class OrganizationStore : IDisposable
     /// Inline UNIQUE/PK constraints create <c>sqlite_autoindex_*</c> entries with
     /// no SQL, which are excluded; the named partial index is explicit.
     /// </summary>
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
-        BuildExpectedSchema();
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV1 =
+        BuildExpectedSchema(SchemaV1Statements);
 
-    private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema()
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV2Statements);
+
+    private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
+        IEnumerable<string> statements)
     {
         var expected = new Dictionary<(string Type, string Name), string>();
-        foreach (var statement in SchemaStatements)
+        foreach (var statement in statements)
         {
             var match = System.Text.RegularExpressions.Regex.Match(
                 statement,
@@ -246,7 +301,11 @@ public sealed class OrganizationStore : IDisposable
 
             var type = match.Groups["type"].Value.ToLowerInvariant();
             var name = match.Groups["name"].Value;
-            expected[(type, name)] = NormalizeSchemaSql(statement);
+            if (!expected.TryAdd((type, name), NormalizeSchemaSql(statement)))
+            {
+                throw new InvalidOperationException(
+                    $"Schema statements contain duplicate {type} object '{name}'.");
+            }
         }
 
         return expected;
@@ -292,6 +351,12 @@ public sealed class OrganizationStore : IDisposable
     /// an authoritative database. Production never sets it.
     /// </summary>
     internal bool ForceBusyCheckpointForTest { get; set; }
+
+    /// <summary>Fault seam after the migration transaction starts and before commit.</summary>
+    internal Action? BeforeMigrationCommit { get; set; }
+
+    /// <summary>Fault seam after the verified backup exists and before migration begins.</summary>
+    internal Action? AfterMigrationBackup { get; set; }
 
     /// <summary>
     /// Restricts the process creation mask so files the runtime creates (the
@@ -345,7 +410,7 @@ public sealed class OrganizationStore : IDisposable
             {
                 RequireNonEmptyExistingDatabase();
                 using var connection = OpenConnection(_databasePath);
-                ValidateExistingStore(connection);
+                PrepareExistingStore(connection);
                 identity = ReadIdentity(connection, created: false, organizationNameFromConfiguration);
             }
             else
@@ -653,6 +718,151 @@ public sealed class OrganizationStore : IDisposable
         });
     }
 
+    /// <summary>
+    /// Records non-secret configured request policy separately from native/session
+    /// observations. This never records an endpoint, account, key or serving-lane
+    /// claim, and it never records a key fingerprint: the raw key stays in the
+    /// controller-only secret file and is not persisted here.
+    /// </summary>
+    public void RecordProviderConfiguration(
+        string? credentialSetId,
+        string? providerConfigVersion,
+        string? providerProfileId,
+        string providerConfigStatus,
+        string? modelCatalogVersion,
+        string? policyLaneId,
+        string configuredProviderId,
+        string configuredModelId,
+        string? configuredVariant)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerConfigStatus);
+        ArgumentException.ThrowIfNullOrWhiteSpace(configuredProviderId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(configuredModelId);
+        TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                if (_bindingId is null)
+                {
+                    throw new OrganizationStoreException("The store has not been opened; provider configuration cannot be recorded.");
+                }
+
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var affected = Execute(
+                    connection,
+                    transaction,
+                    """
+                    UPDATE runtime_bindings
+                    SET credential_set_id = $credential,
+                        provider_config_version = $configVersion,
+                        provider_profile_id = $profile,
+                        provider_config_status = $status,
+                        model_catalog_version = $catalogVersion,
+                        policy_lane_id = $lane,
+                        configured_provider_id = $provider,
+                        configured_model_id = $model,
+                        configured_variant = $variant,
+                        updated_at = CASE WHEN
+                            credential_set_id IS $credential
+                            AND provider_config_version IS $configVersion
+                            AND provider_profile_id IS $profile
+                            AND provider_config_status = $status
+                            AND model_catalog_version IS $catalogVersion
+                            AND policy_lane_id IS $lane
+                            AND configured_provider_id = $provider
+                            AND configured_model_id = $model
+                            AND configured_variant IS $variant
+                            THEN updated_at ELSE $now END,
+                        revision = CASE WHEN
+                            credential_set_id IS $credential
+                            AND provider_config_version IS $configVersion
+                            AND provider_profile_id IS $profile
+                            AND provider_config_status = $status
+                            AND model_catalog_version IS $catalogVersion
+                            AND policy_lane_id IS $lane
+                            AND configured_provider_id = $provider
+                            AND configured_model_id = $model
+                            AND configured_variant IS $variant
+                            THEN revision ELSE revision + 1 END
+                    WHERE id = $binding
+                    """,
+                    ("$credential", credentialSetId),
+                    ("$configVersion", providerConfigVersion),
+                    ("$profile", providerProfileId),
+                    ("$status", providerConfigStatus),
+                    ("$catalogVersion", modelCatalogVersion),
+                    ("$lane", policyLaneId),
+                    ("$provider", configuredProviderId),
+                    ("$model", configuredModelId),
+                    ("$variant", configuredVariant),
+                    ("$now", Timestamp()),
+                    ("$binding", _bindingId));
+                if (affected != 1)
+                {
+                    throw new OrganizationStoreException("Provider configuration did not update exactly one runtime binding.");
+                }
+
+                transaction.Commit();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Persists an authoritative native model observation independently from the
+    /// configured policy lane. Identical observations are a no-op so a status
+    /// poll does not create write churn. A missing variant remains SQL NULL.
+    /// </summary>
+    public void RecordObservedModel(string providerId, string modelId, string? variant, DateTimeOffset observedAt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(providerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+        TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                if (_bindingId is null)
+                {
+                    throw new OrganizationStoreException("The store has not been opened; an observed model cannot be recorded.");
+                }
+
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var timestamp = observedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+                var affected = Execute(
+                    connection,
+                    transaction,
+                    """
+                    UPDATE runtime_bindings
+                    SET observed_provider_id = $provider,
+                        observed_model_id = $model,
+                        observed_variant = $variant,
+                        observed_at = $observed,
+                        updated_at = $observed,
+                        revision = revision + 1
+                    WHERE id = $binding
+                        AND NOT (
+                            observed_provider_id IS $provider
+                            AND observed_model_id IS $model
+                            AND observed_variant IS $variant)
+                    """,
+                    ("$provider", providerId),
+                    ("$model", modelId),
+                    ("$variant", variant),
+                    ("$observed", timestamp),
+                    ("$binding", _bindingId));
+                if (affected is < 0 or > 1)
+                {
+                    throw new OrganizationStoreException("Observed model persistence updated an unexpected number of runtime bindings.");
+                }
+
+                transaction.Commit();
+            }
+        });
+    }
+
     /// <summary>Returns the minimal organization overview read model.</summary>
     public OrganizationOverview GetOverview()
     {
@@ -819,6 +1029,31 @@ public sealed class OrganizationStore : IDisposable
     }
 
     /// <summary>
+    /// Opens retained evidence read-only without pooling and without applying the
+    /// writer/WAL contract. Verification must never mutate the backup or create
+    /// WAL/SHM sidecars merely by inspecting it.
+    /// </summary>
+    private static SqliteConnection OpenReadOnlyEvidenceConnection(string path)
+    {
+        var immutableUri = new UriBuilder(Uri.UriSchemeFile, string.Empty)
+        {
+            Path = Path.GetFullPath(path),
+            Query = "immutable=1",
+        }.Uri.AbsoluteUri;
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = immutableUri,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        ExecutePragma(connection, "foreign_keys = ON");
+        ExecutePragma(connection, "busy_timeout = 5000");
+        return connection;
+    }
+
+    /// <summary>
     /// Applies the writer contract to every connection: WAL, full synchronous
     /// durability, foreign keys and a bounded busy timeout.
     /// </summary>
@@ -951,7 +1186,27 @@ public sealed class OrganizationStore : IDisposable
         command.ExecuteNonQuery();
     }
 
-    private void ValidateExistingStore(SqliteConnection connection)
+    private void PrepareExistingStore(SqliteConnection connection)
+    {
+        ValidateIntegrity(connection);
+        var version = ReadSchemaVersion(connection);
+        if (version == 1)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV1);
+            EnsureSchemaV1Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV1ToV2(connection);
+        }
+        else if (version != CurrentSchemaVersion)
+        {
+            throw new OrganizationStoreCorruptException(
+                $"The control database '{_databasePath}' records schema version {version}; this build requires {CurrentSchemaVersion}. Refusing to start on an unknown or newer store.");
+        }
+
+        ValidateExistingStore(connection);
+    }
+
+    private void ValidateIntegrity(SqliteConnection connection)
     {
         // Integrity first: a damaged file must not be read as identity.
         using (var check = connection.CreateCommand())
@@ -980,14 +1235,16 @@ public sealed class OrganizationStore : IDisposable
             }
         }
 
-        ValidateSchemaSignature(connection);
+    }
 
-        int version;
-        using (var versionCommand = connection.CreateCommand())
+    private int ReadSchemaVersion(SqliteConnection connection)
+    {
+        try
         {
-            versionCommand.CommandText = "SELECT version FROM schema_version LIMIT 2;";
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT version FROM schema_version LIMIT 2;";
             var values = new List<int>();
-            using var reader = versionCommand.ExecuteReader();
+            using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 values.Add(reader.GetInt32(0));
@@ -999,9 +1256,206 @@ public sealed class OrganizationStore : IDisposable
                     $"The control database '{_databasePath}' has {values.Count} schema_version rows; exactly one is expected.");
             }
 
-            version = values[0];
+            return values[0];
+        }
+        catch (SqliteException exception)
+        {
+            throw new OrganizationStoreCorruptException(
+                $"The control database '{_databasePath}' does not carry a readable schema version. Refusing to infer or repair it.",
+                exception);
+        }
+    }
+
+    private void EnsureSchemaV1Backup(SqliteConnection source)
+    {
+        var directory = Path.GetDirectoryName(_databasePath) ?? ".";
+        var backupPath = Path.Combine(directory, SchemaV1BackupFileName);
+        var hashPath = Path.Combine(directory, SchemaV1BackupHashFileName);
+        if (!File.Exists(backupPath))
+        {
+            var temporary = backupPath + "." + RandomNumberGenerator.GetHexString(8) + ".tmp";
+            try
+            {
+                using (var destination = OpenConnection(temporary))
+                {
+                    source.BackupDatabase(destination);
+                    ValidateIntegrity(destination);
+                    if (ReadSchemaVersion(destination) != 1)
+                    {
+                        throw new OrganizationStoreCorruptException("The pre-migration backup did not preserve schema version 1.");
+                    }
+
+                    ValidateSchemaSignature(destination, ExpectedSchemaV1);
+                    Checkpoint(destination, temporary);
+                }
+
+                ClearPoolFor(temporary);
+                RemoveSidecars(temporary);
+                RestrictFileMode(temporary);
+                File.Move(temporary, backupPath);
+            }
+            finally
+            {
+                ClearPoolFor(temporary);
+                RemoveSidecars(temporary);
+                if (File.Exists(temporary))
+                {
+                    File.Delete(temporary);
+                }
+            }
         }
 
+        var bytesBeforeVerification = File.ReadAllBytes(backupPath);
+        var expectedHash = Convert.ToHexString(SHA256.HashData(bytesBeforeVerification)).ToLowerInvariant();
+        if (File.Exists(hashPath))
+        {
+            if (!string.Equals(File.ReadAllText(hashPath).Trim(), expectedHash, StringComparison.Ordinal))
+            {
+                throw new OrganizationStoreCorruptException("The schema-v1 backup hash does not match the retained backup.");
+            }
+        }
+        else
+        {
+            PublishEvidenceFile(hashPath, Encoding.ASCII.GetBytes(expectedHash + "\n"));
+        }
+
+        using (var verify = OpenReadOnlyEvidenceConnection(backupPath))
+        {
+            ValidateIntegrity(verify);
+            if (ReadSchemaVersion(verify) != 1)
+            {
+                throw new OrganizationStoreCorruptException("The retained pre-migration backup is not schema version 1.");
+            }
+
+            ValidateSchemaSignature(verify, ExpectedSchemaV1);
+            var sourceDigest = ComputeLogicalContentDigest(source);
+            var backupDigest = ComputeLogicalContentDigest(verify);
+            if (!sourceDigest.AsSpan().SequenceEqual(backupDigest))
+            {
+                throw new OrganizationStoreCorruptException(
+                    "The retained schema-v1 backup is valid but does not match the current schema-v1 source. Refusing to reuse mismatched recovery evidence.");
+            }
+        }
+
+        var bytesAfterVerification = File.ReadAllBytes(backupPath);
+        if (!bytesBeforeVerification.AsSpan().SequenceEqual(bytesAfterVerification)
+            || !string.Equals(
+                Convert.ToHexString(SHA256.HashData(bytesAfterVerification)).ToLowerInvariant(),
+                expectedHash,
+                StringComparison.Ordinal))
+        {
+            throw new OrganizationStoreCorruptException("The retained schema-v1 backup changed while it was being verified.");
+        }
+
+        if (File.Exists(backupPath + "-wal") || File.Exists(backupPath + "-shm"))
+        {
+            throw new OrganizationStoreCorruptException("Verifying the retained schema-v1 backup created an unexpected SQLite sidecar.");
+        }
+
+        RestrictFileMode(backupPath);
+        RestrictFileMode(hashPath);
+    }
+
+    private static byte[] ComputeLogicalContentDigest(SqliteConnection connection)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        static void Append(IncrementalHash hash, string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            hash.AppendData(BitConverter.GetBytes(bytes.Length));
+            hash.AppendData(bytes);
+        }
+
+        var tables = new List<(string Name, string Sql)>();
+        using (var schema = connection.CreateCommand())
+        {
+            schema.CommandText =
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name COLLATE BINARY";
+            using var reader = schema.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add((reader.GetString(0), NormalizeSchemaSql(reader.GetString(1))));
+            }
+        }
+
+        foreach (var (table, sql) in tables)
+        {
+            Append(hash, "table");
+            Append(hash, table);
+            Append(hash, sql);
+
+            var columns = new List<string>();
+            using (var pragma = connection.CreateCommand())
+            {
+                pragma.CommandText = $"PRAGMA table_info(\"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\")";
+                using var reader = pragma.ExecuteReader();
+                while (reader.Read())
+                {
+                    columns.Add(reader.GetString(1));
+                }
+            }
+
+            var quotedColumns = string.Join(", ", columns.Select(column => $"\"{column.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
+            using var rows = connection.CreateCommand();
+            rows.CommandText = $"SELECT {quotedColumns} FROM \"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\" ORDER BY {quotedColumns}";
+            using var rowReader = rows.ExecuteReader();
+            while (rowReader.Read())
+            {
+                Append(hash, "row");
+                for (var index = 0; index < rowReader.FieldCount; index++)
+                {
+                    var value = rowReader.GetValue(index);
+                    switch (value)
+                    {
+                        case DBNull:
+                            Append(hash, "null");
+                            break;
+                        case byte[] blob:
+                            Append(hash, "blob");
+                            hash.AppendData(BitConverter.GetBytes(blob.Length));
+                            hash.AppendData(blob);
+                            break;
+                        default:
+                            Append(hash, value.GetType().FullName ?? "value");
+                            Append(hash, Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty);
+                            break;
+                    }
+                }
+            }
+        }
+
+        return hash.GetHashAndReset();
+    }
+
+    private void MigrateV1ToV2(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "ALTER TABLE runtime_bindings RENAME TO runtime_bindings_v1");
+        Execute(connection, transaction, RuntimeBindingsV2Statement);
+        Execute(
+            connection,
+            transaction,
+            """
+            INSERT INTO runtime_bindings (
+                id, employee_id, placement, container_ref, volume_ref, home_ref,
+                workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
+                created_at, updated_at, revision)
+            SELECT id, employee_id, placement, container_ref, volume_ref, home_ref,
+                workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
+                created_at, updated_at, revision
+            FROM runtime_bindings_v1
+            """);
+        Execute(connection, transaction, "DROP TABLE runtime_bindings_v1");
+        Execute(connection, transaction, "UPDATE schema_version SET version = 2 WHERE version = 1");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
+    private void ValidateExistingStore(SqliteConnection connection)
+    {
+        ValidateIntegrity(connection);
+        ValidateSchemaSignature(connection, ExpectedSchema);
+        var version = ReadSchemaVersion(connection);
         if (version != CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
@@ -1051,7 +1505,9 @@ public sealed class OrganizationStore : IDisposable
     /// CHECK or FOREIGN KEY; the full definition comparison catches all of
     /// them, including the partial active-session index.
     /// </summary>
-    private void ValidateSchemaSignature(SqliteConnection connection)
+    private void ValidateSchemaSignature(
+        SqliteConnection connection,
+        IReadOnlyDictionary<(string Type, string Name), string> expectedSchema)
     {
         var actual = new Dictionary<(string Type, string Name), string>();
         var unexpected = new List<string>();
@@ -1078,7 +1534,7 @@ public sealed class OrganizationStore : IDisposable
         }
 
         var differences = new List<string>();
-        foreach (var (key, expectedSql) in ExpectedSchema)
+        foreach (var (key, expectedSql) in expectedSchema)
         {
             if (!actual.TryGetValue(key, out var actualSql))
             {
@@ -1092,7 +1548,7 @@ public sealed class OrganizationStore : IDisposable
 
         foreach (var key in actual.Keys)
         {
-            if (!ExpectedSchema.ContainsKey(key))
+            if (!expectedSchema.ContainsKey(key))
             {
                 differences.Add($"unexpected {key.Type} {key.Name}");
             }
@@ -1139,7 +1595,7 @@ public sealed class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaStatements)
+        foreach (var statement in SchemaV2Statements)
         {
             Execute(connection, transaction, statement);
         }

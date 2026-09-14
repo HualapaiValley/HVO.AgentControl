@@ -11,6 +11,29 @@ Changes after the first portal release are collected here.
 
 ### Added
 
+- Portable CLIProxy managed-employee inference seam (#243). A commit-curated,
+  sanitized policy-lane catalog (18 lanes) is separated from a deterministic
+  control exposure profile (`agentcontrol-control-phase1-v1`) that generates only
+  the directly selectable lanes plus step/tool-bounded, read-only task agents; the proxy's
+  internal fallback source aliases and `auto` are never exposed, and no implicit
+  review agent exists. The generated direct `@ai-sdk/openai-compatible` provider
+  references `{env:CLIPROXY_API_KEY}` and carries an explicit `reasoningEffort`
+  on every advertised variant. The controller reads an absolute secret file
+  immediately before start, exports the value only to the OpenCode child (tmux
+  and the PTY bridge never receive it, and the privileged launcher forwards it
+  only for the `acp` operation), and faults before process start without Big
+  Pickle fallback when configuration is missing or invalid. Schema v2 records
+  only non-secret provider metadata (credential set, config/profile/catalog
+  version, policy lane, requested provider/model/variant) with a create-once v1
+  backup and transactional migration; no key or fingerprint is stored.
+  `scripts/init-secrets.py --provision-cliproxy-key` creates or rotates the named
+  AgentControl key from stdin without printing it, fails closed on hostile paths
+  and while the control container runs, and preserves the inode on unchanged
+  input. Compose selects `cliproxy/default` at medium; deployment awaits a
+  reviewed merge and operator key provisioning. Evaluated and rejected the
+  dashboard config sync, Oh-My plugin set, MCP injection and dynamic discovery;
+  the lightweight community provider plugin is recommended only for general
+  interactive OpenCode clients, not managed employee authority.
 - Authoritative SQLite organization store (#215). `/control-data/control.db`
   (controller UID, `0600` in the `0700` private volume) is the single source of
   truth for organization, department, role, employee, runtime-binding and

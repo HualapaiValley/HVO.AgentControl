@@ -11,6 +11,7 @@ namespace HVO.AgentControl.Runtime;
 public sealed class ControlOptions
 {
     public const string SectionName = "Control";
+    public const int MinimumCliProxySecretLength = 16;
 
     /// <summary>Whether the background control runtime should start. Defaults to disabled.</summary>
     public bool Enabled { get; set; }
@@ -70,6 +71,15 @@ public sealed class ControlOptions
 
     /// <summary>Model identifier supplied in the generated OpenCode configuration.</summary>
     public string Model { get; set; } = "opencode/big-pickle";
+
+    /// <summary>Requested OpenCode variant, separate from observed provider/model metadata.</summary>
+    public string ModelVariant { get; set; } = string.Empty;
+
+    /// <summary>Fixed OpenAI-compatible CLIProxy endpoint; required only for cliproxy/* lanes.</summary>
+    public string CliProxyEndpoint { get; set; } = string.Empty;
+
+    /// <summary>Absolute file containing the Phase 1 shared inference key; never persisted in generated config.</summary>
+    public string CliProxySecretFile { get; set; } = string.Empty;
 
     /// <summary>Loopback hostname for the native HTTP server.</summary>
     public string Hostname { get; set; } = "127.0.0.1";
@@ -137,6 +147,17 @@ public sealed class ControlOptions
         if (string.IsNullOrWhiteSpace(Model))
         {
             errors.Add($"{nameof(Model)} must not be empty.");
+        }
+        else if (CliProxyRuntimeConfiguration.IsCliProxyModel(Model))
+        {
+            // Provider selection, endpoint, variant and secret bytes are checked
+            // after the organization store opens. That ordering lets a failed
+            // required-provider start durably record unavailable/revoked before
+            // faulting, while still occurring before any OpenCode child starts.
+        }
+        else if (!string.IsNullOrWhiteSpace(ModelVariant))
+        {
+            errors.Add($"{nameof(ModelVariant)} is supported only for curated CLIProxy policy lanes.");
         }
 
         if (!IsLoopbackHostname(Hostname))

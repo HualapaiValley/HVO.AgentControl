@@ -14,6 +14,17 @@ services:
       Control__AgentLauncher: /usr/local/bin/agentcontrol-launch
       Control__OrganizationName: AgentControl Development
       Control__OwnerPasswordFile: /run/agentcontrol-secrets/owner-password
+      # AgentControl managed-employee inference. The control manager runs the
+      # non-attributable default policy lane at medium effort through the direct
+      # OpenAI-compatible provider (no dashboard sync, Oh-My plugin, MCP injection
+      # or dynamic discovery). The key is the named AgentControl shared managed
+      # key provisioned into the external secrets volume; a missing or revoked key
+      # faults this runtime before OpenCode starts and never falls back. This is
+      # not the separate general interactive OpenCode key.
+      Control__Model: cliproxy/default
+      Control__ModelVariant: medium
+      Control__CliProxyEndpoint: http://home-docker.home.lan:8317/v1
+      Control__CliProxySecretFile: /run/agentcontrol-secrets/cliproxy-api-key
     volumes:
       - control-data:/data
       - control-private:/control-data

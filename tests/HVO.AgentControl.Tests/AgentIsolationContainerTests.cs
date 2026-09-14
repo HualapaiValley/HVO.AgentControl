@@ -103,6 +103,7 @@ public sealed class AgentIsolationContainerTests
             "setgroups(0, NULL)",
             "privilege drop was reversible",
             "kEnvironmentAllowList",
+            "CLIPROXY_API_KEY",
         })
         {
             Assert.Contains(required, launcherSource, StringComparison.Ordinal);
@@ -111,6 +112,15 @@ public sealed class AgentIsolationContainerTests
         // No parameter for an executable path: the four targets are compiled in.
         Assert.DoesNotContain("execvp", launcherSource, StringComparison.Ordinal);
         Assert.DoesNotContain("system(", launcherSource, StringComparison.Ordinal);
+
+        // The inference key is forwarded only to the ACP/OpenCode child; the
+        // terminal and tmux operations pass the explicit "exclude" value even
+        // though the key name stays in the allow-list.
+        Assert.Contains("kInferenceKeyName", launcherSource, StringComparison.Ordinal);
+        Assert.Contains("build_environment(include_inference_key)", launcherSource, StringComparison.Ordinal);
+        Assert.Contains("exec_as_agent(OPENCODE_PATH, child, cwd, 1)", launcherSource, StringComparison.Ordinal);
+        Assert.Contains("exec_as_agent(TMUX_PATH, child, \"/\", 0)", launcherSource, StringComparison.Ordinal);
+        Assert.Contains("exec_as_agent(PYTHON_PATH, child, home, 0)", launcherSource, StringComparison.Ordinal);
 
         // The launcher must not claim to bound which *programs* can run: the
         // tmux operation forwards a caller-supplied pane command vector, which

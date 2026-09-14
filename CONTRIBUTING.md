@@ -45,11 +45,14 @@ establish feasibility or safety. Do not grow scope just to satisfy review nits.
 
 ## Pull request process
 
-Phase 1 requires the [two-model review protocol](docs/REVIEW-PROTOCOL.md): two
-independent reviewers, randomly selected distinct approved models excluding the
-coordinator, with recorded model provenance and no silent fallback. Both reviews
-together count as one cycle. Generic agent names do not establish model identity.
-Both reviewers attest the same immutable merge-base/head pair. Explicitly mark
+Phase 1 follows the [review protocol](docs/REVIEW-PROTOCOL.md) and the revised
+owner-approved practice recorded for #243: a routine change gets one independent
+reviewer, a high-risk change gets two, and a focused correction gets one focused
+reviewer. Reviewers are selected from approved lanes excluding the coordinator,
+with recorded model provenance and no silent fallback. When two reviewers are
+required, both reviews together count as one cycle and attest the same immutable
+merge-base/head pair. This #243 change remains high-risk and still requires two.
+Generic agent names do not establish model identity. Explicitly mark
 deferred findings in their source threads with follow-up issue numbers; keep
 those issues open and labeled `status:deferred` until completed, and include
 their fixes and interactions in the next development/review cycle.

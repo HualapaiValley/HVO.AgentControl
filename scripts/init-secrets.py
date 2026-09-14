@@ -10,6 +10,12 @@ import sys
 DEFAULT_PROJECT = "agentcontrol-v2"
 DEFAULT_SECRET_VOLUME = "agentcontrol-v2-secrets"
 TARGET = "/secrets/owner-password"
+CLIPROXY_TARGET = "/secrets/cliproxy-api-key"
+
+# Mirrors ControlOptions.MinimumCliProxySecretLength. The key is deployment-wide
+# for the named AgentControl managed-employee credential set and is never the
+# general interactive OpenCode key.
+CLIPROXY_MINIMUM_LENGTH = 16
 
 # Compose derives volume and container names from the project name. A malformed
 # project would otherwise produce names that silently do not exist, and the
@@ -76,6 +82,205 @@ finally:
         pass
 
 print("Created owner password (contents not printed).")
+'''
+
+# ---------------------------------------------------------------------------
+# CLIProxy managed-employee key provisioning.
+#
+# The key is read from stdin only. It is never an argument, an environment
+# variable, a log line or a printed value, and the code never prints a
+# fingerprint either. The operator pipes the named dashboard key straight in:
+#
+#   tr -d '\n' < /secure/path/cliproxy-key | \
+#     scripts/init-secrets.py --provision-cliproxy-key
+#
+# The file lives in the existing external secrets volume as
+# /secrets/cliproxy-api-key, is controller-owned 0600, and is the only file this
+# mode touches - the owner password is never read or re-owned. The control
+# container must be stopped first: a live process may still hold the previous
+# value, and rotating underneath it would leave the runtime and the file
+# disagreeing.
+#
+# Publication rules match the owner-secret writer: a private O_EXCL/O_NOFOLLOW
+# temporary in the destination directory, final ownership and mode applied while
+# it is still invisible, fsync, then renameat over the target. Identical input is
+# a no-op that leaves the inode in place; changed input atomically replaces it
+# and reports rotation without the value. Symlinks, non-regular files, extra hard
+# links and unexpected owners fail closed before anything is written.
+PROVISION_CODE = '''\
+import os
+import secrets
+import stat
+import sys
+
+directory = sys.argv[1]
+target_name = sys.argv[2]
+control_uid = int(sys.argv[3])
+control_gid = int(sys.argv[4])
+minimum = int(sys.argv[5])
+fault_phase = sys.argv[6] if len(sys.argv) > 6 else None
+
+if not os.path.isabs(directory) or os.path.basename(target_name) != target_name or target_name in ("", ".", ".."):
+    raise SystemExit("the CLIProxy target parent must be absolute and the target must be a fixed basename")
+target = os.path.join(directory, target_name)
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+# Read the key from stdin only. Exactly one final LF or CRLF is framing and is
+# removed. Every other whitespace/control byte, including leading/trailing spaces
+# or additional newlines, is rejected rather than silently normalized.
+raw = sys.stdin.buffer.read()
+if raw.endswith(b"\\r\\n"):
+    key = raw[:-2]
+elif raw.endswith(b"\\n"):
+    key = raw[:-1]
+else:
+    key = raw
+if len(key) == 0:
+    fail("no CLIProxy key was supplied on stdin")
+if len(key) < minimum:
+    fail("the CLIProxy key must be at least %d bytes" % minimum)
+for byte in key:
+    if byte <= 0x20 or byte == 0x7F:
+        fail("the CLIProxy key contains whitespace or a control character")
+payload = key + b"\\n"
+
+try:
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+except OSError as error:
+    fail("the secrets directory %s could not be opened (%s)" % (directory, error.strerror))
+
+try:
+    # Hostile paths fail closed before any write: a symlink could redirect the
+    # rotation, a non-regular file has no key semantics, an extra hard link means
+    # another name observes the value, and an unexpected owner is not ours.
+    try:
+        info = os.stat(target_name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        info = None
+    if info is not None:
+        if stat.S_ISLNK(info.st_mode):
+            fail("the CLIProxy key path is a symlink; refusing to rotate")
+        if not stat.S_ISREG(info.st_mode):
+            fail("the CLIProxy key path is not a regular file; refusing to rotate")
+        if info.st_nlink != 1:
+            fail("the CLIProxy key file has extra hard links; refusing to rotate")
+        if info.st_uid != control_uid:
+            fail("the CLIProxy key file is owned by an unexpected identity; refusing to rotate")
+
+    existing = None
+    if info is not None:
+        try:
+            existing_fd = os.open(
+                target_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd
+            )
+        except OSError as error:
+            fail("the CLIProxy key file could not be opened (%s); refusing to rotate" % error.strerror)
+        try:
+            opened = os.fstat(existing_fd)
+            if (opened.st_ino, opened.st_dev) != (info.st_ino, info.st_dev):
+                fail("the CLIProxy key file changed while it was inspected; refusing to rotate")
+            chunks = []
+            while True:
+                chunk = os.read(existing_fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            existing = b"".join(chunks)
+        finally:
+            os.close(existing_fd)
+
+    if existing == payload:
+        # Identical bytes are a metadata reconciliation, not an unconditional
+        # no-op. Repair ownership/mode through the already-verified descriptor so
+        # the inode and contents remain unchanged, then verify before success.
+        repair_fd = os.open(
+            target_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd
+        )
+        try:
+            before = os.fstat(repair_fd)
+            if (before.st_dev, before.st_ino) != (info.st_dev, info.st_ino):
+                fail("the CLIProxy key file changed before metadata repair; reconcile before retry")
+            if before.st_gid != control_gid:
+                os.fchown(repair_fd, control_uid, control_gid)
+            if stat.S_IMODE(before.st_mode) != 0o600:
+                os.fchmod(repair_fd, 0o600)
+            repaired = os.fstat(repair_fd)
+            if (repaired.st_dev, repaired.st_ino) != (info.st_dev, info.st_ino):
+                fail("the CLIProxy key file changed during metadata repair; reconcile before retry")
+            if repaired.st_uid != control_uid or repaired.st_gid != control_gid:
+                fail("the CLIProxy key file does not carry the controller ownership after metadata repair")
+            if stat.S_IMODE(repaired.st_mode) != 0o600:
+                fail("the CLIProxy key file does not carry mode 0600 after metadata repair")
+        finally:
+            os.close(repair_fd)
+        print("CLIProxy key is unchanged; metadata verified or repaired in place (contents not printed).")
+        raise SystemExit(0)
+
+    fd = None
+    temporary = None
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for _ in range(64):
+        candidate = ".cliproxy-api-key.%s.tmp" % secrets.token_hex(8)
+        try:
+            fd = os.open(candidate, flags, 0o600, dir_fd=directory_fd)
+            temporary = candidate
+            break
+        except FileExistsError:
+            continue
+    if fd is None:
+        fail("could not create a private temporary for the CLIProxy key")
+
+    published = False
+    try:
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(fd, payload[offset:])
+        os.fchown(fd, control_uid, control_gid)
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+        if fault_phase == "before-publication":
+            fail("simulated failure before publication; the existing key is unchanged")
+        os.replace(temporary, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        published = True
+        if fault_phase == "after-publication":
+            print(
+                "CLIProxy key publication may have occurred; reconcile the file before retrying.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    finally:
+        os.close(fd)
+        if not published:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except OSError:
+                pass
+    os.fsync(directory_fd)
+
+    # Verify by descriptor, not by trusting the publish call.
+    check_fd = os.open(target_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
+    try:
+        check = os.fstat(check_fd)
+    finally:
+        os.close(check_fd)
+    if check.st_nlink != 1:
+        fail("the CLIProxy key file has extra hard links after rotation")
+    if check.st_uid != control_uid or check.st_gid != control_gid:
+        fail("the CLIProxy key file does not carry the controller ownership")
+    if stat.S_IMODE(check.st_mode) != 0o600:
+        fail("the CLIProxy key file does not carry mode 0600")
+finally:
+    os.close(directory_fd)
+
+if info is None:
+    print("Created the CLIProxy key (contents not printed).")
+else:
+    print("Rotated the CLIProxy key (contents not printed).")
 '''
 
 # Re-owns an existing secret from the pre-isolation shared identity (UID 1000)
@@ -1312,6 +1517,16 @@ def parse_args(argv):
             "controller-private copy and the two cannot be merged automatically."
         ),
     )
+    mode.add_argument(
+        "--provision-cliproxy-key",
+        action="store_true",
+        help=(
+            "create or rotate /secrets/cliproxy-api-key in the external secrets volume from the "
+            "named AgentControl managed-employee key. The key is read from stdin only - never an "
+            "argument, environment variable, log line or printed value - and the control container "
+            "must be stopped first. The owner password is not touched."
+        ),
+    )
     parser.add_argument(
         "--state-source",
         choices=("legacy", "private"),
@@ -1417,8 +1632,12 @@ def require_volumes(docker, volumes):
         raise SystemExit(1)
 
 
-def run_in_volumes(docker, image, code, mounts, arguments):
+def run_in_volumes(docker, image, code, mounts, arguments, interactive=False):
     command = docker + ["run", "--rm", "--user", "root", "--entrypoint", "python3"]
+    if interactive:
+        # Attach the operator's stdin so the key reaches the helper directly and
+        # is never placed in an argument, an environment variable or a log line.
+        command += ["-i"]
     for source, target in mounts:
         command += ["--mount", f"type=volume,source={source},target={target}"]
     command += [image, "-c", code] + [str(value) for value in arguments]
@@ -1428,6 +1647,7 @@ def run_in_volumes(docker, image, code, mounts, arguments):
 def main(argv):
     args = parse_args(argv)
     docker = ["docker", "--context", args.context]
+    interactive = False
 
     if args.revert_isolation or args.resume_isolation:
         # The isolated controller holds the private state and would immediately
@@ -1479,6 +1699,25 @@ def main(argv):
         arguments = [TARGET, CONTROL_UID, CONTROL_GID]
         code = MIGRATE_CODE
         action = "ownership migration"
+    elif args.provision_cliproxy_key:
+        # A live controller may still hold the previous key in the child
+        # environment, so rotating underneath it would leave the process and the
+        # file disagreeing. Any CLIProxy runtime sharing the credential set must
+        # be stopped, not just the one container named here.
+        if container_is_running(docker, args.container):
+            print(
+                f"'{args.container}' is running; stop it (and every CLIProxy runtime "
+                "sharing the key) before provisioning the CLIProxy key, then re-run "
+                "--provision-cliproxy-key.",
+                file=sys.stderr,
+            )
+            return 1
+        require_volumes(docker, [args.secrets_volume])
+        mounts = [(args.secrets_volume, "/secrets")]
+        arguments = ["/secrets", "cliproxy-api-key", CONTROL_UID, CONTROL_GID, CLIPROXY_MINIMUM_LENGTH]
+        code = PROVISION_CODE
+        action = "CLIProxy key provisioning"
+        interactive = True
     else:
         subprocess.run(docker + ["volume", "create", args.secrets_volume], check=True)
         mounts = [(args.secrets_volume, "/secrets")]
@@ -1487,8 +1726,8 @@ def main(argv):
         action = "initialization"
 
     try:
-        run_in_volumes(docker, args.image, code, mounts, arguments)
-    except subprocess.CalledProcessError:
+        run_in_volumes(docker, args.image, code, mounts, arguments, interactive=interactive)
+    except subprocess.CalledProcessError as error:
         if args.revert_isolation:
             print(
                 "isolation rollback failed. Nothing was deleted and every step is idempotent: "
@@ -1503,12 +1742,25 @@ def main(argv):
                 "exact same command again.",
                 file=sys.stderr,
             )
+        elif args.provision_cliproxy_key:
+            if error.returncode == 2:
+                print(
+                    "CLIProxy key publication may have occurred; reconcile the file and stop all "
+                    "runtimes sharing the credential before deciding whether to retry.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "CLIProxy key provisioning failed before a confirmed publication. No value was "
+                    "printed; inspect the reported condition before retrying.",
+                    file=sys.stderr,
+                )
         else:
             print(
                 f"owner password {action} failed; no existing file was overwritten.",
                 file=sys.stderr,
             )
-        return 1
+        return error.returncode if args.provision_cliproxy_key and error.returncode == 2 else 1
     return 0
 
 

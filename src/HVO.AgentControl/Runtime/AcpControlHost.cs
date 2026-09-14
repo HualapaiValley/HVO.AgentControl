@@ -284,14 +284,14 @@ public sealed class AcpControlHost : BackgroundService
             }
 
             // Do not advertise a requested value as observed state when readback fails.
-            string? confirmed = null;
+            NativeModelReference? confirmed = null;
             var native = _native;
             if (native is not null)
             {
                 var snapshot = await native.GetSessionModelAsync(sessionId, token).ConfigureAwait(false);
                 if (snapshot.Available)
                 {
-                    confirmed = snapshot.Model?.Reference;
+                    confirmed = snapshot.Model;
                 }
             }
 
@@ -299,8 +299,8 @@ public sealed class AcpControlHost : BackgroundService
             {
                 return false;
             }
-            SetModel(confirmed);
-            return string.Equals(confirmed, reference.Reference, StringComparison.Ordinal);
+            SetObservedModel(confirmed);
+            return string.Equals(confirmed.Reference, reference.Reference, StringComparison.Ordinal);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -550,7 +550,7 @@ public sealed class AcpControlHost : BackgroundService
     private async Task ConnectAsync(CancellationToken cancellationToken)
     {
         _password = RandomNumberGenerator.GetHexString(32).ToLowerInvariant();
-        _stderrBuffer.SetSecret(_password);
+        _stderrBuffer.SetSecrets([_password]);
 
         var instructionsPath = InstructionsPath;
         await File.WriteAllTextAsync(
@@ -567,8 +567,54 @@ public sealed class AcpControlHost : BackgroundService
                 | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
         }
 
-        var configContent = AgentControlOpenCodeConfig.Build(_options.Model, instructionsPath);
-        var startInfo = BuildProcessStartInfo(configContent);
+        CliProxyRuntimeConfiguration? cliProxy = null;
+        if (CliProxyRuntimeConfiguration.IsCliProxyModel(_options.Model))
+        {
+            try
+            {
+                cliProxy = CliProxyRuntimeConfiguration.LoadRequired(_options);
+            }
+            catch (InvalidOperationException)
+            {
+                RecordCliProxyUnavailableWithoutSecret();
+                throw;
+            }
+        }
+
+        if (cliProxy is not null)
+        {
+            _stderrBuffer.AddSecret(cliProxy.Secret);
+            try
+            {
+                await cliProxy.ValidateCatalogAsync(
+                    TimeSpan.FromSeconds(Math.Min(_options.StartupTimeoutSeconds, 10)),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (CliProxyPreflightException exception)
+            {
+                RecordCliProxyConfiguration(cliProxy, exception.Status);
+                throw;
+            }
+
+            RecordCliProxyConfiguration(cliProxy, "configured");
+        }
+        else
+        {
+            var separator = _options.Model.IndexOf('/');
+            _organization!.RecordProviderConfiguration(
+                credentialSetId: null,
+                providerConfigVersion: null,
+                providerProfileId: null,
+                providerConfigStatus: "unconfigured",
+                modelCatalogVersion: null,
+                policyLaneId: null,
+                configuredProviderId: separator > 0 ? _options.Model[..separator] : "unknown",
+                configuredModelId: separator > 0 ? _options.Model[(separator + 1)..] : _options.Model,
+                configuredVariant: null);
+        }
+
+        var configContent = AgentControlOpenCodeConfig.Build(_options.Model, instructionsPath, cliProxy);
+        var startInfo = BuildProcessStartInfo(configContent, cliProxy);
 
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         if (!process.Start())
@@ -592,7 +638,36 @@ public sealed class AcpControlHost : BackgroundService
         await HandshakeAsync(session, cancellationToken).ConfigureAwait(false);
     }
 
-    private ProcessStartInfo BuildProcessStartInfo(string configContent)
+    private void RecordCliProxyUnavailableWithoutSecret()
+    {
+        var laneId = _options.Model[(CliProxyModelCatalog.ProviderId.Length + 1)..];
+        _organization!.RecordProviderConfiguration(
+            CliProxyModelCatalog.CredentialSetId,
+            CliProxyModelCatalog.ProviderConfigVersion,
+            CliProxyProfile.Version,
+            "unavailable",
+            CliProxyModelCatalog.Version,
+            CliProxyModelCatalog.Find(laneId) is null ? null : laneId,
+            CliProxyModelCatalog.ProviderId,
+            laneId,
+            string.IsNullOrWhiteSpace(_options.ModelVariant) ? null : _options.ModelVariant);
+    }
+
+    private void RecordCliProxyConfiguration(CliProxyRuntimeConfiguration cliProxy, string status) =>
+        _organization!.RecordProviderConfiguration(
+            CliProxyModelCatalog.CredentialSetId,
+            CliProxyModelCatalog.ProviderConfigVersion,
+            CliProxyProfile.Version,
+            status,
+            CliProxyModelCatalog.Version,
+            cliProxy.Lane.Id,
+            CliProxyModelCatalog.ProviderId,
+            cliProxy.Lane.Id,
+            cliProxy.Variant);
+
+    private ProcessStartInfo BuildProcessStartInfo(
+        string configContent,
+        CliProxyRuntimeConfiguration? cliProxy)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -624,6 +699,10 @@ public sealed class AcpControlHost : BackgroundService
             ["OPENCODE_SERVER_USERNAME"] = "opencode",
             ["OPENCODE_SERVER_PASSWORD"] = _password,
         };
+        if (cliProxy is not null)
+        {
+            overrides[CliProxyModelCatalog.ApiKeyEnvironmentVariable] = cliProxy.Secret;
+        }
 
         var environment = ChildEnvironment.Build(overrides);
         startInfo.Environment.Clear();
@@ -875,7 +954,7 @@ public sealed class AcpControlHost : BackgroundService
             var snapshot = await native.GetSessionModelAsync(sessionId, cancellationToken).ConfigureAwait(false);
             if (snapshot.Available)
             {
-                SetModel(snapshot.Model?.Reference);
+                SetObservedModel(snapshot.Model);
             }
 
             if (GetModelsSnapshot() is null)
@@ -1317,11 +1396,20 @@ public sealed class AcpControlHost : BackgroundService
         }
     }
 
-    private void SetModel(string? model)
+    private void SetObservedModel(NativeModelReference? model)
     {
         lock (_gate)
         {
-            _model = string.IsNullOrWhiteSpace(model) ? "unknown" : model;
+            _model = model?.Reference ?? "unknown";
+        }
+
+        if (model is not null)
+        {
+            _organization?.RecordObservedModel(
+                model.ProviderId,
+                model.ModelId,
+                model.Variant,
+                DateTimeOffset.UtcNow);
         }
     }
 

@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <None Update="Fixtures/fake_acp.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures/fake_opencode_capture.py" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures/fake-tmux.py" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures/tmux-wrapper.sh" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Fixtures/fake-opencode.sh" CopyToOutputDirectory="PreserveNewest" />

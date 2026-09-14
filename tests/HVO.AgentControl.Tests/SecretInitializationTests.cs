@@ -46,6 +46,31 @@ public sealed class SecretInitializationTests
         Assert.Contains("--resume-isolation", text, StringComparison.Ordinal);
         Assert.Contains("--state-source", text, StringComparison.Ordinal);
 
+        // The CLIProxy key provisioner reads stdin only and never prints the
+        // value or a fingerprint.
+        Assert.Contains("PROVISION_CODE", text, StringComparison.Ordinal);
+        Assert.Contains("--provision-cliproxy-key", text, StringComparison.Ordinal);
+        Assert.Contains("CLIPROXY_TARGET = \"/secrets/cliproxy-api-key\"", text, StringComparison.Ordinal);
+        Assert.Contains("sys.stdin.buffer.read()", text, StringComparison.Ordinal);
+        Assert.Contains("interactive=interactive", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("print(key", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("print(payload", text, StringComparison.Ordinal);
+
+        var provision = ExtractBlock("PROVISION_CODE");
+        Assert.Contains("minimum = int(sys.argv[5])", provision, StringComparison.Ordinal);
+        Assert.Contains("target_name = sys.argv[2]", provision, StringComparison.Ordinal);
+        Assert.Contains("os.stat(target_name, dir_fd=directory_fd", provision, StringComparison.Ordinal);
+        Assert.Contains("os.open(target_name,", provision, StringComparison.Ordinal);
+        Assert.Contains("os.replace(temporary, target_name,", provision, StringComparison.Ordinal);
+        Assert.DoesNotContain("os.stat(target, dir_fd=directory_fd", provision, StringComparison.Ordinal);
+        Assert.DoesNotContain("os.open(target,", provision, StringComparison.Ordinal);
+        Assert.DoesNotContain("os.replace(temporary, target,", provision, StringComparison.Ordinal);
+        Assert.Contains(
+            "arguments = [\"/secrets\", \"cliproxy-api-key\", CONTROL_UID, CONTROL_GID, CLIPROXY_MINIMUM_LENGTH]",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains("public const int MinimumCliProxySecretLength = 16", File.ReadAllText(RequireControlOptions()), StringComparison.Ordinal);
+
         // The credential is written to the file stream, never printed.
         Assert.DoesNotContain("print(secrets.token_urlsafe", text, StringComparison.Ordinal);
     }
@@ -978,6 +1003,258 @@ public sealed class SecretInitializationTests
         Assert.False(File.Exists(target));
     }
 
+    /// <summary>
+    /// The provisioner creates, no-ops on identical input (preserving the inode)
+    /// and atomically rotates on change, without ever printing the key or a
+    /// fingerprint.
+    /// </summary>
+    [Fact]
+    public void ProvisionCreatesNoOpsIdenticallyAndRotatesAtomicallyWithoutPrintingTheKey()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        using var directory = new TempDirectory();
+        var target = Path.Combine(directory.Path, "cliproxy-api-key");
+        const string first = "first-disposable-provision-key-0001";
+        const string second = "second-disposable-provision-key-0002";
+
+        var created = RunProvision(python, target, uid, gid, first);
+        Assert.True(created.ExitCode == 0, created.StandardError);
+        Assert.Contains("Created", created.StandardOutput, StringComparison.Ordinal);
+        Assert.Equal(first + "\n", File.ReadAllText(target));
+        Assert.DoesNotContain(first, created.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain(first, created.StandardError, StringComparison.Ordinal);
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            File.GetUnixFileMode(target));
+        var firstInode = Inode(python, target);
+
+        File.SetUnixFileMode(
+            target,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        var identical = RunProvision(python, target, uid, gid, first);
+        Assert.True(identical.ExitCode == 0, identical.StandardError);
+        Assert.Contains("unchanged", identical.StandardOutput, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(firstInode, Inode(python, target));
+        Assert.Equal(first + "\n", File.ReadAllText(target));
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            File.GetUnixFileMode(target));
+
+        var rotated = RunProvision(python, target, uid, gid, second);
+        Assert.True(rotated.ExitCode == 0, rotated.StandardError);
+        Assert.Contains("Rotated", rotated.StandardOutput, StringComparison.Ordinal);
+        Assert.NotEqual(firstInode, Inode(python, target));
+        Assert.Equal(second + "\n", File.ReadAllText(target));
+        Assert.DoesNotContain(second, rotated.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain(second, rotated.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("fingerprint", rotated.StandardOutput, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProvisionRepairsUnexpectedGroupOnIdenticalInputWithoutReplacingInode()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        var alternateGroup = SupplementaryGroup(python, gid);
+        if (alternateGroup is null)
+        {
+            return;
+        }
+
+        using var directory = new TempDirectory();
+        var target = Path.Combine(directory.Path, "cliproxy-api-key");
+        const string key = "disposable-group-repair-key-0001";
+        Assert.Equal(0, RunProvision(python, target, uid, gid, key).ExitCode);
+        var inode = Inode(python, target);
+        var changed = Run(
+            python,
+            ["-c", "import os,sys;os.chown(sys.argv[1], -1, int(sys.argv[2]))", target, alternateGroup.Value.ToString()]);
+        Assert.True(changed.ExitCode == 0, changed.StandardError);
+        Assert.Equal(alternateGroup.Value, GroupId(python, target));
+
+        var repaired = RunProvision(python, target, uid, gid, key);
+        Assert.True(repaired.ExitCode == 0, repaired.StandardError);
+        Assert.Equal(inode, Inode(python, target));
+        Assert.Equal(gid, GroupId(python, target));
+        Assert.Equal(key + "\n", File.ReadAllText(target));
+    }
+
+    [Fact]
+    public void ProvisionDistinguishesFailuresBeforeAndAfterPublication()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        using var directory = new TempDirectory();
+        var target = Path.Combine(directory.Path, "cliproxy-api-key");
+        const string original = "disposable-original-key-0001";
+        const string replacement = "disposable-replacement-key-0002";
+        Assert.Equal(0, RunProvision(python, target, uid, gid, original).ExitCode);
+        var originalInode = Inode(python, target);
+
+        var before = RunProvision(python, target, uid, gid, replacement, "before-publication");
+        Assert.Equal(1, before.ExitCode);
+        Assert.Contains("before publication", before.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(original + "\n", File.ReadAllText(target));
+        Assert.Equal(originalInode, Inode(python, target));
+
+        var after = RunProvision(python, target, uid, gid, replacement, "after-publication");
+        Assert.Equal(2, after.ExitCode);
+        Assert.Contains("publication may have occurred", after.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(replacement + "\n", File.ReadAllText(target));
+        Assert.NotEqual(originalInode, Inode(python, target));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("too-short")]
+    [InlineData("control\u0001character-key")]
+    public void ProvisionRejectsAnInvalidStdinKeyWithoutWriting(string input)
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        using var directory = new TempDirectory();
+        var target = Path.Combine(directory.Path, "cliproxy-api-key");
+
+        var result = RunProvision(python, target, uid, gid, input);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.False(File.Exists(target));
+        if (input.Length > 0)
+        {
+            Assert.DoesNotContain(input, result.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain(input, result.StandardError, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A symlink, non-regular file, extra hard link or unexpected owner is
+    /// refused before any rotation, so a hostile path cannot redirect or observe
+    /// the managed-employee key.
+    /// </summary>
+    [Fact]
+    public void ProvisionFailsClosedOnHostileExistingPaths()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var (uid, gid) = CurrentUidGid(python);
+        using var directory = new TempDirectory();
+        const string key = "disposable-hostile-path-key-0001";
+
+        // Symlink: the write must not follow the link.
+        var real = Path.Combine(directory.Path, "real");
+        var link = Path.Combine(directory.Path, "linked");
+        File.WriteAllText(real, "untouched");
+        File.CreateSymbolicLink(link, real);
+        var symlink = RunProvision(python, link, uid, gid, key);
+        Assert.NotEqual(0, symlink.ExitCode);
+        Assert.Contains("symlink", symlink.StandardError, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("untouched", File.ReadAllText(real));
+
+        // Non-regular file.
+        var asDirectory = Path.Combine(directory.Path, "directory");
+        Directory.CreateDirectory(asDirectory);
+        var nonRegular = RunProvision(python, asDirectory, uid, gid, key);
+        Assert.NotEqual(0, nonRegular.ExitCode);
+        Assert.Contains("not a regular file", nonRegular.StandardError, StringComparison.Ordinal);
+
+        // Extra hard link.
+        var hardA = Path.Combine(directory.Path, "hard-a");
+        var hardB = Path.Combine(directory.Path, "hard-b");
+        File.WriteAllText(hardA, "untouched");
+        Run(python, new[] { "-c", "import os,sys;os.link(sys.argv[1], sys.argv[2])", hardA, hardB });
+        var hardLink = RunProvision(python, hardA, uid, gid, key);
+        Assert.NotEqual(0, hardLink.ExitCode);
+        Assert.Contains("hard links", hardLink.StandardError, StringComparison.Ordinal);
+        Assert.Equal("untouched", File.ReadAllText(hardA));
+
+        // Unexpected owner: the file belongs to the test identity, not the
+        // requested controller identity.
+        var foreign = Path.Combine(directory.Path, "foreign-owner");
+        File.WriteAllText(foreign, "untouched");
+        var foreignOwner = RunProvision(python, foreign, uid + 1, gid + 1, key);
+        Assert.NotEqual(0, foreignOwner.ExitCode);
+        Assert.Contains("unexpected identity", foreignOwner.StandardError, StringComparison.Ordinal);
+        Assert.Equal("untouched", File.ReadAllText(foreign));
+    }
+
+    /// <summary>
+    /// A live controller may still hold the previous key, so provisioning refuses
+    /// to rotate underneath it. The refusal happens before any container runs.
+    /// </summary>
+    [Fact]
+    public void ProvisionRefusesWhileTheControlContainerIsRunning()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var directory = new TempDirectory();
+        var result = RunWithFakeDocker(
+            python,
+            directory,
+            inspect: new(0, "true"),
+            arguments: ["--provision-cliproxy-key"]);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("stop it", result.StandardError, StringComparison.Ordinal);
+        Assert.DoesNotContain("run --rm", DockerCalls(directory), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Provisioning attaches stdin (so the key never becomes an argument or an
+    /// environment value) and operates only on the CLIProxy key path, never the
+    /// owner password.
+    /// </summary>
+    [Fact]
+    public void ProvisionAttachesStdinAndTargetsOnlyTheCliProxyKey()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var directory = new TempDirectory();
+        var result = RunWithFakeDocker(
+            python,
+            directory,
+            inspect: new(0, "false"),
+            arguments: ["--provision-cliproxy-key"]);
+
+        Assert.Equal(0, result.ExitCode);
+        var calls = DockerCalls(directory);
+        Assert.Contains("run --rm --user root --entrypoint python3 -i", calls, StringComparison.Ordinal);
+        Assert.Contains("/secrets cliproxy-api-key", calls, StringComparison.Ordinal);
+        Assert.DoesNotContain("/secrets/owner-password", calls, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void MissingFilePublishesAUsablePasswordAtomically()
     {
@@ -1092,6 +1369,91 @@ public sealed class SecretInitializationTests
         return Run(python, new[] { "-c", code, target, ControlUid.ToString(), ControlGid.ToString() });
     }
 
+    private static (int ExitCode, string StandardOutput, string StandardError) RunProvision(
+        string python,
+        string target,
+        int uid,
+        int gid,
+        string key,
+        string? faultPhase = null)
+    {
+        var code = LoadEmbeddedCode(python, "PROVISION_CODE");
+        Assert.False(string.IsNullOrWhiteSpace(code));
+        var arguments = new List<string>
+        {
+            "-c", code, Path.GetDirectoryName(target)!, Path.GetFileName(target),
+            uid.ToString(), gid.ToString(), "16",
+        };
+        if (faultPhase is not null)
+        {
+            arguments.Add(faultPhase);
+        }
+
+        return RunWithInput(python, arguments, key);
+    }
+
+    private static (int UserId, int GroupId) CurrentUidGid(string python)
+    {
+        var result = Run(python, ["-c", "import os;print(os.geteuid());print(os.getegid())"]);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        var lines = result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return (int.Parse(lines[0], System.Globalization.CultureInfo.InvariantCulture),
+            int.Parse(lines[1], System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private static long Inode(string python, string path)
+    {
+        var result = Run(python, ["-c", "import os,sys;print(os.stat(sys.argv[1]).st_ino)", path]);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        return long.Parse(result.StandardOutput.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int GroupId(string python, string path)
+    {
+        var result = Run(python, ["-c", "import os,sys;print(os.stat(sys.argv[1]).st_gid)", path]);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        return int.Parse(result.StandardOutput.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static int? SupplementaryGroup(string python, int primaryGroup)
+    {
+        var result = Run(python, ["-c", "import os;print(' '.join(str(x) for x in os.getgroups()))"]);
+        Assert.True(result.ExitCode == 0, result.StandardError);
+        return result.StandardOutput
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(value => int.Parse(value, System.Globalization.CultureInfo.InvariantCulture))
+            .FirstOrDefault(value => value != primaryGroup) is var group && group != 0
+                ? group
+                : null;
+    }
+
+    private static (int ExitCode, string StandardOutput, string StandardError) RunWithInput(
+        string python,
+        IReadOnlyList<string> arguments,
+        string input)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = python,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("python3 did not start.");
+        process.StandardInput.Write(input);
+        process.StandardInput.Close();
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        return (process.ExitCode, standardOutput.GetAwaiter().GetResult(), standardError.GetAwaiter().GetResult());
+    }
+
     private static string LoadEmbeddedCode(string python, string name)
     {
         const string harness = """
@@ -1132,6 +1494,11 @@ public sealed class SecretInitializationTests
         RequireRepositoryRoot() is { } root
             ? Path.Combine(root, "scripts", "init-secrets.py")
             : throw new InvalidOperationException("could not locate scripts/init-secrets.py");
+
+    private static string RequireControlOptions() =>
+        RequireRepositoryRoot() is { } root
+            ? Path.Combine(root, "src", "HVO.AgentControl", "Runtime", "ControlOptions.cs")
+            : throw new InvalidOperationException("could not locate ControlOptions.cs");
 
     private static string? RequireRepositoryRoot()
     {

@@ -144,11 +144,21 @@ optional override for the Chromium binary.
 Provider/inference checks are separately requested, explicitly authorized
 operator checks. Normal development and CI use no provider credentials.
 All child processes strip ambient provider keys as well as GitHub/control
-credentials. Container-level OPENAI_API_KEY or similar environment variables
-are intentionally not a provider provisioning interface. Default Big Pickle
-requires no key; other providers need explicitly authorized OpenCode login in
-the private runtime HOME/XDG directories. Managed provider provisioning is
-future work.
+credentials. Container-level OPENAI_API_KEY or similar ambient variables are
+not a provider provisioning interface. `opencode/big-pickle` requires no key and
+is used only when explicitly selected. The implemented CLIProxy portability
+seam accepts a fixed endpoint plus absolute secret-file path, generates a direct
+OpenAI-compatible provider with only the committed control exposure profile,
+carries explicit `reasoningEffort` on every advertised variant, and exports the
+validated file value only to the OpenCode child as `CLIPROXY_API_KEY`; it never
+copies an inherited workstation key, and tmux/PTY children never receive it.
+Missing/invalid CLIProxy configuration faults before process start without Big
+Pickle fallback. See [CLIProxy model policy](CLIPROXY-MODEL-POLICY.md). The code
+is ready; deployment is pending a reviewed merge and provisioning of the named
+AgentControl key through `scripts/init-secrets.py --provision-cliproxy-key`
+(stdin only, never printed). Normal gates use only disposable fake
+secrets/endpoints. The key is provisioned after merge; do not activate with the
+general interactive OpenCode/workstation key.
 
 ## C# and .NET guidelines
 
