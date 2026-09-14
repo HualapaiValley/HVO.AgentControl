@@ -198,10 +198,7 @@ A replay is safe only while `/data/runtime.json` still holds what the rollback
 published; once the pre-isolation image has run it advances that file, and
 republishing the older private bytes over it would destroy that work. The
 rollback therefore validates the recorded `rollback.active` against the bytes on
-the legacy path **before its first write or chown**: an unchanged or already
-converged legacy file is a replay and proceeds, anything else is refused with
-both digests and routed to `--resume-isolation`. An already-converged replay
-re-applies metadata only, so the legacy inode is not churned.
+the legacy path **before its first write or chown**.
 
 There is no automatic merge between a state the pre-isolation image advanced and
 the state the isolated run left behind. `--revert-isolation` therefore records
@@ -210,14 +207,60 @@ is unresolved instead of silently picking a side. `--resume-isolation
 --state-source legacy|private` is the only thing that clears it; the state that
 loses is preserved under a timestamped name, never deleted.
 
-**The marker is written before any ownership is handed back**, because it is both
-the interlock and the evidence the replay check above compares against. Recording
-it afterwards left a crash window in which the old image was already runnable
-with no record of the publication: the next replay would find no marker, treat the
-state the old image had advanced as unrecorded, and overwrite it. With the marker
-first, a failure to record it aborts while `/data` and the owner secret still
-belong to the controller — neither image starts, and re-running the identical
-command converges — and a crash after it leaves an ordinary replayable rollback.
+#### Marker durability and the two crash windows
+
+**The marker is durable before the runtime state is republished and before every
+ownership hand-back.** Ordering only the `chown` calls after the marker was not
+sufficient, and that gap was a real data-loss path: the republish creates a new
+inode and renames it over `/data/runtime.json`, and it previously gave that inode
+its `1000:1000` ownership at creation time. Publishing was therefore itself an
+ownership hand-back that ran *before* the marker existed — a crash in between left
+a legacy state the pre-isolation image could read and advance with no record of
+it, and the next replay, finding no marker, treated the advanced state as the
+ordinary first rollback and overwrote it.
+
+The order is now: decide, record the **intent** marker, publish **root-owned
+`0600`**, hand back explicitly, complete the marker. The marker carries three
+digests so a replay classifies what it finds rather than guessing:
+
+| Field | Meaning |
+| --- | --- |
+| `prepublicationLegacySha256` | What `/data/runtime.json` held before this rollback touched it; `null` when there was no legacy file. |
+| `intendedSha256` | What this rollback will publish; `null` when nothing will be (`--accept-missing-runtime-state`, or a rollback out of an unrecorded divergence that keeps the legacy bytes). |
+| `publishedSha256` | What the legacy path holds now; `null` while `phase` is `"intent"`. |
+
+A replay reads the legacy path and matches:
+
+| Observed | Classification | Action |
+| --- | --- | --- |
+| `legacy == prepublicationLegacySha256` | The publication never ran. | Proceed and publish; nothing is lost. |
+| `legacy == intendedSha256` | The publication already landed. | Converged — the inode is **not** replaced, only the remaining hand-backs are re-applied. |
+| Neither | The old image or another writer advanced it. | Refuse before the first write or chown; route to `--resume-isolation`. |
+
+Every failure mode is therefore a safe one. A marker that cannot be published
+aborts while the legacy state keeps its prior owner **and** its prior bytes, so
+the old image cannot start at all. A crash after the marker but before the publish
+is classified by `prepublicationLegacySha256` and re-runs cleanly. A crash after
+the root-owned publish but before the hand-back is classified by `intendedSha256`,
+and until that hand-back runs the published bytes are root-owned, so the old image
+cannot read a state this run has not finished committing to.
+
+Because the republish replaces the inode, the descriptor opened during validation
+refers to a **superseded** one. Handing that back would give UID 1000 an
+unreachable orphan while the file the old image actually opens stayed root-owned —
+a rollback that reports success and leaves the old image unable to read its own
+state. The published name is therefore re-opened by directory descriptor under the
+same no-follow/hard-link/owner rules, its bytes re-verified against the digest just
+published, and only that descriptor is handed back.
+
+The two markers share a file name and are distinguished by `reason`, branched on
+explicitly and never inferred from which fields are populated. `operator-rollback`
+records a publication (or the intent to perform one) that a replay may resume;
+`unrecorded-legacy-divergence` records a divergence that was only *detected*, with
+all three publication digests `null` and the diverged bytes in `legacySha256`.
+Reading the latter as a publication record would republish the current private
+state over exactly the bytes the operator is rolling back to keep. Both carry
+`schema: 2`.
 
 "Preserved, never deleted" also has to survive a name collision: the archive name
 carries a one-second timestamp, so two resumes inside one second (or after a clock
@@ -234,9 +277,12 @@ the same way, but failing alone was not sufficient: the resume path is driven by
 the marker, so a refusal that recorded nothing left every later start failing
 identically with nothing to resolve. `prepare-layout.py` now writes the
 reconciliation marker itself — `reason: unrecorded-legacy-divergence`, both
-digests and sizes, the detected legacy owner, and no `publishedSha256` because
-nothing was republished — and only then fails. Rolling back out of that state is
-supported and keeps the diverged legacy bytes rather than overwriting them.
+digests and sizes, the detected legacy owner, and null `publishedSha256`,
+`intendedSha256` and `prepublicationLegacySha256` because nothing was written to
+the legacy path — and only then fails. Rolling back out of that state is
+supported and keeps the diverged legacy bytes rather than overwriting them; if
+that legacy file has itself moved on since the divergence was detected, the
+rollback refuses rather than choosing a survivor on the operator's behalf.
 
 ### Interrupted first adoption
 
@@ -269,12 +315,14 @@ Real alternate-UID tests live in
 planted-symlink escalation attempts, the capability bounding set, the `/bin/sh`
 confinement case, the state-republishing rollback (including the diverged-state
 case, a deployment with no legacy file, replayed runs, the replay refusal once
-the old image has advanced the legacy state, and substituted paths), the
-interrupted-adoption crash boundaries, the recorded reconciliation marker, the
-fail-closed roll-forward interlock and the recorded controller PID. CI runs them
-in the `docker` job with `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable
-daemon fails the job instead of skipping the suite, and asserts the exact TRX
-counters (37 discovered/executed/passed, 0 skipped — 35 container tests plus 2
+the old image has advanced the legacy state, and substituted paths), both crash
+windows around the root-owned republish, the published-versus-superseded inode
+hand-back, the interrupted-adoption crash boundaries, the recorded
+reconciliation marker, the fail-closed roll-forward interlock and the recorded
+controller PID. CI runs them in the `docker` job with
+`AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon fails the job instead
+of skipping the suite, and asserts the exact TRX counters (41
+discovered/executed/passed, 0 skipped — 39 container test cases plus 2
 structural wiring tests) rather than a lower bound.
 
 Separate credentials and process identities further before adding untrusted

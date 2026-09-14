@@ -150,19 +150,39 @@ old image has run it advances that file, and re-running `--revert-isolation`
 would republish the older controller-private bytes over the newer legacy state —
 the same data loss the roll-forward interlock prevents, reached from the other
 side. The command therefore checks the recorded `rollback.active` against the
-bytes actually on the legacy path **before writing or chowning anything**, and
-refuses with both digests if they have diverged. The deployment is already
-reverted at that point, so nothing needs repairing; to go back to the isolated
-image, resolve the interlock explicitly with `--resume-isolation --state-source
-legacy|private`. Repairing a genuinely interrupted rollback still works, because
-an unchanged (or already converged) legacy file is recognised as a replay.
+bytes actually on the legacy path **before writing or chowning anything**.
 
-That check needs the record to exist before the old image can start, so
-`rollback.active` is written **before** `/data`, the runtime state or the owner
-secret are handed back. If the marker cannot be recorded the command aborts while
-the controller still owns everything: neither image starts, nothing is lost, and
-re-running the identical command converges. A crash after the marker is the
-ordinary replayable case.
+That check needs the record to exist before the old image can observe anything
+the rollback did, so `rollback.active` is written **before the runtime state is
+republished** and before `/data`, the runtime state or the owner secret are
+handed back. Ordering only the ownership changes after the marker was not enough:
+the republish creates a new inode and renames it into place, and it used to give
+that inode its UID 1000 ownership at creation time, so publishing was itself a
+hand-back that ran first.
+
+The sequence is now: decide, record the marker, publish **root-owned `0600`**,
+hand back explicitly, then complete the marker. The marker records what the legacy
+path held before (`prepublicationLegacySha256`), what the rollback will publish
+(`intendedSha256`) and what it holds now (`publishedSha256`), so a replay can tell
+the three cases apart:
+
+- the legacy file still matches the pre-publication digest → the publication never
+  happened; the replay performs it;
+- it matches the intended digest → the publication already landed; the replay
+  re-applies only the remaining hand-backs and does not touch the inode;
+- it matches neither → the old image (or another writer) advanced it; the command
+  refuses with all three digests and nothing is changed.
+
+If the marker cannot be recorded the command aborts while the controller still
+owns everything — including the runtime state, which keeps its prior owner *and*
+its prior bytes — so neither image starts, nothing is lost, and re-running the
+identical command converges. A crash after the marker is the ordinary replayable
+case in both windows; until the explicit hand-back runs, the published bytes are
+root-owned and the old image cannot read a state the rollback has not finished.
+
+The deployment is already reverted when the refusal happens, so nothing needs
+repairing; to go back to the isolated image, resolve the interlock explicitly with
+`--resume-isolation --state-source legacy|private`.
 
 A deployment with no controller-private state (one that never started) fails
 closed; `--accept-missing-runtime-state` opts into handing back ownership only
@@ -204,6 +224,14 @@ is a decision point rather than a permanent refusal with nothing to resolve; the
 same `--resume-isolation --state-source` command then applies. Rolling back out
 of that state instead is also supported and keeps the diverged legacy bytes
 untouched.
+
+That marker is `reason: unrecorded-legacy-divergence` and is deliberately not an
+operator rollback: nothing was written to the legacy path, so it records no
+publication and no intent, and `--revert-isolation` branches on the reason rather
+than inferring one from the digests present. Treating the recorded diverged bytes
+as a publication record would republish the private state over exactly the bytes
+the operator is rolling back to keep. If the legacy file has moved on again since
+the divergence was detected, the rollback refuses rather than picking a survivor.
 
 A legacy file still owned by UID 1000 whose bytes are **identical** to the
 controller-private copy is not a divergence: it is a first adoption that was

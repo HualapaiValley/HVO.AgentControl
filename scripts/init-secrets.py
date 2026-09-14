@@ -189,20 +189,59 @@ print(
 # /data/runtime.json, and republishing the (now older) controller-private bytes
 # over it would destroy the work the old image did - the precise data loss the
 # roll-forward interlock exists to prevent, arrived at from the other direction.
-# So a recorded rollback is validated first: a legacy file that still matches the
-# recorded publication (or that already matches the bytes about to be written) is
-# a replay and proceeds; anything else is refused before the first write or
-# chown, and the operator resolves it with --resume-isolation instead.
 #
-# That bound only holds if the marker is on disk before the old image can run.
-# The marker is therefore recorded immediately after the legacy state is decided
-# and BEFORE any ownership is handed back: a crash between the two would
-# otherwise leave a deployment the pre-isolation image can start with no record
-# of the publication, so the next replay would have nothing to compare against
-# and would overwrite whatever the old image had advanced. Recording first
-# inverts both failure modes into safe ones - a crash after the marker leaves a
-# replayable rollback the operator finishes by re-running the same command, and
-# a marker that cannot be published aborts before the old image can start at all.
+# That bound only holds if the marker is durable before ANY of this operation's
+# effects are reachable by the pre-isolation identity, and publishing the runtime
+# state is one of those effects, not a preparation for them. The publication
+# creates a new inode and renames it over /data/runtime.json; giving that inode
+# its 1000:1000 ownership at creation time is an ownership hand-back like any
+# other, and doing it before the marker existed left exactly the unbounded window
+# the marker is supposed to close: a crash in between produced a legacy file the
+# old image could read and advance with no record of what had been published, so
+# the next replay saw no marker at all, treated the advanced state as the ordinary
+# first rollback, and overwrote it.
+#
+# So the order is: decide, record the INTENT marker, publish root-owned, hand
+# back. The marker is written before the first byte is published and before every
+# ownership hand-back, and it carries three digests so a replay can classify what
+# it finds without guessing:
+#
+#   prepublicationLegacySha256  what /data/runtime.json held before this rollback
+#                               touched it (null when there was no legacy file).
+#   intendedSha256              the controller-private bytes this rollback will
+#                               publish (null when nothing will be published:
+#                               --accept-missing-runtime-state, or a rollback out
+#                               of an unrecorded divergence that keeps the legacy
+#                               bytes).
+#   publishedSha256             what /data/runtime.json actually holds once the
+#                               rollback has completed; null while phase=="intent".
+#
+# A replay then reads the legacy path and matches:
+#
+#   legacy == prepublicationLegacySha256  the publication never happened. Proceed
+#                                         and publish; nothing is lost.
+#   legacy == intendedSha256              the publication already landed (a crash
+#                                         after the root-owned publish, or after a
+#                                         completed rollback). Converged: the inode
+#                                         is NOT replaced, only the remaining
+#                                         hand-backs are re-applied.
+#   neither                               the old image - or some other writer -
+#                                         advanced the legacy state. Refuse before
+#                                         the first write or chown and route the
+#                                         operator to --resume-isolation.
+#
+# Recording first inverts every failure mode into a safe one: a marker that cannot
+# be published aborts while /data/runtime.json still has its prior owner and prior
+# bytes, so the old image cannot start at all; a crash after the marker but before
+# the publish is classified by prepublicationLegacySha256 and re-runs cleanly; a
+# crash after the root-owned publish but before the hand-back is classified by
+# intendedSha256 and only finishes the hand-backs.
+#
+# The reason field distinguishes the two markers that can be on disk. This one is
+# "operator-rollback". prepare-layout.py writes "unrecorded-legacy-divergence" for
+# a divergence nobody rolled back; that marker records no publication intent at
+# all, and reading it as one would republish over the diverged legacy bytes the
+# operator is about to choose. It is branched on explicitly, never inferred.
 REVERT_CODE = '''\
 import hashlib
 import json
@@ -430,6 +469,10 @@ try:
     legacy_digest = (
         hashlib.sha256(legacy_payload).hexdigest() if legacy_payload is not None else None
     )
+    # Recorded in the marker so an operator can see whether the legacy path was
+    # still root-owned (isolated, nothing handed back) or already UID 1000 when
+    # this rollback started.
+    legacy_owner_uid = None if legacy_fd is None else os.fstat(legacy_fd).st_uid
 
     # ------------------------------------------------------------------
     # A recorded rollback bounds the replay. Validate it before the first
@@ -438,8 +481,23 @@ try:
     # controller-private bytes over that would destroy the newer state - the
     # same data loss the roll-forward interlock refuses, reached from the
     # rollback side.
+    #
+    # The classification is three-way and explicit, because "not what we
+    # published" and "not yet published" are different situations with opposite
+    # correct actions:
+    #
+    #   legacy == prepublicationLegacySha256  publication did not happen; publish.
+    #   legacy == intendedSha256              publication already landed; converged,
+    #                                         do not replace the inode.
+    #   neither                               someone else advanced it; refuse.
+    #
+    # intendedSha256 is what makes the crash window between the marker and the
+    # ownership hand-back recoverable: the bytes are already on the legacy path,
+    # owned by root, and the replay has to recognise them as its own work rather
+    # than as a foreign writer.
     # ------------------------------------------------------------------
     keep_legacy_bytes = False
+    already_published = False
     marker_fd = open_checked(
         os.path.join(private_root, marker_name),
         allowed_owners=(control_uid, 0),
@@ -457,9 +515,12 @@ try:
             if not isinstance(recorded, dict):
                 raise ValueError("marker is not an object")
             recorded_digest = recorded.get("publishedSha256")
+            recorded_intended = recorded.get("intendedSha256")
+            recorded_prepublication = recorded.get("prepublicationLegacySha256")
             recorded_legacy_digest = recorded.get("legacySha256")
             recorded_at = recorded.get("publishedAt", "an unknown time")
             recorded_reason = recorded.get("reason", "rollback")
+            recorded_phase = recorded.get("phase", "complete")
         except (ValueError, UnicodeDecodeError) as error:
             # Fail closed. A marker that cannot be read cannot bound the replay,
             # and this operation writes over the state the old image may hold.
@@ -470,55 +531,121 @@ try:
                 % (os.path.join(private_root, marker_name), error, legacy_state)
             )
 
-        # The replay is safe when nothing would be written over the legacy state
-        # at all (no private state, or no legacy file), when the legacy path
-        # already holds exactly the bytes this run would write, or when it still
-        # holds what this rollback published. Anything else is a legacy state
-        # that advanced past the private copy.
-        converged = legacy_payload is not None and payload is not None and legacy_payload == payload
-        replayable = (
-            legacy_fd is None
-            or payload is None
-            or converged
-            or (recorded_digest is not None and legacy_digest == recorded_digest)
-        )
-
-        # prepare-layout records a marker for a divergence nobody rolled back,
-        # and that marker has no publishedSha256 because no republish happened.
-        # Rolling back from there is legitimate and must not be a dead end: the
-        # legacy bytes are the ones the operator is choosing to keep by running
-        # a rollback at all, so they are left exactly as they are and only the
-        # ownership is handed back. The private state is retained either way.
-        if (
-            not replayable
-            and recorded_reason == "unrecorded-legacy-divergence"
-            and recorded_legacy_digest is not None
-            and legacy_digest == recorded_legacy_digest
-        ):
-            keep_legacy_bytes = True
-            replayable = True
+        if recorded_reason == "unrecorded-legacy-divergence":
+            # prepare-layout's marker. It records no publication and no
+            # publication intent - nothing was ever written to the legacy path -
+            # so it must never be read as a rollback whose publication can be
+            # replayed. Rolling back out of this state is legitimate and keeps
+            # the diverged legacy bytes: the operator chose them by rolling back
+            # at all. The private state is retained either way.
+            #
+            # legacySha256 is this marker's own record of the diverged bytes and
+            # is deliberately a different field from the operator-rollback
+            # digests. Reading it as a publication record would republish over
+            # exactly the bytes the operator is keeping.
+            if legacy_fd is None:
+                # The diverged file is gone. There is nothing to keep, so the
+                # ordinary publication path applies.
+                pass
+            elif recorded_legacy_digest is not None and legacy_digest == recorded_legacy_digest:
+                keep_legacy_bytes = True
+                print(
+                    "%s records an unrecorded divergence (%s) and %s still holds exactly the "
+                    "diverged bytes it recorded. Rolling back keeps them: the legacy state is "
+                    "handed back unmodified and the controller-private state is retained, not "
+                    "republished over it."
+                    % (os.path.join(private_root, marker_name), recorded_at, legacy_state)
+                )
+            else:
+                fail(
+                    "an unrecorded divergence is recorded in %s (%s) but %s no longer holds the "
+                    "bytes it recorded (recorded sha256 %s, found sha256 %s). Something advanced "
+                    "the legacy state after the divergence was detected, so neither keeping it nor "
+                    "republishing over it is a decision this command may take on its own. Nothing "
+                    "was changed. Resolve it explicitly with: --resume-isolation --state-source "
+                    "legacy|private."
+                    % (
+                        os.path.join(private_root, marker_name),
+                        recorded_at,
+                        legacy_state,
+                        recorded_legacy_digest if recorded_legacy_digest is not None else "none",
+                        legacy_digest,
+                    )
+                )
+        elif legacy_fd is None:
+            # Nothing on the legacy path to overwrite, so publishing cannot
+            # destroy anything. This is also the replay of an interrupted
+            # rollback for a deployment that never had a legacy file.
+            pass
+        elif recorded_intended is not None and legacy_digest == recorded_intended:
+            # The publication already landed: either the crash window between the
+            # root-owned publish and the ownership hand-back, or an ordinary
+            # replay of a completed rollback. Converged - the inode is not
+            # replaced, only the remaining hand-backs are re-applied.
+            already_published = True
+        elif recorded_digest is not None and legacy_digest == recorded_digest:
+            # A completed rollback recorded by this version, or by an older one
+            # that wrote only publishedSha256.
+            already_published = True
+        elif recorded_prepublication is not None and legacy_digest == recorded_prepublication:
+            # The marker is durable but the publication never happened. The
+            # legacy path still holds exactly what it held before this rollback
+            # started, so publishing over it loses nothing.
             print(
-                "%s records an unrecorded divergence (%s) and %s still holds exactly the diverged "
-                "bytes it recorded. Rolling back keeps them: the legacy state is handed back "
-                "unmodified and the controller-private state is retained, not republished over it."
-                % (os.path.join(private_root, marker_name), recorded_at, legacy_state)
+                "%s records a rollback at %s whose publication did not complete; %s still holds "
+                "the bytes recorded before it (sha256 %s). Resuming the publication."
+                % (
+                    os.path.join(private_root, marker_name),
+                    recorded_at,
+                    legacy_state,
+                    legacy_digest,
+                )
             )
-
-        if not replayable:
+        elif payload is not None and legacy_payload == payload:
+            # Converged against the current private state even though the marker
+            # predates the intent fields. Still a replay, not a foreign write.
+            already_published = True
+        elif (
+            recorded_intended is None
+            and recorded_digest is None
+            and recorded_prepublication is None
+        ):
+            # A marker carrying no digest at all cannot bound anything, and this
+            # command is about to write over state the old image may hold. Fail
+            # closed rather than guess which side the legacy bytes came from.
             fail(
-                "a rollback is already recorded in %s (%s, reason '%s') and %s no longer matches it "
-                "(recorded sha256 %s, found sha256 %s). The pre-isolation image has advanced the "
-                "legacy state, so republishing the controller-private copy over it would discard "
-                "that work. Nothing was changed, and the deployment is already reverted: %s and the "
-                "owner secret belong to UID %d and the old image can run. To roll forward to the "
-                "isolated image instead, choose which state survives explicitly with: "
+                "a rollback is recorded in %s (%s, reason '%s') but it records no digest for %s, "
+                "so a replay cannot tell an unfinished publication from a legacy state the old "
+                "image advanced. Nothing was changed. Resolve it explicitly with: "
                 "--resume-isolation --state-source legacy|private."
                 % (
                     os.path.join(private_root, marker_name),
                     recorded_at,
                     recorded_reason,
                     legacy_state,
-                    recorded_digest if recorded_digest is not None else "none",
+                )
+            )
+        else:
+            fail(
+                "a rollback is already recorded in %s (%s, reason '%s', phase '%s') and %s matches "
+                "neither the state recorded before the publication (sha256 %s) nor the state the "
+                "rollback intended to publish (sha256 %s); it is sha256 %s. The pre-isolation image "
+                "- or another writer - has advanced the legacy state, so republishing the "
+                "controller-private copy over it would discard that work. Nothing was changed, and "
+                "the deployment is already reverted: %s and the owner secret belong to UID %d and "
+                "the old image can run. To roll forward to the isolated image instead, choose "
+                "which state survives explicitly with: --resume-isolation --state-source "
+                "legacy|private."
+                % (
+                    os.path.join(private_root, marker_name),
+                    recorded_at,
+                    recorded_reason,
+                    recorded_phase,
+                    legacy_state,
+                    recorded_prepublication if recorded_prepublication is not None else "none",
+                    recorded_intended
+                    if recorded_intended is not None
+                    else (recorded_digest if recorded_digest is not None else "none"),
                     legacy_digest,
                     data_root,
                     legacy_uid,
@@ -528,99 +655,174 @@ try:
     # ------------------------------------------------------------------
     # Apply. Order is deliberate and each step is idempotent on a re-run.
     #
-    # 1. Republish the runtime state while both images are stopped, so the old
-    #    image can never observe a half-written file.
-    # 2. Record the rollback marker - before any ownership is handed back. The
-    #    marker is both the roll-forward interlock and the evidence a later
-    #    replay validates against, so it has to exist before the pre-isolation
-    #    image can possibly start. Recording it after the hand-backs left a
-    #    crash window in which the old image was runnable with no record of the
-    #    publication: the next replay would then find no marker, treat the
-    #    advanced legacy state as unrecorded, and overwrite the old image's work.
-    # 3. Hand back the runtime state and then /data, which is what lets the old
-    #    image write.
-    # 4. Hand back the secret last: it is the step that makes the old image able
+    # 1. Decide what the legacy path will hold, WITHOUT writing anything.
+    # 2. Record the intent marker - before the first byte is published and
+    #    before any ownership is handed back. The marker is the roll-forward
+    #    interlock and the evidence every later replay classifies against, so it
+    #    has to be durable before any effect of this operation is reachable by
+    #    the pre-isolation identity. Publishing the runtime state IS such an
+    #    effect: the publication creates the inode already owned 1000:1000, so
+    #    doing it before the marker left a crash window in which the old image
+    #    could read and advance a state with no record of it, and the next
+    #    replay - finding no marker - would treat that advanced state as the
+    #    ordinary first rollback and overwrite it.
+    # 3. Publish the runtime state root-owned 0600 while both images are
+    #    stopped, so the old image can neither observe a half-written file nor
+    #    read one this run has not finished committing to.
+    # 4. Hand back the runtime state explicitly, then /data, which is what lets
+    #    the old image write.
+    # 5. Hand back the secret last: it is the step that makes the old image able
     #    to authenticate, so it should not precede a failure in the others.
+    # 6. Complete the marker with what actually landed.
     #
     # A failure at step 2 therefore leaves a deployment neither image can start
-    # from a half-reverted state: /data and the secret still belong to the
-    # controller, and re-running the identical command converges.
+    # from a half-reverted state: the legacy state keeps its prior owner and its
+    # prior bytes, /data and the secret still belong to the controller, and
+    # re-running the identical command converges.
     # ------------------------------------------------------------------
-    published_digest = None
-    published_bytes = 0
-    republished = False
+    marker_path = os.path.join(private_root, marker_name)
+
+    def write_marker(phase, published_digest, published_bytes, intended_digest, intended_bytes):
+        """Publish the rollback marker atomically, controller-owned 0600.
+
+        `phase` is "intent" before the legacy path has been written and
+        "complete" once it holds what this rollback decided. A marker is durable
+        at both points, so a crash in between is classified rather than guessed
+        at: `prepublicationLegacySha256` identifies "the publication did not
+        happen", `intendedSha256` identifies "it did".
+        """
+        body = {
+            "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "reason": "operator-rollback",
+            "phase": phase,
+            "schema": 2,
+            # What the legacy path held before this rollback touched it. A replay
+            # that finds exactly this knows the publication never happened.
+            "prepublicationLegacySha256": legacy_digest,
+            "prepublicationLegacyBytes": (
+                None if legacy_payload is None else len(legacy_payload)
+            ),
+            "prepublicationLegacyOwnerUid": legacy_owner_uid,
+            # What this rollback will put there. A replay that finds exactly this
+            # knows the publication landed and must not replace the inode.
+            "intendedSha256": intended_digest,
+            "intendedBytes": intended_bytes,
+            # What is actually there now; null while phase == "intent".
+            "publishedSha256": published_digest,
+            "publishedBytes": published_bytes,
+            "legacyBytesRetained": keep_legacy_bytes,
+            "privateStateRetained": private_fd is not None,
+            "legacyPath": legacy_state,
+            "privatePath": private_state,
+        }
+        publish_bytes(
+            private_dir_fd,
+            private_root,
+            marker_name,
+            (json.dumps(body, indent=2, sort_keys=True) + "\\n").encode("utf-8"),
+            control_uid,
+            control_gid,
+            0o600,
+        )
+
+    # Step 1: decide. Nothing is written in this block.
     if keep_legacy_bytes:
         # A recorded, unrecorded-origin divergence the operator is rolling back
         # into: the legacy bytes are the survivor, so only ownership moves.
+        intended_digest = legacy_digest
+        intended_bytes = len(legacy_payload)
+        will_publish = False
+    elif already_published or (payload is not None and legacy_payload == payload):
+        # The legacy path already carries the bytes this rollback would write -
+        # a replay after the publication landed. Rewriting identical bytes would
+        # replace the inode for nothing, so only the hand-backs are re-applied.
+        intended_digest = legacy_digest
+        intended_bytes = 0 if legacy_payload is None else len(legacy_payload)
+        will_publish = False
+    elif payload is not None:
+        intended_digest = hashlib.sha256(payload).hexdigest()
+        intended_bytes = len(payload)
+        will_publish = True
+    else:
+        # --accept-missing-runtime-state: ownership only. There is no intended
+        # publication, and the marker says so rather than recording the bytes
+        # that happen to be on the legacy path as an intent this run never had.
+        intended_digest = None
+        intended_bytes = None
+        will_publish = False
+
+    # Step 2: the marker, before the first write and before every hand-back.
+    write_marker("intent", None, None, intended_digest, intended_bytes)
+
+    # Step 3: publish root-owned. The old image must not be able to read a state
+    # this run has not yet handed back; the hand-back below is the explicit,
+    # separately verified step that makes it reachable.
+    republished = False
+    if will_publish:
+        published_digest = publish_bytes(
+            data_fd, data_root, state_name, payload, 0, 0, 0o600
+        )
+        republished = True
+        print(
+            "Published the current controller-private runtime state to %s root-owned "
+            "(%d bytes, sha256 %s); it is handed to %d:%d below."
+            % (legacy_state, len(payload), published_digest, legacy_uid, legacy_gid)
+        )
+    elif keep_legacy_bytes:
         published_digest = legacy_digest
-        published_bytes = len(legacy_payload)
-    elif payload is not None and legacy_payload == payload:
-        # Already converged - a replay after the publish succeeded. Rewriting
-        # identical bytes would replace the inode for nothing, so only the
-        # metadata hand-back is (re-)applied.
+    elif intended_digest is not None:
         published_digest = legacy_digest
-        published_bytes = len(payload)
         print(
             "%s already carries the current controller-private runtime state "
             "(%d bytes, sha256 %s); it was not rewritten."
-            % (legacy_state, len(payload), published_digest)
-        )
-    elif payload is not None:
-        published_digest = publish_bytes(
-            data_fd, data_root, state_name, payload, legacy_uid, legacy_gid, 0o600
-        )
-        published_bytes = len(payload)
-        republished = True
-        print(
-            "Republished the current controller-private runtime state to %s "
-            "(%d bytes, sha256 %s) and owned it %d:%d."
-            % (legacy_state, len(payload), published_digest, legacy_uid, legacy_gid)
+            % (legacy_state, intended_bytes, published_digest)
         )
     else:
-        # --accept-missing-runtime-state: ownership only. The marker still has to
-        # record what the legacy path holds, because that is what bounds a later
-        # replay; an unrecorded rollback here would be the same dead end.
         published_digest = legacy_digest
-        published_bytes = 0 if legacy_payload is None else len(legacy_payload)
         print(
             "No controller-private runtime state; %s was not republished and the old image will "
             "create a new organization on start." % legacy_state,
             file=sys.stderr,
         )
+    if published_digest is None:
+        published_bytes = None
+    elif will_publish:
+        published_bytes = intended_bytes
+    else:
+        published_bytes = 0 if legacy_payload is None else len(legacy_payload)
 
-    # publishedSha256 is the digest of what /data/runtime.json actually holds now,
-    # which is what a later replay compares against to tell "nothing has run since"
-    # from "the old image advanced the state". When the legacy bytes were kept
-    # rather than republished, that is those bytes - not the private copy's.
-    marker = {
-        "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "reason": "operator-rollback",
-        "publishedSha256": published_digest,
-        "publishedBytes": published_bytes,
-        "legacyBytesRetained": keep_legacy_bytes,
-        "privateStateRetained": private_fd is not None,
-        "legacyPath": legacy_state,
-        "privatePath": private_state,
-    }
-    publish_bytes(
-        private_dir_fd,
-        private_root,
-        marker_name,
-        (json.dumps(marker, indent=2, sort_keys=True) + "\\n").encode("utf-8"),
-        control_uid,
-        control_gid,
-        0o600,
-    )
-
-    # Only now does anything become reachable by the pre-isolation identity. The
-    # republish already applied the final ownership to the new inode, so the
-    # descriptor opened earlier refers to a superseded inode and must not be
-    # chowned.
-    if legacy_fd is not None and not republished:
+    # Step 4: hand the runtime state back explicitly.
+    #
+    # A republish replaced the inode, so the descriptor opened during validation
+    # refers to a superseded one and must never be chowned - that would hand the
+    # OLD inode to UID 1000 while the published one stayed root-owned. Re-open
+    # the published name by directory descriptor instead, under the same
+    # no-follow/hard-link/owner rules as every other path here.
+    if republished:
+        published_fd = open_checked(
+            legacy_state, allowed_owners=(0,), parent_fd=data_fd, name=state_name
+        )
+        if published_fd is None:
+            fail("%s disappeared between its publication and its hand-back" % legacy_state)
+        try:
+            if hashlib.sha256(read_all(published_fd)).hexdigest() != published_digest:
+                fail(
+                    "%s no longer holds the bytes that were just published; refusing to hand it "
+                    "back." % legacy_state
+                )
+            hand_back_metadata(published_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
+        finally:
+            os.close(published_fd)
+    elif legacy_fd is not None:
         hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
 
+    # Step 5.
     hand_back_metadata(data_fd, data_root, legacy_uid, legacy_gid, 0o755)
     hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)
+
+    # Step 6: record what actually landed. A crash before this leaves the intent
+    # marker, which the replay classifies by intendedSha256 and finishes.
+    write_marker("complete", published_digest, published_bytes, intended_digest, intended_bytes)
 finally:
     for descriptor in descriptors:
         os.close(descriptor)

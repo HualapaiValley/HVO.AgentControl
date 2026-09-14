@@ -250,9 +250,15 @@ public sealed class SecretInitializationTests
         var revert = ExtractBlock("REVERT_CODE");
 
         // The private state is the source, the legacy path is the destination.
+        // The publication is root-owned; the hand-back to the legacy identity is
+        // a separate step after the marker, not an attribute of the new inode.
         Assert.Contains("payload = read_all(private_fd)", revert, StringComparison.Ordinal);
         Assert.Contains(
-            "publish_bytes(\n            data_fd, data_root, state_name, payload, legacy_uid, legacy_gid, 0o600\n        )",
+            "publish_bytes(\n            data_fd, data_root, state_name, payload, 0, 0, 0o600\n        )",
+            revert,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "data_fd, data_root, state_name, payload, legacy_uid, legacy_gid",
             revert,
             StringComparison.Ordinal);
 
@@ -298,29 +304,61 @@ public sealed class SecretInitializationTests
     }
 
     /// <summary>
-    /// The rollback marker must be published before any ownership is handed
-    /// back. It is both the roll-forward interlock and the evidence a later
-    /// replay validates against, so a crash between the hand-backs and the
-    /// marker would leave the old image runnable with no record of what was
-    /// published - and the next replay would then overwrite whatever the old
-    /// image had advanced, which is the exact data loss the guard exists to
-    /// prevent.
+    /// The rollback marker must be durable before the runtime state is
+    /// republished and before every ownership hand-back. It is both the
+    /// roll-forward interlock and the evidence a later replay classifies
+    /// against, so any effect the pre-isolation identity can observe before the
+    /// marker exists is an unbounded window.
     /// </summary>
     /// <remarks>
-    /// Asserted on order in the source because the container test that exercises
-    /// it needs a Docker daemon. Both cover the same property; this one cannot
-    /// be skipped.
+    /// <para>
+    /// Ordering the <c>chown</c> calls after the marker was not sufficient. The
+    /// republish creates a new inode and renames it over
+    /// <c>/data/runtime.json</c>, and it used to give that inode its
+    /// <c>1000:1000</c> ownership at creation time - so the publication itself
+    /// was an ownership hand-back that ran before the marker was written. A
+    /// crash in between left a legacy state the old image could read and
+    /// advance with no record of it, and the next replay, finding no marker,
+    /// treated the advanced state as the ordinary first rollback and overwrote
+    /// it. The publication is therefore root-owned and the hand-back is a
+    /// separate, explicit step.
+    /// </para>
+    /// <para>
+    /// Asserted on order in the source because the container tests that
+    /// exercise it need a Docker daemon. Both cover the same property; this one
+    /// cannot be skipped.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void RevertPublishesTheMarkerBeforeHandingAnythingBack()
+    public void RevertPublishesTheMarkerBeforeTheRepublishAndEveryHandBack()
     {
         var revert = ExtractBlock("REVERT_CODE");
 
-        var marker = revert.IndexOf("        marker_name,\n", StringComparison.Ordinal);
-        Assert.True(marker > 0, "the rollback marker publication was not found");
+        var marker = revert.IndexOf(
+            "write_marker(\"intent\", None, None, intended_digest, intended_bytes)",
+            StringComparison.Ordinal);
+        Assert.True(marker > 0, "the intent marker publication was not found");
+
+        // The republish itself is an effect the old image can observe, so it
+        // must follow the marker, not precede it.
+        var republish = revert.IndexOf(
+            "published_digest = publish_bytes(\n            data_fd, data_root, state_name, payload, 0, 0, 0o600\n        )",
+            StringComparison.Ordinal);
+        Assert.True(
+            republish > 0,
+            "the runtime-state republish was not found, or no longer publishes root-owned. "
+            + "Publishing it already owned by the legacy UID is an ownership hand-back before "
+            + "the marker exists.");
+        Assert.True(
+            republish > marker,
+            "the runtime state is republished before the rollback marker is recorded, which "
+            + "leaves the pre-isolation image able to read and advance a state with no record "
+            + "of the publication.");
 
         foreach (var handBack in new[]
         {
+            "hand_back_metadata(published_fd, legacy_state, legacy_uid, legacy_gid, 0o600)",
+            "hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)",
             "hand_back_metadata(data_fd, data_root, legacy_uid, legacy_gid, 0o755)",
             "hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)",
         })
@@ -331,14 +369,155 @@ public sealed class SecretInitializationTests
                 index > marker,
                 $"'{handBack}' runs before the rollback marker is recorded, which leaves the "
                 + "pre-isolation image runnable with no record of the publication.");
+            Assert.True(
+                index > republish,
+                $"'{handBack}' runs before the republish, so ownership would move to the legacy "
+                + "identity on a state this rollback has not finished writing.");
         }
 
-        // The legacy state's hand-back is also after the marker, and is skipped
-        // entirely when the republish already applied the final ownership - the
-        // descriptor opened earlier then refers to a superseded inode.
-        var legacyHandBack = revert.IndexOf(
-            "if legacy_fd is not None and not republished:", StringComparison.Ordinal);
-        Assert.True(legacyHandBack > marker, "the legacy state is handed back before the marker is recorded");
+        // The marker is completed after the hand-backs, so a crash in that
+        // window leaves the intent marker the replay knows how to finish.
+        var complete = revert.IndexOf(
+            "write_marker(\"complete\", published_digest, published_bytes",
+            StringComparison.Ordinal);
+        Assert.True(complete > 0, "the completion marker was not found");
+        Assert.True(
+            complete > revert.IndexOf(
+                "hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)",
+                StringComparison.Ordinal),
+            "the marker is completed before the hand-backs, so it would claim a rollback that "
+            + "had not happened yet");
+    }
+
+    /// <summary>
+    /// A republish replaces the inode, so the descriptor opened during
+    /// validation refers to a superseded one. Handing <em>that</em> back would
+    /// give UID 1000 an unreachable orphan while the file the old image actually
+    /// reads stayed root-owned — a rollback that reports success and leaves the
+    /// old image unable to read its own state.
+    /// </summary>
+    [Fact]
+    public void RevertHandsBackThePublishedInodeRatherThanTheStaleDescriptor()
+    {
+        var revert = ExtractBlock("REVERT_CODE");
+
+        // After a republish the published name is re-opened by directory
+        // descriptor, under the same no-follow/hard-link/owner rules...
+        Assert.Contains(
+            "published_fd = open_checked(\n            legacy_state, allowed_owners=(0,), parent_fd=data_fd, name=state_name\n        )",
+            revert,
+            StringComparison.Ordinal);
+
+        // ...its bytes are confirmed to be the ones just published...
+        Assert.Contains(
+            "if hashlib.sha256(read_all(published_fd)).hexdigest() != published_digest:",
+            revert,
+            StringComparison.Ordinal);
+
+        // ...and only that descriptor is handed back. The stale `legacy_fd` is
+        // used only on the path where nothing was republished.
+        Assert.Contains(
+            "hand_back_metadata(published_fd, legacy_state, legacy_uid, legacy_gid, 0o600)",
+            revert,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "elif legacy_fd is not None:\n        hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)",
+            revert,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The replay guard has to classify three distinct situations, because
+    /// "this is not what we published" and "we never got as far as publishing"
+    /// demand opposite actions. Collapsing them either refuses a recoverable
+    /// interrupted rollback or overwrites a legacy state another writer
+    /// advanced.
+    /// </summary>
+    [Fact]
+    public void RevertClassifiesTheReplayAgainstBothRecordedDigests()
+    {
+        var revert = ExtractBlock("REVERT_CODE");
+
+        // Recorded before the publication: proves the publication did not run.
+        Assert.Contains(
+            "elif recorded_prepublication is not None and legacy_digest == recorded_prepublication:",
+            revert,
+            StringComparison.Ordinal);
+
+        // Recorded as the intent: proves the publication did run, so the inode
+        // must not be replaced.
+        Assert.Contains(
+            "elif recorded_intended is not None and legacy_digest == recorded_intended:",
+            revert,
+            StringComparison.Ordinal);
+        Assert.Contains("already_published = True", revert, StringComparison.Ordinal);
+
+        // Neither: refuse before the first write or chown. The message is
+        // wrapped in the source, so match the distinguishing clause.
+        Assert.Contains("neither the state recorded before the publication", revert, StringComparison.Ordinal);
+        Assert.Contains("rollback intended to publish", revert, StringComparison.Ordinal);
+
+        // Both digests are written, and the phase distinguishes an intent marker
+        // from a completed one.
+        foreach (var field in new[]
+        {
+            "\"prepublicationLegacySha256\": legacy_digest,",
+            "\"intendedSha256\": intended_digest,",
+            "\"publishedSha256\": published_digest,",
+            "\"phase\": phase,",
+        })
+        {
+            Assert.Contains(field, revert, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("write_marker(\"intent\"", revert, StringComparison.Ordinal);
+        Assert.Contains("write_marker(\"complete\"", revert, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two markers share a file name and are told apart by
+    /// <c>reason</c>, explicitly. <c>prepare-layout.py</c>'s
+    /// <c>unrecorded-legacy-divergence</c> marker records a divergence that was
+    /// only detected — nothing was written to the legacy path — so reading its
+    /// <c>legacySha256</c> as a publication record would republish the current
+    /// private state over exactly the bytes the operator is rolling back to
+    /// keep.
+    /// </summary>
+    [Fact]
+    public void TheTwoMarkerKindsAreDistinguishedByReasonRatherThanInferred()
+    {
+        var revert = ExtractBlock("REVERT_CODE");
+        var layout = File.ReadAllText(Path.Combine(
+            ControllerIsolationLayoutTests.RepositoryRoot(), "src", "container", "prepare-layout.py"));
+
+        // The rollback branches on the reason before it looks at any digest.
+        var divergence = revert.IndexOf(
+            "if recorded_reason == \"unrecorded-legacy-divergence\":", StringComparison.Ordinal);
+        Assert.True(divergence > 0, "the rollback does not branch on the divergence reason");
+        Assert.True(
+            divergence < revert.IndexOf(
+                "elif recorded_intended is not None", StringComparison.Ordinal),
+            "the divergence marker is classified after the publication digests, so a detection "
+            + "could be treated as a resumable publication");
+
+        // Under that reason the diverged bytes are kept, never republished over.
+        Assert.Contains("keep_legacy_bytes = True", revert, StringComparison.Ordinal);
+
+        // And the entrypoint's marker records no publication or intent at all.
+        Assert.Contains("\"reason\": \"unrecorded-legacy-divergence\",", layout, StringComparison.Ordinal);
+        foreach (var nulled in new[]
+        {
+            "\"prepublicationLegacySha256\": None,",
+            "\"intendedSha256\": None,",
+            "\"publishedSha256\": None,",
+        })
+        {
+            Assert.Contains(nulled, layout, StringComparison.Ordinal);
+        }
+
+        // Both markers carry a schema so a future field change is detectable.
+        Assert.Contains("\"schema\": 2,", layout, StringComparison.Ordinal);
+        Assert.Contains("\"schema\": 2,", revert, StringComparison.Ordinal);
     }
 
     /// <summary>

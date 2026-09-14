@@ -75,6 +75,20 @@ and the detected ownership) and only then fails. Refusing without recording
 would have left the operator with a start that fails identically on every
 attempt and no state for `--resume-isolation` to resolve.
 
+Both markers use the same file name and are distinguished by `reason`, which is
+branched on explicitly and never inferred from which fields happen to be
+populated:
+
+`reason: "operator-rollback"`
+    Written by `--revert-isolation`. Records a publication to the legacy path -
+    `prepublicationLegacySha256` (what was there before), `intendedSha256` (what
+    the rollback will publish) and `publishedSha256` (what is there now, null
+    while `phase` is `"intent"`). A replay may resume or converge on it.
+`reason: "unrecorded-legacy-divergence"`
+    Written here. Records a divergence that was only *detected*; nothing was
+    written to the legacy path, so all three publication digests are null and
+    the diverged bytes are in `legacySha256`. There is no publication to replay.
+
 Interrupted first adoption
 --------------------------
 
@@ -453,11 +467,24 @@ def record_unrecorded_divergence(control_fd, legacy_payload, legacy_uid, private
     identically with nothing for `--resume-isolation` to resolve. The marker
     carries both digests and sizes, so the operator can see which state is which
     before naming the survivor; neither state is modified here.
+
+    This marker and the one `--revert-isolation` writes share a file name and are
+    told apart by `reason`, never by inference. The distinction is load-bearing:
+    an operator-rollback marker records a publication (or the intent to perform
+    one) that a replay may resume, while this one records a divergence that was
+    only *detected*. Nothing was written to the legacy path, so there is no
+    publication to replay and no intent to complete - `intendedSha256`,
+    `prepublicationLegacySha256` and `publishedSha256` are all null, and the
+    diverged bytes live in `legacySha256`, which the rollback reads only under
+    this reason. Reading them as a publication record would republish the current
+    private state over the exact bytes the operator is rolling back to keep.
     """
     payload = json.dumps(
         {
             "publishedAt": now(),
             "reason": "unrecorded-legacy-divergence",
+            "phase": "detected",
+            "schema": 2,
             "detectedBy": "prepare-layout",
             "legacyPath": os.path.join(AGENT_DATA, LEGACY_STATE_NAME),
             "legacyOwnerUid": legacy_uid,
@@ -467,8 +494,14 @@ def record_unrecorded_divergence(control_fd, legacy_payload, legacy_uid, private
             "privateSha256": hashlib.sha256(private_payload).hexdigest(),
             "privateBytes": len(private_payload),
             "privateStateRetained": True,
-            # No republish happened, so there is no published digest to compare a
-            # later --revert-isolation replay against.
+            # Nothing was written to the legacy path, so there is neither a
+            # publication nor an intent for a later --revert-isolation replay to
+            # validate against. Recording any of these as non-null would make the
+            # replay guard classify a detection as a resumable publication.
+            "prepublicationLegacySha256": None,
+            "prepublicationLegacyBytes": None,
+            "intendedSha256": None,
+            "intendedBytes": None,
             "publishedSha256": None,
             "publishedBytes": 0,
         },

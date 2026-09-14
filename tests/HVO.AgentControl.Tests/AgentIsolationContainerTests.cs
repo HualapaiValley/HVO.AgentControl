@@ -1134,10 +1134,13 @@ public sealed class AgentIsolationContainerTests
         Assert.Contains("CLEAN_REPLAY_EXIT=0", output, StringComparison.Ordinal);
         Assert.Contains("CLEAN_REPLAY_INODE_STABLE", output, StringComparison.Ordinal);
 
-        // The unsafe replay is refused.
+        // The unsafe replay is refused, and the refusal names both digests it
+        // checked so the operator can see it is neither an unfinished
+        // publication nor a converged one.
         Assert.Contains("MUTATED=0", output, StringComparison.Ordinal);
         Assert.Contains("UNSAFE_REPLAY_EXIT=1", output, StringComparison.Ordinal);
-        Assert.Contains("no longer matches it", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("matches neither the state recorded before", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("intended to publish", result.StandardError, StringComparison.Ordinal);
         Assert.Contains("--state-source legacy|private", result.StandardError, StringComparison.Ordinal);
 
         // The old image's work survives exactly: same bytes, same inode.
@@ -1661,14 +1664,20 @@ public sealed class AgentIsolationContainerTests
 
     /// <summary>
     /// The rollback marker is the roll-forward interlock <em>and</em> the
-    /// evidence a later replay validates against, so it has to be on disk before
-    /// the pre-isolation image can start. Recording it after the ownership
-    /// hand-backs left a crash window in which the old image was already
-    /// runnable with no record of the publication: the next replay would find no
-    /// marker, treat the state the old image had advanced as unrecorded, and
-    /// overwrite it. This asserts the marker is written first and that a failure
-    /// to write it leaves the deployment un-handed-back.
+    /// evidence a later replay classifies against, so it has to be durable
+    /// before the pre-isolation image can observe anything this rollback did.
+    /// This asserts a failure to write it leaves the deployment entirely
+    /// un-handed-back — including the runtime state's bytes and owner — and
+    /// that both crash windows converge on a replay.
     /// </summary>
+    /// <remarks>
+    /// Ordering the <c>chown</c> calls after the marker was not enough on its
+    /// own: the republish creates the inode and used to give it its
+    /// <c>1000:1000</c> ownership at creation time, so the publication was
+    /// itself a hand-back that ran first. The assertions below therefore check
+    /// the legacy state's owner and bytes after the injected marker failure, not
+    /// only <c>/data</c> and the secret.
+    /// </remarks>
     [DockerFact]
     public void TheRollbackMarkerIsRecordedBeforeAnythingIsHandedBackToTheOldImage()
     {
@@ -1691,6 +1700,12 @@ public sealed class AgentIsolationContainerTests
             {{revertCode}}
             REVERT_EOF
 
+            # State of the legacy path before the failed attempt: the isolated
+            # run leaves it root-owned, stale and unreadable by the agent.
+            PRIOR_OWNER=$(stat -c '%u:%g:%a' /data/runtime.json)
+            PRIOR_SUM=$(sha256sum /data/runtime.json | cut -d' ' -f1)
+            PRIOR_INODE=$(stat -c '%i' /data/runtime.json)
+
             # Fault injection, applied only to this copy: the marker publication
             # is redirected to a path that cannot exist, so it fails exactly
             # where a full disk or a lost volume would. Nothing else is changed,
@@ -1699,11 +1714,9 @@ public sealed class AgentIsolationContainerTests
             import pathlib
             path = pathlib.Path('/tmp/revert-nomarker.py')
             body = pathlib.Path('/tmp/revert.py').read_text()
-            call = 'publish_bytes(\n        private_dir_fd,\n        private_root,\n        marker_name,\n'
+            call = '            marker_name,\n'
             assert body.count(call) == 1, 'the marker publication call was not found exactly once'
-            path.write_text(body.replace(
-                call,
-                'publish_bytes(\n        private_dir_fd,\n        private_root,\n        marker_name + "/unwritable",\n'))
+            path.write_text(body.replace(call, '            marker_name + "/unwritable",\n'))
             INJECT_EOF
 
             python3 /tmp/revert-nomarker.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0 2>/dev/null
@@ -1711,9 +1724,21 @@ public sealed class AgentIsolationContainerTests
             test -e /control-data/rollback.active && echo MARKER_WRITTEN || echo NO_MARKER
 
             # Nothing the old image needs was handed back, so it cannot start on
-            # a rollback that was never recorded.
+            # a rollback that was never recorded. Decisively, that includes the
+            # runtime state itself: publishing it already owned by UID 1000
+            # would have handed it back before the marker existed.
             stat -c 'FAILED_DATA=%u:%g:%a' /data
             stat -c 'FAILED_SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            stat -c 'FAILED_LEGACY=%u:%g:%a' /data/runtime.json
+            test "$PRIOR_OWNER" = "$(stat -c '%u:%g:%a' /data/runtime.json)" \
+                && echo FAILED_LEGACY_OWNER_UNCHANGED || echo FAILED_LEGACY_OWNER_MOVED
+            test "$PRIOR_SUM" = "$(sha256sum /data/runtime.json | cut -d' ' -f1)" \
+                && echo FAILED_LEGACY_BYTES_UNCHANGED || echo FAILED_LEGACY_BYTES_CHANGED
+            test "$PRIOR_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo FAILED_LEGACY_INODE_STABLE || echo FAILED_LEGACY_INODE_CHANGED
+            setpriv --reuid 1000 --regid 1000 --clear-groups \
+                cat /data/runtime.json >/dev/null 2>&1 \
+                && echo OLD_IMAGE_COULD_READ_STATE || echo OLD_IMAGE_STATE_UNREADABLE
             setpriv --reuid 1000 --regid 1000 --clear-groups \
                 cat /run/agentcontrol-secrets/owner-password >/dev/null 2>&1 \
                 && echo OLD_IMAGE_COULD_AUTHENTICATE || echo OLD_IMAGE_LOCKED_OUT
@@ -1725,6 +1750,14 @@ public sealed class AgentIsolationContainerTests
             stat -c 'REPAIRED_DATA=%u:%g:%a' /data
             stat -c 'REPAIRED_SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
             echo "REPAIRED_STATE=$(cat /data/runtime.json)"
+            python3 -c "
+            import json, pathlib
+            m = json.loads(pathlib.Path('/control-data/rollback.active').read_text())
+            print('REPAIRED_PHASE=' + m['phase'])
+            print('REPAIRED_REASON=' + m['reason'])
+            print('REPAIRED_INTENT_IS_PUBLISHED' if m['intendedSha256'] == m['publishedSha256'] else 'REPAIRED_INTENT_MISMATCH')
+            print('REPAIRED_HAS_PREPUBLICATION' if m['prepublicationLegacySha256'] else 'REPAIRED_NO_PREPUBLICATION')
+            "
 
             # A crash in the other window - marker on disk, hand-backs not yet
             # applied - is the shape the new order actually produces. Reproduce
@@ -1757,12 +1790,30 @@ public sealed class AgentIsolationContainerTests
         Assert.Contains("OLD_IMAGE_LOCKED_OUT", output, StringComparison.Ordinal);
         Assert.DoesNotContain("OLD_IMAGE_COULD_AUTHENTICATE", output, StringComparison.Ordinal);
 
+        // The runtime state in particular keeps its prior owner, bytes and
+        // inode. This is the regression the previous cycle missed: the
+        // republish gave the new inode its 1000:1000 ownership at creation
+        // time, so a marker failure still left the old image able to read and
+        // advance a state with no record of it.
+        Assert.Contains("FAILED_LEGACY=0:0:600", output, StringComparison.Ordinal);
+        Assert.Contains("FAILED_LEGACY_OWNER_UNCHANGED", output, StringComparison.Ordinal);
+        Assert.Contains("FAILED_LEGACY_BYTES_UNCHANGED", output, StringComparison.Ordinal);
+        Assert.Contains("FAILED_LEGACY_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("OLD_IMAGE_STATE_UNREADABLE", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("OLD_IMAGE_COULD_READ_STATE", output, StringComparison.Ordinal);
+
         // Re-running the same command repairs it completely.
         Assert.Contains("REPAIR_EXIT=0", output, StringComparison.Ordinal);
         Assert.Contains("REPAIRED_MARKER", output, StringComparison.Ordinal);
         Assert.Contains("REPAIRED_DATA=1000:1000:755", output, StringComparison.Ordinal);
         Assert.Contains("REPAIRED_SECRET=1000:1000:600", output, StringComparison.Ordinal);
         Assert.Contains("ses_isolated", Extract(output, "REPAIRED_STATE="), StringComparison.Ordinal);
+
+        // The completed marker records the schema a replay classifies against.
+        Assert.Contains("REPAIRED_PHASE=complete", output, StringComparison.Ordinal);
+        Assert.Contains("REPAIRED_REASON=operator-rollback", output, StringComparison.Ordinal);
+        Assert.Contains("REPAIRED_INTENT_IS_PUBLISHED", output, StringComparison.Ordinal);
+        Assert.Contains("REPAIRED_HAS_PREPUBLICATION", output, StringComparison.Ordinal);
 
         // And the marker-written-but-not-handed-back crash window converges too.
         Assert.Contains("PARTIAL_REPLAY_EXIT=0", output, StringComparison.Ordinal);
@@ -1773,6 +1824,273 @@ public sealed class AgentIsolationContainerTests
         Assert.Contains("NO_TEMP_LEAK", output, StringComparison.Ordinal);
 
         Assert.DoesNotContain("owner-password-value", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two crash windows the marker-first order creates, and the replay
+    /// classification each one needs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>After the marker, before the publish.</b> The legacy path still holds
+    /// its pre-publication bytes, which the marker recorded as
+    /// <c>prepublicationLegacySha256</c>. The replay must recognise that the
+    /// publication never happened and perform it, rather than refusing on a
+    /// legacy state that "does not match what was published".
+    /// </para>
+    /// <para>
+    /// <b>After the root-owned publish, before the hand-back.</b> The legacy
+    /// path holds exactly <c>intendedSha256</c>, still root-owned, so the old
+    /// image cannot yet read it. The replay must recognise those bytes as its
+    /// own work, leave the inode alone, and only finish the hand-backs.
+    /// </para>
+    /// <para>
+    /// Without the second digest these two are indistinguishable from "another
+    /// writer advanced the legacy state", which is why the guard records both
+    /// and why this test injects the crash at each boundary rather than
+    /// simulating the resulting layout by hand.
+    /// </para>
+    /// </remarks>
+    [DockerFact]
+    public void BothCrashWindowsAroundTheRootOwnedPublishAreClassifiedAndConverge()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+
+            # Two copies, each aborting at exactly one boundary. Only a
+            # SystemExit is inserted; every surrounding step is the real one.
+            python3 - <<'INJECT_EOF'
+            import pathlib
+            body = pathlib.Path('/tmp/revert.py').read_text()
+
+            before = '    if will_publish:\n        published_digest = publish_bytes('
+            assert body.count(before) == 1, 'the republish call was not found exactly once'
+            pathlib.Path('/tmp/revert-crash-before-publish.py').write_text(
+                body.replace(before, '    if will_publish:\n        raise SystemExit(9)\n        published_digest = publish_bytes('))
+
+            after = '    # Step 4: hand the runtime state back explicitly.'
+            assert body.count(after) == 1, 'the hand-back step was not found exactly once'
+            pathlib.Path('/tmp/revert-crash-after-publish.py').write_text(
+                body.replace(after, '    raise SystemExit(9)\n' + after))
+            INJECT_EOF
+
+            setup() {
+              rm -f /control-data/rollback.active
+              install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
+              echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
+              echo '{"organizationId":"org-keep","sessionId":"ses_stale"}' > /data/runtime.json
+              chown 0:0 /data/runtime.json && chmod 0600 /data/runtime.json
+              chown 0:0 /data && chmod 0755 /data
+              chown 1001:1001 /run/agentcontrol-secrets/owner-password
+              chmod 0600 /run/agentcontrol-secrets/owner-password
+            }
+            revert() { python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0; }
+
+            # ---- Window 1: marker durable, publication never ran. ----
+            setup
+            BEFORE_SUM=$(sha256sum /data/runtime.json | cut -d' ' -f1)
+            python3 /tmp/revert-crash-before-publish.py /run/agentcontrol-secrets/owner-password \
+                1000 1000 /data /control-data 0 >/dev/null 2>&1
+            echo "W1_CRASH_EXIT=$?"
+            test -e /control-data/rollback.active && echo W1_MARKER_DURABLE || echo W1_NO_MARKER
+            python3 -c "
+            import json, pathlib
+            m = json.loads(pathlib.Path('/control-data/rollback.active').read_text())
+            print('W1_PHASE=' + m['phase'])
+            print('W1_PUBLISHED_IS_NULL' if m['publishedSha256'] is None else 'W1_CLAIMS_PUBLISH')
+            print('W1_PREPUB=' + str(m['prepublicationLegacySha256']))
+            "
+            echo "W1_EXPECT_PREPUB=$BEFORE_SUM"
+            # Nothing reached the old image yet.
+            stat -c 'W1_LEGACY_AFTER_CRASH=%u:%g:%a' /data/runtime.json
+            stat -c 'W1_DATA_AFTER_CRASH=%u:%g:%a' /data
+            stat -c 'W1_SECRET_AFTER_CRASH=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            test "$BEFORE_SUM" = "$(sha256sum /data/runtime.json | cut -d' ' -f1)" \
+                && echo W1_BYTES_UNCHANGED || echo W1_BYTES_CHANGED
+            # The replay recognises "not published yet" and publishes.
+            revert >/dev/null 2>/tmp/w1.err
+            echo "W1_REPLAY_EXIT=$?"
+            stat -c 'W1_LEGACY=%u:%g:%a' /data/runtime.json
+            echo "W1_STATE=$(setpriv --reuid 1000 --regid 1000 --clear-groups cat /data/runtime.json)"
+
+            # ---- Window 2: root-owned publish landed, hand-back did not. ----
+            setup
+            python3 /tmp/revert-crash-after-publish.py /run/agentcontrol-secrets/owner-password \
+                1000 1000 /data /control-data 0 >/dev/null 2>&1
+            echo "W2_CRASH_EXIT=$?"
+            # The published bytes are there, but root-owned: the old image still
+            # cannot read a state this run has not handed back.
+            stat -c 'W2_LEGACY_AFTER_CRASH=%u:%g:%a' /data/runtime.json
+            echo "W2_STATE_AFTER_CRASH=$(cat /data/runtime.json)"
+            setpriv --reuid 1000 --regid 1000 --clear-groups cat /data/runtime.json >/dev/null 2>&1 \
+                && echo W2_OLD_IMAGE_COULD_READ || echo W2_OLD_IMAGE_BLOCKED
+            stat -c 'W2_DATA_AFTER_CRASH=%u:%g:%a' /data
+            stat -c 'W2_SECRET_AFTER_CRASH=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            python3 -c "
+            import json, pathlib
+            m = json.loads(pathlib.Path('/control-data/rollback.active').read_text())
+            print('W2_PHASE=' + m['phase'])
+            print('W2_PUBLISHED_IS_NULL' if m['publishedSha256'] is None else 'W2_CLAIMS_PUBLISH')
+            "
+            W2_INODE=$(stat -c '%i' /data/runtime.json)
+            # The replay recognises its own intended bytes: no rewrite, just the
+            # remaining hand-backs.
+            revert >/dev/null 2>/tmp/w2.err
+            echo "W2_REPLAY_EXIT=$?"
+            test "$W2_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo W2_INODE_STABLE || echo W2_INODE_CHANGED
+            stat -c 'W2_LEGACY=%u:%g:%a' /data/runtime.json
+            stat -c 'W2_DATA=%u:%g:%a' /data
+            stat -c 'W2_SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            echo "W2_STATE=$(setpriv --reuid 1000 --regid 1000 --clear-groups cat /data/runtime.json)"
+
+            # ---- And after a completed rollback, an advanced legacy state is
+            # still refused rather than classified as either window. ----
+            setpriv --reuid 1000 --regid 1000 --clear-groups sh -c \
+                'printf "%s" "{\"sessionId\":\"ses_OLD_IMAGE_WORK\"}" > /data/runtime.json'
+            ADV_SUM=$(sha256sum /data/runtime.json | cut -d' ' -f1)
+            ADV_INODE=$(stat -c '%i' /data/runtime.json)
+            revert >/dev/null 2>/tmp/adv.err
+            echo "ADVANCED_EXIT=$?"
+            test "$ADV_SUM" = "$(sha256sum /data/runtime.json | cut -d' ' -f1)" \
+                && echo ADVANCED_BYTES_STABLE || echo ADVANCED_BYTES_CHANGED
+            test "$ADV_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo ADVANCED_INODE_STABLE || echo ADVANCED_INODE_CHANGED
+            grep -q 'matches neither' /tmp/adv.err && echo ADVANCED_MSG_OK || echo ADVANCED_MSG_BAD
+            ls /data/.runtime.json.*.tmp >/dev/null 2>&1 && echo TEMP_LEAKED || echo NO_TEMP_LEAK
+            """);
+
+        var output = result.StandardOutput;
+
+        // Window 1: the marker is durable and honest about having published
+        // nothing, and nothing reached the pre-isolation identity.
+        Assert.Contains("W1_CRASH_EXIT=9", output, StringComparison.Ordinal);
+        Assert.Contains("W1_MARKER_DURABLE", output, StringComparison.Ordinal);
+        Assert.Contains("W1_PHASE=intent", output, StringComparison.Ordinal);
+        Assert.Contains("W1_PUBLISHED_IS_NULL", output, StringComparison.Ordinal);
+        Assert.Equal(Extract(output, "W1_EXPECT_PREPUB="), Extract(output, "W1_PREPUB="));
+        Assert.Contains("W1_LEGACY_AFTER_CRASH=0:0:600", output, StringComparison.Ordinal);
+        Assert.Contains("W1_DATA_AFTER_CRASH=0:0:755", output, StringComparison.Ordinal);
+        Assert.Contains("W1_SECRET_AFTER_CRASH=1001:1001:600", output, StringComparison.Ordinal);
+        Assert.Contains("W1_BYTES_UNCHANGED", output, StringComparison.Ordinal);
+
+        // ...and the replay resumes the publication instead of refusing.
+        Assert.Contains("W1_REPLAY_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("W1_LEGACY=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "W1_STATE="), StringComparison.Ordinal);
+
+        // Window 2: the bytes landed but stayed root-owned, so the hand-back is
+        // genuinely a separate step and the old image cannot jump the gun.
+        Assert.Contains("W2_CRASH_EXIT=9", output, StringComparison.Ordinal);
+        Assert.Contains("W2_LEGACY_AFTER_CRASH=0:0:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "W2_STATE_AFTER_CRASH="), StringComparison.Ordinal);
+        Assert.Contains("W2_OLD_IMAGE_BLOCKED", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("W2_OLD_IMAGE_COULD_READ", output, StringComparison.Ordinal);
+        Assert.Contains("W2_DATA_AFTER_CRASH=0:0:755", output, StringComparison.Ordinal);
+        Assert.Contains("W2_SECRET_AFTER_CRASH=1001:1001:600", output, StringComparison.Ordinal);
+        Assert.Contains("W2_PHASE=intent", output, StringComparison.Ordinal);
+        Assert.Contains("W2_PUBLISHED_IS_NULL", output, StringComparison.Ordinal);
+
+        // ...and the replay recognises its own intended digest: hand-backs only.
+        Assert.Contains("W2_REPLAY_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("W2_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("W2_LEGACY=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("W2_DATA=1000:1000:755", output, StringComparison.Ordinal);
+        Assert.Contains("W2_SECRET=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "W2_STATE="), StringComparison.Ordinal);
+
+        // A genuinely advanced legacy state is still neither window.
+        Assert.Contains("ADVANCED_EXIT=1", output, StringComparison.Ordinal);
+        Assert.Contains("ADVANCED_BYTES_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("ADVANCED_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("ADVANCED_MSG_OK", output, StringComparison.Ordinal);
+        Assert.Contains("NO_TEMP_LEAK", output, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("owner-password-value", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A republish replaces the inode. Handing back the descriptor opened during
+    /// validation would chown the <em>superseded</em> inode — giving UID 1000 an
+    /// unreachable orphan while the file the old image actually reads stayed
+    /// root-owned, so the rollback would report success and leave the old image
+    /// unable to read its own state.
+    /// </summary>
+    /// <remarks>
+    /// The superseded inode is kept observable by holding an open descriptor
+    /// across the rename and inspecting it through <c>/proc/self/fd</c>. A hard
+    /// link would change <c>st_nlink</c> and trip the rollback's own hard-link
+    /// guard, which would prove nothing about this ordering.
+    /// </remarks>
+    [DockerFact]
+    public void RepublishHandsBackThePublishedInodeAndNotTheSupersededOne()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+
+            install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_stale"}' > /data/runtime.json
+            chown 0:0 /data/runtime.json && chmod 0600 /data/runtime.json
+            chown 0:0 /data && chmod 0755 /data
+
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+
+            # Pin the pre-publication inode. The rename unlinks its name, but an
+            # open descriptor keeps the inode alive and inspectable, and it
+            # leaves st_nlink at 1 so the rollback's hard-link guard is
+            # unaffected.
+            exec 9< /data/runtime.json
+            SUPERSEDED_INODE=$(stat -c '%i' /proc/self/fd/9)
+
+            python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0 >/dev/null
+            echo "REVERT_EXIT=$?"
+
+            test "$SUPERSEDED_INODE" != "$(stat -c '%i' /data/runtime.json)" \
+                && echo INODE_REPLACED || echo INODE_REUSED
+
+            # The decisive assertion: the superseded inode must still be
+            # root-owned. A chown of the stale descriptor would report 1000:1000
+            # here while the file the old image reads stayed root-only.
+            stat -c 'SUPERSEDED_OWNER=%u:%g' /proc/self/fd/9
+            echo "SUPERSEDED_CONTENT=$(cat /proc/self/fd/9)"
+            exec 9<&-
+
+            # ...and the inode the old image actually opens is the published one,
+            # owned by and readable as UID 1000.
+            stat -c 'PUBLISHED_OWNER=%u:%g:%a' /data/runtime.json
+            echo "PUBLISHED_CONTENT=$(setpriv --reuid 1000 --regid 1000 --clear-groups cat /data/runtime.json)"
+            """);
+
+        var output = result.StandardOutput;
+
+        Assert.Contains("REVERT_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("INODE_REPLACED", output, StringComparison.Ordinal);
+
+        // The orphan keeps the controller's ownership and the stale bytes.
+        Assert.Contains("SUPERSEDED_OWNER=0:0", output, StringComparison.Ordinal);
+        Assert.Contains("ses_stale", Extract(output, "SUPERSEDED_CONTENT="), StringComparison.Ordinal);
+
+        // The live file is the published one, handed back and readable.
+        Assert.Contains("PUBLISHED_OWNER=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "PUBLISHED_CONTENT="), StringComparison.Ordinal);
     }
 
     /// <summary>

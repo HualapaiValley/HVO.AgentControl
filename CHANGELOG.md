@@ -104,20 +104,53 @@ Changes after the first portal release are collected here.
   fails closed. Covered by a real container regression that reverts, mutates the
   legacy state as UID 1000, re-runs the revert, and asserts byte, hash and inode
   preservation before resuming.
-- The rollback marker is now recorded **before any ownership is handed back**
-  (#240), closing the other half of that data-loss path. The marker is both the
-  roll-forward interlock and the evidence the replay check validates against, so
-  writing it after the hand-backs left a crash window in which the pre-isolation
-  image was already runnable with no record of the publication: the next replay
-  would find no marker, treat the state the old image had advanced as unrecorded,
-  and overwrite it. With the marker first, a failure to record it aborts while
-  `/data`, the runtime state and the owner secret still belong to the controller —
-  neither image can start from a half-reverted deployment — and a crash after it
-  is an ordinary replayable rollback the identical command repairs.
-  `--accept-missing-runtime-state` records the marker too, so that path is bounded
-  as well. Covered by a container regression that injects a marker-publication
-  failure and asserts nothing was handed back, plus a source-order assertion that
-  needs no daemon.
+- The rollback marker is now durable **before the runtime state is republished**,
+  not only before the ownership hand-backs (#240). Ordering the `chown` calls
+  after the marker left the data-loss path open: the republish creates a new
+  inode and renames it over `/data/runtime.json`, and it gave that inode its
+  `1000:1000` ownership at creation time, so **publishing was itself an ownership
+  hand-back that ran before the marker existed**. A crash in between left a legacy
+  state the pre-isolation image could read and advance with no record of it, and
+  the next replay — finding no marker — treated the advanced state as the ordinary
+  first rollback and overwrote it. The order is now decide → record the intent
+  marker → publish **root-owned `0600`** → hand back explicitly → complete the
+  marker, so until the hand-back runs the old image cannot read a state the
+  rollback has not finished committing to. A marker that cannot be published now
+  aborts with the legacy state keeping its prior owner *and* its prior bytes.
+- The rollback marker carries a **schema with three digests** so a replay
+  classifies rather than guesses (#240): `prepublicationLegacySha256` (what the
+  legacy path held before this rollback), `intendedSha256` (what it will publish)
+  and `publishedSha256` (what it holds now, null while `phase` is `"intent"`).
+  A legacy file matching the pre-publication digest means the publication never
+  ran and is performed; one matching the intended digest means it already landed,
+  so the inode is not replaced and only the remaining hand-backs are re-applied;
+  anything else is a legacy state another writer advanced and is refused with all
+  three digests before the first write or chown. Both markers also carry
+  `schema: 2` and a `reason`/`phase` pair. `--accept-missing-runtime-state`
+  records the marker too, so that path is bounded as well.
+- `--revert-isolation` distinguishes the two marker kinds by **`reason`,
+  explicitly** (#240). `prepare-layout.py`'s `unrecorded-legacy-divergence` marker
+  records a divergence that was only detected — nothing was written to the legacy
+  path — so it now records null `prepublicationLegacySha256`, `intendedSha256` and
+  `publishedSha256`, and the rollback branches on the reason before it looks at
+  any digest. Inferring a publication from the recorded diverged bytes would
+  republish the private state over exactly the bytes the operator is rolling back
+  to keep. A diverged legacy file that has itself moved on since detection is
+  refused rather than resolved unilaterally.
+- The rollback hands back **the published inode, never the stale descriptor**
+  (#240). A republish replaces the inode, so the descriptor opened during
+  validation refers to a superseded one; chowning it would give UID 1000 an
+  unreachable orphan while the file the old image actually opens stayed
+  root-owned — a rollback reporting success while leaving the old image unable to
+  read its own state. The published name is re-opened by directory descriptor
+  under the same no-follow/hard-link/owner rules, its bytes re-verified against
+  the digest just published, and only that descriptor is handed back.
+  Covered by container regressions that inject a marker-publication failure and
+  assert the runtime state's owner, bytes and inode are all unchanged and
+  unreadable by UID 1000; that crash at each side of the root-owned publish and
+  assert the replay classifies and converges; and that pin the superseded inode
+  through an open descriptor to prove it was not the one handed back. Plus
+  source-order assertions that need no daemon.
 - Resume archives are published **create-never-replace** (#240). The
   `runtime.superseded-*`/`runtime.rolled-back-*` name carries a one-second
   timestamp, so two resumes inside one second — or after a clock step backwards —
@@ -196,12 +229,12 @@ Changes after the first portal release are collected here.
   that job already built (`AGENTCONTROL_ISOLATION_IMAGE`) with
   `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon or a missing image
   fails the job instead of silently skipping the suite. The job then asserts the
-  **exact** TRX counters — 37 discovered, 37 executed, 37 passed and 0
+  **exact** TRX counters — 41 discovered, 41 executed, 41 passed and 0
   `notExecuted` — rather than a lower bound, because a lower bound accepts a
-  suite that quietly lost coverage and a skip reports as "0 failed". The 37 are
-  35 real alternate-UID container tests plus 2 structural source/Compose wiring
-  tests that need no daemon; only the 35 prove the kernel-enforced boundary, and
-  the step records that distinction.
+  suite that quietly lost coverage and a skip reports as "0 failed". The 41 are
+  39 real alternate-UID container test cases plus 2 structural source/Compose
+  wiring tests that need no daemon; only the 39 prove the kernel-enforced
+  boundary, and the step records that distinction.
 - Runtime state moves from `/data/runtime.json` to the controller-private
   `/control-data/runtime.json` (#240), which is the single authoritative state
   while the isolated image runs. First start copies the legacy file;
