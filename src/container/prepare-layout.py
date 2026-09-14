@@ -608,6 +608,12 @@ def prepare():
         control_fd = track(open_directory(CONTROL_DATA))
         refuse_when_rollback_is_recorded(control_fd)
 
+        # Once the authoritative SQLite store exists, runtime.json is evidence
+        # only. A JSON-only divergence can no longer change what the controller
+        # resumes, so it must not block the database-era start; the bytes are
+        # still preserved and the legacy path is still reduced to root-only.
+        database_authoritative = exists(control_fd, "control.db")
+
         # ------------------------------------------------------------------
         # Step 1: take the agent-writable parent away first. `/data` is a fixed
         # mount point, not a caller-supplied path, and O_NOFOLLOW|O_DIRECTORY
@@ -680,7 +686,7 @@ def prepare():
                         "preserved the pre-isolation runtime state as '%s' with hash evidence"
                         % os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
                     )
-            elif legacy_info.st_uid != 0 and private_payload != payload:
+            elif legacy_info.st_uid != 0 and private_payload != payload and not database_authoritative:
                 # Root ownership is what a completed adoption leaves behind. A
                 # different owner with *different* bytes means something wrote
                 # this path outside isolation - almost certainly the
@@ -708,6 +714,23 @@ def prepare():
                     )
                 )
             else:
+                if database_authoritative and legacy_info.st_uid != 0 and private_payload != payload:
+                    # The database is the authority, so this JSON divergence no
+                    # longer changes what the controller resumes. Nothing is
+                    # recorded anywhere - there is no publication or marker for a
+                    # later replay to consume - so report it under its truthful
+                    # provenance label instead of claiming it was "recorded".
+                    #
+                    # A byte-identical legacy/private pair (an interrupted
+                    # adoption) can never take this branch because the condition
+                    # requires private_payload != payload, so this provenance is
+                    # emitted exactly when the two states genuinely differ.
+                    log(
+                        "provenance=database-era-json-divergence: the authoritative database at '%s' "
+                        "is present, so the JSON-only divergence at '%s' is tolerated as evidence "
+                        "rather than blocking the start"
+                        % (os.path.join(CONTROL_DATA, "control.db"), legacy_path)
+                    )
                 # Two cases converge here, and both are completions rather than
                 # divergences:
                 #
