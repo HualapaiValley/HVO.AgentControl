@@ -123,10 +123,15 @@ starts a shell and keeps `nologin`.
   It exposes four fixed operations — `acp`, `tmux`, `pty` and `signal` — with the
   executable always one of four compiled-in paths and no parameter for a program,
   UID, capability set or environment block. Every exec drops irreversibly to the
-  agent identity, sets `no_new_privs`, empties the capability bounding set,
-  rebuilds the environment from an allow-list, closes inherited descriptors while
-  still privileged, and re-checks the resolved working directory after `chdir` so
-  a symlink inside `/data` cannot place the child outside the agent tree.
+  agent identity, sets `no_new_privs`, leaves the child with empty permitted and
+  effective capability sets, rebuilds the environment from an allow-list, closes
+  inherited descriptors while still privileged, and re-checks the resolved
+  working directory after `chdir` so a symlink inside `/data` cannot place the
+  child outside the agent tree. The launcher does **not** empty the child's
+  capability *bounding* set: `PR_CAPBSET_DROP` needs `CAP_SETPCAP`, which the
+  entrypoint has already removed, so that attempt is a no-op here. The bounding
+  set the child inherits is the one the entrypoint installed
+  (`SETUID | SETGID | KILL`), measured as such in the container suite.
 
   **What the launcher does not bound.** The `tmux` operation's arguments are the
   caller's, and `new-session`/`new-window` take a child command vector — so the
@@ -188,13 +193,47 @@ the three volumes there is no transaction, so the operation is **replayable
 instead of atomic**: every step is idempotent, nothing is deleted, and a failure
 is repaired by re-running the identical command.
 
+Replayable is bounded, and the bound is a data-loss boundary in its own right.
+A replay is safe only while `/data/runtime.json` still holds what the rollback
+published; once the pre-isolation image has run it advances that file, and
+republishing the older private bytes over it would destroy that work. The
+rollback therefore validates the recorded `rollback.active` against the bytes on
+the legacy path **before its first write or chown**: an unchanged or already
+converged legacy file is a replay and proceeds, anything else is refused with
+both digests and routed to `--resume-isolation`. An already-converged replay
+re-applies metadata only, so the legacy inode is not churned.
+
 There is no automatic merge between a state the pre-isolation image advanced and
 the state the isolated run left behind. `--revert-isolation` therefore records
 `/control-data/rollback.active`, and `prepare-layout.py` fails the start while it
 is unresolved instead of silently picking a side. `--resume-isolation
 --state-source legacy|private` is the only thing that clears it; the state that
-loses is preserved under a timestamped name, never deleted. A legacy file written
-outside isolation without a recorded rollback fails closed the same way.
+loses is preserved under a timestamped name, never deleted.
+
+A legacy file written outside isolation without a recorded rollback fails closed
+the same way, but failing alone was not sufficient: the resume path is driven by
+the marker, so a refusal that recorded nothing left every later start failing
+identically with nothing to resolve. `prepare-layout.py` now writes the
+reconciliation marker itself — `reason: unrecorded-legacy-divergence`, both
+digests and sizes, the detected legacy owner, and no `publishedSha256` because
+nothing was republished — and only then fails. Rolling back out of that state is
+supported and keeps the diverged legacy bytes rather than overwriting them.
+
+### Interrupted first adoption
+
+Adoption is three writes, not one: publish the controller-private copy, record
+the snapshot plus its evidence, then reduce the legacy file to root-owned `0600`.
+A crash between them is resumable, and each boundary has a defined outcome:
+
+| Observed state | Treatment |
+| --- | --- |
+| Private copy exists, legacy still UID 1000, **bytes equal** | Interrupted adoption. Backfill snapshot/evidence, re-own the legacy file, continue. |
+| Private copy exists, legacy still UID 1000, **bytes differ** | Divergence. Record the reconciliation marker, then fail closed. |
+| Snapshot exists, evidence missing | Generate evidence *from the snapshot's own bytes*; the snapshot is never rewritten. |
+| Snapshot and evidence disagree on hash or size | Corruption. Fail the start rather than treat a damaged historical record as authoritative. |
+
+The snapshot is validated on every start, not only on the start that writes it,
+and must be a controller-owned regular file.
 
 Because the setuid launcher is the elevation mechanism, the container cannot run
 with `no-new-privileges`. Every other setuid binary is stripped from the image at
@@ -210,10 +249,14 @@ Real alternate-UID tests live in
 `tests/HVO.AgentControl.Tests/AgentIsolationContainerTests.cs`, including the
 planted-symlink escalation attempts, the capability bounding set, the `/bin/sh`
 confinement case, the state-republishing rollback (including the diverged-state
-case, a deployment with no legacy file, replayed runs and substituted paths), the
-fail-closed roll-forward interlock and the recorded controller PID. CI runs them in the `docker` job
-with `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon fails the job
-instead of skipping the suite.
+case, a deployment with no legacy file, replayed runs, the replay refusal once
+the old image has advanced the legacy state, and substituted paths), the
+interrupted-adoption crash boundaries, the recorded reconciliation marker, the
+fail-closed roll-forward interlock and the recorded controller PID. CI runs them
+in the `docker` job with `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable
+daemon fails the job instead of skipping the suite, and asserts the exact TRX
+counters (37 discovered/executed/passed, 0 skipped — 35 container tests plus 2
+structural wiring tests) rather than a lower bound.
 
 Separate credentials and process identities further before adding untrusted
 repository execution.

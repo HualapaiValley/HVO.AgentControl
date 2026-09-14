@@ -144,6 +144,19 @@ replayable rather than atomic**: nothing is deleted, every step is idempotent,
 and a failure part-way through is repaired by running the exact same command
 again. Do not start either image until it reports success.
 
+**The replay window closes when the pre-isolation image starts.** Replay is safe
+only while `/data/runtime.json` is still what the rollback put there. Once the
+old image has run it advances that file, and re-running `--revert-isolation`
+would republish the older controller-private bytes over the newer legacy state —
+the same data loss the roll-forward interlock prevents, reached from the other
+side. The command therefore checks the recorded `rollback.active` against the
+bytes actually on the legacy path **before writing or chowning anything**, and
+refuses with both digests if they have diverged. The deployment is already
+reverted at that point, so nothing needs repairing; to go back to the isolated
+image, resolve the interlock explicitly with `--resume-isolation --state-source
+legacy|private`. Repairing a genuinely interrupted rollback still works, because
+an unchanged (or already converged) legacy file is recognised as a replay.
+
 A deployment with no controller-private state (one that never started) fails
 closed; `--accept-missing-runtime-state` opts into handing back ownership only
 and letting the old image create a new organization.
@@ -170,8 +183,22 @@ docker --context home-docker compose up -d
 
 The state that is not chosen is preserved next to the private store under a
 timestamped name, never deleted. This command also returns the owner secret to
-UID 1001 and clears the interlock. The same fail-closed refusal applies if the
-legacy file was advanced outside isolation without a recorded rollback.
+UID 1001 and clears the interlock.
+
+The same fail-closed refusal applies if the legacy file was advanced outside
+isolation without a recorded rollback — an operator who started the old image by
+hand, for example. In that case the entrypoint **records the divergence itself**
+(with both SHA-256 digests and the detected owner) before failing, so the start
+is a decision point rather than a permanent refusal with nothing to resolve; the
+same `--resume-isolation --state-source` command then applies. Rolling back out
+of that state instead is also supported and keeps the diverged legacy bytes
+untouched.
+
+A legacy file still owned by UID 1000 whose bytes are **identical** to the
+controller-private copy is not a divergence: it is a first adoption that was
+interrupted after the private copy was published but before the snapshot and the
+legacy re-own. The start completes those remaining steps instead of demanding a
+choice between two copies of the same state.
 
 `--revert-isolation`, `--resume-isolation` and `--migrate-owner` are mutually
 exclusive. `--project` derives the `<project>_control-data`,

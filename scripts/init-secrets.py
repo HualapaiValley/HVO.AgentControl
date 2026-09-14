@@ -182,6 +182,17 @@ print(
 # this operation is written to be replayable instead: every step is idempotent,
 # nothing is deleted, and a failure part-way through is repaired by running the
 # exact same command again.
+#
+# "Replayable" is bounded, and the bound is the point of the marker check below.
+# A replay is only safe while the legacy state is still what this rollback put
+# there. Once the pre-isolation image has actually run it advances
+# /data/runtime.json, and republishing the (now older) controller-private bytes
+# over it would destroy the work the old image did - the precise data loss the
+# roll-forward interlock exists to prevent, arrived at from the other direction.
+# So a recorded rollback is validated first: a legacy file that still matches the
+# recorded publication (or that already matches the bytes about to be written) is
+# a replay and proceeds; anything else is refused before the first write or
+# chown, and the operator resolves it with --resume-isolation instead.
 REVERT_CODE = '''\
 import hashlib
 import json
@@ -387,6 +398,104 @@ try:
         descriptors.append(legacy_fd)
 
     payload = read_all(private_fd) if private_fd is not None else None
+    legacy_payload = read_all(legacy_fd) if legacy_fd is not None else None
+    legacy_digest = (
+        hashlib.sha256(legacy_payload).hexdigest() if legacy_payload is not None else None
+    )
+
+    # ------------------------------------------------------------------
+    # A recorded rollback bounds the replay. Validate it before the first
+    # write or chown: once the pre-isolation image has run it owns
+    # /data/runtime.json and may have advanced it, and republishing the older
+    # controller-private bytes over that would destroy the newer state - the
+    # same data loss the roll-forward interlock refuses, reached from the
+    # rollback side.
+    # ------------------------------------------------------------------
+    keep_legacy_bytes = False
+    marker_fd = open_checked(
+        os.path.join(private_root, marker_name),
+        allowed_owners=(control_uid, 0),
+        parent_fd=private_dir_fd,
+        name=marker_name,
+    )
+    if marker_fd is not None:
+        try:
+            marker_body = read_all(marker_fd)
+        finally:
+            os.close(marker_fd)
+
+        try:
+            recorded = json.loads(marker_body.decode("utf-8"))
+            if not isinstance(recorded, dict):
+                raise ValueError("marker is not an object")
+            recorded_digest = recorded.get("publishedSha256")
+            recorded_legacy_digest = recorded.get("legacySha256")
+            recorded_at = recorded.get("publishedAt", "an unknown time")
+            recorded_reason = recorded.get("reason", "rollback")
+        except (ValueError, UnicodeDecodeError) as error:
+            # Fail closed. A marker that cannot be read cannot bound the replay,
+            # and this operation writes over the state the old image may hold.
+            fail(
+                "%s exists but could not be read as rollback evidence (%s). Refusing to republish "
+                "over %s on an unverifiable record. Resolve the interlock explicitly instead: "
+                "--resume-isolation --state-source legacy|private."
+                % (os.path.join(private_root, marker_name), error, legacy_state)
+            )
+
+        # The replay is safe when nothing would be written over the legacy state
+        # at all (no private state, or no legacy file), when the legacy path
+        # already holds exactly the bytes this run would write, or when it still
+        # holds what this rollback published. Anything else is a legacy state
+        # that advanced past the private copy.
+        converged = legacy_payload is not None and payload is not None and legacy_payload == payload
+        replayable = (
+            legacy_fd is None
+            or payload is None
+            or converged
+            or (recorded_digest is not None and legacy_digest == recorded_digest)
+        )
+
+        # prepare-layout records a marker for a divergence nobody rolled back,
+        # and that marker has no publishedSha256 because no republish happened.
+        # Rolling back from there is legitimate and must not be a dead end: the
+        # legacy bytes are the ones the operator is choosing to keep by running
+        # a rollback at all, so they are left exactly as they are and only the
+        # ownership is handed back. The private state is retained either way.
+        if (
+            not replayable
+            and recorded_reason == "unrecorded-legacy-divergence"
+            and recorded_legacy_digest is not None
+            and legacy_digest == recorded_legacy_digest
+        ):
+            keep_legacy_bytes = True
+            replayable = True
+            print(
+                "%s records an unrecorded divergence (%s) and %s still holds exactly the diverged "
+                "bytes it recorded. Rolling back keeps them: the legacy state is handed back "
+                "unmodified and the controller-private state is retained, not republished over it."
+                % (os.path.join(private_root, marker_name), recorded_at, legacy_state)
+            )
+
+        if not replayable:
+            fail(
+                "a rollback is already recorded in %s (%s, reason '%s') and %s no longer matches it "
+                "(recorded sha256 %s, found sha256 %s). The pre-isolation image has advanced the "
+                "legacy state, so republishing the controller-private copy over it would discard "
+                "that work. Nothing was changed, and the deployment is already reverted: %s and the "
+                "owner secret belong to UID %d and the old image can run. To roll forward to the "
+                "isolated image instead, choose which state survives explicitly with: "
+                "--resume-isolation --state-source legacy|private."
+                % (
+                    os.path.join(private_root, marker_name),
+                    recorded_at,
+                    recorded_reason,
+                    legacy_state,
+                    recorded_digest if recorded_digest is not None else "none",
+                    legacy_digest,
+                    data_root,
+                    legacy_uid,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Apply. Order is deliberate and each step is idempotent on a re-run.
@@ -400,7 +509,23 @@ try:
     #    later roll-forward instead of letting it silently pick a state.
     # ------------------------------------------------------------------
     published_digest = None
-    if payload is not None:
+    if keep_legacy_bytes:
+        # A recorded, unrecorded-origin divergence the operator is rolling back
+        # into: the legacy bytes are the survivor, so only ownership moves.
+        published_digest = legacy_digest
+        hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
+    elif payload is not None and legacy_payload == payload:
+        # Already converged - a replay after the publish succeeded. Rewriting
+        # identical bytes would replace the inode for nothing, so only the
+        # metadata hand-back is (re-)applied.
+        published_digest = legacy_digest
+        print(
+            "%s already carries the current controller-private runtime state "
+            "(%d bytes, sha256 %s); it was not rewritten."
+            % (legacy_state, len(payload), published_digest)
+        )
+        hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
+    elif payload is not None:
         published_digest = publish_bytes(
             data_fd, data_root, state_name, payload, legacy_uid, legacy_gid, 0o600
         )
@@ -421,10 +546,20 @@ try:
     hand_back_metadata(data_fd, data_root, legacy_uid, legacy_gid, 0o755)
     hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)
 
+    # publishedSha256 is the digest of what /data/runtime.json actually holds now,
+    # which is what a later replay compares against to tell "nothing has run since"
+    # from "the old image advanced the state". When the legacy bytes were kept
+    # rather than republished, that is those bytes - not the private copy's.
     marker = {
         "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "reason": "operator-rollback",
         "publishedSha256": published_digest,
-        "publishedBytes": len(payload) if payload is not None else 0,
+        "publishedBytes": (
+            len(legacy_payload)
+            if keep_legacy_bytes and legacy_payload is not None
+            else (len(payload) if payload is not None else 0)
+        ),
+        "legacyBytesRetained": keep_legacy_bytes,
         "privateStateRetained": private_fd is not None,
         "legacyPath": legacy_state,
         "privatePath": private_state,
@@ -567,9 +702,46 @@ private_dir_fd = open_checked(private_root, directory=True, allowed_owners=(cont
 if private_dir_fd is None:
     fail("%s does not exist; the controller-private volume is not mounted" % private_root)
 
-if not os.path.lexists(os.path.join(private_root, marker_name)):
+marker_path = os.path.join(private_root, marker_name)
+if not os.path.lexists(marker_path):
     print("No rollback is recorded; nothing to resume. The isolated image can start as it is.")
     raise SystemExit(0)
+
+# The marker is what this command consumes and unlinks, so it is held to the
+# same rules as every other path here: a regular, controller-owned file with no
+# symlink at the final component and no extra hard links. Its body is advisory
+# (the operator's --state-source decides, not the recorded digests), so a
+# damaged body is reported rather than fatal - but a substituted *inode* is not
+# something to resolve on.
+marker_fd = open_checked(
+    marker_path, allowed_owners=(control_uid, 0), parent_fd=private_dir_fd, name=marker_name
+)
+if marker_fd is None:
+    fail("%s disappeared while it was being read; re-run the command" % marker_path)
+try:
+    marker_body = read_all(marker_fd)
+finally:
+    os.close(marker_fd)
+
+try:
+    recorded_marker = json.loads(marker_body.decode("utf-8"))
+    if not isinstance(recorded_marker, dict):
+        raise ValueError("marker is not an object")
+    print(
+        "Resolving the interlock recorded in %s at %s (reason '%s')."
+        % (
+            marker_path,
+            recorded_marker.get("publishedAt", "an unknown time"),
+            recorded_marker.get("reason", "rollback"),
+        )
+    )
+except (ValueError, UnicodeDecodeError) as error:
+    print(
+        "%s could not be parsed as rollback evidence (%s); resolving it from the explicit "
+        "--state-source choice, which does not depend on the recorded detail."
+        % (marker_path, error),
+        file=sys.stderr,
+    )
 
 data_fd = open_checked(data_root, directory=True, allowed_owners=(0, 1000))
 if data_fd is None:

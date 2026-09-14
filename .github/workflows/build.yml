@@ -93,21 +93,52 @@ jobs:
           --logger "trx;LogFileName=isolation-results.trx"
           --results-directory artifacts/isolation-results
       # A filter that stops matching (rename, namespace move) would silently run
-      # zero tests and still exit 0. Assert the suite actually executed.
+      # zero tests and still exit 0, and a `Skip` that starts applying would
+      # report "0 failed" just as cheerfully. Assert the exact expected count,
+      # all executed and all passing, with nothing skipped.
+      #
+      # The count is exact rather than a lower bound on purpose: a lower bound
+      # accepts a suite that quietly lost coverage as long as enough other tests
+      # remain, which is the "never a false green" failure this gate exists to
+      # prevent. Adding or removing a test in AgentIsolationContainerTests is a
+      # deliberate act, so updating EXPECTED here is part of that change.
+      #
+      # Scope note: the filter selects the whole AgentIsolationContainerTests
+      # class, which is 35 real alternate-UID container tests plus 2 structural
+      # source/Compose-wiring tests that need no daemon
+      # (LauncherSourceIsWiredIntoTheImageAndCi and
+      # ComposeGrantsExactlyTheCapabilitiesTheseTestsAssume). Both are asserted
+      # here; only the 35 prove the kernel-enforced boundary.
       - name: Assert the isolation suite executed
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
+          EXPECTED = 37  # see the scope note above: 35 container + 2 structural
           files = glob.glob("artifacts/isolation-results/*.trx")
           if not files:
               sys.exit("no isolation test results were produced")
+          if len(files) != 1:
+              sys.exit(f"expected exactly one isolation TRX, found {len(files)}: {sorted(files)}")
           ns = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
           counters = ET.parse(files[0]).getroot().find(".//t:Counters", ns)
+          if counters is None:
+              sys.exit("the isolation TRX carries no Counters element")
+          total = int(counters.get("total"))
           executed = int(counters.get("executed"))
           passed = int(counters.get("passed"))
-          print(f"isolation tests executed={executed} passed={passed}")
-          if executed < 33 or executed != passed:
-              sys.exit(f"expected at least 33 executed and all passing, got {executed}/{passed}")
+          # A Skip on DockerFact/DockerTheory lands in notExecuted, which is the
+          # exact shape a skipped security suite takes in the summary.
+          not_executed = int(counters.get("notExecuted"))
+          print(
+              f"isolation tests total={total} executed={executed} "
+              f"passed={passed} notExecuted={not_executed}"
+          )
+          if (total, executed, passed, not_executed) != (EXPECTED, EXPECTED, EXPECTED, 0):
+              sys.exit(
+                  f"expected exactly {EXPECTED} discovered, executed and passing with none skipped; "
+                  f"got total={total} executed={executed} passed={passed} notExecuted={not_executed}. "
+                  "If a test was intentionally added or removed, update EXPECTED in this step."
+              )
           PY
       - name: Upload isolation test results
         if: always()

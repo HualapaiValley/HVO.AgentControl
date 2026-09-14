@@ -37,11 +37,21 @@
  *
  * Every exec operation irreversibly drops to the agent identity (supplementary
  * groups cleared, real/effective/saved UID and GID set, verified afterwards),
- * sets PR_SET_NO_NEW_PRIVS, empties the capability bounding set, rebuilds the
- * environment from a closed name allow-list, closes inherited descriptors above
- * stderr, and starts a new process group. A compromise of the controller can
- * therefore execute code as the agent - which it already does by design - but
- * never as root, as the controller's own UID, or as any other identity.
+ * sets PR_SET_NO_NEW_PRIVS, leaves the child with empty permitted and effective
+ * capability sets, rebuilds the environment from a closed name allow-list,
+ * closes inherited descriptors above stderr, and starts a new process group. A
+ * compromise of the controller can therefore execute code as the agent - which
+ * it already does by design - but never as root, as the controller's own UID, or
+ * as any other identity.
+ *
+ * The child's capability *bounding* set is not emptied here, and this file must
+ * not claim otherwise. PR_CAPBSET_DROP requires CAP_SETPCAP, which the entrypoint
+ * deliberately removes before the controller starts, so the attempt below is a
+ * no-op (EPERM) in the shipped configuration. What actually bounds the child is
+ * the set the entrypoint installed - SETUID | SETGID | KILL - which is why the
+ * entrypoint, not this binary, is where CHOWN/DAC_OVERRIDE/FOWNER are removed.
+ * StartupCapabilitiesAreRemovedFromTheControllerBoundingSet measures the child's
+ * bounding set as 0xE0 rather than 0, which is the evidence for this wording.
  *
  * The `signal` operation is the only one that stays privileged, because a
  * UID 1001 parent cannot signal its UID 1000 children. It refuses anything that

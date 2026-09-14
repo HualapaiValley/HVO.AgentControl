@@ -666,6 +666,9 @@ public sealed class TmuxAttachLauncherTests
 
     private sealed class FakeTmux : IDisposable
     {
+        private static readonly string CanonicalFakeTmux =
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "fake-tmux.py");
+
         private readonly string _directory = Directory.CreateTempSubdirectory("tmux-fake-").FullName;
         private readonly string _executable;
         public string OthersPath => Path.Combine(_directory, "others.json");
@@ -674,132 +677,27 @@ public sealed class TmuxAttachLauncherTests
 
         public FakeTmux()
         {
-            _executable = Path.Combine(_directory, "fake tmux");
-            // This fake reproduces the real tmux 3.4 target grammar that issue #238
-            // exposed, verified against tmux 3.4 on a private socket:
-            //   * '=' exact-match syntax is honoured only by commands that resolve a
-            //     session through the fuzzy target parser (has-session,
-            //     show-environment, list-panes, kill-session, new-window).
-            //   * set-option treats '=' as part of a literal name and fails with
-            //     "no such session: =name".
-            //   * show-options -qv treats it the same way but stays SILENT with exit
-            //     code 0, which is why the original defect never surfaced in tests.
-            // Session ids ("$N") always resolve exactly for every command.
-            File.WriteAllText(_executable, "#!/usr/bin/python3\n" + "ROOT = " + JsonSerializer.Serialize(_directory) + "\n" + """
-                import json, os, sys
-                args = sys.argv[1:]
-                with open(os.path.join(ROOT, 'calls.jsonl'), 'a') as log:
-                    log.write(json.dumps({'Args': args, 'Env': dict(os.environ)}) + '\n')
-                path = os.path.join(ROOT, 'state.json')
-                others_path = os.path.join(ROOT, 'others.json')
-                arm_path = os.path.join(ROOT, 'arm')
-                arm_seen_path = os.path.join(ROOT, 'arm-seen')
-                state = json.load(open(path)) if os.path.exists(path) else None
-                others = json.load(open(others_path)) if os.path.exists(others_path) else []
-                command = args[0]
-                failure = os.path.join(ROOT, 'failure')
-                if os.path.exists(failure) and open(failure).read() == command: sys.exit(2)
-
-                def save():
-                    if state is not None: json.dump(state, open(path, 'w'))
-                    json.dump(others, open(others_path, 'w'))
-
-                def sessions():
-                    return ([state] if state is not None else []) + others
-
-                def target(flag='-t'):
-                    return args[args.index(flag) + 1] if flag in args else None
-
-                def resolve(value, exact_ok):
-                    # Strip the trailing window component of a 'session:' target.
-                    value = value[:-1] if value.endswith(':') else value
-                    if value.startswith('$'):
-                        found = [s for s in sessions() if s['id'] == value]
-                        return found[0] if found else None
-                    if value.startswith('='):
-                        if not exact_ok: return None  # '=' is a literal name character here.
-                        found = [s for s in sessions() if s['name'] == value[1:]]
-                        return found[0] if found else None
-                    found = [s for s in sessions() if s['name'] == value]
-                    if found: return found[0]
-                    found = [s for s in sessions() if s['name'].startswith(value)]
-                    return found[0] if len(found) == 1 else None
-
-                if command == 'has-session':
-                    sys.exit(0 if resolve(target(), True) else 1)
-                elif command == 'list-sessions':
-                    if not sessions(): sys.exit(1)
-                    assert args[args.index('-F') + 1] == '#{session_id} #{session_name}'
-                    for s in sessions(): print(s['id'] + ' ' + s['name'])
-                elif command == 'show-environment':
-                    s = resolve(target(), True)
-                    if not s: sys.exit(1)
-                    print('AGENTCONTROL_OWNER=' + s['owner'])
-                    # Deterministic server restart: once list-panes has passed
-                    # (the last probe before the recovery owner recheck), replace
-                    # this server after the recheck succeeds with an unrelated
-                    # session that reuses id $0 under a different name.
-                    if os.path.exists(arm_seen_path):
-                        os.remove(arm_seen_path)
-                        state = {'id': '$0', 'name': open(arm_path).read().strip(), 'owner': 'foreign', 'panes': {'%50': 0}, 'identity': 'foreign:%50'}
-                        save()
-                elif command == 'show-options':
-                    s = resolve(target(), False)
-                    if s is None: sys.exit(0)  # -qv: silent and successful.
-                    print(s.get('identity', ''))
-                elif command == 'set-option':
-                    s = resolve(target(), False)
-                    if s is None:
-                        sys.stderr.write('no such session: ' + str(target()) + '\n')
-                        sys.exit(1)
-                    s['identity'] = args[-1]
-                    save()
-                elif command in ('select-window', 'select-pane'):
-                    owner = [s for s in sessions() if args[-1] in s['panes']]
-                    if not owner: sys.exit(1)
-                    owner[0]['selectedWindow' if command == 'select-window' else 'selectedPane'] = args[-1]
-                    save()
-                elif command == 'list-panes':
-                    s = resolve(target(), True)
-                    if not s: sys.exit(1)
-                    for pane, dead in s['panes'].items(): print(pane + ' ' + str(dead))
-                    if os.path.exists(arm_path):
-                        open(arm_seen_path, 'w').write('1')
-                elif command in ('new-session', 'new-window'):
-                    assert args[args.index('-F') + 1] == '#{session_id} #{pane_id}' and '-P' in args
-                    if command == 'new-session':
-                        name = args[args.index('-s') + 1]
-                        if any(s['name'] == name for s in sessions()): sys.exit(1)
-                        used = {s['id'] for s in sessions()}
-                        ident = next('$' + str(n) for n in range(100) if '$' + str(n) not in used)
-                        owner = args[args.index('-e') + 1].split('=', 1)[1]
-                        state = {'id': ident, 'name': name, 'owner': owner, 'panes': {}, 'identity': ''}
-                        s = state
-                        pane = '%1'
-                    else:
-                        s = resolve(target(), True)
-                        if not s: sys.exit(1)
-                        pane = '%' + str(s.get('nextPane', 2))
-                        s['nextPane'] = int(pane[1:]) + 1
-                    s['panes'][pane] = 0
-                    save()
-                    print(s['id'] + ' ' + pane)
-                elif command == 'kill-session':
-                    s = resolve(target(), True)
-                    if not s: sys.exit(1)
-                    if state is not None and s is state:
-                        state = None
-                        os.remove(path)
-                    else:
-                        others.remove(s)
-                    save()
-                else:
-                    sys.exit(2)
-                """);
-            if (!OperatingSystem.IsWindows())
+            // The fake tmux binary is a build-copied canonical fixture that each
+            // test symlinks to, never a file written here. Writing an executable
+            // and then exec'ing it loses a race under parallel test execution:
+            // File.WriteAllText holds a writable descriptor, a concurrent
+            // Process.Start on another thread forks and inherits it, and the
+            // execve then fails with ETXTBSY ("Text file busy") - measured at
+            // roughly 2% of starts under load, which surfaced as a rare failure
+            // on the very first EnsureAsync. Same defect class as #232.
+            //
+            // The fixture derives its data directory from the invoked path, so
+            // the symlink keeps each test's state private.
+            if (!File.Exists(CanonicalFakeTmux))
             {
-                File.SetUnixFileMode(_executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                throw new FileNotFoundException(
+                    $"Canonical fake tmux fixture was not copied to '{CanonicalFakeTmux}'.",
+                    CanonicalFakeTmux);
             }
+
+            _executable = Path.Combine(_directory, "fake tmux");
+            File.CreateSymbolicLink(_executable, CanonicalFakeTmux);
+
             Request = new("http://127.0.0.1:12345", Path.Combine(_directory, "work space"), Path.Combine(_directory, "home"), "ses_test", "opencode", "ephemeral", "owner", true, "/pinned path/opencode");
         }
 

@@ -15,6 +15,7 @@ namespace HVO.AgentControl.Tests;
 /// covered by the always-on build-and-test job.
 /// </remarks>
 [Collection("agent-isolation")]
+[Trait("Category", "DockerIsolation")]
 public sealed class AgentIsolationContainerTests
 {
     private const string ImageTag = "hvo-agentcontrol:isolation-tests";
@@ -123,6 +124,40 @@ public sealed class AgentIsolationContainerTests
         })
         {
             Assert.DoesNotContain(falseClaim, launcherSource, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Nor may it claim to empty the child's capability BOUNDING set. Its
+        // PR_CAPBSET_DROP needs CAP_SETPCAP, which the entrypoint removes before
+        // the controller starts, so the call is a no-op in the shipped
+        // configuration: StartupCapabilitiesAreRemovedFromTheControllerBoundingSet
+        // measures the child's bounding set as 0xE0, not 0. What the launcher
+        // does guarantee is empty permitted/effective sets. The distinction is a
+        // security claim, so a doc or comment that overstates it fails here.
+        foreach (var document in new[]
+        {
+            launcherSource,
+            File.ReadAllText(Path.Combine(root, "docs", "ARCHITECTURE.md")),
+            File.ReadAllText(Path.Combine(root, "docs", "PHASE-1-CONTRACTS.md")),
+            File.ReadAllText(Path.Combine(root, "CHANGELOG.md")),
+            File.ReadAllText(Path.Combine(root, "README.md")),
+        })
+        {
+            Assert.DoesNotContain(
+                "empties the capability bounding set",
+                document,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        // The pinned SDK has a single source; a doc that names a different one
+        // is stale rather than historical unless it is describing a past bump.
+        var globalJson = File.ReadAllText(Path.Combine(root, "global.json"));
+        Assert.Contains("10.0.401", globalJson, StringComparison.Ordinal);
+        foreach (var name in new[] { "CHANGELOG.md", "README.md" })
+        {
+            Assert.DoesNotContain(
+                "SDK 10.0.400",
+                File.ReadAllText(Path.Combine(root, name)),
+                StringComparison.Ordinal);
         }
     }
 
@@ -1005,6 +1040,124 @@ public sealed class AgentIsolationContainerTests
     }
 
     /// <summary>
+    /// The bound on "replayable". A rollback is only safe to replay while the
+    /// legacy state is still what the rollback put there. Once the pre-isolation
+    /// image has actually run and advanced <c>/data/runtime.json</c>, re-running
+    /// the identical command would republish the older controller-private bytes
+    /// over the newer legacy state — destroying exactly the work the roll-forward
+    /// interlock exists to protect, arrived at from the rollback side.
+    /// </summary>
+    /// <remarks>
+    /// The assertion is on bytes <em>and</em> inode: a refusal that rewrote the
+    /// file with identical-looking content, or that re-owned it first and then
+    /// aborted, would be a different (and still wrong) outcome. The operator is
+    /// then steered to <c>--resume-isolation</c>, and the private state is still
+    /// selectable, which is what makes the refusal a decision point rather than
+    /// a dead end.
+    /// </remarks>
+    [DockerFact]
+    public void ReplayedRevertRefusesToOverwriteALegacyStateTheOldImageAdvanced()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var resumeCode = ExtractPythonBlock("RESUME_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
+            echo '{"organizationId":"org-keep","sessionId":"ses_adopt"}' > /data/runtime.json
+            chown 1000:1000 /data/runtime.json
+            /usr/local/bin/control-entrypoint /bin/true || echo ENTRYPOINT_FAILED
+
+            # The isolated run advances only the private state.
+            echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
+            chown 1001:1001 /control-data/runtime.json && chmod 0600 /control-data/runtime.json
+
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+            cat > /tmp/resume.py <<'RESUME_EOF'
+            {{resumeCode}}
+            RESUME_EOF
+            revert() { python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0; }
+
+            revert; echo "FIRST_REVERT_EXIT=$?"
+
+            # A replay with nothing in between is still a replay: it must succeed
+            # and must not churn the inode it already converged on.
+            AFTER_FIRST_INODE=$(stat -c '%i' /data/runtime.json)
+            revert; echo "CLEAN_REPLAY_EXIT=$?"
+            test "$AFTER_FIRST_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo CLEAN_REPLAY_INODE_STABLE || echo CLEAN_REPLAY_INODE_CHANGED
+
+            # Now the pre-isolation image genuinely runs as UID 1000 and advances
+            # the legacy state. This is the mutation the replay must not destroy.
+            setpriv --reuid 1000 --regid 1000 --clear-groups sh -c \
+                'printf "%s" "{\"organizationId\":\"org-keep\",\"sessionId\":\"ses_OLD_IMAGE_WORK\"}" > /data/runtime.json'
+            echo "MUTATED=$?"
+            ADVANCED_INODE=$(stat -c '%i' /data/runtime.json)
+            ADVANCED_BYTES=$(stat -c '%s' /data/runtime.json)
+            ADVANCED_SUM=$(sha256sum /data/runtime.json | cut -d' ' -f1)
+
+            revert; echo "UNSAFE_REPLAY_EXIT=$?"
+
+            # Byte-exact and inode-exact preservation: nothing was republished,
+            # re-owned, or rewritten with equivalent content.
+            echo "AFTER_STATE=$(cat /data/runtime.json)"
+            test "$ADVANCED_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo ADVANCED_INODE_STABLE || echo ADVANCED_INODE_CHANGED
+            test "$ADVANCED_BYTES" = "$(stat -c '%s' /data/runtime.json)" \
+                && echo ADVANCED_BYTES_STABLE || echo ADVANCED_BYTES_CHANGED
+            test "$ADVANCED_SUM" = "$(sha256sum /data/runtime.json | cut -d' ' -f1)" \
+                && echo ADVANCED_HASH_STABLE || echo ADVANCED_HASH_CHANGED
+            echo "PRIVATE_AFTER=$(cat /control-data/runtime.json)"
+            ls /data/.runtime.json.*.tmp >/dev/null 2>&1 && echo TEMP_LEAKED || echo NO_TEMP_LEAK
+
+            # The refusal is a decision point, not a dead end: the documented
+            # resume still works and can keep the state the old image advanced.
+            python3 /tmp/resume.py /run/agentcontrol-secrets/owner-password 1001 1001 /data /control-data legacy >/dev/null
+            echo "RESUME_EXIT=$?"
+            echo "RESUMED_PRIVATE=$(cat /control-data/runtime.json)"
+            test -e /control-data/rollback.active && echo MARKER_STILL_THERE || echo MARKER_CLEARED
+            /usr/local/bin/control-entrypoint /bin/true; echo "RESTART_EXIT=$?"
+            """);
+
+        var output = result.StandardOutput;
+
+        Assert.DoesNotContain("ENTRYPOINT_FAILED", output, StringComparison.Ordinal);
+        Assert.Contains("FIRST_REVERT_EXIT=0", output, StringComparison.Ordinal);
+
+        // A replay of a converged rollback stays idempotent and does not churn.
+        Assert.Contains("CLEAN_REPLAY_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("CLEAN_REPLAY_INODE_STABLE", output, StringComparison.Ordinal);
+
+        // The unsafe replay is refused.
+        Assert.Contains("MUTATED=0", output, StringComparison.Ordinal);
+        Assert.Contains("UNSAFE_REPLAY_EXIT=1", output, StringComparison.Ordinal);
+        Assert.Contains("no longer matches it", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("--state-source legacy|private", result.StandardError, StringComparison.Ordinal);
+
+        // The old image's work survives exactly: same bytes, same inode.
+        Assert.Contains("ses_OLD_IMAGE_WORK", Extract(output, "AFTER_STATE="), StringComparison.Ordinal);
+        Assert.Contains("ADVANCED_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("ADVANCED_BYTES_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("ADVANCED_HASH_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("NO_TEMP_LEAK", output, StringComparison.Ordinal);
+
+        // ...and neither state was lost: the private copy is still selectable.
+        Assert.Contains("ses_isolated", Extract(output, "PRIVATE_AFTER="), StringComparison.Ordinal);
+
+        // The documented next step still resolves it.
+        Assert.Contains("RESUME_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("ses_OLD_IMAGE_WORK", Extract(output, "RESUMED_PRIVATE="), StringComparison.Ordinal);
+        Assert.Contains("MARKER_CLEARED", output, StringComparison.Ordinal);
+        Assert.Contains("RESTART_EXIT=0", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A rollback leaves two independent histories of the same organization: the
     /// one the pre-isolation image advances in <c>/data/runtime.json</c> and the
     /// one the isolated run left in <c>/control-data</c>. They cannot be merged,
@@ -1084,22 +1237,73 @@ public sealed class AgentIsolationContainerTests
     /// <summary>
     /// The same divergence can arise without a recorded marker — an operator who
     /// started the old image by hand, for example. A UID 1000 owner on the legacy
-    /// state while controller-private state exists means it was written outside
-    /// isolation, and there is still no automatic merge, so the start fails.
+    /// state while <em>differing</em> controller-private state exists means it was
+    /// written outside isolation, and there is still no automatic merge, so the
+    /// start fails.
     /// </summary>
+    /// <remarks>
+    /// Failing was not enough on its own. <c>--resume-isolation</c> is driven by
+    /// the marker, so a refusal that recorded nothing left every later start
+    /// failing identically with nothing for the operator to resolve. The
+    /// entrypoint therefore writes the reconciliation marker — carrying both
+    /// digests so the operator can see which state is which — and only then
+    /// fails, which is what turns this into a decision point.
+    /// </remarks>
     [DockerFact]
-    public void AnUnrecordedLegacyWriteAlsoFailsClosedInsteadOfDiscardingState()
+    public void AnUnrecordedLegacyWriteRecordsAReconciliationMarkerAndThenFailsClosed()
     {
+        var resumeCode = ExtractPythonBlock("RESUME_CODE");
         var result = RunInContainer(
-            """
-            export Control__OwnerPasswordFile=""
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
             install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
             echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
             echo '{"organizationId":"org-keep","sessionId":"ses_legacy_advanced"}' > /data/runtime.json
             chown 1000:1000 /data/runtime.json
+            LEGACY_INODE=$(stat -c '%i' /data/runtime.json)
+            LEGACY_SUM=$(sha256sum /data/runtime.json | cut -d' ' -f1)
+            PRIVATE_SUM=$(sha256sum /control-data/runtime.json | cut -d' ' -f1)
+
             /usr/local/bin/control-entrypoint /bin/true; echo "EXIT=$?"
             echo "PRIVATE_INTACT=$(cat /control-data/runtime.json)"
             echo "LEGACY_INTACT=$(cat /data/runtime.json)"
+            stat -c 'LEGACY_OWNER=%u:%g' /data/runtime.json
+            test "$LEGACY_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo LEGACY_INODE_STABLE || echo LEGACY_INODE_CHANGED
+
+            # The marker is what makes this resolvable, so its content matters.
+            test -f /control-data/rollback.active && echo MARKER_RECORDED || echo MARKER_MISSING
+            stat -c 'MARKER=%u:%g:%a' /control-data/rollback.active
+            python3 -c "
+            import json, os, pathlib, sys
+            marker = json.loads(pathlib.Path('/control-data/rollback.active').read_text())
+            print('MARKER_REASON=' + marker['reason'])
+            print('MARKER_LEGACY_SUM=' + marker['legacySha256'])
+            print('MARKER_PRIVATE_SUM=' + marker['privateSha256'])
+            print('MARKER_LEGACY_UID=%d' % marker['legacyOwnerUid'])
+            print('MARKER_NO_PUBLISH' if marker['publishedSha256'] is None else 'MARKER_CLAIMS_PUBLISH')
+            "
+            echo "EXPECT_LEGACY_SUM=$LEGACY_SUM"
+            echo "EXPECT_PRIVATE_SUM=$PRIVATE_SUM"
+
+            # A second start still fails closed, and does not re-record over it.
+            /usr/local/bin/control-entrypoint /bin/true; echo "SECOND_EXIT=$?"
+
+            # ...and the recorded marker is exactly what the resume consumes.
+            cat > /tmp/resume.py <<'RESUME_EOF'
+            {{resumeCode}}
+            RESUME_EOF
+            python3 /tmp/resume.py /run/agentcontrol-secrets/owner-password 1001 1001 /data /control-data legacy
+            echo "RESUME_EXIT=$?"
+            echo "RESOLVED_PRIVATE=$(cat /control-data/runtime.json)"
+            cat /control-data/runtime.superseded-*.json 2>/dev/null | head -1
+            test -e /control-data/rollback.active && echo MARKER_STILL_THERE || echo MARKER_CLEARED
+            /usr/local/bin/control-entrypoint /bin/true; echo "RESTART_EXIT=$?"
             """);
 
         var output = result.StandardOutput;
@@ -1108,9 +1312,216 @@ public sealed class AgentIsolationContainerTests
         Assert.Contains("written outside isolation", result.StandardError, StringComparison.Ordinal);
         Assert.Contains("--state-source legacy|private", result.StandardError, StringComparison.Ordinal);
 
-        // Refusal is not destruction: both states are still there to choose from.
+        // Refusal is not destruction: both states are still there to choose from,
+        // byte-exact and on their original inode.
         Assert.Contains("ses_isolated", Extract(output, "PRIVATE_INTACT="), StringComparison.Ordinal);
         Assert.Contains("ses_legacy_advanced", Extract(output, "LEGACY_INTACT="), StringComparison.Ordinal);
+        Assert.Contains("LEGACY_OWNER=1000:1000", output, StringComparison.Ordinal);
+        Assert.Contains("LEGACY_INODE_STABLE", output, StringComparison.Ordinal);
+
+        // The divergence is recorded with both digests, so the operator can tell
+        // the two states apart before naming a survivor.
+        Assert.Contains("MARKER_RECORDED", output, StringComparison.Ordinal);
+        Assert.Contains("MARKER=1001:1001:600", output, StringComparison.Ordinal);
+        Assert.Contains("MARKER_REASON=unrecorded-legacy-divergence", output, StringComparison.Ordinal);
+        Assert.Contains("MARKER_LEGACY_UID=1000", output, StringComparison.Ordinal);
+        Assert.Equal(Extract(output, "EXPECT_LEGACY_SUM="), Extract(output, "MARKER_LEGACY_SUM="));
+        Assert.Equal(Extract(output, "EXPECT_PRIVATE_SUM="), Extract(output, "MARKER_PRIVATE_SUM="));
+
+        // No republish happened, so the marker must not claim one — otherwise a
+        // later rollback replay would validate against a publication that is not
+        // on disk.
+        Assert.Contains("MARKER_NO_PUBLISH", output, StringComparison.Ordinal);
+        Assert.Contains("SECOND_EXIT=1", output, StringComparison.Ordinal);
+
+        // The marker the entrypoint wrote is the one the resume resolves.
+        Assert.Contains("RESUME_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("ses_legacy_advanced", Extract(output, "RESOLVED_PRIVATE="), StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", output, StringComparison.Ordinal);
+        Assert.Contains("MARKER_CLEARED", output, StringComparison.Ordinal);
+        Assert.Contains("RESTART_EXIT=0", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Adoption is not one write. It publishes the controller-private copy first,
+    /// then records the snapshot and its evidence, then re-owns the legacy file to
+    /// root. A crash between those steps leaves a private copy beside a still-UID
+    /// 1000 legacy file that is <em>byte-identical</em> to it — which the previous
+    /// owner-only check reported as a divergence written outside isolation.
+    /// </summary>
+    /// <remarks>
+    /// That was wrong in the worst direction: an interrupted first start would
+    /// permanently refuse to boot and demand a state choice between two copies of
+    /// the same bytes. Identical bytes are an unfinished adoption, so the start
+    /// finishes it. Differing bytes remain a divergence, which the sibling test
+    /// above covers.
+    /// </remarks>
+    [DockerFact]
+    public void AnInterruptedAdoptionIsCompletedRatherThanReportedAsDivergence()
+    {
+        var result = RunInContainer(
+            """
+            export Control__OwnerPasswordFile=""
+            STATE='{"organizationId":"org-keep","sessionId":"ses_adopt","tmuxOwnerToken":"tok-adopt"}'
+
+            # Crash boundary 1: the private copy was published, but the process
+            # died before the snapshot, the evidence and the legacy re-own.
+            echo "$STATE" > /data/runtime.json && chown 1000:1000 /data/runtime.json
+            install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
+            echo "$STATE" > /control-data/runtime.json
+            rm -f /control-data/runtime.pre-isolation.json /control-data/runtime.pre-isolation.meta.json
+            LEGACY_INODE=$(stat -c '%i' /data/runtime.json)
+
+            /usr/local/bin/control-entrypoint /bin/true; echo "RESUMED_ADOPTION_EXIT=$?"
+            stat -c 'LEGACY_AFTER=%u:%g:%a' /data/runtime.json
+            test "$LEGACY_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo LEGACY_INODE_STABLE || echo LEGACY_INODE_CHANGED
+            echo "LEGACY_BYTES=$(cat /data/runtime.json)"
+            echo "PRIVATE_BYTES=$(cat /control-data/runtime.json)"
+            echo "SNAPSHOT_BYTES=$(cat /control-data/runtime.pre-isolation.json)"
+            test -e /control-data/rollback.active && echo MARKER_WRITTEN || echo NO_MARKER
+            python3 -c "
+            import hashlib, json, pathlib
+            meta = json.loads(pathlib.Path('/control-data/runtime.pre-isolation.meta.json').read_text())
+            body = pathlib.Path('/control-data/runtime.pre-isolation.json').read_bytes()
+            print('EVIDENCE_HASH_MATCHES' if meta['sha256'] == hashlib.sha256(body).hexdigest() else 'EVIDENCE_HASH_MISMATCH')
+            print('EVIDENCE_SIZE_MATCHES' if meta['bytes'] == len(body) else 'EVIDENCE_SIZE_MISMATCH')
+            print('EVIDENCE_PROVENANCE=' + meta['provenance'])
+            "
+
+            # Crash boundary 2: the snapshot landed but the evidence did not. The
+            # evidence is regenerated from the snapshot's own bytes, and the
+            # snapshot itself is never rewritten.
+            rm -f /control-data/runtime.pre-isolation.meta.json
+            SNAPSHOT_INODE=$(stat -c '%i' /control-data/runtime.pre-isolation.json)
+            /usr/local/bin/control-entrypoint /bin/true; echo "EVIDENCE_BACKFILL_EXIT=$?"
+            test -f /control-data/runtime.pre-isolation.meta.json && echo EVIDENCE_REGENERATED || echo EVIDENCE_MISSING
+            test "$SNAPSHOT_INODE" = "$(stat -c '%i' /control-data/runtime.pre-isolation.json)" \
+                && echo SNAPSHOT_INODE_STABLE || echo SNAPSHOT_INODE_CHANGED
+            echo "SNAPSHOT_AFTER_BACKFILL=$(cat /control-data/runtime.pre-isolation.json)"
+            stat -c 'EVIDENCE_MODE=%u:%g:%a' /control-data/runtime.pre-isolation.meta.json
+            python3 -c "
+            import hashlib, json, pathlib
+            meta = json.loads(pathlib.Path('/control-data/runtime.pre-isolation.meta.json').read_text())
+            body = pathlib.Path('/control-data/runtime.pre-isolation.json').read_bytes()
+            print('BACKFILL_HASH_MATCHES' if meta['sha256'] == hashlib.sha256(body).hexdigest() else 'BACKFILL_HASH_MISMATCH')
+            print('BACKFILL_PROVENANCE=' + meta['provenance'])
+            "
+
+            # Crash boundary 3: evidence that disagrees with the snapshot is
+            # corruption, not a backfill opportunity. It must fail the start.
+            python3 -c "
+            import json, pathlib
+            path = pathlib.Path('/control-data/runtime.pre-isolation.meta.json')
+            meta = json.loads(path.read_text())
+            meta['sha256'] = '0' * 64
+            path.write_text(json.dumps(meta))
+            "
+            /usr/local/bin/control-entrypoint /bin/true; echo "CORRUPT_EVIDENCE_EXIT=$?"
+            echo "SNAPSHOT_AFTER_CORRUPTION=$(cat /control-data/runtime.pre-isolation.json)"
+            """);
+
+        var output = result.StandardOutput;
+
+        // Boundary 1: the interrupted adoption completes instead of failing.
+        Assert.Contains("RESUMED_ADOPTION_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("NO_MARKER", output, StringComparison.Ordinal);
+
+        // The remaining adoption steps actually ran: the legacy file is reduced
+        // to the root-owned stale copy, on its original inode with its bytes.
+        Assert.Contains("LEGACY_AFTER=0:0:600", output, StringComparison.Ordinal);
+        Assert.Contains("LEGACY_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("ses_adopt", Extract(output, "LEGACY_BYTES="), StringComparison.Ordinal);
+        Assert.Contains("ses_adopt", Extract(output, "PRIVATE_BYTES="), StringComparison.Ordinal);
+
+        // ...and the snapshot that the crash skipped is backfilled with evidence.
+        Assert.Contains("ses_adopt", Extract(output, "SNAPSHOT_BYTES="), StringComparison.Ordinal);
+        Assert.Contains("EVIDENCE_HASH_MATCHES", output, StringComparison.Ordinal);
+        Assert.Contains("EVIDENCE_SIZE_MATCHES", output, StringComparison.Ordinal);
+        Assert.Contains(
+            "EVIDENCE_PROVENANCE=interrupted-adoption-completion",
+            output,
+            StringComparison.Ordinal);
+
+        // Boundary 2: missing evidence is regenerated from the snapshot bytes,
+        // and the snapshot is never overwritten to make them agree.
+        Assert.Contains("EVIDENCE_BACKFILL_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("EVIDENCE_REGENERATED", output, StringComparison.Ordinal);
+        Assert.Contains("SNAPSHOT_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("ses_adopt", Extract(output, "SNAPSHOT_AFTER_BACKFILL="), StringComparison.Ordinal);
+        Assert.Contains("EVIDENCE_MODE=1001:1001:600", output, StringComparison.Ordinal);
+        Assert.Contains("BACKFILL_HASH_MATCHES", output, StringComparison.Ordinal);
+        Assert.Contains("BACKFILL_PROVENANCE=evidence-backfill", output, StringComparison.Ordinal);
+
+        // Boundary 3: disagreeing evidence fails the start and the snapshot is
+        // left alone rather than rewritten to match a corrupted record.
+        Assert.Contains("CORRUPT_EVIDENCE_EXIT=1", output, StringComparison.Ordinal);
+        Assert.Contains("disagree", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("ses_adopt", Extract(output, "SNAPSHOT_AFTER_CORRUPTION="), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A rollback out of an unrecorded divergence must not be a dead end. The
+    /// entrypoint's own marker has no <c>publishedSha256</c> (nothing was
+    /// republished), so the replay guard would otherwise refuse the very first
+    /// rollback attempt. Recognising that marker, the rollback keeps the diverged
+    /// legacy bytes — the operator chose them by rolling back — hands ownership
+    /// back, and retains the controller-private state.
+    /// </summary>
+    [DockerFact]
+    public void RollingBackOutOfAnUnrecordedDivergenceKeepsTheLegacyBytes()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
+            install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_legacy_advanced"}' > /data/runtime.json
+            chown 1000:1000 /data/runtime.json
+            LEGACY_INODE=$(stat -c '%i' /data/runtime.json)
+
+            # The entrypoint detects and records the divergence, then fails.
+            /usr/local/bin/control-entrypoint /bin/true; echo "DETECT_EXIT=$?"
+
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+            python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0
+            echo "REVERT_EXIT=$?"
+
+            echo "LEGACY_AFTER=$(cat /data/runtime.json)"
+            test "$LEGACY_INODE" = "$(stat -c '%i' /data/runtime.json)" \
+                && echo LEGACY_INODE_STABLE || echo LEGACY_INODE_CHANGED
+            stat -c 'LEGACY_MODE=%u:%g:%a' /data/runtime.json
+            stat -c 'DATA_MODE=%u:%g:%a' /data
+            stat -c 'SECRET_MODE=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            echo "PRIVATE_RETAINED=$(cat /control-data/runtime.json)"
+            """);
+
+        var output = result.StandardOutput;
+
+        Assert.Contains("DETECT_EXIT=1", output, StringComparison.Ordinal);
+
+        // The rollback proceeds rather than refusing on its own marker...
+        Assert.Contains("REVERT_EXIT=0", output, StringComparison.Ordinal);
+
+        // ...keeping the diverged legacy bytes exactly, on the same inode.
+        Assert.Contains("ses_legacy_advanced", Extract(output, "LEGACY_AFTER="), StringComparison.Ordinal);
+        Assert.Contains("LEGACY_INODE_STABLE", output, StringComparison.Ordinal);
+
+        // The old image can run: ownership of state, /data and the secret is back.
+        Assert.Contains("LEGACY_MODE=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("DATA_MODE=1000:1000:755", output, StringComparison.Ordinal);
+        Assert.Contains("SECRET_MODE=1000:1000:600", output, StringComparison.Ordinal);
+
+        // And nothing was discarded: the isolated run's state is still there.
+        Assert.Contains("ses_isolated", Extract(output, "PRIVATE_RETAINED="), StringComparison.Ordinal);
     }
 
     /// <summary>

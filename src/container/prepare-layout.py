@@ -66,6 +66,31 @@ that marker exists this helper refuses to start: rolling forward would
 otherwise silently discard one of the two. The operator picks the surviving
 state explicitly with `scripts/init-secrets.py --resume-isolation
 --state-source legacy|private`, which is the only thing that clears the marker.
+
+The same interlock covers a divergence nobody recorded - an operator who
+started the pre-isolation image by hand, for example. When the legacy state is
+still owned by UID 1000 while controller-private state exists *and the two
+differ*, this helper writes the marker itself (recording both SHA-256 digests
+and the detected ownership) and only then fails. Refusing without recording
+would have left the operator with a start that fails identically on every
+attempt and no state for `--resume-isolation` to resolve.
+
+Interrupted first adoption
+--------------------------
+
+Adoption is three separate writes: publish the private copy, record the
+snapshot plus its evidence, and reduce the legacy file to root-owned `0600`.
+A crash between them leaves a private copy next to a still-UID-1000 legacy
+file, which is byte-identical to it. That is not a divergence and must not be
+reported as one, so the start completes the remaining steps instead: the
+snapshot/evidence are backfilled from the identical bytes and the legacy file
+is reduced. Only differing bytes are a divergence.
+
+The snapshot and its evidence are validated on every start: the snapshot must
+be a controller-owned regular file, a missing evidence file is generated from
+the snapshot's own bytes (never by overwriting the snapshot), and an evidence
+file whose hash or size disagrees with the snapshot fails the start rather than
+letting a corrupted historical record look authoritative.
 """
 
 import errno
@@ -261,18 +286,123 @@ def exists(directory_fd, name):
     return True
 
 
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def evidence_for(payload, provenance):
+    return json.dumps(
+        {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+            "source": os.path.join(AGENT_DATA, LEGACY_STATE_NAME),
+            "provenance": provenance,
+            "recordedAt": now(),
+        },
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def verify_snapshot_evidence(control_fd):
+    """Validate the preserved snapshot and backfill missing evidence.
+
+    Adoption writes the snapshot and its evidence as two separate publishes, so
+    a crash in between leaves a snapshot with no hash record. The snapshot bytes
+    are the surviving truth in that case: the evidence is regenerated *from
+    them*, and the snapshot itself is never rewritten. An evidence file that
+    disagrees with the snapshot is corruption, not a backfill opportunity, and
+    fails the start rather than standing as a false historical record.
+
+    Returns True when evidence was generated, False when it was already valid,
+    and None when there is no snapshot yet.
+    """
+    snapshot_path = os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
+    snapshot_fd = open_regular_file(control_fd, SNAPSHOT_NAME, CONTROL_DATA)
+    if snapshot_fd is None:
+        if exists(control_fd, SNAPSHOT_NAME):
+            raise LayoutError("'%s' vanished while being validated" % snapshot_path)
+        return None
+
+    try:
+        info = os.fstat(snapshot_fd)
+        if info.st_uid not in (CONTROL_UID, 0):
+            raise LayoutError(
+                "'%s' is owned by UID %d; the preserved pre-isolation state must belong to the "
+                "controller identity. Refusing to start on an unverifiable historical record."
+                % (snapshot_path, info.st_uid)
+            )
+        body = read_all(snapshot_fd)
+    finally:
+        os.close(snapshot_fd)
+
+    digest = hashlib.sha256(body).hexdigest()
+    evidence_path = os.path.join(CONTROL_DATA, SNAPSHOT_EVIDENCE_NAME)
+    evidence_fd = open_regular_file(control_fd, SNAPSHOT_EVIDENCE_NAME, CONTROL_DATA)
+    if evidence_fd is None:
+        if exists(control_fd, SNAPSHOT_EVIDENCE_NAME):
+            raise LayoutError("'%s' vanished while being validated" % evidence_path)
+        publish(
+            control_fd,
+            CONTROL_DATA,
+            SNAPSHOT_EVIDENCE_NAME,
+            evidence_for(body, "evidence-backfill"),
+            CONTROL_UID,
+            CONTROL_GID,
+            0o600,
+        )
+        return True
+
+    try:
+        recorded_body = read_all(evidence_fd)
+    finally:
+        os.close(evidence_fd)
+
+    try:
+        recorded = json.loads(recorded_body.decode("utf-8"))
+        recorded_digest = recorded["sha256"]
+        recorded_bytes = recorded["bytes"]
+    except (ValueError, UnicodeDecodeError, KeyError, TypeError) as error:
+        raise LayoutError(
+            "'%s' is not readable hash evidence for '%s' (%s); refusing to start on a corrupted "
+            "record of the pre-isolation state." % (evidence_path, snapshot_path, error)
+        ) from error
+
+    if recorded_digest != digest or recorded_bytes != len(body):
+        raise LayoutError(
+            "'%s' records sha256 %s / %s bytes but '%s' is sha256 %s / %d bytes; the preserved "
+            "pre-isolation state and its evidence disagree. Refusing to start rather than treat a "
+            "corrupted historical record as authoritative."
+            % (
+                evidence_path,
+                recorded_digest,
+                recorded_bytes,
+                snapshot_path,
+                digest,
+                len(body),
+            )
+        )
+    return False
+
+
 def record_pre_isolation_snapshot(control_fd, payload, provenance):
     """Preserve the original legacy state once, with hash evidence.
 
     This is what makes the pre-isolation state independent of `/data/runtime.json`
     afterwards: the rollback republishes the *current* private state over that
     path, so the file itself can no longer serve as the historical record. An
-    existing snapshot is never overwritten - only the first one is the original.
+    existing snapshot is never overwritten - only the first one is the original,
+    and an existing one is validated (and its evidence backfilled) instead.
     """
     if exists(control_fd, SNAPSHOT_NAME):
+        if verify_snapshot_evidence(control_fd):
+            log(
+                "regenerated the missing hash evidence for '%s' from its own bytes"
+                % os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
+            )
         return False
 
-    digest = publish(
+    publish(
         control_fd,
         CONTROL_DATA,
         SNAPSHOT_NAME,
@@ -281,27 +411,59 @@ def record_pre_isolation_snapshot(control_fd, payload, provenance):
         CONTROL_GID,
         0o600,
     )
-    evidence = json.dumps(
-        {
-            "sha256": digest,
-            "bytes": len(payload),
-            "source": os.path.join(AGENT_DATA, LEGACY_STATE_NAME),
-            "provenance": provenance,
-            "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        },
-        indent=2,
-        sort_keys=True,
-    ).encode("utf-8")
     publish(
         control_fd,
         CONTROL_DATA,
         SNAPSHOT_EVIDENCE_NAME,
-        evidence,
+        evidence_for(payload, provenance),
         CONTROL_UID,
         CONTROL_GID,
         0o600,
     )
     return True
+
+
+def record_unrecorded_divergence(control_fd, legacy_payload, legacy_uid, private_payload):
+    """Record the reconciliation marker for a divergence nobody rolled back.
+
+    A UID 1000 owner on the legacy state while differing controller-private state
+    exists means the pre-isolation image (or an operator) wrote it outside
+    isolation. Failing without recording anything would have been a dead end: the
+    resume path is driven by this marker, so every subsequent start would fail
+    identically with nothing for `--resume-isolation` to resolve. The marker
+    carries both digests and sizes, so the operator can see which state is which
+    before naming the survivor; neither state is modified here.
+    """
+    payload = json.dumps(
+        {
+            "publishedAt": now(),
+            "reason": "unrecorded-legacy-divergence",
+            "detectedBy": "prepare-layout",
+            "legacyPath": os.path.join(AGENT_DATA, LEGACY_STATE_NAME),
+            "legacyOwnerUid": legacy_uid,
+            "legacySha256": hashlib.sha256(legacy_payload).hexdigest(),
+            "legacyBytes": len(legacy_payload),
+            "privatePath": os.path.join(CONTROL_DATA, PRIVATE_STATE_NAME),
+            "privateSha256": hashlib.sha256(private_payload).hexdigest(),
+            "privateBytes": len(private_payload),
+            "privateStateRetained": True,
+            # No republish happened, so there is no published digest to compare a
+            # later --revert-isolation replay against.
+            "publishedSha256": None,
+            "publishedBytes": 0,
+        },
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    publish(
+        control_fd,
+        CONTROL_DATA,
+        ROLLBACK_MARKER_NAME,
+        payload,
+        CONTROL_UID,
+        CONTROL_GID,
+        0o600,
+    )
 
 
 def refuse_when_rollback_is_recorded(control_fd):
@@ -316,7 +478,11 @@ def refuse_when_rollback_is_recorded(control_fd):
     if not exists(control_fd, ROLLBACK_MARKER_NAME):
         return
 
-    detail = ""
+    # A symlink or non-regular file in the marker's place is refused by
+    # open_regular_file, and a damaged body only costs the operator the detail
+    # line: the presence of the entry is what blocks the start, so a marker that
+    # cannot be parsed still fails closed rather than being ignored.
+    detail = " (the marker could not be parsed; treat it as unresolved)"
     marker_fd = open_regular_file(control_fd, ROLLBACK_MARKER_NAME, CONTROL_DATA)
     if marker_fd is not None:
         try:
@@ -325,9 +491,12 @@ def refuse_when_rollback_is_recorded(control_fd):
             os.close(marker_fd)
         try:
             recorded = json.loads(body.decode("utf-8"))
-            detail = " (rollback recorded at %s)" % recorded.get("publishedAt", "an unknown time")
+            detail = " (recorded at %s, reason '%s')" % (
+                recorded.get("publishedAt", "an unknown time"),
+                recorded.get("reason", "rollback"),
+            )
         except (ValueError, UnicodeDecodeError):
-            detail = ""
+            pass
 
     raise LayoutError(
         "a rollback to the pre-isolation image is recorded in '%s'%s; the legacy '%s' may have been "
@@ -428,9 +597,19 @@ def prepare():
         # keep the stale legacy path root-only for the rest of the isolated run.
         # ------------------------------------------------------------------
         legacy_path = os.path.join(AGENT_DATA, LEGACY_STATE_NAME)
-        if legacy_fd is not None:
+        if legacy_fd is None:
+            # No legacy state to adopt, but an existing snapshot is still the
+            # historical record and is validated (and its evidence backfilled)
+            # on every start, not only on the start that writes it.
+            if verify_snapshot_evidence(control_fd):
+                log(
+                    "regenerated the missing hash evidence for '%s' from its own bytes"
+                    % os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
+                )
+        else:
             legacy_info = os.fstat(legacy_fd)
             payload = read_all(legacy_fd)
+            private_payload = None if private_fd is None else read_all(private_fd)
 
             if private_fd is None:
                 publish(
@@ -448,23 +627,62 @@ def prepare():
                         "preserved the pre-isolation runtime state as '%s' with hash evidence"
                         % os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
                     )
-            elif legacy_info.st_uid != 0:
-                # Root ownership is what the isolated run leaves behind. Any other
-                # owner means something wrote this path outside isolation - almost
-                # certainly the pre-isolation image after an unrecorded rollback -
-                # and the two states cannot be merged automatically.
+            elif legacy_info.st_uid != 0 and private_payload != payload:
+                # Root ownership is what a completed adoption leaves behind. A
+                # different owner with *different* bytes means something wrote
+                # this path outside isolation - almost certainly the
+                # pre-isolation image after an unrecorded rollback - and the two
+                # states cannot be merged automatically.
+                #
+                # Record the reconciliation marker before failing. Refusing
+                # without it would strand the deployment: --resume-isolation is
+                # driven by the marker, so every later start would fail the same
+                # way with nothing for the operator to resolve. The marker
+                # preserves both digests; neither state is touched.
+                record_unrecorded_divergence(
+                    control_fd, payload, legacy_info.st_uid, private_payload
+                )
                 raise LayoutError(
-                    "'%s' is owned by UID %d while controller-private state exists; it was written "
-                    "outside isolation and there is no automatic merge. Choose which state survives "
-                    "with: %s" % (legacy_path, legacy_info.st_uid, RESUME_INSTRUCTION)
+                    "'%s' is owned by UID %d and differs from the controller-private state; it was "
+                    "written outside isolation and there is no automatic merge. Both states are "
+                    "intact and the divergence is now recorded in '%s'. Choose which state survives "
+                    "with: %s"
+                    % (
+                        legacy_path,
+                        legacy_info.st_uid,
+                        os.path.join(CONTROL_DATA, ROLLBACK_MARKER_NAME),
+                        RESUME_INSTRUCTION,
+                    )
                 )
-            elif record_pre_isolation_snapshot(control_fd, payload, "pre-isolation-backfill"):
-                # A deployment isolated before snapshots existed: the root-owned
-                # legacy file is still the untouched original, so record it now.
-                log(
-                    "preserved the existing pre-isolation runtime state as '%s' with hash evidence"
-                    % os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
+            else:
+                # Two cases converge here, and both are completions rather than
+                # divergences:
+                #
+                # * A root-owned legacy file - the ordinary isolated restart, or
+                #   a deployment isolated before snapshots existed, whose
+                #   untouched original is recorded now.
+                # * A UID 1000 legacy file whose bytes are *identical* to the
+                #   private copy. Adoption publishes the private copy before it
+                #   snapshots and before it re-owns the legacy file, so this is
+                #   an adoption that was interrupted between those steps. The
+                #   remaining steps are finished below instead of reporting a
+                #   divergence that does not exist.
+                provenance = (
+                    "pre-isolation-backfill"
+                    if legacy_info.st_uid == 0
+                    else "interrupted-adoption-completion"
                 )
+                if legacy_info.st_uid != 0:
+                    log(
+                        "completing an adoption that was interrupted after the private copy was "
+                        "published: '%s' still belongs to UID %d and is byte-identical to the "
+                        "controller-private state" % (legacy_path, legacy_info.st_uid)
+                    )
+                if record_pre_isolation_snapshot(control_fd, payload, provenance):
+                    log(
+                        "preserved the existing pre-isolation runtime state as '%s' with hash evidence"
+                        % os.path.join(CONTROL_DATA, SNAPSHOT_NAME)
+                    )
 
             # The stale legacy copy carries the tmux owner token from the state it
             # was captured at, and the agent identity must not be able to read it

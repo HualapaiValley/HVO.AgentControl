@@ -181,8 +181,11 @@ secret, and a separate agent identity (UID 1000) owning the OpenCode home,
 workspace, tmux, TUI and PTY bridge. Orientation is host-owned and
 agent-readable at `/agent-config`. A setuid launcher (root:control, `4750`,
 not agent-executable) provides only registered `acp`, `tmux`, `pty` and `signal`
-operations, drops privileges irreversibly, sets `no_new_privs`, empties the
-capability bounding set and rebuilds the child environment from an allow-list.
+operations, drops privileges irreversibly, sets `no_new_privs`, leaves the child
+with empty permitted and effective capability sets, and rebuilds the child
+environment from an allow-list. The child's capability *bounding* set is bounded
+by the entrypoint (`SETUID | SETGID | KILL`), not by the launcher, which cannot
+shrink it once `CAP_SETPCAP` is gone.
 `/data` itself is root-owned so the agent cannot substitute a subdirectory for
 the root entrypoint to act on, and the entrypoint removes
 `CHOWN`/`DAC_OVERRIDE`/`FOWNER` from the capability bounding set before the

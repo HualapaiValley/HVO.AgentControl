@@ -21,7 +21,8 @@ Changes after the first portal release are collected here.
   `pty` and `signal` operations, with the executable always one of four
   compiled-in paths and no parameter for a program, UID, capability set or
   environment block. It drops privileges irreversibly, sets `no_new_privs`,
-  empties the capability bounding set, rebuilds the environment from an
+  leaves the child with empty permitted and effective capability sets, rebuilds
+  the environment from an
   allow-list, closes inherited descriptors while still privileged, and re-checks
   the resolved working directory after `chdir` so a symlink inside `/data`
   cannot place the child outside the agent tree. The `tmux` operation forwards
@@ -49,9 +50,13 @@ Changes after the first portal release are collected here.
   and the legacy runtime state, the controller/child capability bounding sets,
   the `/bin/sh`-as-agent confinement case, the login-shell requirement, the
   end-to-end rollback with diverged state, a rollback for a deployment that never
-  had a legacy file, replayed rollbacks, the fail-closed roll-forward interlock
-  and the recorded controller PID.
-- `docs/DEVELOPMENT.md`: pinned toolchain (.NET SDK 10.0.400, target
+  had a legacy file, replayed rollbacks, the replay refusal once the old image has
+  advanced the legacy state (asserting byte, hash and inode preservation), the
+  crash boundaries of an interrupted first adoption (identical-bytes completion,
+  evidence backfill and corrupted-evidence refusal), the recorded reconciliation
+  marker for an unrecorded divergence, the fail-closed roll-forward interlock and
+  the recorded controller PID.
+- `docs/DEVELOPMENT.md`: pinned toolchain (.NET SDK 10.0.401, target
   `net10.0`, Node 22, Playwright 1.63.0, Python 3.12, OpenCode 1.18.30, and the
   runtime image's `python3`/`tmux`), clean-machine build/test/browser/container
   and opt-in live-check commands, C# guidance, Blazor code-behind/scoped-style
@@ -84,6 +89,43 @@ Changes after the first portal release are collected here.
   state fails closed unless `--accept-missing-runtime-state` is given. It still
   refuses to run while the control container is up or its state cannot be
   determined, and is mutually exclusive with `--migrate-owner`.
+- The rollback replay is now **bounded by the recorded marker**, which closes a
+  data-loss path (#240). Replay was only ever safe while `/data/runtime.json`
+  still held what the rollback published; once the pre-isolation image had run
+  and advanced it, re-running the identical command republished the older
+  controller-private bytes over the newer legacy state — destroying exactly the
+  work the roll-forward interlock exists to protect. `--revert-isolation` now
+  validates `rollback.active` (regular file, controller-owned, parsed digests)
+  against the bytes on the legacy path **before its first write or chown**: an
+  unchanged or already-converged legacy file is a replay and proceeds, and an
+  already-converged one re-applies metadata only instead of churning the inode.
+  Anything else is refused with both digests, nothing is modified, and the
+  operator is routed to `--resume-isolation`. A marker that cannot be parsed
+  fails closed. Covered by a real container regression that reverts, mutates the
+  legacy state as UID 1000, re-runs the revert, and asserts byte, hash and inode
+  preservation before resuming.
+- An unrecorded divergence now **records a reconciliation marker before failing**
+  (#240). `prepare-layout.py` refused to start when the legacy state was owned by
+  UID 1000 while controller-private state existed, but recorded nothing — and
+  `--resume-isolation` is driven by that marker, so every later start failed
+  identically with nothing for the operator to resolve. It now publishes a marker
+  carrying `reason: unrecorded-legacy-divergence`, both SHA-256 digests and sizes,
+  the detected legacy owner, and an explicit null `publishedSha256` (nothing was
+  republished, so a later replay must not validate against a publication that is
+  not on disk). Rolling back out of that state is supported and keeps the diverged
+  legacy bytes untouched rather than overwriting them.
+- **Interrupted first adoption is resumable** (#240). Adoption publishes the
+  private copy before it records the snapshot and before it re-owns the legacy
+  file, so a crash in between left a UID 1000 legacy file that was byte-identical
+  to the private copy — which the previous owner-only check reported as a
+  divergence written outside isolation, permanently refusing to boot and demanding
+  a choice between two copies of the same state. Identical bytes are now treated
+  as an unfinished adoption and the remaining steps are completed; only differing
+  bytes are a divergence. A snapshot without evidence has its evidence generated
+  from the snapshot's own bytes (the snapshot is never rewritten to make them
+  agree), the snapshot is validated as a controller-owned regular file on every
+  start, and evidence that disagrees with it on hash or size fails the start
+  instead of standing as a false historical record.
 - The byte-exact pre-isolation runtime state is preserved once, at first
   adoption, as `/control-data/runtime.pre-isolation.json` with SHA-256, size and
   provenance in a sibling `.meta.json` (#240). The rollback overwrites
@@ -99,7 +141,11 @@ Changes after the first portal release are collected here.
   the only thing that clears the interlock, it cannot run without an explicit
   state choice, it preserves the losing state under a timestamped name instead of
   deleting it, and it returns the owner secret to UID 1001. A legacy file written
-  outside isolation without a recorded rollback fails closed the same way.
+  outside isolation without a recorded rollback fails closed the same way. The
+  resume validates the marker inode it consumes (regular, controller-owned, no
+  symlink at the final component) rather than only testing for its existence; the
+  recorded body is advisory, because the explicit `--state-source` choice — not a
+  recorded digest — decides which state survives.
 - `scripts/init-secrets.py` derives the data/private volumes and the control
   container from `--project` (validated against the Compose naming rules) and
   takes `--secrets-volume`/`--image` overrides (#240), so a non-default Compose
@@ -119,8 +165,13 @@ Changes after the first portal release are collected here.
 - CI runs the alternate-UID isolation suite in the `docker` job against the image
   that job already built (`AGENTCONTROL_ISOLATION_IMAGE`) with
   `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon or a missing image
-  fails the job instead of silently skipping the suite, and the job asserts the
-  executed test count afterwards.
+  fails the job instead of silently skipping the suite. The job then asserts the
+  **exact** TRX counters — 37 discovered, 37 executed, 37 passed and 0
+  `notExecuted` — rather than a lower bound, because a lower bound accepts a
+  suite that quietly lost coverage and a skip reports as "0 failed". The 37 are
+  35 real alternate-UID container tests plus 2 structural source/Compose wiring
+  tests that need no daemon; only the 35 prove the kernel-enforced boundary, and
+  the step records that distinction.
 - Runtime state moves from `/data/runtime.json` to the controller-private
   `/control-data/runtime.json` (#240), which is the single authoritative state
   while the isolated image runs. First start copies the legacy file;
@@ -158,6 +209,15 @@ Changes after the first portal release are collected here.
 - Stop writing executable ACP fixture files while tests run. Per-test symlinks
   and scenario sidecars use one build-copied script, avoiding Linux `ETXTBSY`
   from writable descriptors inherited by concurrent process starts (#232).
+- Apply that same fix to the fake tmux binary in `TmuxAttachLauncherTests`, which
+  still wrote and then exec'd a per-test executable and so kept the #232 race.
+  It surfaced as a rare first-`EnsureAsync` failure during a full-suite run and
+  did not reproduce when the class ran alone. Measured directly: exec'ing a
+  freshly written executable under a parallel `Process.Start` load fails with
+  errno 26 in roughly 2% of starts, while exec'ing a symlink to a never-written
+  canonical file fails in 0 of 400. The script moves to
+  `Fixtures/fake-tmux.py` and each test symlinks to it, deriving its private
+  data directory from the invoked path.
 - Reject cancellation as soon as the control runtime reports an unavailable
   state, even while its ACP child is still being reaped. Degraded sessions keep
   their recovery controls (#228).
