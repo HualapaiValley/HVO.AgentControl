@@ -21,6 +21,7 @@ public sealed class AcpControlHost : BackgroundService
 
     private readonly ControlOptions _options;
     private readonly ILogger<AcpControlHost> _logger;
+    private readonly AgentProcessLauncher _launcher;
     private readonly object _gate = new();
     private readonly CancellationTokenSource _hostLifetime = new();
     private readonly SanitizedLogBuffer _stderrBuffer;
@@ -57,11 +58,18 @@ public sealed class AcpControlHost : BackgroundService
     {
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _launcher = new AgentProcessLauncher(_options.AgentLauncher);
         _stderrBuffer = new SanitizedLogBuffer(secret: null);
     }
 
-    /// <summary>Absolute data directory used by the runtime.</summary>
+    /// <summary>Absolute agent data directory (workspace and private OpenCode home).</summary>
     public string DataDirectory => Path.GetFullPath(_options.DataDirectory);
+
+    /// <summary>Absolute controller-private state directory.</summary>
+    public string PrivateDataDirectory => Path.GetFullPath(_options.ResolvePrivateDataDirectory());
+
+    /// <summary>Privileged launcher used for agent-identity children.</summary>
+    public AgentProcessLauncher AgentLauncher => _launcher;
 
     /// <summary>Loopback URL of the native OpenCode HTTP server exposed by ACP.</summary>
     public string NativeUrl => new UriBuilder("http", _options.Hostname, _options.NativePort).Uri.GetLeftPart(UriPartial.Authority);
@@ -332,21 +340,83 @@ public sealed class AcpControlHost : BackgroundService
 
     private void PrepareDirectories()
     {
-        Directory.CreateDirectory(DataDirectory);
-        Directory.CreateDirectory(WorkspacePath);
-        Directory.CreateDirectory(HomePath);
-
-        if (!OperatingSystem.IsWindows())
+        if (_launcher.IsEnabled)
         {
+            // Under OS isolation the agent tree belongs to the agent UID and is
+            // prepared by the root entrypoint. The controller can neither create
+            // nor chmod it, so a missing directory is a startup fault rather than
+            // something to silently recreate with the wrong owner.
+            foreach (var required in new[] { DataDirectory, WorkspacePath, HomePath })
+            {
+                if (!Directory.Exists(required))
+                {
+                    throw new AcpProtocolException(
+                        $"Agent directory '{required}' was not prepared by the container entrypoint.");
+                }
+            }
+        }
+        else
+        {
+            Directory.CreateDirectory(DataDirectory);
+            Directory.CreateDirectory(WorkspacePath);
+            Directory.CreateDirectory(HomePath);
+
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(
+                    HomePath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+        }
+
+        Directory.CreateDirectory(PrivateDataDirectory);
+        if (!OperatingSystem.IsWindows()
+            && !string.Equals(PrivateDataDirectory, DataDirectory, StringComparison.Ordinal))
+        {
+            // Controller-private: no group or other access at all.
             File.SetUnixFileMode(
-                HomePath,
+                PrivateDataDirectory,
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        if (InstructionsDirectory is { } instructions)
+        {
+            Directory.CreateDirectory(instructions);
+            if (!OperatingSystem.IsWindows())
+            {
+                // Host-owned, agent-readable: the agent may traverse and read the
+                // orientation but cannot replace or unlink it.
+                File.SetUnixFileMode(
+                    instructions,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                    | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+            }
         }
     }
 
+    /// <summary>
+    /// Loads the controller-private runtime state, adopting a legacy
+    /// <c>DataDirectory/runtime.json</c> exactly once when the private store does
+    /// not exist yet. The legacy file is read, never moved or deleted, so the
+    /// migration stays reversible and no recorded organization/session identity
+    /// is lost.
+    /// </summary>
     private PersistedRuntimeState LoadOrCreateState()
     {
-        var state = RuntimeStateStore.Load(RuntimeStatePath) ?? RuntimeStateStore.CreateNew(_options.OrganizationName);
+        var state = RuntimeStateStore.Load(RuntimeStatePath);
+
+        if (state is null && !string.Equals(RuntimeStatePath, LegacyRuntimeStatePath, StringComparison.Ordinal))
+        {
+            state = RuntimeStateStore.Load(LegacyRuntimeStatePath);
+            if (state is not null)
+            {
+                _logger.LogInformation(
+                    "Adopted the legacy runtime state into the controller-private store; the legacy file is left in place.");
+            }
+        }
+
+        state ??= RuntimeStateStore.CreateNew(_options.OrganizationName);
         state.OrganizationName = _options.OrganizationName;
         state.TmuxOwnerToken ??= RuntimeStateStore.NewOwnerToken();
         return state;
@@ -362,11 +432,20 @@ public sealed class AcpControlHost : BackgroundService
         _password = RandomNumberGenerator.GetHexString(32).ToLowerInvariant();
         _stderrBuffer.SetSecret(_password);
 
-        var instructionsPath = Path.Combine(HomePath, AgentControlOpenCodeConfig.InstructionsFileName);
+        var instructionsPath = InstructionsPath;
         await File.WriteAllTextAsync(
             instructionsPath,
             AgentControlOpenCodeConfig.BuildInstructions(_options.OrganizationName),
             cancellationToken).ConfigureAwait(false);
+
+        if (!OperatingSystem.IsWindows() && InstructionsDirectory is not null)
+        {
+            // Orientation is host-owned and agent-readable, never agent-writable.
+            File.SetUnixFileMode(
+                instructionsPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite
+                | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        }
 
         var configContent = AgentControlOpenCodeConfig.Build(_options.Model, instructionsPath);
         var startInfo = BuildProcessStartInfo(configContent);
@@ -433,7 +512,10 @@ public sealed class AcpControlHost : BackgroundService
             startInfo.Environment[key] = value;
         }
 
-        return startInfo;
+        // Under OS isolation the child runs as the agent UID. The launcher owns
+        // the executable/argument mapping; the environment above is filtered
+        // again by the launcher's own allow-list before the child starts.
+        return _launcher.WrapAcp(startInfo, _options.Hostname, _options.NativePort, WorkspacePath);
     }
 
     private async Task HandshakeAsync(PersistedRuntimeState state, AcpRpcSession session, CancellationToken cancellationToken)
@@ -570,7 +652,7 @@ public sealed class AcpControlHost : BackgroundService
 
     private async Task StartTerminalAsync(CancellationToken cancellationToken)
     {
-        _terminal ??= new TmuxAttachLauncher(_options.TmuxSessionName);
+        _terminal ??= new TmuxAttachLauncher(_options.TmuxSessionName, agentLauncher: _launcher);
 
         var request = new TmuxAttachRequest(
             NativeUrl,
@@ -997,10 +1079,20 @@ public sealed class AcpControlHost : BackgroundService
         {
             try
             {
-                if (!_process.HasExited)
+                // Cross-UID termination: the controller cannot signal an agent
+                // child directly, so the launcher performs the verified signal.
+                if (_launcher.TryTerminate(_process, force: false))
                 {
-                    _process.Kill(entireProcessTree: true);
-                    await _process.WaitForExitAsync(shutdownToken).ConfigureAwait(false);
+                    try
+                    {
+                        await _process.WaitForExitAsync(shutdownToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The grace period expired without an observed exit.
+                        _launcher.TryTerminate(_process, force: true);
+                        await _process.WaitForExitAsync(CancellationToken.None).WaitAsync(grace).ConfigureAwait(false);
+                    }
                 }
             }
             catch (Exception exception) when (exception is TimeoutException or OperationCanceledException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
@@ -1250,5 +1342,18 @@ public sealed class AcpControlHost : BackgroundService
 
     private string HomePath => Path.Combine(DataDirectory, "home");
 
-    private string RuntimeStatePath => Path.Combine(DataDirectory, "runtime.json");
+    private string RuntimeStatePath => Path.Combine(PrivateDataDirectory, "runtime.json");
+
+    /// <summary>Pre-isolation runtime state location, retained for one-time adoption.</summary>
+    private string LegacyRuntimeStatePath => Path.Combine(DataDirectory, "runtime.json");
+
+    /// <summary>Host-owned orientation directory, or null when it lives in the agent home.</summary>
+    private string? InstructionsDirectory =>
+        string.IsNullOrWhiteSpace(_options.InstructionsDirectory)
+            ? null
+            : Path.GetFullPath(_options.InstructionsDirectory);
+
+    private string InstructionsPath => Path.Combine(
+        InstructionsDirectory ?? HomePath,
+        AgentControlOpenCodeConfig.InstructionsFileName);
 }

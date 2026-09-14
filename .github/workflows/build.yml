@@ -65,10 +65,57 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
       - name: Validate compose configuration
         run: docker compose config --quiet
       - name: Build image without publishing
         run: docker build --tag hvo-agentcontrol:ci .
+      # Controller/agent OS isolation (#240) is enforced by the kernel, so it can
+      # only be proven by running real processes under both UIDs in the built
+      # image. The suite reuses the image built above via
+      # AGENTCONTROL_ISOLATION_IMAGE instead of building a second time, and
+      # AGENTCONTROL_DOCKER_REQUIRED=1 makes an unavailable daemon or a missing
+      # image fail the job: a skipped security suite is not evidence, and it
+      # would otherwise read like a pass.
+      - name: Restore
+        run: dotnet restore HVO.AgentControl.slnx
+      - name: Build tests
+        run: dotnet build HVO.AgentControl.slnx --no-restore -c Release --warnaserror
+      - name: Alternate-UID isolation tests
+        env:
+          AGENTCONTROL_DOCKER_REQUIRED: "1"
+          AGENTCONTROL_ISOLATION_IMAGE: hvo-agentcontrol:ci
+        run: >-
+          dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --filter "FullyQualifiedName~AgentIsolationContainerTests"
+          --logger "trx;LogFileName=isolation-results.trx"
+          --results-directory artifacts/isolation-results
+      # A filter that stops matching (rename, namespace move) would silently run
+      # zero tests and still exit 0. Assert the suite actually executed.
+      - name: Assert the isolation suite executed
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          files = glob.glob("artifacts/isolation-results/*.trx")
+          if not files:
+              sys.exit("no isolation test results were produced")
+          ns = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
+          counters = ET.parse(files[0]).getroot().find(".//t:Counters", ns)
+          executed = int(counters.get("executed"))
+          passed = int(counters.get("passed"))
+          print(f"isolation tests executed={executed} passed={passed}")
+          if executed < 33 or executed != passed:
+              sys.exit(f"expected at least 33 executed and all passing, got {executed}/{passed}")
+          PY
+      - name: Upload isolation test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: isolation-test-results
+          path: artifacts/isolation-results
+          if-no-files-found: ignore
 
   browser-smoke:
     name: Browser smoke (disabled runtime)

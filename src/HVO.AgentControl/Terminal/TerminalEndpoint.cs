@@ -40,9 +40,14 @@ public static class TerminalEndpoint
     /// child's <c>HOME</c> so tmux, the TUI and ACP share one runtime home.
     /// <paramref name="sessionName"/> is the host-configured tmux session to attach.
     /// </summary>
-    public static async Task HandleAsync(HttpContext context, string homeDirectory, string sessionName = "agentcontrol")
+    public static async Task HandleAsync(
+        HttpContext context,
+        string homeDirectory,
+        string sessionName = "agentcontrol",
+        AgentProcessLauncher? agentLauncher = null)
     {
         ArgumentNullException.ThrowIfNull(context);
+        agentLauncher ??= AgentProcessLauncher.Direct;
 
         if (!context.WebSockets.IsWebSocketRequest)
         {
@@ -86,7 +91,7 @@ public static class TerminalEndpoint
         try
         {
             socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-            process = StartBridge(homeDirectory, bridgePath, sessionName);
+            process = StartBridge(homeDirectory, bridgePath, sessionName, agentLauncher);
 
             var output = PumpOutputAsync(socket, process.StandardOutput.BaseStream, lifetime.Token);
             var input = PumpInputAsync(socket, process.StandardInput, lifetime.Token);
@@ -133,7 +138,7 @@ public static class TerminalEndpoint
         {
             if (process is not null)
             {
-                await StopBridgeAsync(process, logger).ConfigureAwait(false);
+                await StopBridgeAsync(process, agentLauncher, logger).ConfigureAwait(false);
             }
 
             if (socket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
@@ -155,9 +160,13 @@ public static class TerminalEndpoint
         }
     }
 
-    private static Process StartBridge(string homeDirectory, string bridgePath, string sessionName)
+    private static Process StartBridge(
+        string homeDirectory,
+        string bridgePath,
+        string sessionName,
+        AgentProcessLauncher agentLauncher)
     {
-        var startInfo = CreateBridgeStartInfo(homeDirectory, bridgePath, sessionName);
+        var startInfo = CreateBridgeStartInfo(homeDirectory, bridgePath, sessionName, agentLauncher: agentLauncher);
 
         var process = new Process { StartInfo = startInfo };
         if (!process.Start())
@@ -182,7 +191,8 @@ public static class TerminalEndpoint
         string homeDirectory,
         string bridgePath,
         string sessionName,
-        IReadOnlyDictionary<string, string?>? baseEnvironment = null)
+        IReadOnlyDictionary<string, string?>? baseEnvironment = null,
+        AgentProcessLauncher? agentLauncher = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(homeDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(bridgePath);
@@ -225,7 +235,10 @@ public static class TerminalEndpoint
             startInfo.Environment[key] = value;
         }
 
-        return startInfo;
+        // The bridge and its tmux attach client belong to the agent identity, so
+        // the launcher (when configured) replaces the interpreter invocation with
+        // its fixed python/pty_bridge mapping.
+        return (agentLauncher ?? AgentProcessLauncher.Direct).WrapPty(startInfo, homeDirectory, sessionName);
     }
 
     private static async Task PumpOutputAsync(WebSocket socket, Stream output, CancellationToken token)
@@ -375,7 +388,7 @@ public static class TerminalEndpoint
         }
     }
 
-    private static async Task StopBridgeAsync(Process process, ILogger? logger)
+    private static async Task StopBridgeAsync(Process process, AgentProcessLauncher agentLauncher, ILogger? logger)
     {
         try
         {
@@ -398,13 +411,9 @@ public static class TerminalEndpoint
             }
             catch (OperationCanceledException)
             {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
-                {
-                }
+                // Cross-UID: an isolated bridge runs as the agent identity, so
+                // termination goes through the verified launcher signal.
+                agentLauncher.TryTerminate(process, force: true);
 
                 try
                 {

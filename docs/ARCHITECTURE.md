@@ -13,10 +13,10 @@ from the `generation = 2` identity.
 - **Attach TUI:** a TUI client in tmux on the same OpenCode runtime. The browser
   terminal connects to it through the portal over a same-origin authenticated
   WebSocket; one viewer at a time. The TUI is a human view, not a second engine.
-- **Persistence:** `/data/runtime.json` holds organization/session identity;
-  the data volume retains workspace and native conversation state. The private
-  OpenCode home also lives under the data directory. A failed session load is
-  surfaced, not silently replaced.
+- **Persistence:** `/control-data/runtime.json` holds organization/session
+  identity in the controller-private volume; the agent-owned `/data` volume
+  retains the workspace, the private OpenCode home and native conversation
+  state. A failed session load is surfaced, not silently replaced.
 - **Access:** owner Basic authentication from a mounted password file, plus
   same-origin checks on WebSocket and mutation endpoints. The portal publishes
   on all Docker-host IPv4 interfaces (`0.0.0.0:5054`) for trusted-LAN use and is
@@ -72,9 +72,151 @@ baseline. An operator stop must remain authoritative when models fail.
 Keep private keys out of images, logs and worker mounts. Worker access should use
 bounded grants and short-lived scoped credentials. Do not assume an OpenCode
 instruction or a default-allow tool setting prevents credential access through
-another executable. In the current slice the controller and OpenCode share one
-container OS user, so deny rules are defense-in-depth, not OS isolation. Separate
-credentials and process identities before adding untrusted repository execution.
+another executable: deny rules are defense-in-depth, and the OS identity split
+below is the actual security boundary.
+
+### Controller and agent identities (implemented)
+
+The control container runs two unprivileged identities plus one narrow
+privileged launcher. This satisfies the
+[Section 6](PHASE-1-CONTRACTS.md#6-credential-and-process-isolation-prerequisite)
+prerequisite for the control host; the worker-image half of Section 6 is still
+future work.
+
+| Identity | UID:GID | Owns | Login shell |
+| --- | --- | --- | --- |
+| controller | 1001:1001 | `/control-data` (`0700`), the owner secret, `/agent-config` | `/usr/sbin/nologin` |
+| agent | 1000:1000 | `/data/home`, `/data/workspace` (`0700`), tmux, OpenCode, the TUI and PTY bridge | `/bin/bash` |
+
+`/data` itself is **root-owned `0755`**, not agent-owned. An agent-owned parent
+would let the agent rename `home`/`workspace` away and leave a symlink for the
+next root start to act on; with a root-owned parent the agent cannot create,
+rename or unlink anything directly in `/data` while keeping full ownership of
+the two subtrees it uses. `src/container/prepare-layout.py` does all of the
+startup ownership work through `O_NOFOLLOW` descriptors and `fchown`/`fchmod`,
+never through a path, and refuses a symlink, a non-directory or a hard-linked
+runtime state file before changing anything. A refusal exits the entrypoint and
+the service stays down.
+
+The agent needs a real login shell: tmux resolves `default-shell` from the
+account and starts its server through it, so with `nologin` a bare
+`tmux new-session` leaves "no server running" (measured). The controller never
+starts a shell and keeps `nologin`.
+
+- **Controller-private state.** `/control-data/runtime.json` is mode `0600` in a
+  `0700` directory, so the agent cannot read the organization/session identity or
+  the tmux owner token, and cannot rename or unlink the file through its parent.
+  It is the single authoritative runtime state while the isolated image runs.
+  `/data/runtime.json` is **not** a live mirror of it: the controller never
+  writes there, so that path holds the state as it was at adoption and is
+  root-owned `0600` precisely because that stale copy still carries a tmux owner
+  token. The byte-exact original is preserved once, at adoption, as
+  `/control-data/runtime.pre-isolation.json` with SHA-256 evidence beside it.
+- **Owner secret.** Mounted read-only and owned by the controller. The entrypoint
+  verifies from both sides that the controller can read it and the agent cannot,
+  and refuses to start otherwise.
+- **Orientation.** `/agent-config/agentcontrol-instructions.md` is host-owned and
+  agent-readable (`0644` in a `0755` controller-owned directory): the agent reads
+  its orientation but can never rewrite, unlink or swap it.
+- **Privileged launcher.** `src/launcher/agentcontrol-launch.c` is the container's
+  only setuid binary (root:control, mode `4750`, so the agent cannot execute it).
+  It exposes four fixed operations — `acp`, `tmux`, `pty` and `signal` — with the
+  executable always one of four compiled-in paths and no parameter for a program,
+  UID, capability set or environment block. Every exec drops irreversibly to the
+  agent identity, sets `no_new_privs`, empties the capability bounding set,
+  rebuilds the environment from an allow-list, closes inherited descriptors while
+  still privileged, and re-checks the resolved working directory after `chdir` so
+  a symlink inside `/data` cannot place the child outside the agent tree.
+
+  **What the launcher does not bound.** The `tmux` operation's arguments are the
+  caller's, and `new-session`/`new-window` take a child command vector — so the
+  controller *can* run a program of its choosing, including a shell, inside a
+  pane. That is the intended contract (OpenCode's TUI is such a child). The
+  guarantee is confinement, not an execution allow-list: whatever runs, runs as
+  UID 1000 with no capabilities and cannot reach `/control-data`, the owner
+  secret, the launcher binary or any root-owned path. Subcommands that execute
+  outside a pane or reconfigure the server (`run-shell`, `if-shell`,
+  `source-file`, `kill-server`) are not allow-listed.
+- **Cross-UID lifecycle.** A UID 1001 parent cannot signal its UID 1000 children,
+  so termination uses the launcher's `signal` operation, which refuses anything
+  that is not a live agent-identity child of the calling controller. The
+  controller reaps its own direct children through the ordinary wait path; tini
+  is PID 1 for the descendants that outlive their parent and would otherwise
+  accumulate as zombies.
+- **Capabilities.** `CHOWN`, `DAC_OVERRIDE` and `FOWNER` exist only for the root
+  entrypoint's one-time ownership work on the pre-isolation volume. Because the
+  setuid launcher regains everything in the bounding set while it is root, the
+  entrypoint uses `SETPCAP` to remove those three (plus `FSETID` and `SETPCAP`
+  itself) from the bounding set in the same `setpriv` call that drops to the
+  controller. The controller and every descendant therefore hold a bounding set
+  of `SETUID | SETGID | KILL` only. Without `SETPCAP` the entrypoint refuses to
+  start rather than serve a weaker boundary than this document describes.
+
+  Verify it against the controller, not PID 1. The bounding set is reduced in
+  the same `setpriv` call that execs the controller, so PID 1 (tini) still
+  reports the startup capabilities. The entrypoint records the controller's own
+  PID — it `exec`s in place, so the PID written before the exec stays its own:
+
+  ```bash
+  docker compose exec -T control sh -c \
+    'grep CapBnd /proc/$(cat /control-data/controller.pid)/status'
+  ```
+
+  `pgrep -f HVO.AgentControl.dll` is not a substitute: the pattern occurs in the
+  inspecting command's own command line, so pgrep matches that shell and returns
+  a PID even when no controller is running (measured). The PID file is
+  meaningful only while the container runs.
+
+### Rollback and roll-forward (state, not just ownership)
+
+Ownership hand-back alone is not a correct rollback for the runtime state, and
+the distinction is a data-loss boundary rather than a detail:
+
+| Target | Rollback treatment |
+| --- | --- |
+| `/data/runtime.json` | **Republished** from the current controller-private state, then owned `1000:1000` `0600` |
+| `/data` | Metadata only: root → `1000:1000`, `0755` |
+| owner secret | Metadata only: `1001:1001` → `1000:1000`, `0600`; never read, rotated or rewritten |
+
+Re-owning the stale legacy file instead would resume the pre-isolation image on
+the organization, session and tmux owner token as they were at adoption, silently
+discarding the isolated run. The republish is atomic within the data volume (an
+`O_EXCL` temporary in the destination directory, final ownership and mode applied
+before it is visible, `fsync`, `renameat` by directory descriptor, directory
+`fsync`) and refuses a symlinked, hard-linked or unexpectedly owned path. Across
+the three volumes there is no transaction, so the operation is **replayable
+instead of atomic**: every step is idempotent, nothing is deleted, and a failure
+is repaired by re-running the identical command.
+
+There is no automatic merge between a state the pre-isolation image advanced and
+the state the isolated run left behind. `--revert-isolation` therefore records
+`/control-data/rollback.active`, and `prepare-layout.py` fails the start while it
+is unresolved instead of silently picking a side. `--resume-isolation
+--state-source legacy|private` is the only thing that clears it; the state that
+loses is preserved under a timestamped name, never deleted. A legacy file written
+outside isolation without a recorded rollback fails closed the same way.
+
+Because the setuid launcher is the elevation mechanism, the container cannot run
+with `no-new-privileges`. Every other setuid binary is stripped from the image at
+build time to keep that from becoming a general escalation surface. A compromised
+controller can therefore execute code as the agent identity — which it already
+  drives by design — but never as root, as its own UID, or as any other identity.
+- **Tmux metadata trust.** The tmux server, owner environment and pane option
+  live under the agent UID. The agent can read or forge those values and can
+  disrupt its own TUI. They are routing/cleanup evidence for a controller that
+  already owns the binding, not authentication or authorization evidence for
+  organization records, hiring, permissions or another employee.
+Real alternate-UID tests live in
+`tests/HVO.AgentControl.Tests/AgentIsolationContainerTests.cs`, including the
+planted-symlink escalation attempts, the capability bounding set, the `/bin/sh`
+confinement case, the state-republishing rollback (including the diverged-state
+case, a deployment with no legacy file, replayed runs and substituted paths), the
+fail-closed roll-forward interlock and the recorded controller PID. CI runs them in the `docker` job
+with `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon fails the job
+instead of skipping the suite.
+
+Separate credentials and process identities further before adding untrusted
+repository execution.
 
 V1 is reference only. No V1 database migration or runtime compatibility is
 promised. V2 starts with new state and explicitly provisioned environments.

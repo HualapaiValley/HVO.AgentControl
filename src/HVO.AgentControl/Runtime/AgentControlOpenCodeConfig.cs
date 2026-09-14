@@ -85,10 +85,12 @@ public static class AgentControlOpenCodeConfig
                 ["*GH_TOKEN*"] = "deny",
                 ["*OPENCODE_SERVER_PASSWORD*"] = "deny",
                 ["*cat *.env*"] = "deny",
-                // Defense-in-depth token matching only; same-UID isolation is not
-                // a security boundary (the parent process owns authorization).
+                // Defense-in-depth token matching only. OS isolation (separate
+                // controller/agent UIDs and a 0700 private store) is the actual
+                // boundary; these rules just remove the obvious attempts.
                 ["*agentcontrol-secrets*"] = "deny",
                 ["*runtime.json*"] = "deny",
+                ["*/control-data*"] = "deny",
             },
             ["read"] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -102,6 +104,7 @@ public static class AgentControlOpenCodeConfig
                 ["**/.aws/**"] = "deny",
                 ["**/.ssh/**"] = "deny",
                 ["/run/agentcontrol-secrets/**"] = "deny",
+                ["/control-data/**"] = "deny",
                 ["/data/runtime.json"] = "deny",
                 ["**/runtime.json"] = "deny",
             },
@@ -116,6 +119,8 @@ public static class AgentControlOpenCodeConfig
                 ["**/.netrc"] = "deny",
                 ["**/.ssh/**"] = "deny",
                 ["/run/agentcontrol-secrets/**"] = "deny",
+                ["/control-data/**"] = "deny",
+                ["/agent-config/**"] = "deny",
                 ["/data/runtime.json"] = "deny",
                 ["**/runtime.json"] = "deny",
             },

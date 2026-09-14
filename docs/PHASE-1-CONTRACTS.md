@@ -9,8 +9,14 @@ until explicitly recorded on the issue.
 
 The active baseline is one control container, one OpenCode ACP process and one
 combined role (`AcpControlHost` + `AgentControlOpenCodeConfig.RoleName`). The
-existing `/data/runtime.json` identity, session and tmux ownership must be
-preserved, not reset.
+existing runtime identity, session and tmux ownership must be preserved, not
+reset.
+
+Since controller/agent isolation (#240) the authoritative runtime state is
+`/control-data/runtime.json`, not `/data/runtime.json`; the latter is a stale
+copy while the isolated image runs, and the byte-exact pre-isolation original is
+preserved separately as `/control-data/runtime.pre-isolation.json` with hash
+evidence. Read `runtime.json` below as the authoritative controller-private file.
 
 ## 1. Identity model
 
@@ -96,7 +102,10 @@ Chosen: **one small SQLite database file** owned by the C# host, for example
   committed adoption validates matching identity without creating new employees.
 - `runtime.json` is **left in place** as rollback evidence; it is not deleted
   and not silently reinterpreted. After cutover the database is the single
-  authoritative store.
+  authoritative store. Note that "left in place" means the controller-private
+  file plus the `runtime.pre-isolation.json` snapshot: the isolation rollback
+  (#240) overwrites `/data/runtime.json` with the current state, so that path is
+  not durable evidence of any particular point in time.
 - The pre-upgrade JSON is a snapshot, not a live backward-compatible store.
   Rollback must restore the matching backup, not run old code against stale
   session identity after new activity. Backup/restore includes WAL state through
@@ -161,15 +170,41 @@ Chosen: **one small SQLite database file** owned by the C# host, for example
 ## 6. Credential and process isolation prerequisite
 
 **Before** any privileged provisioning authority is added, the baseline
-same-UID credential access must be fixed. Today the controller, OpenCode and the
-mounted owner secret share UID 1000; prompt/tool deny rules are defense-in-depth,
-not OS isolation, and another executable can read the secret.
+same-UID credential access must be fixed. The original baseline ran the
+controller, OpenCode and the mounted owner secret under UID 1000; prompt/tool
+deny rules are defense-in-depth, not OS isolation, and another executable could
+read the secret.
+
+**Control-host status: implemented (#240).** The control container now runs a
+controller identity (UID 1001) owning `/control-data` (`0700`) and the owner
+secret, and a separate agent identity (UID 1000) owning the OpenCode home,
+workspace, tmux, TUI and PTY bridge. Orientation is host-owned and
+agent-readable at `/agent-config`. A setuid launcher (root:control, `4750`,
+not agent-executable) provides only registered `acp`, `tmux`, `pty` and `signal`
+operations, drops privileges irreversibly, sets `no_new_privs`, empties the
+capability bounding set and rebuilds the child environment from an allow-list.
+`/data` itself is root-owned so the agent cannot substitute a subdirectory for
+the root entrypoint to act on, and the entrypoint removes
+`CHOWN`/`DAC_OVERRIDE`/`FOWNER` from the capability bounding set before the
+controller starts. See
+[architecture](ARCHITECTURE.md#controller-and-agent-identities-implemented).
+
+This is **identity confinement, not an execution allow-list.** The launcher's
+`tmux` operation forwards caller-supplied pane command vectors, so a compromised
+controller can execute a program of its choosing — including a shell — as the
+agent UID. What it cannot do is run anything as root, as the controller UID, or
+with access to `/control-data`, the owner secret or the launcher binary. Do not
+describe the registered-operation surface as preventing code execution.
+
+The **worker-image half below remains future work**, as does per-role UID
+allocation for additional internal roles.
 
 Concrete separation inside the same container:
 
 - Distinct OS identities: a controller UID owning the database and owner secret,
   and one separate unprivileged agent/OpenCode UID for the initial combined
-  Operations/IT role. Future process-per-role placement allocates a distinct UID
+  Operations/IT role. *(Implemented for the control host in #240: UID 1001 and
+  UID 1000 respectively.)* Future process-per-role placement allocates a distinct UID
   and private `0700` store per internal role in the same container. Shared-process
   placement is allowed only after all Section 5 isolation gates pass.
 - The agent private store is owned by the agent UID, mode `0700`. A narrow

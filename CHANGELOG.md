@@ -11,6 +11,46 @@ Changes after the first portal release are collected here.
 
 ### Added
 
+- Controller/agent OS isolation inside the single control container (#240),
+  the Section 6 prerequisite for #215. The controller runs as UID 1001 and owns
+  `/control-data` (`0700`) and the owner secret; OpenCode, tmux, the TUI and the
+  PTY bridge run as UID 1000 and own `/data/home` and `/data/workspace`.
+  Orientation moves to the host-owned, agent-readable `/agent-config`.
+  Agent-identity children are started by `src/launcher/agentcontrol-launch.c`, a
+  setuid launcher (root:control, `4750`) exposing only the fixed `acp`, `tmux`,
+  `pty` and `signal` operations, with the executable always one of four
+  compiled-in paths and no parameter for a program, UID, capability set or
+  environment block. It drops privileges irreversibly, sets `no_new_privs`,
+  empties the capability bounding set, rebuilds the environment from an
+  allow-list, closes inherited descriptors while still privileged, and re-checks
+  the resolved working directory after `chdir` so a symlink inside `/data`
+  cannot place the child outside the agent tree. The `tmux` operation forwards
+  caller-supplied pane command vectors, so the controller can run a program of
+  its choosing — but only ever as the agent UID; the guarantee is confinement,
+  not an execution allow-list, and the code, docs and tests now say so. Cross-UID
+  termination uses the verified `signal` operation; the controller reaps its own
+  direct children and tini reaps orphaned descendants.
+  `/data` is root-owned `0755` with agent-owned `home`/`workspace` beneath it, so
+  the agent cannot rename a subdirectory and leave a symlink for the next root
+  start; `src/container/prepare-layout.py` performs all startup ownership work
+  through `O_NOFOLLOW` descriptors and `fchown`/`fchmod`, never a path, and fails
+  the start before touching anything when an entry has been substituted.
+  The entrypoint drops `CHOWN`/`DAC_OVERRIDE`/`FOWNER`/`FSETID`/`SETPCAP` from
+  the capability bounding set as it drops to the controller, so the setuid
+  launcher cannot regain them during its root phase; without `SETPCAP` it refuses
+  to start. The agent account gets `/bin/bash` because tmux starts its server
+  through the account's `default-shell` and `nologin` leaves "no server running";
+  the controller keeps `nologin`.
+  Real alternate-UID container tests cover launcher execution denial, private
+  store/secret/orientation access (including rename and unlink), `/proc`
+  environment and descriptor access, environment injection, termination and
+  reaping, entrypoint idempotence and fail-closed startup, planted-symlink and
+  hard-link escalation attempts against `/data`, `/data/home`, `/data/workspace`
+  and the legacy runtime state, the controller/child capability bounding sets,
+  the `/bin/sh`-as-agent confinement case, the login-shell requirement, the
+  end-to-end rollback with diverged state, a rollback for a deployment that never
+  had a legacy file, replayed rollbacks, the fail-closed roll-forward interlock
+  and the recorded controller PID.
 - `docs/DEVELOPMENT.md`: pinned toolchain (.NET SDK 10.0.400, target
   `net10.0`, Node 22, Playwright 1.63.0, Python 3.12, OpenCode 1.18.30, and the
   runtime image's `python3`/`tmux`), clean-machine build/test/browser/container
@@ -24,6 +64,77 @@ Changes after the first portal release are collected here.
 
 ### Changed
 
+- `scripts/init-secrets.py --revert-isolation` (#240) is the explicit rollback to
+  the pre-isolation image. It **republishes the current controller-private
+  runtime state** to `/data/runtime.json` and then hands it, `/data` and the
+  owner secret to UID 1000. A metadata-only revert would have been wrong for the
+  runtime state: the isolated controller writes only `/control-data/runtime.json`,
+  so the legacy path holds the organization, session and tmux owner token as they
+  were at adoption, and re-owning it would resume the old image on a dead session
+  while silently discarding the isolated run. The republish is atomic within the
+  data volume (`O_EXCL` temporary in the destination directory, `fchown`/`fchmod`
+  before it is visible, `fsync`, `renameat` by directory descriptor, directory
+  `fsync`) and refuses symlinked, hard-linked or unexpectedly owned paths. The
+  owner secret and `/data` stay metadata-only, with the same `O_NOFOLLOW`/
+  hard-link/inode guards as the forward migration. Source owners are validated
+  before anything changes, including the already-reverted owners, so an
+  interrupted run is repaired by re-running the identical command: the three
+  volumes admit no cross-volume transaction, so the operation is documented and
+  tested as replayable rather than atomic. A deployment with no controller-private
+  state fails closed unless `--accept-missing-runtime-state` is given. It still
+  refuses to run while the control container is up or its state cannot be
+  determined, and is mutually exclusive with `--migrate-owner`.
+- The byte-exact pre-isolation runtime state is preserved once, at first
+  adoption, as `/control-data/runtime.pre-isolation.json` with SHA-256, size and
+  provenance in a sibling `.meta.json` (#240). The rollback overwrites
+  `/data/runtime.json`, so that path is no longer the historical record; the
+  snapshot is never overwritten and is backfilled for deployments isolated before
+  it existed.
+- `scripts/init-secrets.py --resume-isolation --state-source legacy|private`
+  (#240) is the roll-forward after a rollback. A rollback leaves two independent
+  histories of the same organization and there is no automatic merge, so
+  `--revert-isolation` records `/control-data/rollback.active` and the isolated
+  entrypoint **fails closed** while it is unresolved rather than silently
+  freezing the newer legacy state or discarding the isolated run. The resume is
+  the only thing that clears the interlock, it cannot run without an explicit
+  state choice, it preserves the losing state under a timestamped name instead of
+  deleting it, and it returns the owner secret to UID 1001. A legacy file written
+  outside isolation without a recorded rollback fails closed the same way.
+- `scripts/init-secrets.py` derives the data/private volumes and the control
+  container from `--project` (validated against the Compose naming rules) and
+  takes `--secrets-volume`/`--image` overrides (#240), so a non-default Compose
+  project can be operated without editing the script. Named volumes are verified
+  to exist before any container runs, because `docker run` would otherwise create
+  an empty one and report a confident success against state it never touched.
+  README documents the stop/revert/start and stop/resume/start sequences.
+- The entrypoint records the controller's PID in `/control-data/controller.pid`
+  before `exec` (#240), and the capability-verification recipe in `compose.yaml`,
+  the Dockerfile and the architecture doc now reads it. The previous
+  `grep CapBnd /proc/1/status` advice inspected tini, which still holds the
+  startup capabilities because the bounding set is reduced in the same `setpriv`
+  call that execs the controller. `pgrep -f HVO.AgentControl.dll` is not a
+  substitute either: the pattern appears in the inspecting command's own command
+  line, so it reports a PID even with no controller running — asserted in the
+  container suite rather than assumed.
+- CI runs the alternate-UID isolation suite in the `docker` job against the image
+  that job already built (`AGENTCONTROL_ISOLATION_IMAGE`) with
+  `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon or a missing image
+  fails the job instead of silently skipping the suite, and the job asserts the
+  executed test count afterwards.
+- Runtime state moves from `/data/runtime.json` to the controller-private
+  `/control-data/runtime.json` (#240), which is the single authoritative state
+  while the isolated image runs. First start copies the legacy file;
+  organization, session and conversation history are preserved. The controller
+  never writes the legacy path afterwards, so it is a stale leftover rather than
+  a live mirror, and it is reduced to root-only `0600` because that stale copy
+  still carries the tmux owner token the agent must not read.
+  `scripts/init-secrets.py --migrate-owner` re-owns an existing owner
+  secret to UID 1001 as a metadata-only, reversible change that never reads,
+  rotates or rewrites the credential. The container refuses to start while the
+  agent identity can still read the secret. Compose adds the `control-private`
+  volume and cannot set `no-new-privileges`, because that would disable the
+  setuid launcher and return every agent process to the controller's identity;
+  all other setuid binaries are stripped from the image.
 - Update centralized ASP.NET Core testing/OpenAPI packages to `10.0.12` and
   Microsoft.NET.Test.Sdk to `18.10.0` (#222, superseding Dependabot #210).
 - Update the active SDK and Docker build image together to .NET `10.0.401`
@@ -123,3 +234,4 @@ reflects active code, not a shipped release artifact.
   is not yet supported.
 - The controller and OpenCode share a container OS user; deny rules are not OS
   isolation. No Docker socket or real repository is mounted in this slice.
+  (The shared-user limit is addressed after this release; see Unreleased #240.)

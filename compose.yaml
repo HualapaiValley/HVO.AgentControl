@@ -4,12 +4,56 @@ services:
     build: .
     environment:
       Control__Enabled: "true"
+      # Agent-owned tree (UID 1000): OpenCode home, workspace, tmux.
       Control__DataDirectory: /data
+      # Controller-private state (UID 1001, mode 0700): runtime identity.
+      Control__PrivateDataDirectory: /control-data
+      # Host-owned, agent-readable orientation (UID 1001 dir 0755, file 0644).
+      Control__InstructionsDirectory: /agent-config
+      # The only privileged component; the agent identity cannot execute it.
+      Control__AgentLauncher: /usr/local/bin/agentcontrol-launch
       Control__OrganizationName: AgentControl Development
       Control__OwnerPasswordFile: /run/agentcontrol-secrets/owner-password
     volumes:
       - control-data:/data
+      - control-private:/control-data
       - control-secrets:/run/agentcontrol-secrets:ro
+    # Startup-only: CHOWN/DAC_OVERRIDE/FOWNER let the root entrypoint re-own the
+    # pre-isolation volume (agent-owned directories and the UID 1000, mode 0600
+    # legacy runtime state). SETPCAP lets it remove exactly those three from the
+    # capability bounding set before exec'ing the controller, so the setuid
+    # launcher can never regain them during its root phase.
+    #
+    # Runtime: only SETUID/SETGID (the launcher assumes the agent identity) and
+    # KILL (cross-UID termination) survive into the controller's bounding set.
+    #
+    # Assert it against the controller, not PID 1: PID 1 is tini, which still
+    # holds the startup capabilities because the bounding set is reduced in the
+    # setpriv call that execs the controller. The entrypoint records the
+    # controller's own PID:
+    #
+    #   docker compose exec -T control sh -c \
+    #     'grep CapBnd /proc/$(cat /control-data/controller.pid)/status'
+    #
+    # The result must be 00000000000000e0 (SETUID|SETGID|KILL) - no CHOWN,
+    # DAC_OVERRIDE or FOWNER. Do not use `pgrep -f HVO.AgentControl.dll`: the
+    # pattern matches the inspecting command's own command line, so it returns a
+    # PID even with no controller running.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETPCAP
+      - SETUID
+      - SETGID
+      - KILL
+    # no-new-privileges is deliberately NOT set: it would block the setuid
+    # launcher and leave the controller running every agent process under its
+    # own identity, which is the vulnerability this design removes. Every other
+    # setuid binary is stripped from the image, and the launcher sets
+    # no_new_privs on the child itself before exec.
     stop_grace_period: 60s
     ports:
       - "0.0.0.0:5054:8080"
@@ -20,6 +64,7 @@ networks:
     driver: bridge
 volumes:
   control-data:
+  control-private:
   control-secrets:
     external: true
     name: agentcontrol-v2-secrets
