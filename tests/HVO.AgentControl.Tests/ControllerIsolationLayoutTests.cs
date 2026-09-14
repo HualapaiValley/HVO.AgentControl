@@ -1,3 +1,4 @@
+using HVO.AgentControl.Organization;
 using HVO.AgentControl.Runtime;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -58,7 +59,7 @@ public sealed class ControllerIsolationLayoutTests
     }
 
     [Fact]
-    public void DatabasePathDefaultsToControlDbInThePrivateDirectory()
+    public void DatabasePathIsFixedToControlDbInThePrivateDirectory()
     {
         var isolated = new ControlOptions
         {
@@ -71,16 +72,26 @@ public sealed class ControllerIsolationLayoutTests
         var development = new ControlOptions { DataDirectory = "/tmp/hvo-dev" };
         Assert.Equal(Path.Combine("/tmp/hvo-dev", "control.db"), development.ResolveDatabasePath());
         Assert.Empty(development.Validate());
+
+        // There is no public override: the path is always derived from the
+        // controller-private directory, so no deployment can select a different
+        // authoritative store than the rollback tooling and layout preparation
+        // expect.
+        Assert.Null(typeof(ControlOptions).GetProperty("DatabasePath"));
+        Assert.Equal(OrganizationStore.DatabaseFileName, Path.GetFileName(isolated.ResolveDatabasePath()));
     }
 
     [Fact]
-    public void RelativeDatabasePathAndEmptyAdoptionReferenceAreRejected()
+    public void EmptyAdoptionReferenceIsRejectedAndComposeSetsNoDatabaseOverride()
     {
-        var relativeDatabase = new ControlOptions { DatabasePath = "data/control.db" };
-        Assert.NotEmpty(relativeDatabase.Validate());
-
         var missingReference = new ControlOptions { AdoptionAuthorizationReference = "  " };
         Assert.NotEmpty(missingReference.Validate());
+
+        // The Compose environment sets the controller-private directory (which
+        // fixes the database location) and never sets a path override.
+        var compose = File.ReadAllText(Path.Combine(RepositoryRoot(), "compose.yaml"));
+        Assert.Contains("Control__PrivateDataDirectory: /control-data", compose, StringComparison.Ordinal);
+        Assert.DoesNotContain("Control__DatabasePath", compose, StringComparison.Ordinal);
     }
 
     /// <summary>

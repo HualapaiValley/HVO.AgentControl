@@ -8,6 +8,7 @@ using HVO.AgentControl.Organization;
 using HVO.AgentControl.Runtime;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -166,6 +167,51 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         var problem = await ReadProblemAsync(response);
         Assert.Equal(403, problem.GetProperty("status").GetInt32());
+    }
+
+    /// <summary>
+    /// A store that opened and validated but faults during a later read is still
+    /// a 503 ProblemDetails, not a leaked 500 or database detail. The damage is
+    /// applied after the runtime is ready on a dedicated factory so the shared
+    /// fixture store stays valid for the other tests.
+    /// </summary>
+    [Fact]
+    public async Task DamagedOpenableStoreReadIs503ProblemDetailsWithoutLeaking()
+    {
+        using var factory = new EnabledRuntimeFactory();
+        using var client = factory.CreateClient();
+        await factory.WaitForReadyAsync(TimeSpan.FromSeconds(45));
+        client.DefaultRequestHeaders.Authorization = Basic("owner", EnabledRuntimeFactory.OwnerPassword);
+
+        // The store opened and passed validation; now drop a table the overview
+        // reads so the next read faults at the SQLite layer.
+        var databasePath = Path.Combine(factory.DataDirectory, OrganizationStore.DatabaseFileName);
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+        };
+        using (var connection = new SqliteConnection(builder.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "DROP TABLE adoption_audit;";
+            command.ExecuteNonQuery();
+        }
+
+        using var response = await client.GetAsync("/api/organization");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var raw = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("control.db", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("adoption_audit", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("SqliteException", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("no such table", raw, StringComparison.OrdinalIgnoreCase);
+        var problem = await ReadProblemAsync(response);
+        Assert.Equal(503, problem.GetProperty("status").GetInt32());
+        Assert.Equal("/api/organization", problem.GetProperty("instance").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(problem.GetProperty("traceId").GetString()));
     }
 
     private async Task<HttpClient> CreateReadyClientAsync()

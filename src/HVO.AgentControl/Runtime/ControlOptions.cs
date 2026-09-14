@@ -48,13 +48,6 @@ public sealed class ControlOptions
     public string OrganizationName { get; set; } = "AgentControl Development";
 
     /// <summary>
-    /// Absolute path of the authoritative SQLite store. When empty it resolves
-    /// to <c>&lt;PrivateDataDirectory&gt;/control.db</c>, which is the isolated
-    /// controller-private layout.
-    /// </summary>
-    public string DatabasePath { get; set; } = string.Empty;
-
-    /// <summary>
     /// Owner authorization reference recorded in the adoption audit for the one
     /// approved initial Operations/IT employee. It is never a model assertion.
     /// </summary>
@@ -136,11 +129,6 @@ public sealed class ControlOptions
             errors.Add($"{nameof(AgentLauncher)} must be an absolute path when configured.");
         }
 
-        if (!IsAbsoluteOrEmpty(DatabasePath))
-        {
-            errors.Add($"{nameof(DatabasePath)} must be an absolute path when configured.");
-        }
-
         if (string.IsNullOrWhiteSpace(AdoptionAuthorizationReference))
         {
             errors.Add($"{nameof(AdoptionAuthorizationReference)} must not be empty.");
@@ -196,13 +184,14 @@ public sealed class ControlOptions
         string.IsNullOrWhiteSpace(PrivateDataDirectory) ? DataDirectory : PrivateDataDirectory;
 
     /// <summary>
-    /// Absolute path of the authoritative SQLite store, defaulting to
-    /// <c>control.db</c> inside the controller-private directory.
+    /// Absolute path of the authoritative SQLite store. It is always
+    /// <c>control.db</c> inside the controller-private directory: the path is
+    /// fixed, not configurable, so the rollback tooling, the container layout
+    /// preparation and the host can never disagree about where the authoritative
+    /// store lives and no deployment can silently select a different one.
     /// </summary>
     public string ResolveDatabasePath() =>
-        string.IsNullOrWhiteSpace(DatabasePath)
-            ? Path.Combine(ResolvePrivateDataDirectory(), "control.db")
-            : Path.GetFullPath(DatabasePath);
+        Path.Combine(ResolvePrivateDataDirectory(), HVO.AgentControl.Organization.OrganizationStore.DatabaseFileName);
 
     private static bool IsAbsoluteOrEmpty(string value) =>
         string.IsNullOrWhiteSpace(value) || Path.IsPathRooted(value);

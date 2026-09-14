@@ -164,9 +164,9 @@ jobs:
           if-no-files-found: ignore
 
   browser-smoke:
-    name: Browser smoke (disabled runtime)
+    name: Browser (disabled smoke + enabled organization)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
@@ -187,12 +187,27 @@ jobs:
       # loopback port with Control__Enabled=false and no owner password, then
       # drives the real portal. No Docker, model provider, credentials, or
       # runtime mutations are involved. Its artifacts go to artifacts/browser-ci.
-      - name: Run hermetic browser smoke
+      - name: Run hermetic browser smoke (disabled runtime)
         run: npm run ci --prefix tests/Browser
-      - name: Upload browser artifacts
+      # ci-organization.mjs is the separate enabled-runtime suite: it starts the
+      # app with Control__Enabled=true, a disposable owner password and the
+      # checked-in fake ACP fixture (no inference/provider credentials), then
+      # asserts the organization panel renders the authoritative store read
+      # model. It runs after the disabled smoke so the disabled baseline is
+      # unchanged. Its artifacts go to artifacts/browser-organization.
+      - name: Run hermetic organization browser check (enabled runtime)
+        run: npm run ci-organization --prefix tests/Browser
+      - name: Upload browser smoke artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: browser-smoke-artifacts
           path: artifacts/browser-ci
+          if-no-files-found: ignore
+      - name: Upload organization browser artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-organization-artifacts
+          path: artifacts/browser-organization
           if-no-files-found: ignore

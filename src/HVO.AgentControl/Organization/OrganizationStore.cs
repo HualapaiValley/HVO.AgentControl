@@ -175,12 +175,13 @@ public sealed class OrganizationStore : IDisposable
             volume_ref TEXT,
             home_ref TEXT,
             workspace_ref TEXT,
-            session_ref TEXT REFERENCES acp_sessions(id) ON DELETE RESTRICT,
+            session_ref TEXT,
             tmux_owner_token TEXT NOT NULL,
             ownership_epoch INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            revision INTEGER NOT NULL
+            revision INTEGER NOT NULL,
+            FOREIGN KEY (session_ref, employee_id) REFERENCES acp_sessions(id, employee_id) ON DELETE RESTRICT
         )
         """,
         """
@@ -192,7 +193,8 @@ public sealed class OrganizationStore : IDisposable
             status TEXT NOT NULL CHECK (status IN ('adopted', 'active', 'superseded', 'closed')),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE (employee_id, native_session_id)
+            UNIQUE (employee_id, native_session_id),
+            UNIQUE (id, employee_id)
         )
         """,
         """
@@ -213,17 +215,45 @@ public sealed class OrganizationStore : IDisposable
         """,
     ];
 
-    private static readonly Dictionary<string, string[]> ExpectedTables = new(StringComparer.Ordinal)
+    /// <summary>
+    /// Canonical, normalized definition of every table and explicit index this
+    /// build creates, keyed by object type and name. An existing store is
+    /// accepted only when its <c>sqlite_master</c> definitions match this
+    /// signature exactly (after whitespace normalization), so a same-column
+    /// rebuild that quietly drops a NOT NULL, UNIQUE, CHECK, FOREIGN KEY or a
+    /// partial index fails closed instead of being read as the accepted schema.
+    /// Inline UNIQUE/PK constraints create <c>sqlite_autoindex_*</c> entries with
+    /// no SQL, which are excluded; the named partial index is explicit.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema();
+
+    private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema()
     {
-        ["schema_version"] = ["version"],
-        ["organizations"] = ["id", "slug", "display_name", "description", "basic_instructions", "created_at", "updated_at", "revision"],
-        ["departments"] = ["id", "organization_id", "slug", "display_name", "created_at", "updated_at", "revision"],
-        ["roles"] = ["id", "department_id", "slug", "display_name", "instruction_profile", "permission_profile", "created_at", "updated_at", "revision"],
-        ["employees"] = ["id", "organization_id", "department_id", "role_id", "slug", "display_name", "purpose", "instructions", "rules", "restrictions", "created_at", "updated_at", "revision"],
-        ["runtime_bindings"] = ["id", "employee_id", "placement", "container_ref", "volume_ref", "home_ref", "workspace_ref", "session_ref", "tmux_owner_token", "ownership_epoch", "created_at", "updated_at", "revision"],
-        ["acp_sessions"] = ["id", "employee_id", "native_session_id", "title", "status", "created_at", "updated_at"],
-        ["adoption_audit"] = ["id", "organization_id", "employee_id", "source", "authorization_reference", "adopted_at", "notes"],
-    };
+        var expected = new Dictionary<(string Type, string Name), string>();
+        foreach (var statement in SchemaStatements)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                statement,
+                @"^\s*CREATE\s+(?:UNIQUE\s+)?(?<type>TABLE|INDEX)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            if (!match.Success)
+            {
+                throw new InvalidOperationException(
+                    "Every schema statement must begin with CREATE TABLE or CREATE [UNIQUE] INDEX.");
+            }
+
+            var type = match.Groups["type"].Value.ToLowerInvariant();
+            var name = match.Groups["name"].Value;
+            expected[(type, name)] = NormalizeSchemaSql(statement);
+        }
+
+        return expected;
+    }
+
+    private static string NormalizeSchemaSql(string sql) =>
+        System.Text.RegularExpressions.Regex.Replace(sql.Trim(), @"\s+", " ").Trim();
 
     private readonly string _databasePath;
     private readonly TimeSpan _lockTimeout;
@@ -254,6 +284,14 @@ public sealed class OrganizationStore : IDisposable
     /// cleaned up. Production never sets it.
     /// </summary>
     internal Action<string>? BeforeFirstPublication { get; set; }
+
+    /// <summary>
+    /// Deterministic fault seam that forces the seed checkpoint to be evaluated
+    /// as a busy <c>(1, 0, 0)</c> result. Tests set it to prove that a checkpoint
+    /// that did not truncate the WAL faults the first start and never publishes
+    /// an authoritative database. Production never sets it.
+    /// </summary>
+    internal bool ForceBusyCheckpointForTest { get; set; }
 
     /// <summary>
     /// Restricts the process creation mask so files the runtime creates (the
@@ -459,8 +497,10 @@ public sealed class OrganizationStore : IDisposable
 
             BeforeFirstPublication?.Invoke(temporary);
 
-            // Atomic within the directory: either the authoritative path does
-            // not exist or it is the complete committed seed.
+            // No overwrite: if a competing authoritative file appeared between
+            // the existence check and here (a second writer, a restored backup
+            // or a failed prior attempt), this must fail rather than replace it.
+            // File.Move without overwrite is that guarantee.
             File.Move(temporary, _databasePath);
 
             ClearPoolFor(_databasePath);
@@ -478,6 +518,9 @@ public sealed class OrganizationStore : IDisposable
             // Clean up only the temporary this attempt created, and only when it
             // was never published. Nothing else in the directory is touched: a
             // temporary left by a different, crashed start is not ours to unlink.
+            // Drop the pooled handle first so a checkpoint failure that never
+            // reached the normal clear does not keep the sidecars alive.
+            ClearPoolFor(temporary);
             if (File.Exists(temporary))
             {
                 RemoveSidecars(temporary);
@@ -501,108 +544,128 @@ public sealed class OrganizationStore : IDisposable
     /// <summary>
     /// Persists the established ACP session for the adopted employee in one
     /// transaction. Called after the session handshake, before any bootstrap
-    /// prompt, so a crash cannot lose the organization/session mapping.
+    /// prompt, so a crash cannot lose the organization/session mapping. A native
+    /// session already recorded for the employee keeps its persisted title: an
+    /// existing session is promoted, never retitled, so a later load cannot
+    /// overwrite the title that was established with the session.
     /// </summary>
     public void RecordSession(string nativeSessionId, string? title)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(nativeSessionId);
-        ThrowIfDisposed();
-        lock (_gate)
+        TranslateStoreFaults(() =>
         {
-            if (_employeeId is null || _bindingId is null)
+            ThrowIfDisposed();
+            lock (_gate)
             {
-                throw new OrganizationStoreException("The store has not been opened; no session can be recorded.");
-            }
+                if (_employeeId is null || _bindingId is null)
+                {
+                    throw new OrganizationStoreException("The store has not been opened; no session can be recorded.");
+                }
 
-            using var connection = OpenConnection(_databasePath);
-            using var transaction = connection.BeginTransaction();
+                using var connection = OpenConnection(_databasePath);
+                using var transaction = connection.BeginTransaction();
 
-            var now = Timestamp();
-            string? sessionRowId = null;
-            using (var find = connection.CreateCommand())
-            {
-                find.Transaction = transaction;
-                find.CommandText =
-                    "SELECT id FROM acp_sessions WHERE employee_id = $employee AND native_session_id = $native";
-                find.Parameters.AddWithValue("$employee", _employeeId);
-                find.Parameters.AddWithValue("$native", nativeSessionId);
-                sessionRowId = find.ExecuteScalar() as string;
-            }
+                var now = Timestamp();
+                string? sessionRowId = null;
+                using (var find = connection.CreateCommand())
+                {
+                    find.Transaction = transaction;
+                    find.CommandText =
+                        "SELECT id FROM acp_sessions WHERE employee_id = $employee AND native_session_id = $native";
+                    find.Parameters.AddWithValue("$employee", _employeeId);
+                    find.Parameters.AddWithValue("$native", nativeSessionId);
+                    sessionRowId = find.ExecuteScalar() as string;
+                }
 
-            // Exactly one session per employee is active at a time. The prior
-            // active session is demoted in the same transaction that promotes
-            // the new one, so a reader can never observe two active sessions and
-            // a crash cannot leave the binding pointing at an active row beside
-            // a stale second active row.
-            Execute(
-                connection,
-                transaction,
-                """
+                // Exactly one session per employee is active at a time. The prior
+                // active session is demoted in the same transaction that promotes
+                // the new one, so a reader can never observe two active sessions and
+                // a crash cannot leave the binding pointing at an active row beside
+                // a stale second active row.
+                Execute(
+                    connection,
+                    transaction,
+                    """
                 UPDATE acp_sessions
                 SET status = 'superseded', updated_at = $now
                 WHERE employee_id = $employee AND status = 'active' AND native_session_id <> $native
                 """,
-                ("$employee", _employeeId),
-                ("$native", nativeSessionId),
-                ("$now", now));
+                    ("$employee", _employeeId),
+                    ("$native", nativeSessionId),
+                    ("$now", now));
 
-            if (sessionRowId is null)
-            {
-                sessionRowId = OrganizationIds.NewSessionId();
-                Execute(
-                    connection,
-                    transaction,
-                    """
+                if (sessionRowId is null)
+                {
+                    sessionRowId = OrganizationIds.NewSessionId();
+                    Execute(
+                        connection,
+                        transaction,
+                        """
                     INSERT INTO acp_sessions (id, employee_id, native_session_id, title, status, created_at, updated_at)
                     VALUES ($id, $employee, $native, $title, 'active', $now, $now)
                     """,
-                    ("$id", sessionRowId),
-                    ("$employee", _employeeId),
-                    ("$native", nativeSessionId),
-                    ("$title", title),
-                    ("$now", now));
-            }
-            else
-            {
-                Execute(
+                        ("$id", sessionRowId),
+                        ("$employee", _employeeId),
+                        ("$native", nativeSessionId),
+                        ("$title", title),
+                        ("$now", now));
+                }
+                else
+                {
+                    // Deliberately not updating the title: the persisted title of an
+                    // already-recorded session is authoritative and is preserved.
+                    Execute(
+                        connection,
+                        transaction,
+                        """
+                    UPDATE acp_sessions
+                    SET status = 'active', updated_at = $now
+                    WHERE id = $id
+                    """,
+                        ("$now", now),
+                        ("$id", sessionRowId));
+                }
+
+                // The runtime binding is the mapping this method exists to update.
+                // If it is missing (or more than one row somehow matched) the session
+                // promotion must not commit: a transaction that claims a binding it
+                // did not actually point at is worse than no write at all.
+                var bindingRows = Execute(
                     connection,
                     transaction,
                     """
-                    UPDATE acp_sessions
-                    SET title = $title, status = 'active', updated_at = $now
-                    WHERE id = $id
-                    """,
-                    ("$title", title),
-                    ("$now", now),
-                    ("$id", sessionRowId));
-            }
-
-            Execute(
-                connection,
-                transaction,
-                """
                 UPDATE runtime_bindings
                 SET session_ref = $session, updated_at = $now, revision = revision + 1
                 WHERE id = $binding
                 """,
-                ("$session", sessionRowId),
-                ("$now", now),
-                ("$binding", _bindingId));
+                    ("$session", sessionRowId),
+                    ("$now", now),
+                    ("$binding", _bindingId));
 
-            transaction.Commit();
-        }
+                if (bindingRows != 1)
+                {
+                    throw new OrganizationStoreException(
+                        $"Recording the session updated {bindingRows} runtime bindings; exactly one is required. The transaction was rolled back.");
+                }
+
+                transaction.Commit();
+            }
+        });
     }
 
     /// <summary>Returns the minimal organization overview read model.</summary>
     public OrganizationOverview GetOverview()
     {
-        ThrowIfDisposed();
-        lock (_gate)
+        return TranslateStoreFaults(() =>
         {
-            using var connection = OpenConnection();
-            var organization = ReadSingleOrganization(connection);
-            return BuildOverview(connection, organization);
-        }
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                var organization = ReadSingleOrganization(connection);
+                return BuildOverview(connection, organization);
+            }
+        });
     }
 
     /// <summary>
@@ -616,59 +679,62 @@ public sealed class OrganizationStore : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(organizationId);
         var validated = ValidateDisplayName(displayName);
-        ThrowIfDisposed();
-
-        lock (_gate)
+        return TranslateStoreFaults(() =>
         {
-            using var connection = OpenConnection();
-            using var transaction = connection.BeginTransaction();
+            ThrowIfDisposed();
 
-            int currentRevision;
-            using (var read = connection.CreateCommand())
+            lock (_gate)
             {
-                read.Transaction = transaction;
-                read.CommandText = "SELECT revision FROM organizations WHERE id = $id";
-                read.Parameters.AddWithValue("$id", organizationId);
-                var value = read.ExecuteScalar();
-                if (value is null)
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+
+                int currentRevision;
+                using (var read = connection.CreateCommand())
                 {
-                    throw new OrganizationNotFoundException($"Organization '{organizationId}' does not exist.");
+                    read.Transaction = transaction;
+                    read.CommandText = "SELECT revision FROM organizations WHERE id = $id";
+                    read.Parameters.AddWithValue("$id", organizationId);
+                    var value = read.ExecuteScalar();
+                    if (value is null)
+                    {
+                        throw new OrganizationNotFoundException($"Organization '{organizationId}' does not exist.");
+                    }
+
+                    currentRevision = Convert.ToInt32(value, CultureInfo.InvariantCulture);
                 }
 
-                currentRevision = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+                if (currentRevision != expectedRevision)
+                {
+                    throw new OrganizationConcurrencyException(
+                        $"Organization '{organizationId}' was revised to {currentRevision}, expected {expectedRevision}.");
+                }
+
+                var now = Timestamp();
+                var affected = Execute(
+                    connection,
+                    transaction,
+                    """
+                    UPDATE organizations
+                    SET display_name = $name, updated_at = $now, revision = revision + 1
+                    WHERE id = $id AND revision = $revision
+                    """,
+                    ("$name", validated),
+                    ("$now", now),
+                    ("$id", organizationId),
+                    ("$revision", expectedRevision));
+
+                if (affected != 1)
+                {
+                    throw new OrganizationConcurrencyException(
+                        $"Organization '{organizationId}' was modified concurrently; retry with the current revision.");
+                }
+
+                transaction.Commit();
+
+                var organization = ReadSingleOrganization(connection);
+                return BuildOverview(connection, organization);
             }
-
-            if (currentRevision != expectedRevision)
-            {
-                throw new OrganizationConcurrencyException(
-                    $"Organization '{organizationId}' was revised to {currentRevision}, expected {expectedRevision}.");
-            }
-
-            var now = Timestamp();
-            var affected = Execute(
-                connection,
-                transaction,
-                """
-                UPDATE organizations
-                SET display_name = $name, updated_at = $now, revision = revision + 1
-                WHERE id = $id AND revision = $revision
-                """,
-                ("$name", validated),
-                ("$now", now),
-                ("$id", organizationId),
-                ("$revision", expectedRevision));
-
-            if (affected != 1)
-            {
-                throw new OrganizationConcurrencyException(
-                    $"Organization '{organizationId}' was modified concurrently; retry with the current revision.");
-            }
-
-            transaction.Commit();
-
-            var organization = ReadSingleOrganization(connection);
-            return BuildOverview(connection, organization);
-        }
+        });
     }
 
     public void Dispose()
@@ -766,21 +832,61 @@ public sealed class OrganizationStore : IDisposable
 
     /// <summary>
     /// Folds the WAL back into the main database and truncates the journal so a
-    /// closed database file is complete on its own.
+    /// closed database file is complete on its own. The checkpoint result is
+    /// load-bearing: publishing and deleting the sidecars is only safe when the
+    /// TRUNCATE fully succeeded, so a busy or partial checkpoint throws before
+    /// the store is published rather than leaving a database that depends on a
+    /// discarded WAL.
     /// </summary>
-    private static void Checkpoint(SqliteConnection connection, string path)
+    private void Checkpoint(SqliteConnection connection, string path)
     {
-        using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        var rows = new List<(long Busy, long Log, long Checkpointed)>();
+        using (var command = connection.CreateCommand())
         {
-            // The checkpoint returns (busy, log, checkpointed); read it to
-            // completion so the TRUNCATE is actually applied before we return.
+            command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                rows.Add((reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2)));
+            }
         }
 
+        if (ForceBusyCheckpointForTest)
+        {
+            rows = [(1, 0, 0)];
+        }
+
+        ValidateCheckpointResult(rows);
         RestrictFileMode(path);
         RestrictSidecarModes(path);
+    }
+
+    /// <summary>
+    /// Validates a <c>wal_checkpoint(TRUNCATE)</c> result tuple set. Exactly one
+    /// row is expected; a busy checkpoint means another reader held the WAL and
+    /// the TRUNCATE did not complete, and <c>checkpointed &lt; log</c> means some
+    /// frames were not folded back. Either is a failure to publish.
+    /// </summary>
+    internal static void ValidateCheckpointResult(IReadOnlyList<(long Busy, long Log, long Checkpointed)> rows)
+    {
+        if (rows.Count != 1)
+        {
+            throw new OrganizationStoreException(
+                $"PRAGMA wal_checkpoint(TRUNCATE) returned {rows.Count} rows; exactly one result row is required before publishing.");
+        }
+
+        var (busy, log, checkpointed) = rows[0];
+        if (busy != 0)
+        {
+            throw new OrganizationStoreException(
+                "PRAGMA wal_checkpoint(TRUNCATE) reported a busy checkpoint; the WAL was not truncated and the seed must not be published.");
+        }
+
+        if (checkpointed != log)
+        {
+            throw new OrganizationStoreException(
+                $"PRAGMA wal_checkpoint(TRUNCATE) checkpointed {checkpointed} of {log} WAL frames; the WAL was not fully folded back and the seed must not be published.");
+        }
     }
 
     /// <summary>
@@ -874,22 +980,7 @@ public sealed class OrganizationStore : IDisposable
             }
         }
 
-        var actualTables = ReadUserTables(connection);
-        if (!actualTables.SetEquals(ExpectedTables.Keys))
-        {
-            throw new OrganizationStoreCorruptException(
-                $"The control database '{_databasePath}' has an unexpected table shape. Expected [{string.Join(", ", ExpectedTables.Keys.Order())}], found [{string.Join(", ", actualTables.Order())}].");
-        }
-
-        foreach (var (table, requiredColumns) in ExpectedTables)
-        {
-            var actual = ReadColumns(connection, table);
-            if (!actual.SetEquals(requiredColumns))
-            {
-                throw new OrganizationStoreCorruptException(
-                    $"The control database '{_databasePath}' table '{table}' has unexpected columns. Expected [{string.Join(", ", requiredColumns)}], found [{string.Join(", ", actual.Order())}].");
-            }
-        }
+        ValidateSchemaSignature(connection);
 
         int version;
         using (var versionCommand = connection.CreateCommand())
@@ -952,33 +1043,67 @@ public sealed class OrganizationStore : IDisposable
         }
     }
 
-    private static HashSet<string> ReadUserTables(SqliteConnection connection)
+    /// <summary>
+    /// Proves the store carries exactly the load-bearing schema this build
+    /// writes: the same tables and explicit indexes with matching normalized
+    /// definitions. Column names alone are not enough because a rebuilt table
+    /// can keep every column while dropping a PRIMARY KEY, NOT NULL, UNIQUE,
+    /// CHECK or FOREIGN KEY; the full definition comparison catches all of
+    /// them, including the partial active-session index.
+    /// </summary>
+    private void ValidateSchemaSignature(SqliteConnection connection)
     {
-        var tables = new HashSet<string>(StringComparer.Ordinal);
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';";
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        var actual = new Dictionary<(string Type, string Name), string>();
+        var unexpected = new List<string>();
+        using (var command = connection.CreateCommand())
         {
-            tables.Add(reader.GetString(0));
+            command.CommandText =
+                "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%';";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var type = reader.GetString(0);
+                var name = reader.GetString(1);
+                // A table/index always carries its defining SQL. A NULL SQL is
+                // an internal auto-index (already excluded by name) or an
+                // object this build did not create; either way it is not ours.
+                if (reader.IsDBNull(2))
+                {
+                    unexpected.Add($"{type} {name} (no definition)");
+                    continue;
+                }
+
+                actual[(type, name)] = NormalizeSchemaSql(reader.GetString(2));
+            }
         }
 
-        return tables;
-    }
-
-    private static HashSet<string> ReadColumns(SqliteConnection connection, string table)
-    {
-        var columns = new HashSet<string>(StringComparer.Ordinal);
-        using var command = connection.CreateCommand();
-        command.CommandText = $"PRAGMA table_info({table});";
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        var differences = new List<string>();
+        foreach (var (key, expectedSql) in ExpectedSchema)
         {
-            columns.Add(reader.GetString(1));
+            if (!actual.TryGetValue(key, out var actualSql))
+            {
+                differences.Add($"missing {key.Type} {key.Name}");
+            }
+            else if (!string.Equals(expectedSql, actualSql, StringComparison.Ordinal))
+            {
+                differences.Add($"changed {key.Type} {key.Name}");
+            }
         }
 
-        return columns;
+        foreach (var key in actual.Keys)
+        {
+            if (!ExpectedSchema.ContainsKey(key))
+            {
+                differences.Add($"unexpected {key.Type} {key.Name}");
+            }
+        }
+
+        differences.AddRange(unexpected);
+        if (differences.Count > 0)
+        {
+            throw new OrganizationStoreCorruptException(
+                $"The control database '{_databasePath}' has an unexpected table shape. The load-bearing schema does not match this build: {string.Join("; ", differences)}. Refusing to start on an unexpected store.");
+        }
     }
 
     private OrganizationRuntimeIdentity CreateAndSeed(
@@ -1456,6 +1581,49 @@ public sealed class OrganizationStore : IDisposable
 
         return trimmed;
     }
+
+    /// <summary>
+    /// Translates raw storage faults from a read or update into the store's own
+    /// exception contract so callers and the HTTP endpoints can answer a single
+    /// 503 ProblemDetails instead of a leaked 500. Store-defined exceptions
+    /// (concurrency, not-found, validation, corruption) pass through unchanged;
+    /// the wrapped message is generic and never re-exposes the underlying
+    /// database or path detail to a client.
+    /// </summary>
+    private static T TranslateStoreFaults<T>(Func<T> operation)
+    {
+        try
+        {
+            return operation();
+        }
+        catch (OrganizationStoreException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsStorageFault(exception))
+        {
+            throw new OrganizationStoreException(
+                "The authoritative organization store could not be read or updated.", exception);
+        }
+    }
+
+    private static void TranslateStoreFaults(Action operation)
+    {
+        TranslateStoreFaults(() =>
+        {
+            operation();
+            return true;
+        });
+    }
+
+    private static bool IsStorageFault(Exception exception) =>
+        exception is SqliteException
+            or InvalidOperationException
+            or ObjectDisposedException
+            or IOException
+            or FormatException
+            or OverflowException
+            or NotSupportedException;
 
     private static int Execute(
         SqliteConnection connection,

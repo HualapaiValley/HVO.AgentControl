@@ -642,6 +642,277 @@ public sealed class OrganizationStoreTests
         Assert.Equal(5000, int.Parse(ReadPragma(connection, "busy_timeout"), System.Globalization.CultureInfo.InvariantCulture));
     }
 
+    /// <summary>
+    /// A binding may reference only a session owned by the same employee. The
+    /// composite <c>(session_ref, employee_id)</c> foreign key enforces this even
+    /// though a plain session id is globally unique; a second employee, a second
+    /// session and a raw cross-employee UPDATE must all be rejected.
+    /// </summary>
+    [Fact]
+    public void ARuntimeBindingCannotReferenceAnotherEmployeesSession()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        var exception = Assert.Throws<SqliteException>(() => ExecuteRaw(
+            root.Path,
+            """
+            INSERT INTO employees (id, organization_id, department_id, role_id, slug, display_name, purpose, instructions, rules, restrictions, created_at, updated_at, revision)
+            SELECT 'emp-second', organization_id, department_id, role_id, 'second', 'Second', 'purpose', 'instructions', 'rules', 'restrictions', created_at, updated_at, 1 FROM employees LIMIT 1;
+            INSERT INTO acp_sessions (id, employee_id, native_session_id, title, status, created_at, updated_at)
+            VALUES ('acps-second', 'emp-second', 'ses_second', NULL, 'closed', '2026-01-01T00:00:00.0000000+00:00', '2026-01-01T00:00:00.0000000+00:00');
+            UPDATE runtime_bindings SET session_ref = 'acps-second';
+            """));
+        Assert.Contains("FOREIGN KEY", exception.Message, StringComparison.OrdinalIgnoreCase);
+
+        // The binding still points at its own employee (or no session), never the
+        // other employee's session.
+        Assert.Equal(0, RawScalar(
+            root.Path,
+            "SELECT COUNT(*) FROM runtime_bindings b JOIN acp_sessions s ON s.id = b.session_ref WHERE s.employee_id <> b.employee_id;"));
+    }
+
+    /// <summary>
+    /// Dropping the partial active-session index leaves every column intact but
+    /// removes the single-active-session invariant, so the store must fail closed
+    /// instead of accepting it and it must not recreate the index.
+    /// </summary>
+    [Fact]
+    public void RemovedActiveSessionIndexFailsClosedEvenThoughColumnsMatch()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        ExecuteRaw(root.Path, "DROP INDEX one_active_session_per_employee;");
+
+        using var reopened = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromMilliseconds(200));
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(
+            () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Contains("one_active_session_per_employee", exception.Message, StringComparison.Ordinal);
+
+        // Refused starts never repair: the index stays gone and the store is intact.
+        Assert.Equal(0, RawScalar(
+            root.Path,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'one_active_session_per_employee';"));
+        Assert.Equal(7, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('acp_sessions');"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM organizations;"));
+    }
+
+    /// <summary>
+    /// A table rebuilt with exactly the same columns but a weakened definition
+    /// (here the status CHECK removed) must be rejected: column presence alone is
+    /// not proof of the load-bearing schema.
+    /// </summary>
+    [Fact]
+    public void WeakenedTableDefinitionWithIdenticalColumnsFailsClosed()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        RewriteSchemaSql(
+            root.Path,
+            "acp_sessions",
+            """
+            CREATE TABLE acp_sessions (
+                id TEXT PRIMARY KEY,
+                employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+                native_session_id TEXT NOT NULL,
+                title TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (employee_id, native_session_id),
+                UNIQUE (id, employee_id)
+            )
+            """);
+
+        // The column set is unchanged; only the CHECK is missing.
+        Assert.Equal(7, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('acp_sessions');"));
+
+        using var reopened = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromMilliseconds(200));
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(
+            () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Contains("changed table acp_sessions", exception.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A session promotion is only committed when the runtime binding it points
+    /// at is actually updated. A missing binding faults the transaction and the
+    /// inserted session is rolled back with it.
+    /// </summary>
+    [Fact]
+    public void RecordSessionFailsAndRollsBackWhenTheBindingIsMissing()
+    {
+        using var root = new TempStore();
+        using var store = Open(root);
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+
+        ExecuteRaw(root.Path, "DELETE FROM runtime_bindings;");
+
+        var exception = Assert.Throws<OrganizationStoreException>(() => store.RecordSession("ses_orphan", "Orphan"));
+        Assert.Contains("runtime binding", exception.Message, StringComparison.Ordinal);
+
+        // The promotion transaction rolled back: no session row survives.
+        Assert.Equal(0, CountSessions(root.Path));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM runtime_bindings;"));
+    }
+
+    /// <summary>
+    /// A loaded (already recorded) session is promoted without being retitled:
+    /// the persisted title is authoritative and survives a mismatched or null
+    /// title argument.
+    /// </summary>
+    [Fact]
+    public void RecordingAnExistingSessionPreservesItsPersistedTitle()
+    {
+        using var root = new TempStore();
+        var source = RuntimeStateStore.CreateNew("Contoso", () => "org-title");
+        source.SessionId = "ses_titled";
+        source.SessionTitle = "Persisted Title";
+
+        using var store = Open(root);
+        store.OpenAndAdopt(
+            "AgentControl Development",
+            "owner-approved:test",
+            source,
+            "/runtime.json",
+            "byte-exact-title-source"u8.ToArray());
+
+        Assert.Equal("Persisted Title", Assert.Single(store.GetOverview().Employees).SessionTitle);
+
+        store.RecordSession("ses_titled", "Ignored Retitle");
+        Assert.Equal("Persisted Title", Assert.Single(store.GetOverview().Employees).SessionTitle);
+        Assert.Equal("active", SessionStatus(root.Path, "ses_titled"));
+
+        // A null title for a loaded session must not erase the persisted title.
+        store.RecordSession("ses_titled", null);
+        Assert.Equal("Persisted Title", Assert.Single(store.GetOverview().Employees).SessionTitle);
+    }
+
+    [Fact]
+    public void CheckpointValidationRejectsBusyPartialAndNonSingleResults()
+    {
+        // A busy checkpoint, a partial checkpoint, no row and more than one row
+        // are all publication-blocking failures.
+        Assert.Throws<OrganizationStoreException>(
+            () => OrganizationStore.ValidateCheckpointResult([(1, 10, 10)]));
+        Assert.Throws<OrganizationStoreException>(
+            () => OrganizationStore.ValidateCheckpointResult([(0, 10, 4)]));
+        Assert.Throws<OrganizationStoreException>(
+            () => OrganizationStore.ValidateCheckpointResult([]));
+        Assert.Throws<OrganizationStoreException>(
+            () => OrganizationStore.ValidateCheckpointResult([(0, 0, 0), (0, 0, 0)]));
+
+        // Successful shapes: a fully truncated WAL and a complete passive checkpoint.
+        OrganizationStore.ValidateCheckpointResult([(0, 0, 0)]);
+        OrganizationStore.ValidateCheckpointResult([(0, 8, 8)]);
+    }
+
+    [Fact]
+    public void BusyCheckpointFaultsTheFirstStartAndNeverPublishes()
+    {
+        using var root = new TempStore();
+        using var store = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromSeconds(5));
+        store.ForceBusyCheckpointForTest = true;
+
+        Assert.Throws<OrganizationStoreException>(
+            () => store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+
+        // Nothing was published and the attempt's temporary was cleaned up.
+        Assert.False(File.Exists(root.Path));
+        Assert.Empty(Directory.GetFileSystemEntries(
+            root.Directory,
+            "." + OrganizationStore.DatabaseFileName + ".seed-*"));
+
+        // Without the fault the same store seeds cleanly.
+        store.ForceBusyCheckpointForTest = false;
+        var identity = store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.True(identity.Created);
+        Assert.True(File.Exists(root.Path));
+    }
+
+    /// <summary>
+    /// A competing authoritative file that appears before publication must never
+    /// be replaced, and the seed attempt's temporary must be cleaned up.
+    /// </summary>
+    [Fact]
+    public void FirstPublicationNeverOverwritesACompetingAuthoritativeFile()
+    {
+        using var root = new TempStore();
+        using var store = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromSeconds(5));
+        var competing = "competing-authoritative-bytes"u8.ToArray();
+        store.BeforeFirstPublication = _ => File.WriteAllBytes(root.Path, competing);
+
+        Assert.ThrowsAny<IOException>(
+            () => store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+
+        // The competing file is untouched and no seed temporary is orphaned.
+        Assert.Equal(competing, File.ReadAllBytes(root.Path));
+        Assert.Empty(Directory.GetFileSystemEntries(
+            root.Directory,
+            "." + OrganizationStore.DatabaseFileName + ".seed-*"));
+    }
+
+    /// <summary>
+    /// A store that opens but faults during a read (for example a table dropped
+    /// underneath it) is still a store contract failure, not a raw SqliteException
+    /// leaking to callers or an HTTP 500.
+    /// </summary>
+    [Fact]
+    public void ReadFaultsAreTranslatedIntoTheStoreContract()
+    {
+        using var root = new TempStore();
+        using var store = Open(root);
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+
+        ExecuteRaw(root.Path, "DROP TABLE adoption_audit;");
+
+        var exception = Assert.Throws<OrganizationStoreException>(() => store.GetOverview());
+        Assert.IsNotType<OrganizationStoreCorruptException>(exception);
+        Assert.IsType<SqliteException>(exception.InnerException);
+        Assert.DoesNotContain(root.Path, exception.Message, StringComparison.Ordinal);
+    }
+
+    private static void RewriteSchemaSql(string path, string name, string sql)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using (var writable = connection.CreateCommand())
+        {
+            writable.CommandText = "PRAGMA writable_schema = ON;";
+            writable.ExecuteNonQuery();
+        }
+
+        using (var update = connection.CreateCommand())
+        {
+            update.CommandText = "UPDATE sqlite_master SET sql = $sql WHERE type = 'table' AND name = $name";
+            update.Parameters.AddWithValue("$sql", sql);
+            update.Parameters.AddWithValue("$name", name);
+            update.ExecuteNonQuery();
+        }
+
+        using (var writable = connection.CreateCommand())
+        {
+            writable.CommandText = "PRAGMA writable_schema = OFF;";
+            writable.ExecuteNonQuery();
+        }
+    }
+
     private static string ReadPragma(SqliteConnection connection, string pragma)
     {
         using var command = connection.CreateCommand();

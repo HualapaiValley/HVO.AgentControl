@@ -70,14 +70,16 @@ dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
 ```
 
 CI (`.github/workflows/build.yml`) runs restore/build/test/format, Compose
-validation, an image build and hermetic browser smoke. The browser CI suite
-starts its own disabled runtime and uses no provider credentials or inference.
-Run it locally for UI changes with Node 22+ and Chromium:
+validation, an image build and hermetic browser checks. The browser CI suites
+start their own runtime (one disabled, one enabled against the checked-in fake
+ACP fixture) and use no provider credentials or inference. Run them locally with
+Node 22+ and Chromium:
 
 ```bash
 npm ci --prefix tests/Browser
 npx --prefix tests/Browser playwright install chromium
-npm run ci --prefix tests/Browser
+npm run ci --prefix tests/Browser                # disabled-runtime smoke
+npm run ci-organization --prefix tests/Browser   # enabled-runtime organization
 ```
 
 Live browser suites are separate, explicitly requested checks against a running

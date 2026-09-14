@@ -4,25 +4,37 @@ Playwright checks for the AgentControl V2 portal. The package is portability-fir
 the browser binary is either the one bundled by the pinned `playwright`
 dependency or an explicit `CHROME_PATH`; no machine paths are hardcoded.
 
-## Hermetic CI (`ci-smoke.mjs`)
+## Hermetic CI suites
 
-`ci-smoke.mjs` is the only suite CI runs. It spawns the locally built app
+CI runs two hermetic suites, both against the locally built app
 (`src/HVO.AgentControl/bin/Release/net10.0/HVO.AgentControl.dll`) on a free
-loopback port with `Control__Enabled=false` and no owner password, then drives
-the real Blazor portal. It needs no Docker, model provider, or credentials and
-performs no runtime mutations.
+loopback port. Neither needs Docker, a model provider, or credentials, and
+neither performs an inference call.
+
+| Script | Runtime | What it proves |
+| --- | --- | --- |
+| `ci-smoke.mjs` | `Control__Enabled=false`, no owner password | Portal shell, disabled-runtime status, terminal/model/cancel gates, responsive layout |
+| `ci-organization.mjs` | `Control__Enabled=true`, disposable owner password, checked-in fake ACP fixture | Enabled runtime reaches ready; the organization panel fetches and renders the seeded departments, one employee and the adoption audit; no secret field is exposed; desktop/mobile layout |
+
+`ci-organization.mjs` copies `tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`
+into a temporary directory with a `prompt_fast` scenario sidecar and points
+`Control__OpenCodeExecutable` at it; it never uses the real OpenCode binary,
+provider credentials, or model inference. It is deliberately separate from the
+disabled smoke so the disabled baseline keeps its exact coverage.
 
 ```bash
 # from the repository root, after the .NET build
 dotnet build HVO.AgentControl.slnx --no-restore -c Release   # or the app test step
 npm ci --prefix tests/Browser
 npx --prefix tests/Browser playwright install --with-deps chromium
-npm run ci --prefix tests/Browser
+npm run ci --prefix tests/Browser                # disabled-runtime smoke
+npm run ci-organization --prefix tests/Browser   # enabled-runtime organization
 ```
 
-Artifacts (results JSON, `app.log`, desktop/mobile screenshots) are written to
-`artifacts/browser-ci/`. The app is always killed and the browser closed in
-`finally`, and the process exits non-zero on any failure.
+Artifacts are written to `artifacts/browser-ci/` and
+`artifacts/browser-organization/` (results JSON, `app.log`, screenshots). The app
+is always killed and the browser closed in `finally`, and each process exits
+non-zero on any failure.
 
 ## Live operator suites (intentional, not run in CI)
 

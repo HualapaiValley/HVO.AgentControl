@@ -87,17 +87,31 @@ OpenCode process is launched.
 
 ### Browser checks
 
-CI runs only the hermetic smoke suite. It spawns the locally built app on a
-free loopback port with `Control__Enabled=false` and no owner password, so it
-needs no Docker, credentials, or model provider.
+CI runs two hermetic suites. Both spawn the locally built app on a free loopback
+port, need no Docker, credentials, or model provider, and perform no inference.
+
+- `ci-smoke.mjs` (`npm run ci`) runs with `Control__Enabled=false` and no owner
+  password and covers the portal shell, disabled-runtime status, terminal/model/
+  cancel gates and responsive layout.
+- `ci-organization.mjs` (`npm run ci-organization`) runs with
+  `Control__Enabled=true`, a disposable owner password and the checked-in fake
+  ACP fixture (`tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`). It asserts
+  the enabled runtime reaches ready, the organization panel fetches and renders
+  the seeded Development/Operations/QA departments, one Operations/IT employee
+  and the `owner-approved:issue-211` adoption audit, exposes no owner password or
+  tmux owner token, and stays visible without horizontal overflow at desktop and
+  mobile widths. It is intentionally separate from the disabled smoke so that
+  baseline keeps its exact coverage.
 
 ```bash
 npm ci --prefix tests/Browser
 npx --prefix tests/Browser playwright install --with-deps chromium
 npm run ci --prefix tests/Browser
+npm run ci-organization --prefix tests/Browser
 ```
 
-Test results and screenshots are written to `artifacts/browser-ci/`. See
+Test results and screenshots are written to `artifacts/browser-ci/` and
+`artifacts/browser-organization/`. See
 [`tests/Browser/README.md`](../tests/Browser/README.md) for the suite list.
 
 ### Container
@@ -238,9 +252,12 @@ Health is deliberately split and must not overstate dependency coverage:
   and the attached TUI/tmux readiness. It is **not** a database check and
   **not** a statement that workers or a model provider are ready.
 
-V2 currently has no database; readiness must not require one. This differs from
-archived V1, whose `/health/ready` checked control-plane database connectivity.
-Do not reintroduce a database probe into the V2 readiness signal.
+V2 does have an authoritative controller-private SQLite store at the fixed path
+`<PrivateDataDirectory>/control.db` (see below), but readiness deliberately does
+not depend on it: the store is opened and validated before the runtime starts and
+`/health/ready` never probes it. This differs from archived V1, whose
+`/health/ready` checked control-plane database connectivity. Do not reintroduce a
+database probe into the V2 readiness signal.
 
 The portal readiness contract always requires its TUI. Setting
 `Control:EnableTerminal=false` intentionally leaves `/health/ready` at 503,
@@ -270,8 +287,15 @@ publication remains subject to CI and PR review. `/health/ready` is a
 fail-closed readiness observation: unknown native status yields 503 during
 startup or transient probe failures. Do not use readiness failures as an
 automatic restart signal; `/health/live` is the process liveness probe.
-No existing runtime data schema (for example `/data/runtime.json`) changes as
-part of the API framework work.
+
+The authoritative store path is fixed at
+`<PrivateDataDirectory>/control.db`; there is no `Control:DatabasePath`
+configuration override. The rollback tooling, the container layout preparation
+and the host all resolve that same path (`/control-data/control.db` in Compose),
+so no deployment can silently select a different authoritative store. The API
+framework change itself does not alter the runtime data schema: `/data/runtime.json`
+remains adoption evidence only, and the SQLite store is the separate #215
+persistence surface.
 
 ## Execution workflow
 
