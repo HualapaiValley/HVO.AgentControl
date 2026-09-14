@@ -9,6 +9,7 @@
   },
   "scripts": {
     "ci": "node ci-smoke.mjs",
+    "ci-organization": "node ci-organization.mjs",
     "model-sync": "node model-sync.mjs",
     "portal-layout": "node portal-layout.mjs",
     "portal-smoke": "node portal-smoke.mjs",

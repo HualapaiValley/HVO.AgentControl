@@ -7,6 +7,12 @@ using Microsoft.OpenApi;
 using System.Security.Cryptography;
 using System.Text;
 
+// The controller-private store, its WAL/SHM sidecars and the writer lock must be
+// controller-only from the moment they are created. The process creation mask is
+// narrowed before any file work so SQLite never creates a group/world-readable
+// temporary of the database; the store still applies explicit 0600 modes.
+HVO.AgentControl.Organization.OrganizationStore.RestrictProcessFileCreation();
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents();
 builder.Services.AddAcpControlHost(builder.Configuration);
@@ -188,6 +194,96 @@ app.MapGet("/api/control", (AcpControlHost host) => Results.Ok(host.GetStatus())
     .WithSummary("Returns an immutable snapshot of the owned runtime.")
     .Produces<ControlStatus>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
+
+app.MapGet("/api/organization", (AcpControlHost host) =>
+{
+    var store = host.Organization;
+    if (store is null)
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The control runtime is disabled or the authoritative store has not opened.");
+    try
+    {
+        return Results.Ok(store.GetOverview());
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The authoritative store could not be read.");
+    }
+})
+    .WithName("GetOrganization")
+    .WithTags("Organization")
+    .WithSummary("Returns the minimal organization overview from the authoritative store.")
+    .Produces<HVO.AgentControl.Organization.OrganizationOverview>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPatch("/api/organization", (HttpContext context, AcpControlHost host, OrganizationUpdate update) =>
+{
+    if (!TerminalProtocol.IsSameOrigin(context.Request.Headers.Origin.ToString(),
+            context.Request.Scheme, context.Request.Host.Value))
+        return Results.Problem(
+            statusCode: StatusCodes.Status403Forbidden,
+            title: "Cross-origin request rejected.",
+            detail: "Organization updates must originate from the portal origin.");
+    if (string.IsNullOrWhiteSpace(update.OrganizationId))
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid organization update.",
+            detail: "A stable organization id is required.");
+    if (update.Revision is null or < 1)
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid organization update.",
+            detail: "The current organization revision is required for a safe update.");
+    try
+    {
+        return Results.Ok(host.RenameOrganization(update.OrganizationId, update.DisplayName ?? string.Empty, update.Revision.Value));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid organization update.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Organization update conflicted.",
+            detail: "The organization changed since it was read. Reload and retry.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Organization not found.",
+            detail: "No organization with that stable id exists.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The authoritative store could not be updated.");
+    }
+})
+    .WithName("UpdateOrganization")
+    .WithTags("Organization")
+    .WithSummary("Renames the organization display name under an optimistic revision check.")
+    .Accepts<OrganizationUpdate>("application/json")
+    .Produces<HVO.AgentControl.Organization.OrganizationOverview>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPost("/api/control/model", async (HttpContext context, AcpControlHost host, ModelSelection selection) =>
 {
@@ -418,6 +514,8 @@ public partial class Program
 }
 
 public sealed record ModelSelection(string? Model);
+
+public sealed record OrganizationUpdate(string? OrganizationId, string? DisplayName, int? Revision);
 
 public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented);
 

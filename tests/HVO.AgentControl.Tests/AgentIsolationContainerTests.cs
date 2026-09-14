@@ -445,6 +445,28 @@ public sealed class AgentIsolationContainerTests
             setpriv --reuid 1000 --regid 1000 --clear-groups rm -f /control-data/runtime.json; echo UNLINK=$?
             setpriv --reuid 1000 --regid 1000 --clear-groups mv /control-data/runtime.json /tmp/stolen; echo RENAME=$?
             test -f /control-data/runtime.json && echo STATE-INTACT
+
+            # The controller's own creation mask, and the actual WAL/SHM sidecars
+            # it produces, are controller-only - not merely protected by the 0700
+            # parent. The controller itself holds no effective capabilities, so
+            # the agent-denial probe below runs from the root test shell.
+            export Control__OwnerPasswordFile=""
+            cat > /tmp/probe_sidecars.py <<'PY'
+            import sqlite3, os, stat
+            con = sqlite3.connect("/control-data/control.db")
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE probe (x)")
+            con.execute("INSERT INTO probe VALUES (1)")
+            con.commit()
+            for suffix in ("", "-wal", "-shm"):
+                path = "/control-data/control.db" + suffix
+                if os.path.exists(path):
+                    print("PROBE_MODE%s=%s" % (suffix or "-db", oct(stat.S_IMODE(os.stat(path).st_mode))))
+            con.close()
+            PY
+            chmod 0644 /tmp/probe_sidecars.py
+            /usr/local/bin/control-entrypoint /bin/sh -c 'echo "UMASK=$(umask)"; python3 /tmp/probe_sidecars.py'
+            setpriv --reuid 1000 --regid 1000 --clear-groups cat /control-data/control.db >/dev/null 2>&1; echo DB_READ=$?
             """);
 
         // Reads, directory listing, unlink and rename are all denied: the 0700
@@ -455,6 +477,14 @@ public sealed class AgentIsolationContainerTests
         Assert.Contains("RENAME=1", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("STATE-INTACT", result.StandardOutput, StringComparison.Ordinal);
         Assert.DoesNotContain("org-secret", result.StandardOutput, StringComparison.Ordinal);
+
+        // The controller runs under 0077 and the sidecars it creates are 0600;
+        // the agent cannot read the database.
+        Assert.Contains("UMASK=0077", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("PROBE_MODE-db=0o600", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("PROBE_MODE-wal=0o600", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("PROBE_MODE-shm=0o600", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("DB_READ=1", result.StandardOutput, StringComparison.Ordinal);
     }
 
     [DockerFact]
@@ -983,6 +1013,68 @@ public sealed class AgentIsolationContainerTests
     }
 
     /// <summary>
+    /// Once the authoritative SQLite database exists the pre-isolation image
+    /// cannot read it, so a rollback would run old JSON-only code against stale
+    /// session identity while the database held the real state. The rollback
+    /// must fail closed before it changes a single path.
+    /// </summary>
+    [DockerFact]
+    public void DatabaseEraRevertRefusesAndChangesNothing()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
+            chown 1000:1000 /data && chmod 0755 /data
+            echo '{"organizationId":"org-keep","sessionId":"ses_OLD"}' > /data/runtime.json
+            chown 1000:1000 /data/runtime.json && chmod 0600 /data/runtime.json
+            SECRET_INODE=$(stat -c '%i' /run/agentcontrol-secrets/owner-password)
+            LEGACY_INODE=$(stat -c '%i' /data/runtime.json)
+
+            # The authoritative database appears under the controller-private root.
+            install -o 1001 -g 1001 -m 600 /dev/null /control-data/control.db
+            echo 'sqlite-authoritative-bytes' > /control-data/control.db
+
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+            python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0
+            echo "DB_REVERT_EXIT=$?"
+
+            stat -c 'SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            stat -c 'LEGACY=%u:%g:%a' /data/runtime.json
+            stat -c 'DATA=%u:%g:%a' /data
+            test "$SECRET_INODE" = "$(stat -c '%i' /run/agentcontrol-secrets/owner-password)" && echo SECRET_INODE_STABLE
+            test "$LEGACY_INODE" = "$(stat -c '%i' /data/runtime.json)" && echo LEGACY_INODE_STABLE
+            test -f /control-data/rollback.active && echo MARKER_RECORDED || echo NO_MARKER
+            echo "LEGACY_BYTES=$(cat /data/runtime.json)"
+            echo "DB_BYTES=$(cat /control-data/control.db)"
+            """);
+
+        var output = result.StandardOutput;
+
+        // Refused before anything was written or handed back.
+        Assert.Contains("DB_REVERT_EXIT=1", output, StringComparison.Ordinal);
+        Assert.Contains("authoritative SQLite database", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed", result.StandardError, StringComparison.Ordinal);
+
+        // Byte- and inode-exact: secret, legacy state, data root and the database.
+        Assert.Contains("SECRET=1001:1001:600", output, StringComparison.Ordinal);
+        Assert.Contains("LEGACY=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("DATA=1000:1000:755", output, StringComparison.Ordinal);
+        Assert.Contains("SECRET_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("LEGACY_INODE_STABLE", output, StringComparison.Ordinal);
+        Assert.Contains("NO_MARKER", output, StringComparison.Ordinal);
+        Assert.Contains("ses_OLD", Extract(output, "LEGACY_BYTES="), StringComparison.Ordinal);
+        Assert.Contains("sqlite-authoritative-bytes", Extract(output, "DB_BYTES="), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Three volumes cannot be changed in one transaction, so the rollback is
     /// replayable rather than atomic. Running it twice must converge on the same
     /// result instead of failing on the ownership it already handed back.
@@ -1235,6 +1327,70 @@ public sealed class AgentIsolationContainerTests
         // the isolated entrypoint's both-sides check passes again.
         Assert.Contains("RESUMED_SECRET=1001:1001:600", output, StringComparison.Ordinal);
         Assert.Contains("RESUMED_START_EXIT=0", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Once the authoritative database exists, runtime.json is evidence only, so
+    /// a JSON-only divergence must no longer block the database-era start. The
+    /// bytes are still preserved and the legacy path is still reduced root-only.
+    /// </summary>
+    [DockerFact]
+    public void DatabaseAuthorityTreatsAJsonDivergenceAsEvidenceRatherThanBlocking()
+    {
+        var result = RunInContainer(
+            """
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
+            # The authoritative database is present. A byte-identical
+            # legacy/private pair is an interrupted adoption, not a divergence,
+            # and must not be labelled as one.
+            install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_same"}' > /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_same"}' > /data/runtime.json
+            chown 1000:1000 /data/runtime.json
+            install -o 1001 -g 1001 -m 600 /dev/null /control-data/control.db
+            echo 'sqlite-authoritative' > /control-data/control.db
+
+            /usr/local/bin/control-entrypoint /bin/true; echo "IDENTICAL_EXIT=$?"
+
+            # Now the legacy path is UID 1000 again with genuinely different
+            # bytes while the database is authoritative: this is the JSON-only
+            # divergence that must be tolerated and labelled with its provenance.
+            echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
+            echo '{"organizationId":"org-keep","sessionId":"ses_legacy_advanced"}' > /data/runtime.json
+            chown 1000:1000 /data/runtime.json
+            /usr/local/bin/control-entrypoint /bin/true; echo "DIVERGENT_EXIT=$?"
+
+            test -f /control-data/rollback.active && echo MARKER_RECORDED || echo NO_MARKER
+            stat -c 'LEGACY=%u:%g:%a' /data/runtime.json
+            echo "PRIVATE=$(cat /control-data/runtime.json)"
+            echo "LEGACY_BYTES=$(cat /data/runtime.json)"
+            test -f /control-data/runtime.pre-isolation.json && echo SNAPSHOT || echo NO_SNAPSHOT
+            echo "DB=$(cat /control-data/control.db)"
+            """);
+
+        var output = result.StandardOutput;
+
+        Assert.Contains("IDENTICAL_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("DIVERGENT_EXIT=0", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("written outside isolation", result.StandardError, StringComparison.Ordinal);
+
+        // The byte-identical case must not be logged as a divergence; the
+        // genuinely differing one must be, under its truthful provenance.
+        Assert.Equal(1, Occurrences(result.StandardError, "database-era-json-divergence"));
+
+        // No interlock marker was recorded, the divergence is preserved as
+        // evidence, and the shadowed database is untouched.
+        Assert.Contains("NO_MARKER", output, StringComparison.Ordinal);
+        Assert.Contains("LEGACY=0:0:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "PRIVATE="), StringComparison.Ordinal);
+        Assert.Contains("ses_legacy_advanced", Extract(output, "LEGACY_BYTES="), StringComparison.Ordinal);
+        Assert.Contains("SNAPSHOT", output, StringComparison.Ordinal);
+        Assert.Contains("sqlite-authoritative", Extract(output, "DB="), StringComparison.Ordinal);
     }
 
     /// <summary>

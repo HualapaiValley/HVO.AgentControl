@@ -47,6 +47,21 @@ public sealed class ControlOptions
     /// <summary>Human readable organization name used in instructions and the session title.</summary>
     public string OrganizationName { get; set; } = "AgentControl Development";
 
+    /// <summary>
+    /// Owner authorization reference recorded in the adoption audit for the one
+    /// approved initial Operations/IT employee. It is never a model assertion.
+    /// </summary>
+    /// <remarks>
+    /// Source: the owner explicitly authorized bounded work on issue #211
+    /// (initial organization persistence and the single seed employee) and the
+    /// current implementation decision is to record the exact string
+    /// <c>owner-approved:issue-211</c>. Changing it requires a new explicit
+    /// owner decision, not a quiet edit. The value is written verbatim into the
+    /// <c>adoption_audit.authorization_reference</c> column and surfaced by the
+    /// organization overview.
+    /// </remarks>
+    public string AdoptionAuthorizationReference { get; set; } = "owner-approved:issue-211";
+
     /// <summary>Executable used to launch the OpenCode ACP server.</summary>
     public string OpenCodeExecutable { get; set; } = "opencode";
 
@@ -114,6 +129,11 @@ public sealed class ControlOptions
             errors.Add($"{nameof(AgentLauncher)} must be an absolute path when configured.");
         }
 
+        if (string.IsNullOrWhiteSpace(AdoptionAuthorizationReference))
+        {
+            errors.Add($"{nameof(AdoptionAuthorizationReference)} must not be empty.");
+        }
+
         if (string.IsNullOrWhiteSpace(Model))
         {
             errors.Add($"{nameof(Model)} must not be empty.");
@@ -162,6 +182,16 @@ public sealed class ControlOptions
     /// <summary>Controller-private state root; falls back to <see cref="DataDirectory"/>.</summary>
     public string ResolvePrivateDataDirectory() =>
         string.IsNullOrWhiteSpace(PrivateDataDirectory) ? DataDirectory : PrivateDataDirectory;
+
+    /// <summary>
+    /// Absolute path of the authoritative SQLite store. It is always
+    /// <c>control.db</c> inside the controller-private directory: the path is
+    /// fixed, not configurable, so the rollback tooling, the container layout
+    /// preparation and the host can never disagree about where the authoritative
+    /// store lives and no deployment can silently select a different one.
+    /// </summary>
+    public string ResolveDatabasePath() =>
+        Path.Combine(ResolvePrivateDataDirectory(), HVO.AgentControl.Organization.OrganizationStore.DatabaseFileName);
 
     private static bool IsAbsoluteOrEmpty(string value) =>
         string.IsNullOrWhiteSpace(value) || Path.IsPathRooted(value);

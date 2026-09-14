@@ -37,6 +37,15 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "must start as root to establish controller/agent isolation"
 fi
 
+# Controller-only creation mask. The controller-private store, its WAL/SHM
+# sidecars, the writer lock and every other file the controller creates default
+# to 0600/0700 even before an explicit mode is applied; this closes the window in
+# which SQLite would otherwise create a group/world-readable sidecar under a
+# permissive inherited mask. The C# store also narrows its own mask and applies
+# explicit modes, because single-identity host development does not run this
+# entrypoint.
+umask 0077
+
 # ---------------------------------------------------------------------------
 # Ownership and permissions for the agent tree, the controller-private store,
 # the orientation directory and the legacy runtime state. Symlink-safe and
@@ -47,6 +56,11 @@ fi
 # advanced /data/runtime.json past the controller-private copy, and the two
 # cannot be merged, so the start is refused until the operator names the state
 # that survives with --resume-isolation --state-source legacy|private.
+#
+# Once the authoritative SQLite store /control-data/control.db exists,
+# runtime.json is evidence only: prepare-layout no longer blocks on a JSON-only
+# divergence, and --revert-isolation itself fails closed because the
+# pre-isolation image cannot read the database.
 # ---------------------------------------------------------------------------
 "$PREPARE_LAYOUT" || fail "filesystem layout preparation failed; refusing to start"
 

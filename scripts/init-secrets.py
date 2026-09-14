@@ -408,6 +408,40 @@ def publish_bytes(directory_fd, directory_path, name, payload, uid, gid, mode):
 
 
 # ---------------------------------------------------------------------------
+# Database-era guard. Once the authoritative SQLite store exists, runtime.json
+# is evidence only: the isolated controller reads and writes control.db, and the
+# pre-isolation image knows nothing about it. Rolling back would re-own a stale
+# JSON file and let the old JSON-only code run against session identity the
+# database has already superseded, silently stranding the real state. There is
+# no compatible downgrade for a SQLite-authoritative store and this command does
+# not perform one, so it fails closed before opening or changing anything.
+#
+# This check runs before the descriptor validation below, so the refusal is
+# reported even when the other paths would also be rejected.
+# ---------------------------------------------------------------------------
+database_path = os.path.join(private_root, "control.db")
+database_fd = None
+try:
+    database_fd = os.open(database_path, OPEN_FLAGS)
+except FileNotFoundError:
+    database_fd = None
+except OSError as error:
+    fail(
+        "the authoritative database path %s could not be inspected (%s); refusing to roll "
+        "back on an unverifiable database-era store." % (database_path, error.strerror)
+    )
+if database_fd is not None:
+    os.close(database_fd)
+    fail(
+        "the authoritative SQLite database %s exists. The pre-isolation image understands only "
+        "runtime.json and cannot read the database, so a rollback would run old code against stale "
+        "session identity while the database holds the real state. Database-era rollback requires a "
+        "contract-safe restore of a verified database backup, which this command does not perform. "
+        "Nothing was changed. Stay on the isolated image, or restore the whole controller-private "
+        "volume from a verified backup before downgrading." % database_path
+    )
+
+# ---------------------------------------------------------------------------
 # Validate every path first. A rollback that re-owns the secret and then aborts
 # on the runtime state leaves a half-reverted deployment that neither image can
 # start cleanly, so nothing is changed until all targets are accepted.

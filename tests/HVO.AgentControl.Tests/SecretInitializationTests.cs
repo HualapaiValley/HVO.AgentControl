@@ -607,6 +607,73 @@ public sealed class SecretInitializationTests
         }
     }
 
+    /// <summary>
+    /// Once the authoritative SQLite database exists, the pre-isolation image
+    /// cannot read it. Rolling back by republishing runtime.json would run old
+    /// JSON-only code against stale session identity while the database held the
+    /// real state, so the rollback must fail closed before it changes anything.
+    /// </summary>
+    [Fact]
+    public void DatabaseEraRollbackFailsClosedBeforeAnyWriteOrHandBack()
+    {
+        var revert = ExtractBlock("REVERT_CODE");
+
+        Assert.Contains("control.db", revert, StringComparison.Ordinal);
+        Assert.Contains("authoritative SQLite database", revert, StringComparison.Ordinal);
+        Assert.Contains("contract-safe restore", revert, StringComparison.Ordinal);
+
+        // The guard runs before the descriptor validation and before the first
+        // publication or hand-back, so nothing is changed on the refusal path.
+        var guard = revert.IndexOf("database_path = os.path.join(private_root, \"control.db\")", StringComparison.Ordinal);
+        Assert.True(guard > 0, "the database-era guard was not found");
+        Assert.True(
+            guard < revert.IndexOf("descriptors = []", StringComparison.Ordinal),
+            "the database-era guard must run before the rollback validates and changes paths");
+        Assert.True(
+            guard < revert.IndexOf("write_marker(\"intent\"", StringComparison.Ordinal),
+            "the database-era guard must run before the rollback marker or any publication");
+    }
+
+    /// <summary>
+    /// Executes the rollback block against a controller-private directory that
+    /// holds a control.db. The refusal happens before the secret or state paths
+    /// are inspected, so it is testable without root or Docker.
+    /// </summary>
+    [Fact]
+    public void DatabaseEraRollbackRefusesWhenTheDatabaseExists()
+    {
+        var python = RequirePython();
+        if (python is null || OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var code = LoadEmbeddedCode(python, "REVERT_CODE");
+        Assert.False(string.IsNullOrWhiteSpace(code));
+
+        using var directory = new TempDirectory();
+        var dataRoot = Path.Combine(directory.Path, "data");
+        var privateRoot = Path.Combine(directory.Path, "private");
+        Directory.CreateDirectory(dataRoot);
+        Directory.CreateDirectory(privateRoot);
+        File.WriteAllText(Path.Combine(privateRoot, "control.db"), "not really a database");
+
+        var result = Run(python, new[]
+        {
+            "-c", code,
+            Path.Combine(directory.Path, "owner-password"),
+            "1000", "1000", dataRoot, privateRoot, "0",
+        });
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("authoritative SQLite database", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains("control.db", result.StandardError, StringComparison.Ordinal);
+
+        // Nothing was written: no marker, no republished runtime state.
+        Assert.False(File.Exists(Path.Combine(privateRoot, "rollback.active")));
+        Assert.False(File.Exists(Path.Combine(dataRoot, "runtime.json")));
+    }
+
     private static int Occurrences(string text, string value) =>
         text.Split(value, StringSplitOptions.None).Length - 1;
 

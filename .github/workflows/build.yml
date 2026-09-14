@@ -104,11 +104,11 @@ jobs:
       # deliberate act, so updating EXPECTED here is part of that change.
       #
       # Scope note: the filter selects the whole AgentIsolationContainerTests
-      # class, which is 40 real alternate-UID container test cases plus 2
+      # class, which is 42 real alternate-UID container test cases plus 2
       # structural source/Compose-wiring tests that need no daemon
       # (LauncherSourceIsWiredIntoTheImageAndCi and
       # ComposeGrantsExactlyTheCapabilitiesTheseTestsAssume). Both are asserted
-      # here; only the 40 prove the kernel-enforced boundary. The 40 are 36
+      # here; only the 42 prove the kernel-enforced boundary. The 42 are 38
       # [DockerFact] methods plus the 4 [InlineData] cases of the planted-symlink
       # [DockerTheory], which xUnit reports individually.
       #
@@ -119,12 +119,16 @@ jobs:
       # 37 to 39 with the two crash-window tests added for the marker-before-
       # republish fix (BothCrashWindowsAroundTheRootOwnedPublishAreClassified-
       # AndConverge and RepublishHandsBackThePublishedInodeAndNotTheSupersededOne).
-      # The unsupported-marker-schema test then moved the count from 39 to 40.
+      # The unsupported-marker-schema test then moved the count from 39 to 40,
+      # the database-era rollback refusal (DatabaseEraRevertRefusesAndChanges-Nothing)
+      # moved it from 40 to 41, and the database-era divergence bypass
+      # (DatabaseAuthorityTreatsAJsonDivergenceAsEvidenceRatherThanBlocking) moved it
+      # from 41 to 42.
       - name: Assert the isolation suite executed
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          EXPECTED = 42  # see the scope note above: 40 container + 2 structural
+          EXPECTED = 44  # see the scope note above: 42 container + 2 structural
           files = glob.glob("artifacts/isolation-results/*.trx")
           if not files:
               sys.exit("no isolation test results were produced")
@@ -160,9 +164,14 @@ jobs:
           if-no-files-found: ignore
 
   browser-smoke:
+    # The job name is the required status context on the protected main branch
+    # ("Browser smoke (disabled runtime)"). Renaming it would silently drop the
+    # required check, so the name is kept exactly and the enabled-runtime
+    # organization suite runs inside this same job: the protected gate then
+    # covers both hermetic browser suites rather than fewer.
     name: Browser smoke (disabled runtime)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
@@ -183,12 +192,27 @@ jobs:
       # loopback port with Control__Enabled=false and no owner password, then
       # drives the real portal. No Docker, model provider, credentials, or
       # runtime mutations are involved. Its artifacts go to artifacts/browser-ci.
-      - name: Run hermetic browser smoke
+      - name: Run hermetic browser smoke (disabled runtime)
         run: npm run ci --prefix tests/Browser
-      - name: Upload browser artifacts
+      # ci-organization.mjs is the separate enabled-runtime suite: it starts the
+      # app with Control__Enabled=true, a disposable owner password and the
+      # checked-in fake ACP fixture (no inference/provider credentials), then
+      # asserts the organization panel renders the authoritative store read
+      # model. It runs after the disabled smoke so the disabled baseline is
+      # unchanged. Its artifacts go to artifacts/browser-organization.
+      - name: Run hermetic organization browser check (enabled runtime)
+        run: npm run ci-organization --prefix tests/Browser
+      - name: Upload browser smoke artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: browser-smoke-artifacts
           path: artifacts/browser-ci
+          if-no-files-found: ignore
+      - name: Upload organization browser artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-organization-artifacts
+          path: artifacts/browser-organization
           if-no-files-found: ignore

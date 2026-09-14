@@ -258,6 +258,7 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
+- `/api/organization`: owner-protected overview, with a same-origin revision-guarded rename
 - `/terminal`: same-origin authenticated terminal WebSocket, one viewer at a time
 - `/health/live`: process health, not worker/provider readiness
 - `/api/version`: semantic version and architecture direction
@@ -276,9 +277,20 @@ synchronization is not available; an acknowledged ACP model-setting RPC alone
 does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/runtime.json` stores the organization/session mapping in the
-controller-private volume; the agent-owned data volume retains workspace and
-native conversation state. A failed session load is
+`/control-data/control.db` is the authoritative SQLite store for organization,
+department, role, employee, runtime-binding and session identity in the
+controller-private volume; `/control-data/runtime.json` is retained as adoption
+evidence only. The database, its WAL/SHM sidecars and the writer lock are
+controller-only `0600`, and a fresh database is seed-published atomically so an
+interrupted first start leaves no half-written authoritative file. Before an
+existing runtime is adopted, its exact input bytes are retained create-once as
+`runtime.pre-database.json` with verified SHA-256 evidence in
+`runtime.pre-database.sha256`; conflicting evidence fails closed and is never
+replaced. WAL,
+`synchronous=FULL`, foreign keys and a bounded single-writer lock are configured
+and covered by local/container tests; crash durability on the real volume
+filesystem has not been crash-tested. The agent-owned data volume retains
+workspace and native conversation state. A failed session load is
 surfaced, not silently replaced. Detaching the browser leaves the TUI/runtime
 alive. Container restart restores conversation history, not a running command.
 Only an initial new-session readiness prompt is automatic.

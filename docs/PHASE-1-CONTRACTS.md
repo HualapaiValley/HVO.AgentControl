@@ -75,8 +75,13 @@ labels and are never used as identity.
 
 ## 3. Storage
 
-Chosen: **one small SQLite database file** owned by the C# host, for example
-`/data/control.db` (final path decided in the implementation issue).
+**Status: implemented for the control host (#215), with the remaining
+organization-breadth items still proposed.** The initial store, adoption, seed,
+validation and fail-closed startup below are live in the active code; the wider
+Phase 1 lifecycle that consumes it is not.
+
+Chosen: **one small SQLite database file** owned by the C# host at
+`/control-data/control.db` (controller-private, `0600` in a `0700` directory).
 
 - Single writer: the host process. A cross-process file lock plus
   `busy_timeout` makes a second writer fail closed rather than interleave.
@@ -110,6 +115,15 @@ Chosen: **one small SQLite database file** owned by the C# host, for example
   Rollback must restore the matching backup, not run old code against stale
   session identity after new activity. Backup/restore includes WAL state through
   SQLite backup or a quiesced checkpoint, not a live copy of the database alone.
+  The implemented first-adoption backup is the byte-exact
+  `/control-data/runtime.pre-database.json` plus create-once SHA-256 evidence;
+  both are durable inputs/evidence, not a second live authority. Database-era
+  operational backups remain quiesced whole-volume/SQLite backups.
+  **Implemented decision (#215):** the pre-isolation image cannot read `control.db`,
+  so `--revert-isolation` fails closed before changing anything once the database
+  exists instead of offering a JSON-only downgrade; recovery is a verified restore
+  of the whole controller-private volume. This avoids a dual-write compatibility
+  authority.
 - Archived V1 state is never read or migrated. V2 starts from its own store.
 
 ### 3.2 Crash-uncertain writes
@@ -555,8 +569,14 @@ These are open and must not be presented as decided or owner-accepted:
   epoch/fencing, replay and pending-permission contracts, including redelivery
   versus invalidation on child/turn changes and uncertain decision writes.
 - SQLite is the selected proposed storage scheme, not an unresolved alternative.
-  Validate WAL behavior on the actual volume filesystem and single-writer locking;
-  justify the package version in #215.
+  **Implemented for the control host (#215):** WAL, `synchronous=FULL`, foreign
+  keys and a busy timeout are configured on every writer connection; the bounded
+  cross-process single-writer lock, the controller-only `0600` database/WAL/SHM
+  modes and fail-closed validation are covered by local and container tests, and
+  `Microsoft.Data.Sqlite` is pinned centrally to the matching `10.0.12` servicing
+  band. **Not yet validated:** WAL/`synchronous=FULL` crash durability on the
+  actual Docker volume filesystem has not been crash-tested; the evidence is the
+  configured pragmas and the local/container test filesystems only.
 - The definition and reliability of "comprehension" evidence.
 - Reachability and collateral of `home-dev-02`, and whether the disposable
   worker path can run without touching existing services.

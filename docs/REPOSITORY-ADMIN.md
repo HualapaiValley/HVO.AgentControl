@@ -7,6 +7,12 @@
   branch deletion. Review conversations must be resolved.
 - Required CI checks: `Build and test`, `Docker config and image`, and
   `Browser smoke (disabled runtime)`. Branch must be up to date before merging.
+  These strings are branch-protection contexts, so a workflow job name must not
+  be renamed without updating the protection rule first: a renamed job silently
+  stops satisfying its required check and blocks the merge. The
+  `Browser smoke (disabled runtime)` job intentionally runs both hermetic
+  browser suites (the disabled-runtime smoke and the enabled-runtime
+  organization check), so the required gate covers both.
 - Zero required approvals while the owner is the only collaborator: an author
   cannot approve their own PR. Independent review remains the workflow; add a
   required approval when a second reviewer is enrolled.

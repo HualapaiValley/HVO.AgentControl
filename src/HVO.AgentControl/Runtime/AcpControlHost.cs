@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using HVO.AgentControl.Organization;
 using Microsoft.Extensions.Options;
 
 namespace HVO.AgentControl.Runtime;
@@ -53,6 +54,9 @@ public sealed class AcpControlHost : BackgroundService
     private Task? _statusPollerTask;
     private Task? _notificationTask;
     private Task? _stderrTask;
+    private OrganizationStore? _organization;
+    private OrganizationRuntimeIdentity? _identity;
+    private string _organizationName;
 
     public AcpControlHost(IOptions<ControlOptions> options, ILogger<AcpControlHost> logger)
     {
@@ -60,6 +64,7 @@ public sealed class AcpControlHost : BackgroundService
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _launcher = new AgentProcessLauncher(_options.AgentLauncher);
         _stderrBuffer = new SanitizedLogBuffer(secret: null);
+        _organizationName = _options.OrganizationName;
     }
 
     /// <summary>Absolute agent data directory (workspace and private OpenCode home).</summary>
@@ -70,6 +75,35 @@ public sealed class AcpControlHost : BackgroundService
 
     /// <summary>Privileged launcher used for agent-identity children.</summary>
     public AgentProcessLauncher AgentLauncher => _launcher;
+
+    /// <summary>
+    /// Authoritative organization store. Null until the enabled runtime has
+    /// opened it; the disabled runtime leaves it unopened. The publication is
+    /// guarded by the host gate so a request thread never observes a
+    /// half-published store together with a stale identity.
+    /// </summary>
+    public OrganizationStore? Organization
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _organization;
+            }
+        }
+    }
+
+    /// <summary>Persisted organization identity observed at startup, when the store is open.</summary>
+    public OrganizationRuntimeIdentity? OrganizationIdentity
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _identity;
+            }
+        }
+    }
 
     /// <summary>Loopback URL of the native OpenCode HTTP server exposed by ACP.</summary>
     public string NativeUrl => new UriBuilder("http", _options.Hostname, _options.NativePort).Uri.GetLeftPart(UriPartial.Authority);
@@ -85,7 +119,7 @@ public sealed class AcpControlHost : BackgroundService
             return new ControlStatus
             {
                 State = _state.ToWireValue(),
-                OrganizationName = _options.OrganizationName,
+                OrganizationName = _organizationName,
                 SessionId = _sessionId,
                 Model = _model,
                 Models = _models ?? [],
@@ -95,6 +129,28 @@ public sealed class AcpControlHost : BackgroundService
                 SessionState = _sessionState,
             };
         }
+    }
+
+    /// <summary>
+    /// Renames the persisted organization display name through the authoritative
+    /// store under an optimistic revision check, then reflects it in status.
+    /// </summary>
+    public OrganizationOverview RenameOrganization(string organizationId, string displayName, int expectedRevision)
+    {
+        OrganizationStore store;
+        lock (_gate)
+        {
+            store = _organization
+                ?? throw new OrganizationStoreException("The organization store is not open.");
+        }
+
+        var overview = store.UpdateOrganizationDisplayName(organizationId, displayName, expectedRevision);
+        lock (_gate)
+        {
+            _organizationName = overview.DisplayName;
+        }
+
+        return overview;
     }
 
     /// <summary>
@@ -313,6 +369,13 @@ public sealed class AcpControlHost : BackgroundService
 
         _hostLifetime.Dispose();
         _modelUpdateLock.Dispose();
+        OrganizationStore? organization;
+        lock (_gate)
+        {
+            organization = _organization;
+        }
+
+        organization?.Dispose();
         base.Dispose();
     }
 
@@ -322,11 +385,10 @@ public sealed class AcpControlHost : BackgroundService
         var cancellationToken = lifetime.Token;
 
         PrepareDirectories();
-        var state = LoadOrCreateState();
-        _ownerToken = state.TmuxOwnerToken;
-        PersistState(state);
+        var adoptionSource = LoadAdoptionEvidence();
+        OpenOrganizationStore(adoptionSource);
 
-        await ConnectAsync(state, cancellationToken).ConfigureAwait(false);
+        await ConnectAsync(cancellationToken).ConfigureAwait(false);
         await StartTerminalAsync(cancellationToken).ConfigureAwait(false);
 
         StartStatusPolling(cancellationToken);
@@ -396,38 +458,96 @@ public sealed class AcpControlHost : BackgroundService
     }
 
     /// <summary>
-    /// Loads the controller-private runtime state, adopting a legacy
-    /// <c>DataDirectory/runtime.json</c> exactly once when the private store does
-    /// not exist yet. The legacy file is read, never moved or deleted, so the
-    /// migration stays reversible and no recorded organization/session identity
-    /// is lost.
+    /// Loads the persisted runtime.json identity as the one-time adoption
+    /// source. It is never written back: after the database is opened it is
+    /// evidence only, and the store is authoritative. Returns null when the
+    /// database already exists (the JSON is then evidence, not a source) or when
+    /// there is no JSON at all; a fresh database seeds its own stable identity.
     /// </summary>
-    private PersistedRuntimeState LoadOrCreateState()
+    private PersistedRuntimeEvidence? LoadAdoptionEvidence()
     {
-        var state = RuntimeStateStore.Load(RuntimeStatePath);
-
-        if (state is null && !string.Equals(RuntimeStatePath, LegacyRuntimeStatePath, StringComparison.Ordinal))
+        // Once the authoritative database exists, runtime.json is evidence only:
+        // a malformed or stale copy must not fault the database-era start.
+        if (File.Exists(_options.ResolveDatabasePath()))
         {
-            state = RuntimeStateStore.Load(LegacyRuntimeStatePath);
-            if (state is not null)
+            return null;
+        }
+
+        var evidence = RuntimeStateStore.LoadEvidence(RuntimeStatePath);
+
+        if (evidence is null && !string.Equals(RuntimeStatePath, LegacyRuntimeStatePath, StringComparison.Ordinal))
+        {
+            evidence = RuntimeStateStore.LoadEvidence(LegacyRuntimeStatePath);
+            if (evidence is not null)
             {
                 _logger.LogInformation(
-                    "Adopted the legacy runtime state into the controller-private store; the legacy file is left in place.");
+                    "Reading the legacy runtime state as adoption evidence; the legacy file is left in place.");
             }
         }
 
-        state ??= RuntimeStateStore.CreateNew(_options.OrganizationName);
-        state.OrganizationName = _options.OrganizationName;
-        state.TmuxOwnerToken ??= RuntimeStateStore.NewOwnerToken();
-        return state;
+        // Deliberately do not overwrite a persisted organization display name
+        // with configuration: the store is authoritative and reports any
+        // difference rather than renaming silently.
+        if (evidence is not null)
+        {
+            evidence.State.TmuxOwnerToken ??= RuntimeStateStore.NewOwnerToken();
+        }
+
+        return evidence;
     }
 
-    private void PersistState(PersistedRuntimeState state)
+    /// <summary>
+    /// Opens the authoritative store before any OpenCode process starts. A
+    /// corrupt, partial, newer or otherwise unexpected store faults the host
+    /// instead of being reseeded. The persisted organization display name wins
+    /// over configuration and a difference is reported, never silently applied.
+    /// </summary>
+    private void OpenOrganizationStore(PersistedRuntimeEvidence? adoptionSource)
     {
-        RuntimeStateStore.Save(RuntimeStatePath, state);
+        var store = new OrganizationStore(_options.ResolveDatabasePath(), _logger);
+        OrganizationRuntimeIdentity identity;
+        try
+        {
+            identity = store.OpenAndAdopt(
+                _options.OrganizationName,
+                _options.AdoptionAuthorizationReference,
+                adoptionSource?.State,
+                adoptionSource?.Path ?? "seed://fresh-organization",
+                adoptionSource?.Bytes);
+        }
+        catch
+        {
+            // A faulted open must release the single-writer lock so the fault is
+            // inspectable and the process does not hold the store half-open.
+            store.Dispose();
+            throw;
+        }
+
+        lock (_gate)
+        {
+            _organization = store;
+            _identity = identity;
+            _organizationName = identity.OrganizationDisplayName;
+            _ownerToken = identity.TmuxOwnerToken;
+        }
+
+        if (identity.DisplayNameDiffersFromConfiguration)
+        {
+            _logger.LogWarning(
+                "The persisted organization display name '{Persisted}' differs from Control:OrganizationName '{Configured}'; preserving the persisted name.",
+                identity.OrganizationDisplayName,
+                _options.OrganizationName);
+        }
+
+        if (identity.Created)
+        {
+            _logger.LogInformation(
+                "Seeded the authoritative organization store for {OrganizationId} with one Operations/IT employee and empty Development and QA departments.",
+                identity.OrganizationId);
+        }
     }
 
-    private async Task ConnectAsync(PersistedRuntimeState state, CancellationToken cancellationToken)
+    private async Task ConnectAsync(CancellationToken cancellationToken)
     {
         _password = RandomNumberGenerator.GetHexString(32).ToLowerInvariant();
         _stderrBuffer.SetSecret(_password);
@@ -435,7 +555,7 @@ public sealed class AcpControlHost : BackgroundService
         var instructionsPath = InstructionsPath;
         await File.WriteAllTextAsync(
             instructionsPath,
-            AgentControlOpenCodeConfig.BuildInstructions(_options.OrganizationName),
+            AgentControlOpenCodeConfig.BuildInstructions(OrganizationName),
             cancellationToken).ConfigureAwait(false);
 
         if (!OperatingSystem.IsWindows() && InstructionsDirectory is not null)
@@ -469,7 +589,7 @@ public sealed class AcpControlHost : BackgroundService
         _stderrTask = Task.Run(() => DrainStderrAsync(process, cancellationToken), CancellationToken.None);
         _native = new OpenCodeNativeClient(NativeUrl, "opencode", _password, workspaceDirectory: WorkspacePath);
 
-        await HandshakeAsync(state, session, cancellationToken).ConfigureAwait(false);
+        await HandshakeAsync(session, cancellationToken).ConfigureAwait(false);
     }
 
     private ProcessStartInfo BuildProcessStartInfo(string configContent)
@@ -518,7 +638,7 @@ public sealed class AcpControlHost : BackgroundService
         return _launcher.WrapAcp(startInfo, _options.Hostname, _options.NativePort, WorkspacePath);
     }
 
-    private async Task HandshakeAsync(PersistedRuntimeState state, AcpRpcSession session, CancellationToken cancellationToken)
+    private async Task HandshakeAsync(AcpRpcSession session, CancellationToken cancellationToken)
     {
         var timeout = TimeSpan.FromSeconds(_options.StartupTimeoutSeconds);
         using var startup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -559,7 +679,8 @@ public sealed class AcpControlHost : BackgroundService
 
         string sessionId;
         bool isNew;
-        if (!string.IsNullOrWhiteSpace(state.SessionId))
+        var recordedSessionId = OrganizationIdentity?.SessionId;
+        if (!string.IsNullOrWhiteSpace(recordedSessionId))
         {
             try
             {
@@ -567,7 +688,7 @@ public sealed class AcpControlHost : BackgroundService
                     "session/load",
                     new Dictionary<string, object?>(StringComparer.Ordinal)
                     {
-                        ["sessionId"] = state.SessionId,
+                        ["sessionId"] = recordedSessionId,
                         ["cwd"] = WorkspacePath,
                         ["mcpServers"] = Array.Empty<object>(),
                     },
@@ -577,11 +698,11 @@ public sealed class AcpControlHost : BackgroundService
             catch (AcpRemoteException exception)
             {
                 throw new AcpProtocolException(
-                    $"Recorded session '{state.SessionId}' could not be loaded; refusing to create a new session silently.",
+                    $"Recorded session '{recordedSessionId}' could not be loaded; refusing to create a new session silently.",
                     exception);
             }
 
-            sessionId = state.SessionId!;
+            sessionId = recordedSessionId!;
             isNew = false;
         }
         else
@@ -630,18 +751,19 @@ public sealed class AcpControlHost : BackgroundService
         _sessionId = sessionId;
         _isNewSession = isNew;
 
-        var title = $"{_options.OrganizationName} AgentControl";
-        var titled = await _native!.TrySetSessionTitleAsync(sessionId, title, token).ConfigureAwait(false);
-
-        state.SessionId = sessionId;
-        if (titled)
+        var title = OrganizationIdentity?.SessionTitle;
+        var titled = true;
+        if (isNew)
         {
-            state.SessionTitle = title;
+            title = $"{OrganizationName} AgentControl";
+            titled = await _native!.TrySetSessionTitleAsync(sessionId, title, token).ConfigureAwait(false);
         }
 
-        // Persist identity before the bootstrap prompt so a crash cannot re-create
-        // the session or lose the organization/session mapping.
-        PersistState(state);
+        // The store is authoritative. Persist the established session
+        // transactionally before the bootstrap prompt so a crash cannot lose the
+        // organization/session mapping. runtime.json is not written back.
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+            .RecordSession(sessionId, titled ? title : null);
         SetSession(sessionId);
 
         _logger.LogInformation(
@@ -661,7 +783,7 @@ public sealed class AcpControlHost : BackgroundService
             _sessionId ?? string.Empty,
             "opencode",
             _password,
-            _ownerToken ?? string.Empty,
+            OwnerToken ?? string.Empty,
             _options.EnableTerminal,
             _options.OpenCodeExecutable);
 
@@ -852,7 +974,7 @@ public sealed class AcpControlHost : BackgroundService
         }
 
         var sessionId = _sessionId;
-        var prompt = $"Bootstrap check for the {_options.OrganizationName} AgentControl runtime. " +
+        var prompt = $"Bootstrap check for the {OrganizationName} AgentControl runtime. " +
                      "Reply with one brief readiness line. Do not call tools and do not perform code work.";
 
         _bootstrapTask = Task.Run(
@@ -1105,11 +1227,12 @@ public sealed class AcpControlHost : BackgroundService
             await _session.DisposeAsync().ConfigureAwait(false);
         }
 
-        if (_terminal is not null && _ownerToken is not null)
+        var ownerToken = OwnerToken;
+        if (_terminal is not null && ownerToken is not null)
         {
             try
             {
-                await _terminal.KillOwnedAsync(_ownerToken, shutdownToken).ConfigureAwait(false);
+                await _terminal.KillOwnedAsync(ownerToken, shutdownToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is OperationCanceledException or IOException or InvalidOperationException)
             {
@@ -1341,6 +1464,30 @@ public sealed class AcpControlHost : BackgroundService
     private string WorkspacePath => Path.Combine(DataDirectory, "workspace");
 
     private string HomePath => Path.Combine(DataDirectory, "home");
+
+    /// <summary>Persisted organization name, read under the host gate.</summary>
+    private string OrganizationName
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _organizationName;
+            }
+        }
+    }
+
+    /// <summary>Per-binding tmux owner token, read under the host gate.</summary>
+    private string? OwnerToken
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _ownerToken;
+            }
+        }
+    }
 
     private string RuntimeStatePath => Path.Combine(PrivateDataDirectory, "runtime.json");
 
