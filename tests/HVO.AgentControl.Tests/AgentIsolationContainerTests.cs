@@ -1827,6 +1827,97 @@ public sealed class AgentIsolationContainerTests
     }
 
     /// <summary>
+    /// Recovery semantics are versioned with the marker. Missing, malformed,
+    /// older and newer schemas must fail before rollback replay or explicit
+    /// resume changes either state, ownership, archives or the interlock.
+    /// </summary>
+    [DockerFact]
+    public void UnsupportedRollbackMarkerSchemasFailClosedOnRevertAndResume()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var resumeCode = ExtractPythonBlock("RESUME_CODE");
+        var result = RunInContainer(
+            $$"""
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+            cat > /tmp/resume.py <<'RESUME_EOF'
+            {{resumeCode}}
+            RESUME_EOF
+
+            check_case() {
+                NAME="$1"
+                BODY="$2"
+                ROOT="/tmp/schema-$NAME"
+                rm -rf "$ROOT"
+                mkdir -p "$ROOT/data" "$ROOT/control" "$ROOT/secrets"
+                printf '%s' 'legacy-state' > "$ROOT/data/runtime.json"
+                printf '%s' 'private-state' > "$ROOT/control/runtime.json"
+                printf '%s' 'owner-password-value-0123456789' > "$ROOT/secrets/owner-password"
+                printf '%s' "$BODY" > "$ROOT/control/rollback.active"
+                chown 0:0 "$ROOT/data" "$ROOT/data/runtime.json"
+                chown 1001:1001 "$ROOT/control" "$ROOT/control/runtime.json" \
+                    "$ROOT/control/rollback.active" "$ROOT/secrets/owner-password"
+                chmod 0600 "$ROOT/data/runtime.json" "$ROOT/control/runtime.json" \
+                    "$ROOT/control/rollback.active" "$ROOT/secrets/owner-password"
+
+                BEFORE=$(sha256sum "$ROOT/data/runtime.json" "$ROOT/control/runtime.json" \
+                    "$ROOT/control/rollback.active" "$ROOT/secrets/owner-password")
+                BEFORE_META=$(stat -c '%n=%u:%g:%a' "$ROOT/data" "$ROOT/data/runtime.json" \
+                    "$ROOT/control" "$ROOT/control/runtime.json" "$ROOT/control/rollback.active" \
+                    "$ROOT/secrets/owner-password")
+
+                python3 /tmp/revert.py "$ROOT/secrets/owner-password" 1000 1000 \
+                    "$ROOT/data" "$ROOT/control" 0 >/tmp/revert-$NAME.out 2>/tmp/revert-$NAME.err
+                echo "REVERT_${NAME}_EXIT=$?"
+                grep -q 'rollback evidence' /tmp/revert-$NAME.err \
+                    && echo "REVERT_${NAME}_SCHEMA_REFUSAL"
+
+                AFTER_REVERT=$(sha256sum "$ROOT/data/runtime.json" "$ROOT/control/runtime.json" \
+                    "$ROOT/control/rollback.active" "$ROOT/secrets/owner-password")
+                AFTER_REVERT_META=$(stat -c '%n=%u:%g:%a' "$ROOT/data" "$ROOT/data/runtime.json" \
+                    "$ROOT/control" "$ROOT/control/runtime.json" "$ROOT/control/rollback.active" \
+                    "$ROOT/secrets/owner-password")
+                test "$BEFORE" = "$AFTER_REVERT" && test "$BEFORE_META" = "$AFTER_REVERT_META" \
+                    && echo "REVERT_${NAME}_UNCHANGED"
+
+                python3 /tmp/resume.py "$ROOT/secrets/owner-password" 1001 1001 \
+                    "$ROOT/data" "$ROOT/control" private >/tmp/resume-$NAME.out 2>/tmp/resume-$NAME.err
+                echo "RESUME_${NAME}_EXIT=$?"
+                grep -q 'rollback evidence' /tmp/resume-$NAME.err \
+                    && echo "RESUME_${NAME}_SCHEMA_REFUSAL"
+
+                AFTER_RESUME=$(sha256sum "$ROOT/data/runtime.json" "$ROOT/control/runtime.json" \
+                    "$ROOT/control/rollback.active" "$ROOT/secrets/owner-password")
+                AFTER_RESUME_META=$(stat -c '%n=%u:%g:%a' "$ROOT/data" "$ROOT/data/runtime.json" \
+                    "$ROOT/control" "$ROOT/control/runtime.json" "$ROOT/control/rollback.active" \
+                    "$ROOT/secrets/owner-password")
+                test "$BEFORE" = "$AFTER_RESUME" && test "$BEFORE_META" = "$AFTER_RESUME_META" \
+                    && test "$(find "$ROOT/control" -maxdepth 1 -type f | wc -l)" = 2 \
+                    && echo "RESUME_${NAME}_UNCHANGED"
+            }
+
+            check_case MISSING '{}'
+            check_case MALFORMED 'not-json'
+            check_case OLDER '{"schema":1}'
+            check_case NEWER '{"schema":3}'
+            """);
+
+        foreach (var name in new[] { "MISSING", "MALFORMED", "OLDER", "NEWER" })
+        {
+            Assert.Contains($"REVERT_{name}_EXIT=1", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains($"REVERT_{name}_SCHEMA_REFUSAL", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains($"REVERT_{name}_UNCHANGED", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains($"RESUME_{name}_EXIT=1", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains($"RESUME_{name}_SCHEMA_REFUSAL", result.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains($"RESUME_{name}_UNCHANGED", result.StandardOutput, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("owner-password-value", result.StandardOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("owner-password-value", result.StandardError, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The two crash windows the marker-first order creates, and the replay
     /// classification each one needs.
     /// </summary>
@@ -2141,7 +2232,7 @@ public sealed class AgentIsolationContainerTests
               echo "{\"sessionId\":\"$2\"}" > /data/runtime.json
               chown 1000:1000 /data/runtime.json && chmod 0600 /data/runtime.json
               install -o 1001 -g 1001 -m 600 /dev/null /control-data/rollback.active
-              printf '{"reason":"operator-rollback","publishedSha256":null}\n' \
+              printf '{"schema":2,"reason":"operator-rollback","publishedSha256":null}\n' \
                 > /control-data/rollback.active
               chown 1001:1001 /run/agentcontrol-secrets/owner-password
               python3 /tmp/resume.py /run/agentcontrol-secrets/owner-password 1001 1001 \

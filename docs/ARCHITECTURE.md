@@ -317,12 +317,13 @@ confinement case, the state-republishing rollback (including the diverged-state
 case, a deployment with no legacy file, replayed runs, the replay refusal once
 the old image has advanced the legacy state, and substituted paths), both crash
 windows around the root-owned republish, the published-versus-superseded inode
-hand-back, the interrupted-adoption crash boundaries, the recorded
+hand-back, fail-closed unsupported-marker-schema handling, the
+interrupted-adoption crash boundaries, the recorded
 reconciliation marker, the fail-closed roll-forward interlock and the recorded
 controller PID. CI runs them in the `docker` job with
 `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon fails the job instead
-of skipping the suite, and asserts the exact TRX counters (41
-discovered/executed/passed, 0 skipped — 39 container test cases plus 2
+of skipping the suite, and asserts the exact TRX counters (42
+discovered/executed/passed, 0 skipped — 40 container test cases plus 2
 structural wiring tests) rather than a lower bound.
 
 Separate credentials and process identities further before adding untrusted

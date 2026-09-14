@@ -229,11 +229,11 @@ Changes after the first portal release are collected here.
   that job already built (`AGENTCONTROL_ISOLATION_IMAGE`) with
   `AGENTCONTROL_DOCKER_REQUIRED=1`, so an unavailable daemon or a missing image
   fails the job instead of silently skipping the suite. The job then asserts the
-  **exact** TRX counters — 41 discovered, 41 executed, 41 passed and 0
+  **exact** TRX counters — 42 discovered, 42 executed, 42 passed and 0
   `notExecuted` — rather than a lower bound, because a lower bound accepts a
-  suite that quietly lost coverage and a skip reports as "0 failed". The 41 are
-  39 real alternate-UID container test cases plus 2 structural source/Compose
-  wiring tests that need no daemon; only the 39 prove the kernel-enforced
+  suite that quietly lost coverage and a skip reports as "0 failed". The 42 are
+  40 real alternate-UID container test cases plus 2 structural source/Compose
+  wiring tests that need no daemon; only the 40 prove the kernel-enforced
   boundary, and the step records that distinction.
 - Runtime state moves from `/data/runtime.json` to the controller-private
   `/control-data/runtime.json` (#240), which is the single authoritative state

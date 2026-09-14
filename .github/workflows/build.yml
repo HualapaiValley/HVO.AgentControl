@@ -104,11 +104,11 @@ jobs:
       # deliberate act, so updating EXPECTED here is part of that change.
       #
       # Scope note: the filter selects the whole AgentIsolationContainerTests
-      # class, which is 39 real alternate-UID container test cases plus 2
+      # class, which is 40 real alternate-UID container test cases plus 2
       # structural source/Compose-wiring tests that need no daemon
       # (LauncherSourceIsWiredIntoTheImageAndCi and
       # ComposeGrantsExactlyTheCapabilitiesTheseTestsAssume). Both are asserted
-      # here; only the 39 prove the kernel-enforced boundary. The 39 are 35
+      # here; only the 40 prove the kernel-enforced boundary. The 40 are 36
       # [DockerFact] methods plus the 4 [InlineData] cases of the planted-symlink
       # [DockerTheory], which xUnit reports individually.
       #
@@ -119,11 +119,12 @@ jobs:
       # 37 to 39 with the two crash-window tests added for the marker-before-
       # republish fix (BothCrashWindowsAroundTheRootOwnedPublishAreClassified-
       # AndConverge and RepublishHandsBackThePublishedInodeAndNotTheSupersededOne).
+      # The unsupported-marker-schema test then moved the count from 39 to 40.
       - name: Assert the isolation suite executed
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          EXPECTED = 41  # see the scope note above: 39 container + 2 structural
+          EXPECTED = 42  # see the scope note above: 40 container + 2 structural
           files = glob.glob("artifacts/isolation-results/*.trx")
           if not files:
               sys.exit("no isolation test results were produced")

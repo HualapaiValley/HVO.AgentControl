@@ -514,6 +514,11 @@ try:
             recorded = json.loads(marker_body.decode("utf-8"))
             if not isinstance(recorded, dict):
                 raise ValueError("marker is not an object")
+            recorded_schema = recorded.get("schema")
+            if type(recorded_schema) is not int or recorded_schema != 2:
+                raise ValueError(
+                    "unsupported rollback marker schema %r; expected 2" % recorded_schema
+                )
             recorded_digest = recorded.get("publishedSha256")
             recorded_intended = recorded.get("intendedSha256")
             recorded_prepublication = recorded.get("prepublicationLegacySha256")
@@ -1078,10 +1083,10 @@ if not os.path.lexists(marker_path):
 
 # The marker is what this command consumes and unlinks, so it is held to the
 # same rules as every other path here: a regular, controller-owned file with no
-# symlink at the final component and no extra hard links. Its body is advisory
-# (the operator's --state-source decides, not the recorded digests), so a
-# damaged body is reported rather than fatal - but a substituted *inode* is not
-# something to resolve on.
+# symlink at the final component and no extra hard links. The operator's
+# --state-source decides which state survives, but the marker schema still
+# defines the interlock being consumed. An unreadable or unsupported marker
+# therefore fails closed rather than being removed under unknown semantics.
 marker_fd = open_checked(
     marker_path, allowed_owners=(control_uid, 0), parent_fd=private_dir_fd, name=marker_name
 )
@@ -1096,6 +1101,11 @@ try:
     recorded_marker = json.loads(marker_body.decode("utf-8"))
     if not isinstance(recorded_marker, dict):
         raise ValueError("marker is not an object")
+    recorded_schema = recorded_marker.get("schema")
+    if type(recorded_schema) is not int or recorded_schema != 2:
+        raise ValueError(
+            "unsupported rollback marker schema %r; expected 2" % recorded_schema
+        )
     print(
         "Resolving the interlock recorded in %s at %s (reason '%s')."
         % (
@@ -1105,11 +1115,10 @@ try:
         )
     )
 except (ValueError, UnicodeDecodeError) as error:
-    print(
-        "%s could not be parsed as rollback evidence (%s); resolving it from the explicit "
-        "--state-source choice, which does not depend on the recorded detail."
-        % (marker_path, error),
-        file=sys.stderr,
+    fail(
+        "%s could not be read as supported rollback evidence (%s). Refusing to resolve or remove "
+        "an interlock with unknown semantics. Restore a valid schema-2 marker before retrying."
+        % (marker_path, error)
     )
 
 data_fd = open_checked(data_root, directory=True, allowed_owners=(0, 1000))

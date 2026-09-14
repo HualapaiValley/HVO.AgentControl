@@ -521,6 +521,33 @@ public sealed class SecretInitializationTests
     }
 
     /// <summary>
+    /// A marker version defines the recovery semantics. Neither rollback replay
+    /// nor explicit resume may interpret or remove a marker from another schema.
+    /// </summary>
+    [Fact]
+    public void RollbackAndResumeRequireTheExactSupportedMarkerSchema()
+    {
+        foreach (var (name, body, objectName) in new[]
+        {
+            ("REVERT_CODE", ExtractBlock("REVERT_CODE"), "recorded"),
+            ("RESUME_CODE", ExtractBlock("RESUME_CODE"), "recorded_marker"),
+        })
+        {
+            Assert.Contains($"{objectName}.get(\"schema\")", body, StringComparison.Ordinal);
+            Assert.Contains("type(recorded_schema) is not int", body, StringComparison.Ordinal);
+            Assert.Contains("recorded_schema != 2", body, StringComparison.Ordinal);
+            Assert.Contains("unsupported rollback marker schema", body, StringComparison.Ordinal);
+        }
+
+        var resume = ExtractBlock("RESUME_CODE");
+        Assert.Contains("Refusing to resolve or remove", resume, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "resolving it from the explicit --state-source choice",
+            resume,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// "The other state is preserved, never deleted" has to survive a name
     /// collision. The archive name carries a one-second timestamp, so two
     /// resumes inside one second - or after a clock step - pick the same name;
