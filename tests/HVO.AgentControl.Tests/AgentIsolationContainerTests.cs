@@ -1660,6 +1660,240 @@ public sealed class AgentIsolationContainerTests
     }
 
     /// <summary>
+    /// The rollback marker is the roll-forward interlock <em>and</em> the
+    /// evidence a later replay validates against, so it has to be on disk before
+    /// the pre-isolation image can start. Recording it after the ownership
+    /// hand-backs left a crash window in which the old image was already
+    /// runnable with no record of the publication: the next replay would find no
+    /// marker, treat the state the old image had advanced as unrecorded, and
+    /// overwrite it. This asserts the marker is written first and that a failure
+    /// to write it leaves the deployment un-handed-back.
+    /// </summary>
+    [DockerFact]
+    public void TheRollbackMarkerIsRecordedBeforeAnythingIsHandedBackToTheOldImage()
+    {
+        var revertCode = ExtractPythonBlock("REVERT_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+            export Control__OwnerPasswordFile=/run/agentcontrol-secrets/owner-password
+
+            echo '{"organizationId":"org-keep","sessionId":"ses_adopt"}' > /data/runtime.json
+            chown 1000:1000 /data/runtime.json
+            /usr/local/bin/control-entrypoint /bin/true || echo ENTRYPOINT_FAILED
+            echo '{"organizationId":"org-keep","sessionId":"ses_isolated"}' > /control-data/runtime.json
+            chown 1001:1001 /control-data/runtime.json && chmod 0600 /control-data/runtime.json
+
+            cat > /tmp/revert.py <<'REVERT_EOF'
+            {{revertCode}}
+            REVERT_EOF
+
+            # Fault injection, applied only to this copy: the marker publication
+            # is redirected to a path that cannot exist, so it fails exactly
+            # where a full disk or a lost volume would. Nothing else is changed,
+            # so the surrounding order is the real one.
+            python3 - <<'INJECT_EOF'
+            import pathlib
+            path = pathlib.Path('/tmp/revert-nomarker.py')
+            body = pathlib.Path('/tmp/revert.py').read_text()
+            call = 'publish_bytes(\n        private_dir_fd,\n        private_root,\n        marker_name,\n'
+            assert body.count(call) == 1, 'the marker publication call was not found exactly once'
+            path.write_text(body.replace(
+                call,
+                'publish_bytes(\n        private_dir_fd,\n        private_root,\n        marker_name + "/unwritable",\n'))
+            INJECT_EOF
+
+            python3 /tmp/revert-nomarker.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0 2>/dev/null
+            echo "NOMARKER_EXIT=$?"
+            test -e /control-data/rollback.active && echo MARKER_WRITTEN || echo NO_MARKER
+
+            # Nothing the old image needs was handed back, so it cannot start on
+            # a rollback that was never recorded.
+            stat -c 'FAILED_DATA=%u:%g:%a' /data
+            stat -c 'FAILED_SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            setpriv --reuid 1000 --regid 1000 --clear-groups \
+                cat /run/agentcontrol-secrets/owner-password >/dev/null 2>&1 \
+                && echo OLD_IMAGE_COULD_AUTHENTICATE || echo OLD_IMAGE_LOCKED_OUT
+
+            # The identical command, unpatched, converges: nothing was deleted.
+            python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0 >/dev/null
+            echo "REPAIR_EXIT=$?"
+            test -e /control-data/rollback.active && echo REPAIRED_MARKER || echo REPAIRED_NO_MARKER
+            stat -c 'REPAIRED_DATA=%u:%g:%a' /data
+            stat -c 'REPAIRED_SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            echo "REPAIRED_STATE=$(cat /data/runtime.json)"
+
+            # A crash in the other window - marker on disk, hand-backs not yet
+            # applied - is the shape the new order actually produces. Reproduce
+            # it and prove the replay converges rather than refusing.
+            chown 0:0 /data && chmod 0755 /data
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chown 0:0 /data/runtime.json && chmod 0600 /data/runtime.json
+            python3 /tmp/revert.py /run/agentcontrol-secrets/owner-password 1000 1000 /data /control-data 0 >/dev/null
+            echo "PARTIAL_REPLAY_EXIT=$?"
+            stat -c 'PARTIAL_DATA=%u:%g:%a' /data
+            stat -c 'PARTIAL_LEGACY=%u:%g:%a' /data/runtime.json
+            stat -c 'PARTIAL_SECRET=%u:%g:%a' /run/agentcontrol-secrets/owner-password
+            echo "PARTIAL_STATE=$(cat /data/runtime.json)"
+            ls /data/.runtime.json.*.tmp >/dev/null 2>&1 && echo TEMP_LEAKED || echo NO_TEMP_LEAK
+            """);
+
+        var output = result.StandardOutput;
+
+        Assert.DoesNotContain("ENTRYPOINT_FAILED", output, StringComparison.Ordinal);
+
+        // The marker could not be written, so the rollback failed...
+        Assert.Contains("NOMARKER_EXIT=1", output, StringComparison.Ordinal);
+        Assert.Contains("NO_MARKER", output, StringComparison.Ordinal);
+
+        // ...and, decisively, nothing had been handed back yet. An old image
+        // that could start here would be exactly the unrecorded-rollback state
+        // the replay guard cannot bound.
+        Assert.Contains("FAILED_DATA=0:0:755", output, StringComparison.Ordinal);
+        Assert.Contains("FAILED_SECRET=1001:1001:600", output, StringComparison.Ordinal);
+        Assert.Contains("OLD_IMAGE_LOCKED_OUT", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("OLD_IMAGE_COULD_AUTHENTICATE", output, StringComparison.Ordinal);
+
+        // Re-running the same command repairs it completely.
+        Assert.Contains("REPAIR_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("REPAIRED_MARKER", output, StringComparison.Ordinal);
+        Assert.Contains("REPAIRED_DATA=1000:1000:755", output, StringComparison.Ordinal);
+        Assert.Contains("REPAIRED_SECRET=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "REPAIRED_STATE="), StringComparison.Ordinal);
+
+        // And the marker-written-but-not-handed-back crash window converges too.
+        Assert.Contains("PARTIAL_REPLAY_EXIT=0", output, StringComparison.Ordinal);
+        Assert.Contains("PARTIAL_DATA=1000:1000:755", output, StringComparison.Ordinal);
+        Assert.Contains("PARTIAL_LEGACY=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("PARTIAL_SECRET=1000:1000:600", output, StringComparison.Ordinal);
+        Assert.Contains("ses_isolated", Extract(output, "PARTIAL_STATE="), StringComparison.Ordinal);
+        Assert.Contains("NO_TEMP_LEAK", output, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("owner-password-value", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// "The other state is preserved, never deleted" has to survive a name
+    /// collision. The archive name carries a one-second timestamp, so two
+    /// resumes within the same second - or after a clock step backwards - choose
+    /// the same name, and replacing the file there would silently destroy the
+    /// first archive while reporting that both were preserved.
+    /// </summary>
+    /// <remarks>
+    /// The timestamp is pinned in the extracted copy so the collision is
+    /// deterministic rather than a same-second race, which is the only way to
+    /// assert the outcome instead of hoping for it. Everything else - the
+    /// publication, the ownership and the interlock handling - is the code the
+    /// operator runs.
+    /// </remarks>
+    [DockerFact]
+    public void TwoResumeCyclesSharingATimestampPreserveBothArchivesExactly()
+    {
+        var resumeCode = ExtractPythonBlock("RESUME_CODE");
+        var result = RunInContainer(
+            $$"""
+            mkdir -p /run/agentcontrol-secrets && chmod 0755 /run/agentcontrol-secrets
+            echo 'owner-password-value-0123456789' > /run/agentcontrol-secrets/owner-password
+            chown 1001:1001 /run/agentcontrol-secrets/owner-password
+            chmod 0600 /run/agentcontrol-secrets/owner-password
+
+            cat > /tmp/resume-real.py <<'RESUME_EOF'
+            {{resumeCode}}
+            RESUME_EOF
+
+            # Pin the clock in this copy only, so both cycles land on the same
+            # archive name by construction instead of by racing the second hand.
+            python3 - <<'INJECT_EOF'
+            import pathlib
+            body = pathlib.Path('/tmp/resume-real.py').read_text()
+            clock = 'stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())'
+            assert body.count(clock) == 1, 'the resume timestamp was not found exactly once'
+            pathlib.Path('/tmp/resume.py').write_text(
+                body.replace(clock, 'stamp = "20260101T000000Z"'))
+            INJECT_EOF
+
+            # One rollback cycle: an isolated state, a legacy state the old image
+            # advanced, and the recorded interlock the resume consumes.
+            cycle() {
+              install -o 1001 -g 1001 -m 600 /dev/null /control-data/runtime.json
+              echo "{\"sessionId\":\"$1\"}" > /control-data/runtime.json
+              echo "{\"sessionId\":\"$2\"}" > /data/runtime.json
+              chown 1000:1000 /data/runtime.json && chmod 0600 /data/runtime.json
+              install -o 1001 -g 1001 -m 600 /dev/null /control-data/rollback.active
+              printf '{"reason":"operator-rollback","publishedSha256":null}\n' \
+                > /control-data/rollback.active
+              chown 1001:1001 /run/agentcontrol-secrets/owner-password
+              python3 /tmp/resume.py /run/agentcontrol-secrets/owner-password 1001 1001 \
+                /data /control-data legacy
+              echo "CYCLE_EXIT=$?"
+            }
+
+            cycle ses_isolated_ONE ses_legacy_ONE
+            cycle ses_isolated_TWO ses_legacy_TWO
+
+            echo ARCHIVES
+            ls /control-data | grep '^runtime\.superseded-' | sort
+            echo CONTENTS
+            for archive in /control-data/runtime.superseded-*; do
+              echo "ARCHIVE $(basename "$archive") $(cat "$archive")"
+              stat -c "ARCHIVE_MODE $(basename "$archive") %u:%g:%a" "$archive"
+              stat -c "ARCHIVE_LINKS $(basename "$archive") %h" "$archive"
+            done
+            echo "PRIVATE_NOW=$(cat /control-data/runtime.json)"
+            ls /control-data/.archive.*.tmp /control-data/.runtime.json.*.tmp >/dev/null 2>&1 \
+                && echo TEMP_LEAKED || echo NO_TEMP_LEAK
+            """);
+
+        var output = result.StandardOutput;
+
+        Assert.Equal(2, Occurrences(output, "CYCLE_EXIT=0"));
+
+        // Two archives under one timestamp: the collision is resolved by taking
+        // an unused name, never by replacing what is already there.
+        Assert.Contains("ARCHIVE runtime.superseded-20260101T000000Z.json ", output, StringComparison.Ordinal);
+        Assert.Contains("ARCHIVE runtime.superseded-20260101T000000Z.2.json ", output, StringComparison.Ordinal);
+
+        // ...and each holds exactly the state that cycle superseded.
+        Assert.Contains(
+            """ARCHIVE runtime.superseded-20260101T000000Z.json {"sessionId":"ses_isolated_ONE"}""",
+            output,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            """ARCHIVE runtime.superseded-20260101T000000Z.2.json {"sessionId":"ses_isolated_TWO"}""",
+            output,
+            StringComparison.Ordinal);
+
+        // Controller-owned and 0600, exactly like the private state they came
+        // from, so a later start's owner check accepts them.
+        Assert.Contains(
+            "ARCHIVE_MODE runtime.superseded-20260101T000000Z.json 1001:1001:600",
+            output,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ARCHIVE_MODE runtime.superseded-20260101T000000Z.2.json 1001:1001:600",
+            output,
+            StringComparison.Ordinal);
+
+        // One link each: the temporary used to claim the name atomically was
+        // unlinked, so no archive shares an inode with a leftover entry.
+        Assert.Contains(
+            "ARCHIVE_LINKS runtime.superseded-20260101T000000Z.json 1",
+            output,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ARCHIVE_LINKS runtime.superseded-20260101T000000Z.2.json 1",
+            output,
+            StringComparison.Ordinal);
+
+        // The second cycle's chosen state is the live private one.
+        Assert.Contains("ses_legacy_TWO", Extract(output, "PRIVATE_NOW="), StringComparison.Ordinal);
+        Assert.Contains("NO_TEMP_LEAK", output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Reads one of the container-side Python blocks out of the operator script,
     /// so the rollback tests exercise the code the operator actually runs rather
     /// than a copy that can drift away from it.

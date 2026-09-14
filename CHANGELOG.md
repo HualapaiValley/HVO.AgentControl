@@ -104,6 +104,36 @@ Changes after the first portal release are collected here.
   fails closed. Covered by a real container regression that reverts, mutates the
   legacy state as UID 1000, re-runs the revert, and asserts byte, hash and inode
   preservation before resuming.
+- The rollback marker is now recorded **before any ownership is handed back**
+  (#240), closing the other half of that data-loss path. The marker is both the
+  roll-forward interlock and the evidence the replay check validates against, so
+  writing it after the hand-backs left a crash window in which the pre-isolation
+  image was already runnable with no record of the publication: the next replay
+  would find no marker, treat the state the old image had advanced as unrecorded,
+  and overwrite it. With the marker first, a failure to record it aborts while
+  `/data`, the runtime state and the owner secret still belong to the controller —
+  neither image can start from a half-reverted deployment — and a crash after it
+  is an ordinary replayable rollback the identical command repairs.
+  `--accept-missing-runtime-state` records the marker too, so that path is bounded
+  as well. Covered by a container regression that injects a marker-publication
+  failure and asserts nothing was handed back, plus a source-order assertion that
+  needs no daemon.
+- Resume archives are published **create-never-replace** (#240). The
+  `runtime.superseded-*`/`runtime.rolled-back-*` name carries a one-second
+  timestamp, so two resumes inside one second — or after a clock step backwards —
+  chose the same name and the `os.replace` silently destroyed the first archive
+  while reporting that both states were preserved. The bytes are now written to a
+  private temporary and hard-linked into the first unused name, so `EEXIST` makes
+  the free-name test and the claim on it one atomic step and two concurrent
+  resumes keep two archives. Covered by a container regression that pins the
+  timestamp, runs two rollback/resume cycles, and asserts both archives exist with
+  their exact bytes, ownership, mode and link count.
+- Publication temporaries use a random suffix instead of the process id
+  (`scripts/init-secrets.py` and `src/container/prepare-layout.py`, #240). A
+  container restart reuses low PIDs, so a temporary left behind by an interrupted
+  run made the `O_EXCL` create fail on exactly the same name at every later
+  attempt — a permanent start or rollback failure repairable only by hand — and
+  none of this code may unlink or truncate an entry it did not create.
 - An unrecorded divergence now **records a reconciliation marker before failing**
   (#240). `prepare-layout.py` refused to start when the legacy state was owned by
   UID 1000 while controller-private state existed, but recorded nothing — and
@@ -200,6 +230,28 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Bound the terminal bridge teardown so a failed cross-UID termination can no
+  longer strand `/terminal` permanently (#240). `StopBridgeAsync` waited on
+  `CancellationToken.None` after issuing the forced termination, and that wait
+  runs inside the request's `finally` ahead of the single-viewer semaphore
+  release — so a launcher that refused the privileged signal (the controller
+  cannot signal its UID 1000 children directly) or that reported success while
+  the child survived hung the request and returned 409 to every later viewer
+  until the controller restarted. The forced result is now honoured: a refused
+  termination logs a category-only warning and returns without waiting for an
+  exit nobody requested, an issued one is awaited under a bounded second grace
+  and logs on timeout, and the `Process` handle is released on every path.
+  Covered by deterministic tests that drive a real SIGTERM-ignoring child with a
+  real `AgentProcessLauncher` whose signal helper is scripted to refuse, swallow
+  or deliver; they reproduce the unbounded wait when the fix is reverted.
+- Reuse the checked-in fake tmux fixture in `AcpControlHostTests`, which still
+  wrote and then exec'd a per-test executable and so kept the #232/#233
+  `ETXTBSY` race. The scripted stand-in is now the single shared `FakeTmux`
+  helper over `Fixtures/fake-tmux.py`, and the `docker` stub in
+  `SecretInitializationTests` moves to `Fixtures/fake-docker.sh` for the same
+  reason. `TestFixtureHygieneTests` makes the rule structural: no test source
+  may set an execute bit on a file it wrote or embed a script body, and every
+  canonical fixture must reach the output directory executable.
 - Resolve exact tmux session names to session IDs only for `set-option` and
   `show-options`, which reject the same exact-name syntax as `has-session`; all
   other commands keep the `=name` target so a restarted server that reuses a

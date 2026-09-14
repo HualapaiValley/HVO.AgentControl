@@ -97,6 +97,7 @@ import errno
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 import time
@@ -238,10 +239,29 @@ def publish(directory_fd, directory_path, name, payload, uid, gid, mode):
     unrecorded. A reader therefore sees either the previous file or the complete
     new one, never a partial write, and no step ever resolves a path that a
     symlink could redirect.
+
+    The temporary's suffix is random rather than the PID. A container restart
+    reuses low PIDs, so a temporary left behind by an interrupted start would
+    otherwise make `O_EXCL` fail on exactly the same name at every later start -
+    a permanent start failure repaired only by hand - and nothing here may
+    unlink or truncate an entry it did not create itself.
     """
-    temporary = ".%s.%d.tmp" % (name, os.getpid())
+    fd = None
+    temporary = None
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+    for _ in range(64):
+        candidate = ".%s.%s.tmp" % (name, secrets.token_hex(8))
+        try:
+            fd = os.open(candidate, flags, 0o600, dir_fd=directory_fd)
+            temporary = candidate
+            break
+        except FileExistsError:
+            continue
+    if fd is None:
+        raise LayoutError(
+            "could not create a private temporary for '%s'" % os.path.join(directory_path, name)
+        )
+
     published = False
     try:
         offset = 0

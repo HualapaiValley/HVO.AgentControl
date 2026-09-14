@@ -104,16 +104,21 @@ jobs:
       # deliberate act, so updating EXPECTED here is part of that change.
       #
       # Scope note: the filter selects the whole AgentIsolationContainerTests
-      # class, which is 35 real alternate-UID container tests plus 2 structural
+      # class, which is 37 real alternate-UID container tests plus 2 structural
       # source/Compose-wiring tests that need no daemon
       # (LauncherSourceIsWiredIntoTheImageAndCi and
       # ComposeGrantsExactlyTheCapabilitiesTheseTestsAssume). Both are asserted
-      # here; only the 35 prove the kernel-enforced boundary.
+      # here; only the 37 prove the kernel-enforced boundary.
+      #
+      # The count moved from 35 to 37 with the rollback-marker ordering test
+      # (TheRollbackMarkerIsRecordedBeforeAnythingIsHandedBackToTheOldImage) and
+      # the resume archive-collision test
+      # (TwoResumeCyclesSharingATimestampPreserveBothArchivesExactly).
       - name: Assert the isolation suite executed
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          EXPECTED = 37  # see the scope note above: 35 container + 2 structural
+          EXPECTED = 39  # see the scope note above: 37 container + 2 structural
           files = glob.glob("artifacts/isolation-results/*.trx")
           if not files:
               sys.exit("no isolation test results were produced")

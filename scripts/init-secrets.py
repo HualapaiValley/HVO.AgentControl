@@ -193,10 +193,21 @@ print(
 # recorded publication (or that already matches the bytes about to be written) is
 # a replay and proceeds; anything else is refused before the first write or
 # chown, and the operator resolves it with --resume-isolation instead.
+#
+# That bound only holds if the marker is on disk before the old image can run.
+# The marker is therefore recorded immediately after the legacy state is decided
+# and BEFORE any ownership is handed back: a crash between the two would
+# otherwise leave a deployment the pre-isolation image can start with no record
+# of the publication, so the next replay would have nothing to compare against
+# and would overwrite whatever the old image had advanced. Recording first
+# inverts both failure modes into safe ones - a crash after the marker leaves a
+# replayable rollback the operator finishes by re-running the same command, and
+# a marker that cannot be published aborts before the old image can start at all.
 REVERT_CODE = '''\
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 import time
@@ -291,6 +302,25 @@ def hand_back_metadata(fd, path, uid, gid, mode):
     )
 
 
+def create_temporary(directory_fd, name):
+    """Create a private temporary in `directory_fd` and return (fd, name).
+
+    The suffix is random rather than the PID: a PID repeats across container
+    runs, and a leftover temporary from an interrupted run would then make
+    O_EXCL fail permanently on the reused name. Retrying on a collision keeps
+    the create-exclusive guarantee without ever reusing, truncating or removing
+    an existing entry.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    for _ in range(64):
+        temporary = ".%s.%s.tmp" % (name, secrets.token_hex(8))
+        try:
+            return os.open(temporary, flags, 0o600, dir_fd=directory_fd), temporary
+        except FileExistsError:
+            continue
+    fail("could not create a private temporary for %s" % name)
+
+
 def publish_bytes(directory_fd, directory_path, name, payload, uid, gid, mode):
     """Atomically publish bytes into a directory, by descriptor only.
 
@@ -301,9 +331,7 @@ def publish_bytes(directory_fd, directory_path, name, payload, uid, gid, mode):
     rename cannot be lost. A concurrent reader sees the old file or the complete
     new one; no path is ever resolved, so nothing can be redirected by a symlink.
     """
-    temporary = ".%s.%d.tmp" % (name, os.getpid())
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+    fd, temporary = create_temporary(directory_fd, name)
     published = False
     try:
         offset = 0
@@ -502,49 +530,63 @@ try:
     #
     # 1. Republish the runtime state while both images are stopped, so the old
     #    image can never observe a half-written file.
-    # 2. Hand back the data directory, which is what lets the old image write.
-    # 3. Hand back the secret last: it is the step that makes the old image able
+    # 2. Record the rollback marker - before any ownership is handed back. The
+    #    marker is both the roll-forward interlock and the evidence a later
+    #    replay validates against, so it has to exist before the pre-isolation
+    #    image can possibly start. Recording it after the hand-backs left a
+    #    crash window in which the old image was runnable with no record of the
+    #    publication: the next replay would then find no marker, treat the
+    #    advanced legacy state as unrecorded, and overwrite the old image's work.
+    # 3. Hand back the runtime state and then /data, which is what lets the old
+    #    image write.
+    # 4. Hand back the secret last: it is the step that makes the old image able
     #    to authenticate, so it should not precede a failure in the others.
-    # 4. Record the rollback marker, which fails the isolated image closed on a
-    #    later roll-forward instead of letting it silently pick a state.
+    #
+    # A failure at step 2 therefore leaves a deployment neither image can start
+    # from a half-reverted state: /data and the secret still belong to the
+    # controller, and re-running the identical command converges.
     # ------------------------------------------------------------------
     published_digest = None
+    published_bytes = 0
+    republished = False
     if keep_legacy_bytes:
         # A recorded, unrecorded-origin divergence the operator is rolling back
         # into: the legacy bytes are the survivor, so only ownership moves.
         published_digest = legacy_digest
-        hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
+        published_bytes = len(legacy_payload)
     elif payload is not None and legacy_payload == payload:
         # Already converged - a replay after the publish succeeded. Rewriting
         # identical bytes would replace the inode for nothing, so only the
         # metadata hand-back is (re-)applied.
         published_digest = legacy_digest
+        published_bytes = len(payload)
         print(
             "%s already carries the current controller-private runtime state "
             "(%d bytes, sha256 %s); it was not rewritten."
             % (legacy_state, len(payload), published_digest)
         )
-        hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
     elif payload is not None:
         published_digest = publish_bytes(
             data_fd, data_root, state_name, payload, legacy_uid, legacy_gid, 0o600
         )
+        published_bytes = len(payload)
+        republished = True
         print(
             "Republished the current controller-private runtime state to %s "
             "(%d bytes, sha256 %s) and owned it %d:%d."
             % (legacy_state, len(payload), published_digest, legacy_uid, legacy_gid)
         )
     else:
+        # --accept-missing-runtime-state: ownership only. The marker still has to
+        # record what the legacy path holds, because that is what bounds a later
+        # replay; an unrecorded rollback here would be the same dead end.
+        published_digest = legacy_digest
+        published_bytes = 0 if legacy_payload is None else len(legacy_payload)
         print(
             "No controller-private runtime state; %s was not republished and the old image will "
             "create a new organization on start." % legacy_state,
             file=sys.stderr,
         )
-        if legacy_fd is not None:
-            hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
-
-    hand_back_metadata(data_fd, data_root, legacy_uid, legacy_gid, 0o755)
-    hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)
 
     # publishedSha256 is the digest of what /data/runtime.json actually holds now,
     # which is what a later replay compares against to tell "nothing has run since"
@@ -554,11 +596,7 @@ try:
         "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "reason": "operator-rollback",
         "publishedSha256": published_digest,
-        "publishedBytes": (
-            len(legacy_payload)
-            if keep_legacy_bytes and legacy_payload is not None
-            else (len(payload) if payload is not None else 0)
-        ),
+        "publishedBytes": published_bytes,
         "legacyBytesRetained": keep_legacy_bytes,
         "privateStateRetained": private_fd is not None,
         "legacyPath": legacy_state,
@@ -573,6 +611,16 @@ try:
         control_gid,
         0o600,
     )
+
+    # Only now does anything become reachable by the pre-isolation identity. The
+    # republish already applied the final ownership to the new inode, so the
+    # descriptor opened earlier refers to a superseded inode and must not be
+    # chowned.
+    if legacy_fd is not None and not republished:
+        hand_back_metadata(legacy_fd, legacy_state, legacy_uid, legacy_gid, 0o600)
+
+    hand_back_metadata(data_fd, data_root, legacy_uid, legacy_gid, 0o755)
+    hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)
 finally:
     for descriptor in descriptors:
         os.close(descriptor)
@@ -602,10 +650,20 @@ print(
 # that clears it, and it cannot be performed without naming the state that
 # survives. The other state is never deleted: it is preserved next to the private
 # store under a timestamped name.
+#
+# "Never deleted" has to survive a name collision. The archive name carries a
+# one-second timestamp, so two resumes inside the same second - or two resumes
+# after a clock step - would pick the same name, and an os.replace would then
+# silently destroy the first archive while reporting that it had preserved both.
+# Archives are therefore published create-never-replace: the bytes are written to
+# a private temporary and linked into the first archive name that does not exist
+# yet (os.link fails with EEXIST rather than overwriting, so the check and the
+# claim are one atomic operation). Two concurrent resumes keep two archives.
 RESUME_CODE = '''\
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 import time
@@ -673,11 +731,28 @@ def read_all(fd):
         chunks.append(chunk)
 
 
-def publish_bytes(directory_fd, directory_path, name, payload, uid, gid, mode):
-    temporary = ".%s.%d.tmp" % (name, os.getpid())
+def write_temporary(directory_fd, name, payload, uid, gid, mode):
+    """Write `payload` to a private temporary in `directory_fd`, fully durable.
+
+    The suffix is random rather than the PID, because a PID repeats across
+    container runs: a temporary left behind by an interrupted run would make
+    O_EXCL fail permanently on the reused name, and nothing here may unlink or
+    truncate an entry it did not create. Returns the temporary's name.
+    """
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
-    published = False
+    fd = None
+    temporary = None
+    for _ in range(64):
+        candidate = ".%s.%s.tmp" % (name, secrets.token_hex(8))
+        try:
+            fd = os.open(candidate, flags, 0o600, dir_fd=directory_fd)
+            temporary = candidate
+            break
+        except FileExistsError:
+            continue
+    if fd is None:
+        fail("could not create a private temporary for %s" % name)
+
     try:
         offset = 0
         while offset < len(payload):
@@ -685,17 +760,109 @@ def publish_bytes(directory_fd, directory_path, name, payload, uid, gid, mode):
         os.fchown(fd, uid, gid)
         os.fchmod(fd, mode)
         os.fsync(fd)
-        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        published = True
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except OSError:
+            pass
+        raise
     finally:
         os.close(fd)
-        if not published:
-            try:
-                os.unlink(temporary, dir_fd=directory_fd)
-            except OSError:
-                pass
+    return temporary
+
+
+def publish_bytes(directory_fd, directory_path, name, payload, uid, gid, mode):
+    """Replace `name` with `payload` atomically, by descriptor only."""
+    temporary = write_temporary(directory_fd, name, payload, uid, gid, mode)
+    try:
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except OSError:
+            pass
+        raise
     os.fsync(directory_fd)
     return hashlib.sha256(payload).hexdigest()
+
+
+def archive_names(stamp, kind):
+    """Candidate archive names, most preferred first, and finite.
+
+    The timestamp has one-second resolution, so two resumes in the same second -
+    or after a clock step backwards - collide. The collision is resolved by
+    taking the next unused name, never by replacing the archive already there:
+    an ordinal suffix keeps the ordinary case readable, and a random suffix
+    guarantees a free name exists without an unbounded loop.
+    """
+    yield "runtime.%s-%s.json" % (kind, stamp)
+    for ordinal in range(2, 66):
+        yield "runtime.%s-%s.%d.json" % (kind, stamp, ordinal)
+    for _ in range(64):
+        yield "runtime.%s-%s.%s.json" % (kind, stamp, secrets.token_hex(8))
+
+
+def archive_bytes(directory_fd, directory_path, stamp, kind, payload, uid, gid, mode):
+    """Preserve `payload` under a name that did not exist before. Never replaces.
+
+    The bytes are written to a private temporary first and then hard-linked into
+    the chosen name: os.link fails with EEXIST instead of overwriting, so the
+    "is this name free?" test and the claim on it are one atomic operation and a
+    concurrent publisher cannot win the name in between. A crash can therefore
+    leave an unreferenced temporary, but never a truncated or replaced archive.
+    """
+    temporary = write_temporary(directory_fd, "archive", payload, uid, gid, mode)
+    published = None
+    try:
+        for candidate in archive_names(stamp, kind):
+            try:
+                os.link(
+                    temporary,
+                    candidate,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                continue
+            published = candidate
+            break
+    finally:
+        # Drop the temporary's own reference either way, so the surviving name is
+        # the only link to the inode (a later start's nlink check requires it)
+        # and a failed reservation leaves nothing behind.
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except OSError:
+            pass
+
+    if published is None:
+        fail("could not reserve an unused archive name under %s" % directory_path)
+
+    os.fsync(directory_fd)
+
+    # Verify what landed, by descriptor, rather than what was intended. The owner
+    # is enforced by open_checked's allowed_owners; the group and mode are
+    # checked here, and the nlink check inside open_checked proves the temporary
+    # reference is gone.
+    check_fd = open_checked(
+        os.path.join(directory_path, published),
+        allowed_owners=(uid,),
+        parent_fd=directory_fd,
+        name=published,
+    )
+    if check_fd is None:
+        fail("%s disappeared immediately after it was preserved" % os.path.join(directory_path, published))
+    try:
+        written = read_all(check_fd)
+        info = os.fstat(check_fd)
+    finally:
+        os.close(check_fd)
+    if written != payload:
+        fail("%s does not match the bytes that were preserved" % os.path.join(directory_path, published))
+    if info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode:
+        fail("%s does not carry the intended ownership or mode" % os.path.join(directory_path, published))
+    return published
 
 
 private_dir_fd = open_checked(private_root, directory=True, allowed_owners=(control_uid, 0))
@@ -769,9 +936,15 @@ if source == "legacy":
     if private_fd is not None:
         superseded = read_all(private_fd)
         if superseded != chosen:
-            name = "runtime.superseded-%s.json" % stamp
-            publish_bytes(
-                private_dir_fd, private_root, name, superseded, control_uid, control_gid, 0o600
+            name = archive_bytes(
+                private_dir_fd,
+                private_root,
+                stamp,
+                "superseded",
+                superseded,
+                control_uid,
+                control_gid,
+                0o600,
             )
             print(
                 "Preserved the superseded controller-private state as %s."
@@ -794,9 +967,15 @@ elif source == "private":
     if legacy_fd is not None:
         discarded = read_all(legacy_fd)
         if discarded != kept:
-            name = "runtime.rolled-back-%s.json" % stamp
-            publish_bytes(
-                private_dir_fd, private_root, name, discarded, control_uid, control_gid, 0o600
+            name = archive_bytes(
+                private_dir_fd,
+                private_root,
+                stamp,
+                "rolled-back",
+                discarded,
+                control_uid,
+                control_gid,
+                0o600,
             )
             print(
                 "Preserved the pre-isolation image's state as %s; it is not discarded, only unused."

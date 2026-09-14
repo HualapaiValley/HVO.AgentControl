@@ -32,6 +32,15 @@ public static class TerminalEndpoint
     private const int CloseGraceSeconds = 2;
 
     private static readonly TimeSpan StopGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Second, bounded wait after a forced termination was actually issued. The
+    /// whole teardown is therefore bounded by <see cref="StopGrace"/> plus this,
+    /// which matters because it runs inside the request's <c>finally</c> ahead of
+    /// the <see cref="ViewerSlot"/> release.
+    /// </summary>
+    private static readonly TimeSpan ForcedExitGrace = TimeSpan.FromSeconds(5);
+
     private static readonly SemaphoreSlim ViewerSlot = new(1, 1);
 
     /// <summary>
@@ -388,8 +397,41 @@ public static class TerminalEndpoint
         }
     }
 
-    private static async Task StopBridgeAsync(Process process, AgentProcessLauncher agentLauncher, ILogger? logger)
+    /// <summary>
+    /// Tears the bridge child down within a bounded time and always releases the
+    /// <see cref="Process"/> handle.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This runs inside the request's <c>finally</c>, ahead of the single
+    /// <see cref="ViewerSlot"/> release, so an unbounded wait here would not just
+    /// hang one request: it would strand the terminal for every later viewer with
+    /// a 409. Both waits are therefore bounded and neither observes
+    /// <see cref="CancellationToken.None"/>.
+    /// </para>
+    /// <para>
+    /// The forced termination is only meaningful when it was actually issued. A
+    /// controller running as UID 1001 cannot signal its UID 1000 bridge directly,
+    /// so <see cref="AgentProcessLauncher.TryTerminate"/> returns false when the
+    /// privileged launcher refused or failed - and waiting for an exit that was
+    /// never requested is waiting forever. That case logs a category-only warning
+    /// and returns; the surviving child is reaped by the container's init.
+    /// </para>
+    /// <para>
+    /// Exposed internally so the bound can be asserted with a real child process
+    /// and a launcher whose signal helper fails, rather than inferred.
+    /// </para>
+    /// </remarks>
+    internal static async Task StopBridgeAsync(
+        Process process,
+        AgentProcessLauncher agentLauncher,
+        ILogger? logger,
+        TimeSpan? stopGrace = null,
+        TimeSpan? forcedExitGrace = null)
     {
+        ArgumentNullException.ThrowIfNull(process);
+        ArgumentNullException.ThrowIfNull(agentLauncher);
+
         try
         {
             try
@@ -404,24 +446,44 @@ public static class TerminalEndpoint
             {
             }
 
-            using var grace = new CancellationTokenSource(StopGrace);
+            using var grace = new CancellationTokenSource(stopGrace ?? StopGrace);
             try
             {
                 await process.WaitForExitAsync(grace.Token).ConfigureAwait(false);
+                return;
             }
             catch (OperationCanceledException)
             {
-                // Cross-UID: an isolated bridge runs as the agent identity, so
-                // termination goes through the verified launcher signal.
-                agentLauncher.TryTerminate(process, force: true);
+            }
 
-                try
+            // Cross-UID: an isolated bridge runs as the agent identity, so
+            // termination goes through the verified launcher signal.
+            if (!agentLauncher.TryTerminate(process, force: true))
+            {
+                if (HasExited(process))
                 {
-                    await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                    // Not a failure: the child exited between the wait and the
+                    // signal, which is the whole point of the graceful close.
+                    return;
                 }
-                catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
-                {
-                }
+
+                // Never log bridge stderr or terminal content; category only.
+                logger?.LogWarning(
+                    "Terminal bridge termination was not issued ({Category}); the viewer slot is released without waiting.",
+                    nameof(AgentProcessLauncher));
+                return;
+            }
+
+            using var forced = new CancellationTokenSource(forcedExitGrace ?? ForcedExitGrace);
+            try
+            {
+                await process.WaitForExitAsync(forced.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Terminal bridge did not exit within the forced grace ({Category}); the viewer slot is released anyway.",
+                    nameof(TimeoutException));
             }
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -432,6 +494,18 @@ public static class TerminalEndpoint
         finally
         {
             process.Dispose();
+        }
+    }
+
+    private static bool HasExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            return false;
         }
     }
 

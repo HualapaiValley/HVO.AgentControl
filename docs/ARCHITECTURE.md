@@ -210,6 +210,25 @@ is unresolved instead of silently picking a side. `--resume-isolation
 --state-source legacy|private` is the only thing that clears it; the state that
 loses is preserved under a timestamped name, never deleted.
 
+**The marker is written before any ownership is handed back**, because it is both
+the interlock and the evidence the replay check above compares against. Recording
+it afterwards left a crash window in which the old image was already runnable
+with no record of the publication: the next replay would find no marker, treat the
+state the old image had advanced as unrecorded, and overwrite it. With the marker
+first, a failure to record it aborts while `/data` and the owner secret still
+belong to the controller — neither image starts, and re-running the identical
+command converges — and a crash after it leaves an ordinary replayable rollback.
+
+"Preserved, never deleted" also has to survive a name collision: the archive name
+carries a one-second timestamp, so two resumes inside one second (or after a clock
+step) would choose the same name. Archives are therefore published
+**create-never-replace** — written to a private temporary and `link`ed into the
+first unused name, so `EEXIST` makes the free-name test and the claim on it one
+atomic step — rather than renamed over whatever is there. Publication temporaries
+use a random suffix rather than the PID, because a container restart reuses low
+PIDs and a leftover temporary would otherwise make the `O_EXCL` create fail on the
+same name at every later attempt.
+
 A legacy file written outside isolation without a recorded rollback fails closed
 the same way, but failing alone was not sufficient: the resume path is driven by
 the marker, so a refusal that recorded nothing left every later start failing

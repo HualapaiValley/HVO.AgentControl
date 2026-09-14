@@ -69,11 +69,11 @@ public sealed class SecretInitializationTests
         var result = RunWithFakeDocker(
             python,
             directory,
-            dockerBehavior: "echo false",
+            inspect: new(0, "false"),
             arguments: ["--revert-isolation", "--project", "tenant-b"]);
 
         Assert.Equal(0, result.ExitCode);
-        var calls = File.ReadAllText(Path.Combine(directory.Path, "docker-calls.log"));
+        var calls = DockerCalls(directory);
         Assert.Contains("tenant-b_control-data", calls, StringComparison.Ordinal);
         Assert.Contains("tenant-b_control-private", calls, StringComparison.Ordinal);
         Assert.Contains("inspect --format {{json .State.Running}} tenant-b-control-1", calls, StringComparison.Ordinal);
@@ -123,8 +123,8 @@ public sealed class SecretInitializationTests
         var result = RunWithFakeDocker(
             python,
             directory,
-            dockerBehavior: "echo false",
-            volumeInspectBehavior: "echo 'Error: No such volume' >&2; exit 1");
+            inspect: new(0, "false"),
+            volumeInspect: new(1, StandardError: "Error: No such volume"));
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("these volumes do not exist", result.StandardError, StringComparison.Ordinal);
@@ -133,7 +133,7 @@ public sealed class SecretInitializationTests
         // Nothing was mounted or executed against a volume.
         Assert.DoesNotContain(
             "run --rm",
-            File.ReadAllText(Path.Combine(directory.Path, "docker-calls.log")),
+            DockerCalls(directory),
             StringComparison.Ordinal);
     }
 
@@ -182,14 +182,14 @@ public sealed class SecretInitializationTests
         var result = RunWithFakeDocker(
             python,
             directory,
-            dockerBehavior: "echo true",
+            inspect: new(0, "true"),
             arguments: ["--resume-isolation", "--state-source", "private"]);
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("stop it before resuming", result.StandardError, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "run --rm",
-            File.ReadAllText(Path.Combine(directory.Path, "docker-calls.log")),
+            DockerCalls(directory),
             StringComparison.Ordinal);
     }
 
@@ -298,6 +298,113 @@ public sealed class SecretInitializationTests
     }
 
     /// <summary>
+    /// The rollback marker must be published before any ownership is handed
+    /// back. It is both the roll-forward interlock and the evidence a later
+    /// replay validates against, so a crash between the hand-backs and the
+    /// marker would leave the old image runnable with no record of what was
+    /// published - and the next replay would then overwrite whatever the old
+    /// image had advanced, which is the exact data loss the guard exists to
+    /// prevent.
+    /// </summary>
+    /// <remarks>
+    /// Asserted on order in the source because the container test that exercises
+    /// it needs a Docker daemon. Both cover the same property; this one cannot
+    /// be skipped.
+    /// </remarks>
+    [Fact]
+    public void RevertPublishesTheMarkerBeforeHandingAnythingBack()
+    {
+        var revert = ExtractBlock("REVERT_CODE");
+
+        var marker = revert.IndexOf("        marker_name,\n", StringComparison.Ordinal);
+        Assert.True(marker > 0, "the rollback marker publication was not found");
+
+        foreach (var handBack in new[]
+        {
+            "hand_back_metadata(data_fd, data_root, legacy_uid, legacy_gid, 0o755)",
+            "hand_back_metadata(secret_fd, secret_path, legacy_uid, legacy_gid, 0o600)",
+        })
+        {
+            var index = revert.IndexOf(handBack, StringComparison.Ordinal);
+            Assert.True(index > 0, $"'{handBack}' was not found in the rollback");
+            Assert.True(
+                index > marker,
+                $"'{handBack}' runs before the rollback marker is recorded, which leaves the "
+                + "pre-isolation image runnable with no record of the publication.");
+        }
+
+        // The legacy state's hand-back is also after the marker, and is skipped
+        // entirely when the republish already applied the final ownership - the
+        // descriptor opened earlier then refers to a superseded inode.
+        var legacyHandBack = revert.IndexOf(
+            "if legacy_fd is not None and not republished:", StringComparison.Ordinal);
+        Assert.True(legacyHandBack > marker, "the legacy state is handed back before the marker is recorded");
+    }
+
+    /// <summary>
+    /// "The other state is preserved, never deleted" has to survive a name
+    /// collision. The archive name carries a one-second timestamp, so two
+    /// resumes inside one second - or after a clock step - pick the same name;
+    /// replacing what is there would destroy the first archive while reporting
+    /// that both were preserved.
+    /// </summary>
+    [Fact]
+    public void ResumeArchivesAreCreatedNeverReplaced()
+    {
+        var resume = ExtractBlock("RESUME_CODE");
+
+        // Both archive kinds go through the create-never-replace helper...
+        Assert.Contains("\"superseded\",", resume, StringComparison.Ordinal);
+        Assert.Contains("\"rolled-back\",", resume, StringComparison.Ordinal);
+        Assert.Equal(2, Occurrences(resume, "name = archive_bytes("));
+
+        // ...which claims the name with link (EEXIST), never replace/rename.
+        Assert.Contains("os.link(", resume, StringComparison.Ordinal);
+        Assert.Contains("except FileExistsError:", resume, StringComparison.Ordinal);
+        var archive = resume[resume.IndexOf("def archive_bytes(", StringComparison.Ordinal)..];
+        var archiveBody = archive[..archive.IndexOf("\nprivate_dir_fd", StringComparison.Ordinal)];
+        Assert.DoesNotContain("os.replace(", archiveBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("O_TRUNC", archiveBody, StringComparison.Ordinal);
+
+        // The old formatting, which built the name and published over it, must
+        // not come back through a later edit.
+        Assert.DoesNotContain("\"runtime.superseded-%s.json\" % stamp", resume, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"runtime.rolled-back-%s.json\" % stamp", resume, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Temporary names must not be derived from the PID. A container restart
+    /// reuses low PIDs, so a temporary left behind by an interrupted run would
+    /// make the <c>O_EXCL</c> create fail on exactly the same name at every
+    /// later attempt - a permanent failure repaired only by hand - and none of
+    /// this code may unlink or truncate an entry it did not create.
+    /// </summary>
+    [Fact]
+    public void PublicationTemporariesUseARandomSuffixRatherThanThePid()
+    {
+        var sources = new List<(string Name, string Body)>
+        {
+            ("REVERT_CODE", ExtractBlock("REVERT_CODE")),
+            ("RESUME_CODE", ExtractBlock("RESUME_CODE")),
+            ("src/container/prepare-layout.py", File.ReadAllText(Path.Combine(
+                ControllerIsolationLayoutTests.RepositoryRoot(), "src", "container", "prepare-layout.py"))),
+        };
+
+        foreach (var (name, body) in sources)
+        {
+            Assert.DoesNotContain(".tmp\" % (name, os.getpid())", body, StringComparison.Ordinal);
+            Assert.Contains("secrets.token_hex(8)", body);
+            Assert.Contains("except FileExistsError:", body);
+            Assert.True(
+                body.Contains("import secrets", StringComparison.Ordinal),
+                $"{name} uses secrets.token_hex without importing secrets");
+        }
+    }
+
+    private static int Occurrences(string text, string value) =>
+        text.Split(value, StringSplitOptions.None).Length - 1;
+
+    /// <summary>
     /// Three volumes cannot be changed in one transaction, so the rollback is
     /// replayable instead of atomic, and the failure message has to say so
     /// rather than leaving the operator guessing whether a retry is safe.
@@ -315,8 +422,8 @@ public sealed class SecretInitializationTests
         var result = RunWithFakeDocker(
             python,
             directory,
-            dockerBehavior: "echo false",
-            runBehavior: "echo 'container-side failure' >&2; exit 1");
+            inspect: new(0, "false"),
+            run: new(1, StandardError: "container-side failure"));
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("every step is idempotent", result.StandardError, StringComparison.Ordinal);
@@ -341,14 +448,14 @@ public sealed class SecretInitializationTests
         using var directory = new TempDirectory();
         // What `docker inspect --format '{{json .State.Running}}'` prints for a
         // live container.
-        var result = RunWithFakeDocker(python, directory, dockerBehavior: "echo true");
+        var result = RunWithFakeDocker(python, directory, inspect: new(0, "true"));
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("stop it before reverting", result.StandardError, StringComparison.Ordinal);
 
         // The refusal happens before any container is started, so nothing on the
         // volumes was touched.
-        Assert.DoesNotContain("run --rm", File.ReadAllText(Path.Combine(directory.Path, "docker-calls.log")));
+        Assert.DoesNotContain("run --rm", DockerCalls(directory));
     }
 
     /// <summary>
@@ -365,13 +472,13 @@ public sealed class SecretInitializationTests
         }
 
         using var directory = new TempDirectory();
-        var result = RunWithFakeDocker(python, directory, dockerBehavior: "echo false");
+        var result = RunWithFakeDocker(python, directory, inspect: new(0, "false"));
 
         Assert.Equal(0, result.ExitCode);
         Assert.DoesNotContain("stop it before reverting", result.StandardError, StringComparison.Ordinal);
         Assert.Contains(
             "run --rm",
-            File.ReadAllText(Path.Combine(directory.Path, "docker-calls.log")),
+            DockerCalls(directory),
             StringComparison.Ordinal);
     }
 
@@ -393,7 +500,7 @@ public sealed class SecretInitializationTests
         var result = RunWithFakeDocker(
             python,
             directory,
-            dockerBehavior: "echo 'daemon unreachable' >&2; exit 1");
+            inspect: new(1, StandardError: "daemon unreachable"));
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("could not determine whether", result.StandardError, StringComparison.Ordinal);
@@ -416,13 +523,13 @@ public sealed class SecretInitializationTests
         var result = RunWithFakeDocker(
             python,
             directory,
-            dockerBehavior: "echo 'Error: No such object: agentcontrol-v2-control-1' >&2; exit 1");
+            inspect: new(1, StandardError: "Error: No such object: agentcontrol-v2-control-1"));
 
         Assert.Equal(0, result.ExitCode);
 
         // The precondition passes and the script moves on to the volume work.
         Assert.DoesNotContain("stop it before reverting", result.StandardError, StringComparison.Ordinal);
-        var calls = File.ReadAllText(Path.Combine(directory.Path, "docker-calls.log"));
+        var calls = DockerCalls(directory);
         Assert.Contains("run --rm", calls, StringComparison.Ordinal);
 
         // All three volumes take part: the secret, the agent data and the
@@ -436,39 +543,32 @@ public sealed class SecretInitializationTests
     /// Runs the script with a stub `docker` earlier on PATH, so the precondition
     /// logic is exercised without a daemon, an image, or any real volume.
     /// </summary>
-    /// <param name="dockerBehavior">what `docker inspect &lt;container&gt;` does.</param>
-    /// <param name="volumeInspectBehavior">what `docker volume inspect` does; the
+    /// <param name="inspect">what `docker inspect &lt;container&gt;` does.</param>
+    /// <param name="volumeInspect">what `docker volume inspect` does; the
     /// default reports every volume as present.</param>
-    /// <param name="runBehavior">what `docker run` does; the default succeeds.</param>
+    /// <param name="run">what `docker run` does; the default succeeds.</param>
     /// <param name="arguments">script arguments; defaults to a plain rollback.</param>
     [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
     private static (int ExitCode, string StandardOutput, string StandardError) RunWithFakeDocker(
         string python,
         TempDirectory directory,
-        string dockerBehavior,
-        string volumeInspectBehavior = "exit 0",
-        string runBehavior = "exit 0",
+        DockerResponse inspect,
+        DockerResponse? volumeInspect = null,
+        DockerResponse? run = null,
         IReadOnlyList<string>? arguments = null)
     {
-        var log = Path.Combine(directory.Path, "docker-calls.log");
-        File.WriteAllText(log, string.Empty);
+        // The `docker` stand-in is the checked-in canonical fixture, symlinked
+        // per test, with its behavior in non-executable sidecars. Writing an
+        // executable here and exec'ing it loses the ETXTBSY race of #232 under
+        // parallel test execution.
+        var canonical = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fake-docker.sh");
+        Assert.True(File.Exists(canonical), $"Canonical fake docker fixture was not copied to '{canonical}'.");
 
-        var stub = Path.Combine(directory.Path, "docker");
-        File.WriteAllText(
-            stub,
-            $"""
-            #!/bin/sh
-            echo "$@" >> '{log}'
-            case "$*" in
-              *"volume inspect"*) {volumeInspectBehavior} ;;
-              *"run --rm"*) {runBehavior} ;;
-              *inspect*) {dockerBehavior} ;;
-              *) exit 0 ;;
-            esac
-            """);
-        File.SetUnixFileMode(
-            stub,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.WriteAllText(Path.Combine(directory.Path, "calls.log"), string.Empty);
+        File.CreateSymbolicLink(Path.Combine(directory.Path, "docker"), canonical);
+        WriteResponse(directory, "inspect", inspect);
+        WriteResponse(directory, "volume", volumeInspect ?? DockerResponse.Success);
+        WriteResponse(directory, "run", run ?? DockerResponse.Success);
 
         var startInfo = new ProcessStartInfo
         {
@@ -492,6 +592,20 @@ public sealed class SecretInitializationTests
         process.WaitForExit();
         return (process.ExitCode, standardOutput.GetAwaiter().GetResult(), standardError.GetAwaiter().GetResult());
     }
+
+    /// <summary>Scripted outcome of one `docker` subcommand family.</summary>
+    private sealed record DockerResponse(int ExitCode, string StandardOutput = "", string StandardError = "")
+    {
+        public static DockerResponse Success { get; } = new(0);
+    }
+
+    private static void WriteResponse(TempDirectory directory, string kind, DockerResponse response) =>
+        File.WriteAllLines(
+            Path.Combine(directory.Path, "response." + kind),
+            [response.ExitCode.ToString(), response.StandardOutput, response.StandardError]);
+
+    private static string DockerCalls(TempDirectory directory) =>
+        File.ReadAllText(Path.Combine(directory.Path, "calls.log"));
 
     private static string ExtractBlock(string name)
     {

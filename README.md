@@ -157,9 +157,17 @@ image, resolve the interlock explicitly with `--resume-isolation --state-source
 legacy|private`. Repairing a genuinely interrupted rollback still works, because
 an unchanged (or already converged) legacy file is recognised as a replay.
 
+That check needs the record to exist before the old image can start, so
+`rollback.active` is written **before** `/data`, the runtime state or the owner
+secret are handed back. If the marker cannot be recorded the command aborts while
+the controller still owns everything: neither image starts, nothing is lost, and
+re-running the identical command converges. A crash after the marker is the
+ordinary replayable case.
+
 A deployment with no controller-private state (one that never started) fails
 closed; `--accept-missing-runtime-state` opts into handing back ownership only
-and letting the old image create a new organization.
+and letting the old image create a new organization. That path records the marker
+too, so a later replay is still bounded.
 
 ### Rolling forward again after a rollback
 
@@ -182,8 +190,11 @@ docker --context home-docker compose up -d
 ```
 
 The state that is not chosen is preserved next to the private store under a
-timestamped name, never deleted. This command also returns the owner secret to
-UID 1001 and clears the interlock.
+timestamped name, never deleted. The name carries a one-second timestamp, so two
+resumes inside the same second would otherwise collide; archives are created
+under the first unused name rather than written over an existing one, and both
+survive byte-exact. This command also returns the owner secret to UID 1001 and
+clears the interlock.
 
 The same fail-closed refusal applies if the legacy file was advanced outside
 isolation without a recorded rollback — an operator who started the old image by
