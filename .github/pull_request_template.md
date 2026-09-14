@@ -15,9 +15,12 @@ Commands/results:
 
 ## Review
 
-- [ ] Two independent reviewers used randomly selected distinct approved models,
-      excluding the coordinator; model provenance and any routing/fallback limits
-      are recorded under the Phase 1 review protocol.
+- [ ] Reviewer count matches the owner-approved #243 practice: routine change =
+      one independent reviewer, high-risk change = two independent reviewers, and
+      focused correction = one independent reviewer. This PR is high-risk and
+      therefore still requires two. Approved lanes exclude the coordinator; model
+      provenance and any routing/fallback limits are recorded under the Phase 1
+      review protocol.
 - [ ] Independent review (not the implementing agent) ran against the same exact
       immutable merge-base/head SHA pair recorded below.
 - [ ] Every finding, including all owner comments, is triaged.

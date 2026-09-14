@@ -106,11 +106,16 @@ credentials, destructive actions or review-cycle exceptions to avoid a pause.
 
 ## Pull request process
 
-Phase 1 uses two independent reviewers on randomly selected, distinct approved
-models, excluding the coordinator model. Verify explicit model selection and
-record provenance; generic Task agent types do not prove model identity. See
-[review protocol](docs/REVIEW-PROTOCOL.md). The pair is one review cycle, with a
-maximum of three cycles before owner direction. No silent model fallback.
+Phase 1 uses independent reviewers on randomly selected approved policy lanes,
+excluding the coordinator model. Reviewer count follows the owner-approved
+practice: one independent reviewer for a routine change, two for a high-risk
+change, and one focused reviewer for a correction. Named aliases are requested
+policy lanes, not serving models; random independence is requested-lane
+independence only and fallback overlap must be disclosed. Verify explicit model
+selection and record provenance; generic Task agent types do not prove model
+identity. See [review protocol](docs/REVIEW-PROTOCOL.md). The reviewer set is one
+review cycle, with a maximum of three cycles before owner direction. No silent
+model fallback.
 The owner-approved pool uses Fable 5.1 instead of Fable 5. Failed review/task
 models may be replaced from the applicable approved list under the protocol;
 record the failure/replacement and reconcile partial task effects before retry.

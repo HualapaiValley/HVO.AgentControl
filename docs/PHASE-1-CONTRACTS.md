@@ -92,10 +92,18 @@ Chosen: **one small SQLite database file** owned by the C# host at
   crash semantics. A rewrite of one JSON document is smaller but must reimplement
   atomicity, partial-write detection and journaling. The package addition must
   be justified explicitly in the implementation PR.
-- Schema version is recorded in a `schema_version` table. Startup checks schema
-  version and `PRAGMA quick_check`/`integrity_check`. An unknown or newer
-  version, a failed integrity check, or an unexpected table shape **faults the
-  host** — it never creates, resets or "repairs" the store.
+- Schema version is recorded in a `schema_version` table. Schema v2 adds only
+  non-secret runtime-binding provider metadata: credential-set ID, provider
+  config/profile/status/version, catalog version, policy lane, and requested
+  provider/model/variant. It stores no endpoint, key, account or key
+  fingerprint. Startup validates the exact canonical v1 signature
+  before the only supported migration (1 -> 2), creates and verifies a
+  create-once SQLite Backup API snapshot plus SHA-256 evidence, migrates in one
+  transaction, and validates the canonical v2 signature afterward. Unknown,
+  newer and partial shapes fail closed. The backup is recovery evidence, never a
+  second authority. Startup also checks `PRAGMA quick_check`/foreign keys. A
+  failed check or unexpected table shape **faults the host** — it never creates,
+  resets or "repairs" the store.
 - Data directory `0700`, database file `0600`.
 
 ### 3.1 Safe baseline adoption, no V1 migration
@@ -156,6 +164,8 @@ Chosen: **one small SQLite database file** owned by the C# host at
 ## 5. Internal role placement
 
 - Future Ops, IT and Finance roles live in the **same AgentControl container**.
+  Finance is future-only: there are no Finance department, employee, runtime or
+  usage records now.
   Two acceptable tiers, in order:
   1. Separate ACP sessions in one OpenCode process, **only where per-session
      configuration isolation has been proven** by a test, not assumed.
@@ -180,6 +190,11 @@ Chosen: **one small SQLite database file** owned by the C# host at
   and native HTTP credentials. Failure of any configuration, history or credential
   isolation test requires distinct per-role process identities and private stores
   in the same container, not host routing alone. Section 6 applies to every role.
+- The host and managed employees use one global AgentControl inference key; the
+  general interactive OpenCode key is separate. Future Finance usage reporting
+  is attributed only by correlating proxy usage with AgentControl-persisted
+  employee, runtime, session, task and request IDs. A shared-key aggregate alone
+  cannot attribute usage to Finance or any other employee.
 
 ## 6. Credential and process isolation prerequisite
 
@@ -408,11 +423,18 @@ Design constraints:
   image tools (OpenCode pin, bridge, tmux, PTY support). Reject incompatible or
   unknown mandatory capabilities before creation. Hardware access is not granted
   merely because a host advertises it.
-- Disposable workers default to `opencode/big-pickle`, already measured with no
-  injected provider credentials in the standalone POC. Validate that availability
-  again; it is not guaranteed service. Do not copy coordinator CLIProxy credentials
-  into workers. Provider failure is explicit; a paid/authenticated provider or new
-  infrastructure credential requires owner direction, not silent fallback.
+- Disposable workers default to `opencode/big-pickle` only when that anonymous
+  capability is explicitly selected, already measured with no injected provider
+  credentials in the standalone POC. A task/role selecting `cliproxy/*` requires
+  the committed policy-lane catalog, fixed endpoint and distinct AgentControl
+  inference secret file; validation failure makes only that required runtime
+  unavailable before process start and never substitutes Big Pickle. CLIProxy
+  aliases record requested policy, not actual serving identity. The Phase 1
+  shared key has deployment-wide revocation collateral; see
+  [CLIProxy model policy](CLIPROXY-MODEL-POLICY.md). Do not copy workstation or
+  coordinator CLIProxy credentials into workers. Provider failure is explicit;
+  a paid/authenticated provider or new infrastructure credential requires owner
+  direction, not silent fallback.
 - Docker Desktop Mac hosts run Linux containers; treat them as Linux execution,
   not native macOS.
 

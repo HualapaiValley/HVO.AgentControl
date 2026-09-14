@@ -64,10 +64,22 @@ public static class AgentControlOpenCodeConfig
     /// <summary>
     /// Produces the JSON value for <c>OPENCODE_CONFIG_CONTENT</c>.
     /// </summary>
-    public static string Build(string model, string instructionsPath)
+    public static string Build(
+        string model,
+        string instructionsPath,
+        CliProxyRuntimeConfiguration? cliProxy = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(model);
         ArgumentException.ThrowIfNullOrWhiteSpace(instructionsPath);
+        if (CliProxyRuntimeConfiguration.IsCliProxyModel(model) && cliProxy is null)
+        {
+            throw new InvalidOperationException("A CLIProxy policy lane requires validated provider configuration.");
+        }
+
+        if (!CliProxyRuntimeConfiguration.IsCliProxyModel(model) && cliProxy is not null)
+        {
+            throw new InvalidOperationException("CLIProxy provider configuration cannot be attached to a non-CLIProxy model.");
+        }
 
         var permission = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -138,18 +150,139 @@ public static class AgentControlOpenCodeConfig
             ["$schema"] = "https://opencode.ai/config.json",
             ["model"] = model,
             ["instructions"] = new[] { instructionsPath },
+            ["enabled_providers"] = cliProxy is null ? new[] { "opencode" } : new[] { CliProxyModelCatalog.ProviderId },
             ["permission"] = permission,
-            ["agent"] = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                [RoleName] = new Dictionary<string, object?>(StringComparer.Ordinal)
-                {
-                    ["description"] = "Consolidated manager/operations/IT control role. No Fleet, no workers, no code work.",
-                    ["mode"] = "primary",
-                    ["model"] = model,
-                },
-            },
+            ["agent"] = BuildAgents(model, cliProxy),
         };
+
+        if (cliProxy is not null)
+        {
+            config["provider"] = BuildProvider(cliProxy);
+        }
 
         return JsonSerializer.Serialize(config, SerializerOptions);
     }
+
+    /// <summary>
+    /// Builds the agent map. The control role is always present. When CLIProxy is
+    /// configured, one bounded read-only subagent is generated per deterministic
+    /// task class. No review agent is generated: an independent review must
+    /// explicitly select its policy lane.
+    /// </summary>
+    private static Dictionary<string, object?> BuildAgents(
+        string model,
+        CliProxyRuntimeConfiguration? cliProxy)
+    {
+        var control = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["description"] = "Consolidated manager/operations/IT control role. No Fleet, no workers, no code work.",
+            ["mode"] = "primary",
+            ["model"] = model,
+        };
+        if (!string.IsNullOrWhiteSpace(cliProxy?.Variant))
+        {
+            control["variant"] = cliProxy!.Variant;
+        }
+
+        var agents = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            [RoleName] = control,
+        };
+
+        if (cliProxy is null)
+        {
+            return agents;
+        }
+
+        foreach (var task in CliProxyProfile.TaskClasses)
+        {
+            agents[task.AgentName] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["description"] = task.Description,
+                ["mode"] = "subagent",
+                ["model"] = $"{CliProxyModelCatalog.ProviderId}/{task.LaneId}",
+                ["variant"] = task.Variant,
+                ["permission"] = BuildReadOnlyPermission(),
+            };
+        }
+
+        return agents;
+    }
+
+    /// <summary>
+    /// The direct OpenAI-compatible provider document. It maps only the exposed
+    /// policy lanes. Every advertised variant carries its actual
+    /// <c>reasoningEffort</c>, and the selected lane repeats the selected effort
+    /// in model-level <c>options</c>. OpenCode 1.18.30 otherwise applies its
+    /// built-in low default on the wire even when the selected variant object is
+    /// correct; the pinned outbound integration test guards this exact behavior.
+    /// </summary>
+    private static Dictionary<string, object?> BuildProvider(CliProxyRuntimeConfiguration cliProxy) =>
+        new(StringComparer.Ordinal)
+        {
+            [CliProxyModelCatalog.ProviderId] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["name"] = "AgentControl CLIProxy policy lanes",
+                ["npm"] = "@ai-sdk/openai-compatible",
+                ["env"] = new[] { CliProxyModelCatalog.ApiKeyEnvironmentVariable },
+                ["options"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["baseURL"] = cliProxy.Endpoint.ToString().TrimEnd('/'),
+                    ["apiKey"] = "{" + "env:" + CliProxyModelCatalog.ApiKeyEnvironmentVariable + "}",
+                },
+                ["models"] = CliProxyProfile.SelectableLanes.ToDictionary(
+                    lane => lane.Id,
+                    lane => (object?)new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["id"] = lane.Id,
+                        ["name"] = lane.DisplayName,
+                        ["reasoning"] = lane.AllowedVariants.Count > 0,
+                        ["options"] = string.Equals(lane.Id, cliProxy.Lane.Id, StringComparison.Ordinal)
+                            && !string.IsNullOrWhiteSpace(cliProxy.Variant)
+                            ? new Dictionary<string, object?>(StringComparer.Ordinal)
+                            {
+                                ["reasoningEffort"] = cliProxy.Variant,
+                            }
+                            : new Dictionary<string, object?>(StringComparer.Ordinal),
+                        ["variants"] = lane.AllowedVariants.ToDictionary(
+                            variant => variant,
+                            variant => (object?)new Dictionary<string, object?>(StringComparer.Ordinal)
+                            {
+                                ["reasoningEffort"] = variant,
+                            },
+                            StringComparer.Ordinal),
+                    },
+                    StringComparer.Ordinal),
+            },
+        };
+
+    /// <summary>
+    /// Bounded, read-only task-agent permission. Task agents may read but not
+    /// write, execute, or reach the network; the sensitive-path denies mirror the
+    /// control role.
+    /// </summary>
+    private static Dictionary<string, object?> BuildReadOnlyPermission() =>
+        new(StringComparer.Ordinal)
+        {
+            ["bash"] = "deny",
+            ["edit"] = "deny",
+            ["webfetch"] = "deny",
+            ["websearch"] = "deny",
+            ["read"] = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["*"] = "allow",
+                ["**/.env"] = "deny",
+                ["**/.env.*"] = "deny",
+                ["**/*id_rsa*"] = "deny",
+                ["**/*id_ed25519*"] = "deny",
+                ["**/.git-credentials"] = "deny",
+                ["**/.netrc"] = "deny",
+                ["**/.aws/**"] = "deny",
+                ["**/.ssh/**"] = "deny",
+                ["/run/agentcontrol-secrets/**"] = "deny",
+                ["/control-data/**"] = "deny",
+                ["/data/runtime.json"] = "deny",
+                ["**/runtime.json"] = "deny",
+            },
+        };
 }

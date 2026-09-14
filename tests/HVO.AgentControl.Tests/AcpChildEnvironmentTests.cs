@@ -83,6 +83,46 @@ public sealed class AcpChildEnvironmentTests
     }
 
     [Fact]
+    public void ExplicitCliProxyOverrideSurvivesWhileInheritedWorkstationKeyIsStripped()
+    {
+        var environment = ChildEnvironment.Build(
+            new Dictionary<string, string> { ["CLIPROXY_API_KEY"] = "disposable-system-key" },
+            new Dictionary<string, string?> { ["CLIPROXY_API_KEY"] = "workstation-key" });
+
+        Assert.Equal("disposable-system-key", environment["CLIPROXY_API_KEY"]);
+        Assert.DoesNotContain("workstation-key", environment.Values);
+    }
+
+    /// <summary>
+    /// The tmux attach client only needs the native server credentials, never the
+    /// inference key. It therefore omits CLIPROXY_API_KEY from its overrides, and
+    /// the shared filter strips any inherited value even though the privileged
+    /// launcher could forward it. The terminal child must not be able to read the
+    /// managed employee's proxy credential.
+    /// </summary>
+    [Fact]
+    public void TerminalCallerEnvironmentNeverCarriesTheInferenceKey()
+    {
+        // Exactly the override shape TmuxAttachLauncher builds: no proxy key.
+        var overrides = new Dictionary<string, string>
+        {
+            ["HOME"] = "/data/home",
+            ["XDG_DATA_HOME"] = "/data/home/data",
+            ["XDG_CONFIG_HOME"] = "/data/home/config",
+            ["AGENTCONTROL_OWNER"] = "owner-token",
+            ["OPENCODE_SERVER_USERNAME"] = "opencode",
+            ["OPENCODE_SERVER_PASSWORD"] = "server-password",
+        };
+
+        var environment = ChildEnvironment.Build(
+            overrides,
+            new Dictionary<string, string?> { ["CLIPROXY_API_KEY"] = "workstation-key", ["PATH"] = "/usr/bin" });
+
+        Assert.DoesNotContain(CliProxyModelCatalog.ApiKeyEnvironmentVariable, environment.Keys);
+        Assert.DoesNotContain("workstation-key", environment.Values);
+    }
+
+    [Fact]
     public void OverridesWinAndRestoreServerCredentials()
     {
         var baseline = new Dictionary<string, string?>

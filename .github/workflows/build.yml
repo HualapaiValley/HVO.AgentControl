@@ -49,6 +49,17 @@ jobs:
           dotnet test HVO.AgentControl.slnx --no-build -c Release
           --logger "trx;LogFileName=test-results.trx"
           --results-directory artifacts/test-results
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install pinned OpenCode for outbound wire validation
+        run: npm install --global opencode-ai@1.18.30
+      - name: Real OpenCode outbound request validation
+        env:
+          AGENTCONTROL_OPENCODE_WIRE_REQUIRED: "1"
+        run: >-
+          dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --filter "FullyQualifiedName~OpenCodeOutboundIntegrationTests"
       - name: Format
         run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
       - name: Upload test results

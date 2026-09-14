@@ -52,6 +52,28 @@ public sealed class AcpSanitizedLogBufferTests
     }
 
     [Fact]
+    public void RedactsMultipleSimultaneousSecretsWithoutReplacementRegression()
+    {
+        const string serverPassword = "disposable-server-password-243";
+        const string proxyKey = "disposable-cliproxy-key-243";
+        var buffer = new SanitizedLogBuffer(secret: serverPassword);
+        buffer.AddSecret(proxyKey);
+
+        buffer.Append($"{serverPassword} {proxyKey}\n");
+        buffer.Append($$"""{"password":"{{serverPassword}}","api_key":"{{proxyKey}}"}""" + "\n");
+        buffer.Flush();
+
+        var text = buffer.SnapshotText();
+        Assert.DoesNotContain(serverPassword, text, StringComparison.Ordinal);
+        Assert.DoesNotContain(proxyKey, text, StringComparison.Ordinal);
+        Assert.Contains("***", text, StringComparison.Ordinal);
+
+        buffer.SetSecrets([proxyKey]);
+        Assert.Contains(serverPassword, buffer.Redact(serverPassword), StringComparison.Ordinal);
+        Assert.Equal("***", buffer.Redact(proxyKey));
+    }
+
+    [Fact]
     public void TruncatesOverlongLines()
     {
         var buffer = new SanitizedLogBuffer(maxLineLength: 10);

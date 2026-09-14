@@ -17,18 +17,50 @@ public sealed partial class SanitizedLogBuffer
     private readonly int _maxLineLength;
     private readonly int _maxBytes;
     private int _bytes;
-    private string? _secret;
+    private string[] _secrets = [];
 
     public SanitizedLogBuffer(int maxLines = 200, int maxLineLength = 2000, int maxBytes = 64 * 1024, string? secret = null)
     {
         _maxLines = Math.Max(1, maxLines);
         _maxLineLength = Math.Max(1, maxLineLength);
         _maxBytes = Math.Max(1, maxBytes);
-        _secret = secret;
+        SetSecrets(secret is null ? [] : [secret]);
     }
 
-    /// <summary>Sets or replaces the literal secret redacted from buffered text.</summary>
-    public void SetSecret(string? secret) => _secret = secret;
+    /// <summary>Replaces the complete set of literal secrets redacted from buffered text.</summary>
+    public void SetSecrets(IEnumerable<string?> secrets)
+    {
+        ArgumentNullException.ThrowIfNull(secrets);
+        lock (_gate)
+        {
+            _secrets = secrets
+                .Where(secret => !string.IsNullOrEmpty(secret))
+                .Select(secret => secret!)
+                .Distinct(StringComparer.Ordinal)
+                .OrderByDescending(secret => secret.Length)
+                .ToArray();
+        }
+    }
+
+    /// <summary>Adds one literal secret without removing secrets already registered.</summary>
+    public void AddSecret(string? secret)
+    {
+        if (string.IsNullOrEmpty(secret))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (!_secrets.Contains(secret, StringComparer.Ordinal))
+            {
+                _secrets = _secrets.Append(secret).OrderByDescending(value => value.Length).ToArray();
+            }
+        }
+    }
+
+    /// <summary>Compatibility API: replaces the complete literal-secret set.</summary>
+    public void SetSecret(string? secret) => SetSecrets(secret is null ? [] : [secret]);
 
     public void Append(string text)
     {
@@ -86,9 +118,15 @@ public sealed partial class SanitizedLogBuffer
         }
 
         var result = value;
-        if (!string.IsNullOrEmpty(_secret))
+        string[] secrets;
+        lock (_gate)
         {
-            result = result.Replace(_secret, "***", StringComparison.Ordinal);
+            secrets = _secrets;
+        }
+
+        foreach (var secret in secrets)
+        {
+            result = result.Replace(secret, "***", StringComparison.Ordinal);
         }
 
         result = BasicAuthRegex().Replace(result, "Basic ***");

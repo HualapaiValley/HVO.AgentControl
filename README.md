@@ -245,9 +245,12 @@ exclusive. `--project` derives the `<project>_control-data`,
 a deployment under a non-default Compose project; the owner-secret volume is
 `external` and is set with `--secrets-volume`. Missing volumes fail before any
 container runs, because `docker run` would otherwise create an empty one and
-report a confident success against nothing. Compose enables the
-runtime, installs OpenCode 1.18.30 and uses its
-default Big Pickle provider. The container publishes only the portal on all
+report a confident success against nothing. `--provision-cliproxy-key` creates
+or rotates the named AgentControl managed-employee key from stdin (never
+printed) in that same external volume. Compose enables the runtime, installs
+OpenCode 1.18.30, and selects the curated `cliproxy/default` policy lane at
+medium through a direct OpenAI-compatible provider (no plugin, dashboard sync,
+MCP injection or discovery). The container publishes only the portal on all
 Docker-host IPv4 interfaces (`0.0.0.0:5054`); OpenCode's native HTTP stays on
 container loopback. Nothing starts or migrates the archived V1 deployment.
 

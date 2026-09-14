@@ -135,8 +135,17 @@ static const char *const kEnvironmentAllowList[] = {
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_SERVER_USERNAME",
     "OPENCODE_SERVER_PASSWORD",
+    "CLIPROXY_API_KEY",
     "AGENTCONTROL_OWNER",
 };
+
+/*
+ * The inference key is only needed by the ACP/OpenCode process. tmux and the
+ * terminal PTY bridge must never inherit it, so it is the one allow-listed name
+ * gated per operation. This is defense in depth: the C# callers already omit it
+ * for non-ACP children, but the launcher does not rely on that.
+ */
+static const char *const kInferenceKeyName = "CLIPROXY_API_KEY";
 
 /*
  * tmux subcommands the controller actually issues. `new-session`/`new-window`
@@ -281,7 +290,7 @@ static int is_session_name(const char *value)
     return 1;
 }
 
-static char **build_environment(void)
+static char **build_environment(int include_inference_key)
 {
     size_t allowed = sizeof(kEnvironmentAllowList) / sizeof(kEnvironmentAllowList[0]);
     char **block = calloc(allowed + 2, sizeof(char *));
@@ -295,6 +304,9 @@ static char **build_environment(void)
 
     for (size_t index = 0; index < allowed; index++) {
         const char *name = kEnvironmentAllowList[index];
+        if (!include_inference_key && strcmp(name, kInferenceKeyName) == 0) {
+            continue;
+        }
         const char *value = getenv(name);
         if (value == NULL) {
             continue;
@@ -452,11 +464,11 @@ static void enter_agent_directory(const char *directory)
     }
 }
 
-static void exec_as_agent(const char *program, char *const argv[], const char *directory)
+static void exec_as_agent(const char *program, char *const argv[], const char *directory, int include_inference_key)
 {
     /* Built before the environment is rebuilt from the caller's, and before the
      * descriptors it may need are closed. */
-    char **environment = build_environment();
+    char **environment = build_environment(include_inference_key);
 
     close_inherited_descriptors();
     become_agent();
@@ -500,7 +512,7 @@ static int operation_acp(int argc, char *argv[])
         (char *)"--cwd", (char *)cwd,
         NULL,
     };
-    exec_as_agent(OPENCODE_PATH, child, cwd);
+    exec_as_agent(OPENCODE_PATH, child, cwd, 1);
     return 64;
 }
 
@@ -535,7 +547,7 @@ static int operation_tmux(int argc, char *argv[])
      * matters is the fixed binary, the allow-listed subcommand and the
      * mandatory, verified privilege drop below.
      */
-    exec_as_agent(TMUX_PATH, child, "/");
+    exec_as_agent(TMUX_PATH, child, "/", 0);
     return 64;
 }
 
@@ -558,7 +570,7 @@ static int operation_pty(int argc, char *argv[])
     char *const child[] = {
         (char *)"python3", (char *)"-u", (char *)BRIDGE_PATH, (char *)session, NULL,
     };
-    exec_as_agent(PYTHON_PATH, child, home);
+    exec_as_agent(PYTHON_PATH, child, home, 0);
     return 64;
 }
 
