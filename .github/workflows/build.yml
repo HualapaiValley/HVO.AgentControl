@@ -164,7 +164,12 @@ jobs:
           if-no-files-found: ignore
 
   browser-smoke:
-    name: Browser (disabled smoke + enabled organization)
+    # The job name is the required status context on the protected main branch
+    # ("Browser smoke (disabled runtime)"). Renaming it would silently drop the
+    # required check, so the name is kept exactly and the enabled-runtime
+    # organization suite runs inside this same job: the protected gate then
+    # covers both hermetic browser suites rather than fewer.
+    name: Browser smoke (disabled runtime)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
