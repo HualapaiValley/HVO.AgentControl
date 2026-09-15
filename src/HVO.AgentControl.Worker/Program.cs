@@ -43,7 +43,7 @@ internal static class WorkerProgram
                 }
                 var runtime = new WorkerRuntime(store, WorkerRuntime.OpenInheritedFd(inputFd, FileAccess.Read), WorkerRuntime.OpenInheritedFd(outputFd, FileAccess.Write));
                 runtime.Start(start.Pid);
-                await using var bridge = new WorkerBridge(options, store, runtime, key);
+                await using var bridge = new WorkerBridge(options, store, runtime, key, terminal: new SupervisorWorkerTerminalBackend());
                 using var shutdown = new CancellationTokenSource();
                 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
                 AppDomain.CurrentDomain.ProcessExit += (_, _) => shutdown.Cancel();
@@ -52,7 +52,9 @@ internal static class WorkerProgram
             }
             if (args is ["--worker-connector"])
                 return await RunConnectorAsync(Options()).ConfigureAwait(false);
-            Console.Error.WriteLine("Use one fixed mode: --worker-bootstrap-key, --worker-bridge, or --worker-connector.");
+            if (args is ["--worker-pipe"])
+                return await RunPipeAsync(Options()).ConfigureAwait(false);
+            Console.Error.WriteLine("Use one fixed mode: --worker-bootstrap-key, --worker-bridge, --worker-connector, or --worker-pipe.");
             return 64;
         }
         catch (Exception exception)
@@ -113,6 +115,33 @@ internal static class WorkerProgram
             return 0;
         }
         finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private static async Task<int> RunPipeAsync(WorkerOptions options)
+    {
+        using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await socket.ConnectAsync(new UnixDomainSocketEndPoint(options.SocketPath)).ConfigureAwait(false);
+        await using var stream = new NetworkStream(socket, ownsSocket: false);
+        var input = Console.OpenStandardInput(); var output = Console.OpenStandardOutput();
+        using var lifetime = new CancellationTokenSource();
+        var upstream = CopyPipeAsync(input, stream, lifetime.Token);
+        var downstream = CopyPipeAsync(stream, output, lifetime.Token);
+        await Task.WhenAny(upstream, downstream).ConfigureAwait(false);
+        lifetime.Cancel();
+        try { await Task.WhenAll(upstream, downstream).ConfigureAwait(false); } catch (OperationCanceledException) { }
+        return 0;
+    }
+
+    private static async Task CopyPipeAsync(Stream source, Stream destination, CancellationToken token)
+    {
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, token).ConfigureAwait(false);
+            if (read == 0) break;
+            await destination.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+            await destination.FlushAsync(token).ConfigureAwait(false);
+        }
     }
 
     private static async Task<SupervisorStart> RequestSupervisorStartAsync(long processGeneration)

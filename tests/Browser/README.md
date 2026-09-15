@@ -6,14 +6,15 @@ dependency or an explicit `CHROME_PATH`; no machine paths are hardcoded.
 
 ## Hermetic CI suites
 
-CI runs two hermetic suites, both against the locally built app
+CI runs two hermetic browser suites against the locally built app
 (`src/HVO.AgentControl/bin/Release/net10.0/HVO.AgentControl.dll`) on a free
-loopback port. Neither needs Docker, a model provider, or credentials, and
-neither performs an inference call.
+loopback port, plus the local `terminal-wire.mjs` unit check. None needs Docker,
+a model provider, or credentials, and none performs an inference call.
 
 | Script | Runtime | What it proves |
 | --- | --- | --- |
 | `ci-smoke.mjs` | `Control__Enabled=false`, no owner password | Portal shell, disabled-runtime status, terminal/model/cancel gates, responsive layout |
+| `terminal-wire.mjs` | No app process | Local text/base64 output and UTF-8 decoder isolation across detach/reattach |
 | `ci-organization.mjs` | `Control__Enabled=true`, disposable owner password, checked-in fake ACP fixture | Five-view organization navigation, exact department/availability counts, unsupported approvals, actual Operations employee selection/detail, Development/QA empty states, orientation mutation receipts, no secret field, desktop/mobile layout |
 
 `ci-organization.mjs` copies `tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`
@@ -27,8 +28,7 @@ disabled smoke so the disabled baseline keeps its exact coverage.
 dotnet build HVO.AgentControl.slnx --no-restore -c Release   # or the app test step
 npm ci --prefix tests/Browser
 npx --prefix tests/Browser playwright install --with-deps chromium
-npm run ci --prefix tests/Browser                # disabled-runtime smoke
-npm run ci-organization --prefix tests/Browser   # enabled-runtime organization
+npm run ci-all --prefix tests/Browser            # smoke + wire + organization
 ```
 
 Artifacts are written to `artifacts/browser-ci/` and

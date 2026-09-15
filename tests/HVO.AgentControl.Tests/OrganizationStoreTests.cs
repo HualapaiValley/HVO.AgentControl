@@ -121,7 +121,7 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
-    public void BuildLocalSchemaV3WithAnyDifferentSignatureIsUnsupported()
+    public void SchemaV4WithAnyDifferentSignatureIsUnsupported()
     {
         using var root = new TempStore();
         using (var store = Open(root))
@@ -134,9 +134,8 @@ public sealed class OrganizationStoreTests
         var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
-        Assert.Contains("Unsupported build-local schema 3 signature", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("never released", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -170,7 +169,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -219,7 +218,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -355,7 +354,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -1238,6 +1237,18 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TABLE remote_terminal_viewers;
+            DROP TABLE worker_pending_permissions;
+            DROP TABLE worker_events;
+            DROP TABLE worker_recovery_obligations;
+            DROP TABLE resource_records;
+            DROP TABLE provisioning_operations;
+            DROP TABLE worker_cancellations;
+            DROP TABLE worker_requests;
+            DROP TABLE worker_tasks;
+            DROP TABLE worker_cursors;
+            DROP TABLE worker_enrollments;
+            DROP TABLE execution_hosts;
             DROP TABLE permission_audit;
             DROP TABLE permission_requests;
             DROP TABLE permission_grants;

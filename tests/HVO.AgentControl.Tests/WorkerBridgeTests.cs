@@ -757,7 +757,7 @@ public sealed class WorkerBridgeTests
         Assert.Null(store.Status().JournalFailure);
         Assert.False(store.Status().DispatchHeld);
 
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-next\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
@@ -795,7 +795,7 @@ public sealed class WorkerBridgeTests
         Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         Assert.IsType<WorkerReplayLossException>(Record.Exception(() => store.AppendEvent("another", "{}")));
         store.ReconcileReplayLoss(store.Status().ReplayLoss!.WorkerGeneration, store.Status().ReplayLoss!.MarkerSequence);
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-two\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-one\"}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-two", second.RootElement, "turn-two", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var secondId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();

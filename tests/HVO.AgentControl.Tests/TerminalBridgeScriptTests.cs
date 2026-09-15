@@ -21,7 +21,8 @@ public sealed class TerminalBridgeScriptTests
         Assert.Contains("attach-session", text, StringComparison.Ordinal);
         Assert.Contains("\"-t\"", text, StringComparison.Ordinal);
         Assert.Contains("TIOCSCTTY", text, StringComparison.Ordinal);
-        Assert.Contains("incrementaldecoder", text, StringComparison.Ordinal);
+        Assert.Contains("base64.b64encode", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("incrementaldecoder", text, StringComparison.Ordinal);
         Assert.Contains("attach_failure_message", text, StringComparison.Ordinal);
 
         // No fallback shell and no socket server.
@@ -65,6 +66,53 @@ public sealed class TerminalBridgeScriptTests
             assert module.attach_failure_message(None) is None
             assert module.attach_failure_message(1) == "tmux attach exited with status 1."
             assert module.attach_failure_message(-9) == "tmux attach was terminated by signal 9."
+            bridge = module.Bridge("test")
+            frames = []
+            bridge._write_frame = frames.append
+            bridge._emit_output(b"\x1b[31mplain\xff")
+            assert frames == [{"type": "output", "encoding": "base64", "data": "G1szMW1wbGFpbv8="}]
+
+            drained = module.Bridge("test")
+            drained.master_fd = 9
+            drain_frames = []
+            drained._emit_output = drain_frames.append
+            reads = [b"tail\xff"]
+            def fake_read(*_):
+                if reads:
+                    return reads.pop(0)
+                raise BlockingIOError()
+            original_read = module.os.read
+            module.os.read = fake_read
+            try:
+                drained._drain_master()
+            finally:
+                module.os.read = original_read
+            assert drain_frames == [b"tail\xff"]
+            assert not hasattr(drained, "decoder")
+
+            events = []
+            class Process:
+                def poll(self): return 7
+                def wait(self, timeout=None): events.append(("wait", timeout)); return 7
+            failing = module.Bridge("test")
+            failing.start = lambda: None
+            failing.process = Process()
+            failing._child_exited = lambda: True
+            failing._drain_master = lambda: (_ for _ in ()).throw(RuntimeError("drain failed"))
+            failing._emit_error = lambda message: events.append(("error", message))
+            original_cleanup = failing.cleanup
+            failing.cleanup = lambda: (original_cleanup(), events.append(("cleanup", None)))
+            original_select = module.select.select
+            module.select.select = lambda *_: ([], [], [])
+            try:
+                try:
+                    failing.run()
+                    raise AssertionError("drain exception did not propagate")
+                except RuntimeError as error:
+                    assert str(error) == "drain failed"
+            finally:
+                module.select.select = original_select
+            assert events == [("error", "tmux attach exited with status 7."), ("wait", 0), ("cleanup", None)]
             """;
 
         var (exitCode, standardError) = RunPython(python, harness, scriptPath!);

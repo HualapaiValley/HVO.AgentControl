@@ -23,7 +23,7 @@ from the `generation = 2` identity.
   because no employee-scoped safe log contract exists, so neither bulk logs nor
   another employee's logs are returned. Pending approvals are explicitly
   unsupported rather than fabricated.
-- **Persistence:** `/control-data/control.db` is the authoritative SQLite store. Schema v3 is the merged authoritative code baseline, but semantic release `0.1.0` remains unreleased and has not been published or deployed as a release. Existing databases are accepted only on the exact supported schema signature; there is no compatibility promise for earlier branch-local v3 files.
+- **Persistence:** `/control-data/control.db` is the authoritative SQLite store. Schema v4 migrates only the exact released v3 signature after creating and verifying an immutable `control.schema-v3.db` backup plus SHA-256 evidence. It preserves the #213/#216 organization and policy records and adds stable execution-host, enrollment, cursor, task/request, provisioning/resource, recovery-obligation and terminal-viewer metadata. Key bytes and active connection nonces are never stored there. Semantic release `0.1.0` remains unreleased and has not been published or deployed as a release.
   It stores organization, department, role, employee, runtime-binding and ACP-session
   identity, plus versioned orientation, dispatch-hold and permission-policy records,
   in the controller-private volume. `/control-data/runtime.json` is
@@ -57,7 +57,7 @@ minimal root PID1 supervisor starts only the pinned OpenCode ACP operation as
 employee UID 1102 and the bridge as UID 1101, reaps fixed children, and accepts
 only authenticated-local `start`, `status` and `stop` operations. ACP stdin and
 stdout terminate at the bridge. The bridge owns a private Unix socket and a
-separate exact-signature schema-v6 SQLite journal in `/worker-control`;
+separate exact-signature schema-v6 SQLite journal in `/control`;
 worker/process generations, supervisor lifecycle handles, ownership epochs,
 request forwarding state, replay cursors/events, holds and generation-bound
 pending permissions are durable and bounded by count and bytes. The journal refuses unknown or changed schema
@@ -152,13 +152,17 @@ state/category, correlation, SHA-256 and byte-count metadata.
 A bootstrap-only stdin mode atomically creates a single-link `0600` 32-byte key
 in the bridge-private `0700` directory and prints only its SHA-256 key ID.
 Duplicate bootstrap verifies the exact existing key and never overwrites it.
-The local connector also takes the key on stdin and exists only for hermetic
-protocol tests and local diagnostics.
+The legacy local connector still takes the key on stdin and exists only for
+hermetic protocol tests and local diagnostics. Controller transport instead uses
+`--worker-pipe`, a transparent same-UID Unix-socket byte pipe; no key is placed in
+remote argv or environment and authentication remains controller-to-bridge.
 
-**Still not implemented:** #217 controller integration, SSH/Docker routing,
-two-host provisioning/success, key rotation, hiring/tasks/UI and viewer/TUI
-transport. Consequently control-host `/api/info WorkerControlImplemented`
-remains false. The optional Compose worker profile is disabled by default, has
+The #217 controller core implements disabled-by-default connection, replay,
+dispatch, cancellation, permission rejection, heartbeat, provisioning and cleanup
+coordinators with injectable bridge/provisioner abstractions and intent-first
+SQLite transitions. Schema-v4 also projects bounded pending worker permissions without raw payloads; reject-only decisions reload the authoritative stored tuple/options and require the unchanged cached owner lease. Exact terminal routing has no local/remote fallback, and the viewer role reuses that cached lease without advancing its epoch. The fixed production worker TUI transport/backend is implemented and hermetically validated. **Still not implemented or operationally validated:** key rotation/compromise re-enrollment,
+hiring, and two-host provisioning/success. Consequently control-host
+`/api/info WorkerControlImplemented` remains false. The optional Compose worker profile is disabled by default, has
 no published port or Docker socket, is read-only outside named volumes/tmpfs,
 has process/CPU/memory limits and disables automatic restart. ACP exit does not
 cascade-kill the bridge: the bridge remains available for bounded reconciliation,
@@ -503,6 +507,12 @@ controller can therefore execute code as the agent identity — which it already
   disrupt its own TUI. They are routing/cleanup evidence for a controller that
   already owns the binding, not authentication or authorization evidence for
   organization records, hiring, permissions or another employee.
+- **Worker viewer credential boundary.** Worker PID1 retains a random native
+  OpenCode password only in memory and passes it to the employee ACP and attach
+  children. Because those children share the employee UID, employee code can
+  inspect that environment and disrupt its own TUI; the credential protects only
+  the loopback HTTP endpoint from unrelated identities and is not a controller
+  secret or sandbox boundary.
 Real alternate-UID tests live in
 `tests/HVO.AgentControl.Tests/AgentIsolationContainerTests.cs`, including the
 planted-symlink escalation attempts, the capability bounding set, the `/bin/sh`

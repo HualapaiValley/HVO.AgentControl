@@ -3,9 +3,13 @@
     <OutputType>Exe</OutputType>
     <AssemblyName>HVO.AgentControl.Worker</AssemblyName>
     <StartupObject>HVO.AgentControl.Worker.WorkerEntryPoint</StartupObject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../HVO.AgentControl.WorkerProtocol/HVO.AgentControl.WorkerProtocol.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="HVO.AgentControl.Tests" />

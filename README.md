@@ -28,12 +28,21 @@ Controller-private state lives in the `/control-data` volume (controller UID
 1001); the agent-owned `/data` volume (UID 1000) holds the OpenCode home,
 workspace and conversation history.
 
-This is a development slice. **Developer provisioning and task routing are not
-implemented.** Issue #213 adds a separate, worker-owned ACP bridge artifact and
-hermetic local connector, but the control portal does not connect to it: remote
-SSH/Docker provisioning, two-host success, hiring/tasks and owner UI belong to
-#217 or later. `/api/info WorkerControlImplemented` therefore remains `false`.
-Do not expose this portal to untrusted networks or the Internet.
+This is a development slice. The #217 hermetic controller core now includes
+schema-v4 enrollment/cursor/event/request/cancellation/recovery APIs, durable
+intent-first dispatch and cancellation, authenticated replay synchronization,
+uncertain-write reconciliation, typed provisioning and reverse cleanup, and
+minimal same-origin owner control routes. The fixed SSH/Docker adapter and hosted
+manager remain disabled by default and no remote host was contacted during this
+work. `/api/info WorkerControlImplemented` remains `false` because the operational
+two-host path has not been authorized or validated; `WorkerControlCodeAvailable=true`
+`WorkerControlEnabled` reports the effective configuration gate, and
+`WorkerControlOperationallyValidated=false` preserves that distinction. The
+key rotation, live enrollment/inference/tools and two-host remote terminal evidence
+remain pending separate work and authorization. The viewer role, fixed production
+worker PTY backend and store-only remote read model are hermetically code-complete;
+viewer input is owner-authorized interactive execution, not a sandbox boundary. Do not expose this portal to untrusted
+networks or the Internet.
 
 ### Run locally
 
@@ -58,8 +67,8 @@ contain at least 24 characters after trimming in either runtime mode.
 
 The `worker` Docker target is independent of the control image. It uses a root
 PID1 fixed-operation supervisor, bridge UID 1101 and employee UID 1102, with
-separate persistent `/worker-control`, `/worker/home`, `/worker/workspace` and
-`/worker/session` trees. The optional `worker` Compose profile has no published
+separate persistent `/control`, `/home/worker`, `/workspace` and
+`/session` trees. The optional `worker` Compose profile has no published
 port, no Docker socket, an internal network and `restart: "no"`; it is not part
 of normal `docker compose up`.
 
@@ -76,7 +85,7 @@ docker compose --profile worker up worker-local
 ```
 
 The bootstrap command inherits the profile's fixed worker/controller IDs and
-`/worker-control` named volume, but the key exists only on stdin: it is never an
+`/control` named volume, but the key exists only on stdin: it is never an
 environment or Compose configuration value. Only the non-secret key ID is
 printed. Repeating with the exact same key verifies the existing enrollment; a
 different key, symlink, hard link, wrong owner or wrong mode fails closed and is
@@ -298,7 +307,8 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.
-- `/terminal?employeeId=<stable-id>`: same-origin authenticated terminal WebSocket for only the exact host-owned employee/binding/native-session tuple, one viewer at a time; malformed, unknown, mismatched and unavailable selections fail closed with no fallback
+- `/api/workers/{workerId}/permissions`: safe hash/option-ID projection of remote worker pending permissions; the reject endpoint accepts only decision identity/revision, reloads the authoritative tuple/options, and never offers allow.
+- `/terminal?employeeId=<stable-id>`: same-origin authenticated terminal WebSocket with exact, non-fallback routing. InternalSharedContainer attaches only the exact host-owned employee/binding/native-session tuple. DeveloperContainer is routed only when the exact enrolled/authenticated/running, hold-free cached owner lease and persisted worker viewer capability are available. The fixed worker supervisor backend launches the pinned loopback OpenCode attach command under the employee UID and passes the PTY descriptor with `SCM_RIGHTS`; two-host portal operation remains unvalidated.
 - `/health/live`: process health, not worker/provider readiness
 - `/api/version`: semantic version and architecture direction
 

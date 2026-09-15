@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Fixed-operation PID1 supervisor for the worker image."""
+import base64
+import fcntl
 import json
 import os
+import re
 import selectors
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import termios
 import time
 import uuid
 
@@ -16,14 +20,34 @@ EMPLOYEE_UID = 1102
 EMPLOYEE_GID = 1102
 CONTROL = "/run/worker-supervisor.sock"
 BRIDGE = ["/usr/bin/dotnet", "/app/HVO.AgentControl.Worker.dll", "--worker-bridge"]
-ACP = ["/usr/local/bin/opencode", "acp"]
+ACP = ["/usr/local/bin/opencode", "acp", "--port", "4096", "--hostname", "127.0.0.1", "--cwd", "/workspace", "--pure"]
+ATTACH_PREFIX = ["/usr/local/bin/opencode", "attach", "http://127.0.0.1:4096", "--dir", "/workspace", "--session"]
 MAX_REQUEST = 4096
 IO_TIMEOUT = 5.0
+MAX_DIMENSION = 500
+SESSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 children = {}
 pending_acp = {}
+viewer = None
 stopping = False
 lifecycle_handle = None
 process_generation = None
+server_username = "opencode"
+server_password = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+
+
+def employee_environment():
+    return {
+        "HOME": "/home/worker",
+        "XDG_CONFIG_HOME": "/home/worker/.config",
+        "XDG_CACHE_HOME": "/home/worker/.cache",
+        "XDG_DATA_HOME": "/home/worker/.local/share",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "TERM": "xterm-256color",
+        "OPENCODE_SERVER_USERNAME": server_username,
+        "OPENCODE_SERVER_PASSWORD": server_password,
+    }
 
 
 def child_setup():
@@ -31,7 +55,7 @@ def child_setup():
     os.setgid(EMPLOYEE_GID)
     os.setuid(EMPLOYEE_UID)
     os.umask(0o077)
-    os.chdir("/worker/workspace")
+    os.chdir("/workspace")
 
 
 def bridge_setup():
@@ -39,7 +63,13 @@ def bridge_setup():
     os.setgid(BRIDGE_UID)
     os.setuid(BRIDGE_UID)
     os.umask(0o077)
-    os.chdir("/worker-control")
+    os.chdir("/control")
+
+
+def viewer_setup():
+    child_setup()
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
 def close_pending():
@@ -56,8 +86,8 @@ def start_bridge():
     acp_read, bridge_write = socket.socketpair()
     try:
         env = {
-            "HOME": "/worker-control", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-            "WORKER_CONTROL_DIRECTORY": "/worker-control", "WORKER_ID": os.environ["WORKER_ID"],
+            "HOME": "/control", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+            "WORKER_CONTROL_DIRECTORY": "/control", "WORKER_ID": os.environ["WORKER_ID"],
             "WORKER_CONTROLLER_ID": os.environ["WORKER_CONTROLLER_ID"],
             "WORKER_ACP_READ_FD": str(bridge_read.fileno()),
             "WORKER_ACP_WRITE_FD": str(bridge_write.fileno())}
@@ -93,8 +123,7 @@ def start_acp(requested_generation):
     try:
         acp = subprocess.Popen(
             ACP, stdin=acp_read.fileno(), stdout=acp_write.fileno(), stderr=sys.stderr,
-            env={"HOME": "/worker/home", "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
-            preexec_fn=child_setup, close_fds=True)
+            env=employee_environment(), preexec_fn=child_setup, close_fds=True)
     finally:
         acp_read.close()
         acp_write.close()
@@ -105,10 +134,74 @@ def start_acp(requested_generation):
             "processGeneration": process_generation, "pid": acp.pid}
 
 
+def set_winsize(fd, rows, columns):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+
+
+def start_viewer(session_id, rows, columns):
+    global viewer
+    if viewer is not None and viewer["process"].poll() is None:
+        return ({"ok": False, "error": "viewer-already-running"}, None)
+    close_viewer()
+    acp = children.get("acp")
+    if acp is None or acp.poll() is not None:
+        return ({"ok": False, "error": "acp-unavailable"}, None)
+    master_fd, slave_fd = os.openpty()
+    try:
+        set_winsize(slave_fd, rows, columns)
+        process = subprocess.Popen(
+            ATTACH_PREFIX + [session_id], stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            env=employee_environment(), preexec_fn=viewer_setup, close_fds=True)
+    except Exception:
+        os.close(master_fd)
+        raise
+    finally:
+        os.close(slave_fd)
+    handle = uuid.uuid4().hex
+    viewer = {"handle": handle, "process": process, "master_fd": master_fd, "session_id": session_id}
+    return ({"ok": True, "viewerHandle": handle}, master_fd)
+
+
+def close_viewer():
+    global viewer
+    if viewer is None:
+        return
+    child = viewer["process"]
+    if child.poll() is not None:
+        child.wait()
+    master_fd = viewer["master_fd"]
+    if master_fd is not None:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+    viewer = None
+
+
+def stop_viewer(handle):
+    if viewer is None or viewer["handle"] != handle:
+        return {"ok": False, "error": "viewer-not-found"}
+    child = viewer["process"]
+    if child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+    close_viewer()
+    return {"ok": True}
+
+
 def terminate_all(signum=signal.SIGTERM):
     global stopping
     stopping = True
     close_pending()
+    if viewer is not None and viewer["process"].poll() is None:
+        try:
+            viewer["process"].send_signal(signum)
+        except ProcessLookupError:
+            pass
     for child in children.values():
         if child.poll() is None:
             try:
@@ -118,15 +211,19 @@ def terminate_all(signum=signal.SIGTERM):
 
 
 def reap():
+    global viewer
+    if viewer is not None and viewer["process"].poll() is not None:
+        viewer["process"].wait()
+        close_viewer()
     for name, child in list(children.items()):
         if child.poll() is not None:
+            child.wait()
             children.pop(name, None)
             if not stopping and name == "bridge":
                 terminate_all()
             # ACP exit is terminal for this container's process slot, but the
             # bridge remains alive for status/replay/reconciliation and an
-            # explicit stop. Recovery is container replacement, not an
-            # unreachable reuse of inherited stdio descriptors.
+            # explicit stop. Viewer exit never affects ACP or bridge lifetime.
 
 
 def peer_uid(conn):
@@ -152,9 +249,19 @@ def receive_request(conn):
     return request if isinstance(request, dict) else None
 
 
-def send(conn, value):
+def send(conn, value, fd=None):
     conn.settimeout(IO_TIMEOUT)
-    conn.sendall(json.dumps(value, separators=(",", ":")).encode() + b"\n")
+    payload = json.dumps(value, separators=(",", ":")).encode() + b"\n"
+    if fd is None:
+        conn.sendall(payload)
+    else:
+        sent = conn.sendmsg([payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack("i", fd))])
+        if sent != len(payload):
+            raise OSError("partial supervisor descriptor response")
+
+
+def valid_dimension(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_DIMENSION
 
 
 def handle(conn):
@@ -165,10 +272,35 @@ def handle(conn):
         return
     operation = request.get("operation")
     if operation == "start":
-        if set(request) != {"operation", "processGeneration"} or not isinstance(request["processGeneration"], int) or request["processGeneration"] < 1:
+        if set(request) != {"operation", "processGeneration"} or not isinstance(request["processGeneration"], int) or isinstance(request["processGeneration"], bool) or request["processGeneration"] < 1:
             send(conn, {"ok": False, "error": "invalid-request"})
             return
         send(conn, start_acp(request["processGeneration"]))
+    elif operation == "viewer-start":
+        allowed = {"operation", "sessionId", "rows", "columns"}
+        if not {"operation", "sessionId"} <= set(request) <= allowed or not isinstance(request["sessionId"], str) or not SESSION_PATTERN.fullmatch(request["sessionId"]):
+            send(conn, {"ok": False, "error": "invalid-request"})
+            return
+        rows = request.get("rows", 24)
+        columns = request.get("columns", 80)
+        if not valid_dimension(rows) or not valid_dimension(columns):
+            send(conn, {"ok": False, "error": "invalid-request"})
+            return
+        response, fd = start_viewer(request["sessionId"], rows, columns)
+        try:
+            send(conn, response, fd)
+            if response.get("ok"):
+                os.close(fd)
+                viewer["master_fd"] = None
+        except OSError:
+            if response.get("ok"):
+                stop_viewer(response["viewerHandle"])
+            raise
+    elif operation == "viewer-stop":
+        if set(request) != {"operation", "viewerHandle"} or not isinstance(request["viewerHandle"], str) or not SESSION_PATTERN.fullmatch(request["viewerHandle"]):
+            send(conn, {"ok": False, "error": "invalid-request"})
+            return
+        send(conn, stop_viewer(request["viewerHandle"]))
     elif operation == "status" and set(request) == {"operation"}:
         child = children.get("acp")
         running = child is not None and child.poll() is None
@@ -212,7 +344,7 @@ def bridge_key_present():
         try:
             os.close(read_fd)
             bridge_setup()
-            valid = os.path.isfile("/worker-control/bridge.key")
+            valid = os.path.isfile("/control/bridge.key")
             os.write(write_fd, b"1" if valid else b"0")
         except OSError:
             os.write(write_fd, b"0")
@@ -247,14 +379,16 @@ def main():
         reap()
     terminate_all()
     deadline = time.monotonic() + 5
-    while children and time.monotonic() < deadline:
+    while (children or viewer is not None) and time.monotonic() < deadline:
         reap()
         time.sleep(0.02)
-    for child in children.values():
+    all_children = list(children.values()) + ([] if viewer is None else [viewer["process"]])
+    for child in all_children:
         if child.poll() is None:
             child.kill()
-    for child in children.values():
+    for child in all_children:
         child.wait()
+    close_viewer()
     close_pending()
     server.close()
     try:

@@ -87,12 +87,14 @@ OpenCode process is launched.
 
 ### Browser checks
 
-CI runs two hermetic suites. Both spawn the locally built app on a free loopback
-port, need no Docker, credentials, or model provider, and perform no inference.
+CI runs two hermetic browser suites plus a terminal wire unit check. The browser
+suites spawn the locally built app on a free loopback port; all three need no
+Docker, credentials, or model provider and perform no inference.
 
-- `ci-smoke.mjs` (`npm run ci`) runs with `Control__Enabled=false` and no owner
-  password and covers the portal shell, disabled-runtime status, terminal/model/
-  cancel gates and responsive layout.
+- `ci-smoke.mjs` (`npm run ci`) covers the disabled-runtime portal shell, status,
+  terminal/model/cancel gates and responsive layout.
+- `terminal-wire.mjs` (`npm run terminal-wire`) covers local text/base64 decoding
+  and decoder isolation across terminal attachments.
 - `ci-organization.mjs` (`npm run ci-organization`) runs with
   `Control__Enabled=true`, a disposable owner password and the checked-in fake
   ACP fixture (`tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`). It asserts
@@ -106,13 +108,24 @@ port, need no Docker, credentials, or model provider, and perform no inference.
 ```bash
 npm ci --prefix tests/Browser
 npx --prefix tests/Browser playwright install --with-deps chromium
-npm run ci --prefix tests/Browser
-npm run ci-organization --prefix tests/Browser
+npm run ci-all --prefix tests/Browser
 ```
 
 Test results and screenshots are written to `artifacts/browser-ci/` and
 `artifacts/browser-organization/`. See
 [`tests/Browser/README.md`](../tests/Browser/README.md) for the suite list.
+
+### Hermetic remote-worker controller checks
+
+`RemoteWorkerControlTests` exercise schema-v3 to v4 backup/migration, strict
+approved-host configuration, enrollment/resource relations, conditional lifecycle
+and request transitions, event deduplication/cursor commit, recovery sets,
+intent-first cancellation/provisioning, command-injection rejection, pinned SSH
+flags, resource-label ownership and bounded Linux capability parsing. The bridge,
+connection and provisioning services expose injectable interfaces for deterministic
+fakes. These checks do not access SSH credentials, Docker daemons or remote hosts. The viewer protocol tests use both hermetic fakes and a local Unix `SCM_RIGHTS` PTY contract for the production backend; owner viewer input can execute employee code and its framing limits are not a sandbox. Real two-host portal terminal evidence remains pending.
+`WorkerControl` and its hosted manager are disabled by default; live adapter
+execution and enrollment require separate owner authorization.
 
 ### Worker bridge checks
 

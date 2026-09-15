@@ -414,8 +414,11 @@ Design constraints:
   the bridge protocol. Authorized owner keystrokes retain the TUI behavior below.
   After authentication the bridge asks its supervisor to launch only an
   employee-UID attach client for the bound TUI/session. It accepts bounded
-  input/resize frames, streams bytes to the authenticated same-origin WebSocket,
-  and enforces one viewer per session. Detach asks the supervisor to stop/reap
+  input/resize frames, streams output as explicit
+  `{ "type": "output", "encoding": "base64", "data": "..." }` frames to the
+  authenticated same-origin WebSocket, and enforces one viewer per session. The
+  local PTY bridge uses the same base64 byte contract; the browser accepts only
+  exact `base64` or legacy-explicit `text` encodings and rejects unknown values. Detach asks the supervisor to stop/reap
   only that viewer's lifecycle handle; the bound TUI and ACP remain unaffected.
   The connector never launches an arbitrary command, alternate session or
   fallback shell; this
@@ -631,7 +634,7 @@ These are open and must not be presented as decided or owner-accepted:
   with revisioned staged owner grants and complete matched-restriction audit IDs.
   General worker delivery/restart/bridge behavior remains unresolved.
 - **Implemented worker artifact (#213):** worker-image bridge/employee UID separation; private `0700` control/home/workspace/session trees; bootstrap-only stdin key creation with duplicate verification and symlink/hard-link refusal; no Docker socket, host checkout or controller secrets; fixed root PID1 supervision; ACP stdio ending at the unprivileged bridge; worker/process generations; and explicit bridge/container interruption behavior. **Still unresolved for #217:** key rotation interruption, compromise re-enrollment and remote custody/delivery.
-- **Implemented controller-role worker channel (#213):** bounded NDJSON, mutual role-labelled HMAC over independent nonces and exact identities/version/key ID, Linux peer credentials, nonce replay/expiry rejection, bridge-owned lease epochs/fencing, heartbeat expiry holds, durable request intent/uncertainty, ACP EOF/read-failure correlator reconciliation, retained multi-generation event replay with a lexicographic generation/sequence ACK cursor, explicit gaps/global bounds, bounded pending permission state, a crash-recoverable kernel-owned single-instance lock, and PID1 termination/reaping tests. Bridge startup transactionally increments worker generation, invalidates the lease, interrupts prior forwarding operations and converts a prior starting/running process slot to exited under a protected `process-exited` dispatch hold. The production supervisor does not cascade-stop the bridge when ACP exits; the bridge remains for reconciliation, but the process slot is terminal for that container and recovery is explicit container replacement (`restart: no`), not an in-container child restart claim. Status exposes `AcknowledgedWorkerGeneration` with `AcknowledgedSequence`, explicit replay-loss metadata, bounded exact replay-gap records/count, sanitized journal-failure recovery markers, truthful ACP protocol/transport failure states and ownership epoch on pending permission work. Viewer/TUI attach remains unimplemented and must later prove no ACP generation/lease mutation and reject stale viewer challenges.
+- **Implemented worker channel (#213) and hermetic controller foundation (#217 branch):** the worker retains the bounded NDJSON, mutual role-labelled HMAC, lease/epoch fencing, durable request/replay/permission and interruption behavior described above. The protocol framing, canonical hashing and HMAC code is now a storage-independent library referenced by both worker and controller. Control schema v4 adds exact stable remote host/enrollment/cursor/task/request/provisioning/resource/recovery/viewer and bounded pending-permission metadata after an exact released-v3 migration with verified create-once backup and hash. Owner APIs enroll only configured approved-host references; strict SSH vectors pin known_hosts and identity paths and forbid arbitrary command tokens. The disabled-by-default controller now has injectable authenticated synchronization, replay/ACK, request/cancellation/permission, heartbeat, typed provisioning and ownership-checked cleanup coordinators with intent-first durable transitions. No real host was accessed. The role-separated viewer protocol, fixed production PTY/TUI attach backend, exact process-session binding and store-only read model are implemented hermetically; key rotation and two-host operational evidence remain unimplemented and must not be inferred from this core. Owner keystrokes execute with employee authority and are not a sandbox.
 - Whether the existing authorized SSH/Docker credential can be used without new
   grants; secure key custody/rotation and measured host-adapter restrictions.
 - Implementation and adversarial validation of the specified bridge challenge,
@@ -660,8 +663,8 @@ These are open and must not be presented as decided or owner-accepted:
 
 ## 15. Non-goals
 
-No full role split, no finance workflows, no controller-side provisioning or
-remote worker integration, no container per internal role, no V1 migration, no
-release, and no change to the archive. #213 provides only the independent
-worker-owned bridge/runtime artifact; #217 remains responsible for SSH/Docker
-routing, two-host success and controller binding.
+No full role split, no finance workflows, no container per internal role, no V1
+migration, no release, and no change to the archive. #213 provides the independent
+worker-owned bridge/runtime artifact; #217 now provides the hermetic controller
+binding/routing/provisioning state machines, while viewer/read-model work and
+two-host operational success remain pending.

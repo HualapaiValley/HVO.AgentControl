@@ -10,6 +10,8 @@
   "scripts": {
     "ci": "node ci-smoke.mjs",
     "ci-organization": "node ci-organization.mjs && node organization-ui.mjs",
+    "ci-all": "npm run ci && npm run terminal-wire && npm run ci-organization",
+    "terminal-wire": "node terminal-wire.mjs",
     "organization-ui": "node organization-ui.mjs",
     "model-sync": "node model-sync.mjs",
     "portal-layout": "node portal-layout.mjs",

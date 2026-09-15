@@ -9,8 +9,8 @@ namespace HVO.AgentControl.Worker;
 
 public sealed class WorkerStore : IDisposable, IWorkerObservationSink
 {
-    public const int SchemaVersion = 7;
-    public const string SchemaSignature = "hvo-worker-bridge-v7-20260915";
+    public const int SchemaVersion = 8;
+    public const string SchemaSignature = "hvo-worker-bridge-v8-20260915";
     public const int ReplayGapLimit = 128;
     private static readonly string[] HoldNames = ["manual", "replay-gap", "replay-loss", "process", "permission", "ownership", "transport", "journal"];
     private const string ReplayLossMarker = "{\"loss\":\"events-dropped\"}";
@@ -129,7 +129,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             CREATE TABLE replay_gaps(id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('status','loss','overflow')), worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), after_sequence INTEGER NOT NULL CHECK(after_sequence>=0), first_retained INTEGER NOT NULL CHECK(first_retained>=0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0), loss_marker_generation INTEGER, loss_marker_sequence INTEGER, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), CHECK((kind='loss' AND loss_marker_generation IS NOT NULL AND loss_marker_sequence IS NOT NULL) OR (kind<>'loss' AND loss_marker_generation IS NULL AND loss_marker_sequence IS NULL)), UNIQUE(kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence));
             CREATE TABLE journal_failures(operation_id TEXT PRIMARY KEY, worker_generation INTEGER NOT NULL CHECK(worker_generation>0), error_category TEXT NOT NULL, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), created_utc TEXT NOT NULL);
             CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL);
-            CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL);
+            CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL);
             CREATE TABLE holds(name TEXT PRIMARY KEY, held INTEGER NOT NULL CHECK(held IN(0,1)), reason TEXT);
             CREATE INDEX ix_pending_permissions_state ON pending_permissions(state, created_utc);
             """, tx);
@@ -140,7 +140,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         InsertMeta("worker_generation", "0", tx);
         InsertMeta("process_generation", "0", tx);
         InsertMeta("next_event_sequence", "1", tx);
-        Execute("INSERT INTO lease VALUES(1,0,NULL,NULL,NULL,0); INSERT INTO replay VALUES(1,0,0); INSERT INTO process_slot VALUES(1,'stopped',NULL,NULL,NULL,$now); INSERT INTO holds VALUES('manual',0,NULL),('replay-gap',0,NULL),('replay-loss',0,NULL),('process',0,NULL),('permission',0,NULL),('ownership',0,NULL),('transport',0,NULL),('journal',0,NULL);", tx, ("$now", Now()));
+        Execute("INSERT INTO lease VALUES(1,0,NULL,NULL,NULL,0); INSERT INTO replay VALUES(1,0,0); INSERT INTO process_slot VALUES(1,'stopped',NULL,NULL,NULL,NULL,$now); INSERT INTO holds VALUES('manual',0,NULL),('replay-gap',0,NULL),('replay-loss',0,NULL),('process',0,NULL),('permission',0,NULL),('ownership',0,NULL),('transport',0,NULL),('journal',0,NULL);", tx, ("$now", Now()));
         tx.Commit();
     }
 
@@ -159,7 +159,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
                 ["table:lease"] = "CREATE TABLE lease(singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL CHECK(epoch>=0), controller_id TEXT, connection_nonce TEXT, observed_utc TEXT, active INTEGER NOT NULL CHECK(active IN(0,1)))",
                 ["table:meta"] = "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
                 ["table:pending_permissions"] = "CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL)",
-                ["table:process_slot"] = "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)",
+                ["table:process_slot"] = "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)",
                 ["table:replay"] = "CREATE TABLE replay(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ack_worker_generation INTEGER NOT NULL CHECK(ack_worker_generation>=0), ack_sequence INTEGER NOT NULL CHECK(ack_sequence>=0))",
                 ["table:replay_gaps"] = "CREATE TABLE replay_gaps(id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('status','loss','overflow')), worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), after_sequence INTEGER NOT NULL CHECK(after_sequence>=0), first_retained INTEGER NOT NULL CHECK(first_retained>=0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0), loss_marker_generation INTEGER, loss_marker_sequence INTEGER, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), CHECK((kind='loss' AND loss_marker_generation IS NOT NULL AND loss_marker_sequence IS NOT NULL) OR (kind<>'loss' AND loss_marker_generation IS NULL AND loss_marker_sequence IS NULL)), UNIQUE(kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence))",
                 ["table:replay_loss"] = "CREATE TABLE replay_loss(worker_generation INTEGER PRIMARY KEY CHECK(worker_generation>0), marker_sequence INTEGER NOT NULL CHECK(marker_sequence>0), dropped_count INTEGER NOT NULL CHECK(dropped_count>0), dropped_bytes INTEGER NOT NULL CHECK(dropped_bytes>=0), reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), FOREIGN KEY(worker_generation) REFERENCES event_generations(worker_generation))",
@@ -243,7 +243,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         using var tx = _connection.BeginTransaction();
         var state = Scalar("SELECT state FROM process_slot WHERE singleton=1", tx)?.ToString();
         if (state is "running" or "starting") throw new WorkerProtocolException("The worker process is already active.");
-        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='process_generation'; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE process_slot SET state='starting',lifecycle_handle=NULL,active_request_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1", tx, ("$u", Now()));
+        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='process_generation'; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE process_slot SET state='starting',lifecycle_handle=NULL,active_request_id=NULL,session_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1", tx, ("$u", Now()));
         var generation = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='process_generation'", tx), CultureInfo.InvariantCulture);
         tx.Commit(); return generation;
     }
@@ -330,6 +330,41 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         lock (_databaseGate) Execute("UPDATE process_slot SET state=$s,pid=$p,updated_utc=$u WHERE singleton=1", null, ("$s", state), ("$p", pid), ("$u", Now()));
     }
     public void SetActiveRequest(string? requestId) { lock (_databaseGate) Execute("UPDATE process_slot SET active_request_id=$r,updated_utc=$u WHERE singleton=1", null, ("$r", requestId), ("$u", Now())); }
+    public void BindSession(string sessionId)
+    {
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+        lock (_databaseGate)
+        {
+            using var tx = _connection.BeginTransaction();
+            var currentValue = Scalar("SELECT session_id FROM process_slot WHERE singleton=1", tx);
+            var current = currentValue is null or DBNull ? null : currentValue.ToString();
+            if (current is not null && current != sessionId) throw new WorkerProtocolException("The running process is already bound to a different session.");
+            Execute("UPDATE process_slot SET session_id=$s,updated_utc=$u WHERE singleton=1 AND state='running'", tx, ("$s", sessionId), ("$u", Now()));
+            if (Convert.ToInt64(Scalar("SELECT changes()", tx), CultureInfo.InvariantCulture) != 1) throw new WorkerProtocolException("A running process is required before binding its session.");
+            tx.Commit();
+        }
+    }
+    public bool ViewerSessionBound()
+    {
+        lock (_databaseGate)
+        {
+            using var q = _connection.CreateCommand();
+            q.CommandText = "SELECT COUNT(*) FROM process_slot WHERE singleton=1 AND state='running' AND session_id IS NOT NULL";
+            return Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+        }
+    }
+
+    public string RequireViewerLease(long epoch, string connectionNonce, string sessionId)
+    {
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, connectionNonce);
+            WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+            using var q = _connection.CreateCommand(); q.CommandText = "SELECT state,session_id FROM process_slot WHERE singleton=1"; using var r = q.ExecuteReader(); r.Read();
+            if (r.GetString(0) != "running" || r.IsDBNull(1) || r.GetString(1) != sessionId) throw new WorkerProtocolException("Viewer session does not match the running process binding.");
+            return sessionId;
+        }
+    }
 
     public StoredRequest RegisterGatedRequest(long epoch, string nonce, string id, JsonElement payload, string? turnId) =>
         RegisterAndBeginForwardingGated(epoch, nonce, id, payload, turnId);
