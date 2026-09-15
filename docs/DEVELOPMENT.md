@@ -114,6 +114,35 @@ Test results and screenshots are written to `artifacts/browser-ci/` and
 `artifacts/browser-organization/`. See
 [`tests/Browser/README.md`](../tests/Browser/README.md) for the suite list.
 
+### Worker bridge checks
+
+The worker is a separate build target and optional Compose profile; normal
+control startup does not include it.
+
+```bash
+docker build --target worker -t hvo-agentcontrol:worker-tests .
+AGENTCONTROL_DOCKER_REQUIRED=1 dotnet test HVO.AgentControl.slnx -c Release \
+  --no-build --filter 'FullyQualifiedName~WorkerImageContractTests'
+docker compose --profile worker config
+python3 -m py_compile src/container/worker-supervisor.py
+```
+
+`WorkerBridgeTests` are host-local and use disposable keys/databases plus fake
+streams plus a separate test-only lock-holder executable that is not copied into
+the worker image. They cover persistent advisory-lock reopen/live-holder rejection,
+separate bounded ACP/control codecs, truthful EOF/protocol/transport reconciliation,
+host/session/epoch-bound permissions with count/byte caps, protected holds,
+stale-socket fencing, single-write JSON-RPC cancellation, sanitized journal data,
+exact durable replay-gap sets/caps, replay-loss marker reconciliation, journal-FK
+pruning across generations, recoverable injected observation-store failures and
+exact journal-failure reconciliation, reconnect fencing and terminal container
+process-slot behavior. They require no provider credentials or inference. `WorkerImageContractTests`
+build and run the real image with alternate UIDs and validate private path/socket
+access, empty bridge capabilities/setuid inventory and PID1 signal/reaping. The
+local connector mode reads its key from the first stdin line; never put a worker
+key in argv or environment. Rotation and remote SSH delivery are not development
+helpers in #213.
+
 ### Container
 
 Local development uses the `home-docker` context in this workspace; substitute

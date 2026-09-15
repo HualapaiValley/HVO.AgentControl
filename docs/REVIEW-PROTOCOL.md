@@ -165,19 +165,39 @@ defer it indefinitely. Remove `status:deferred` only after verified completion,
 or an explicit replacement disposition recorded by the owner.
 
 Stop when all required reviews are clear, findings are resolved and exact-head required
-CI is green. At most three cycles are allowed; pause for the owner before cycle
-four. A deferral needs explicit owner approval and a linked issue. Security,
-data-loss, acceptance, failing-CI and material-correctness findings block.
+CI is green. At most three cycles are allowed by default; pause for the owner
+before cycle four, and require a new explicit owner authorization before every
+later cycle. A deferral needs explicit owner approval and a linked issue.
+
+Before completion of an authorized fourth review cycle, security, data-loss,
+acceptance, failing-CI and material-correctness findings block and are not
+deferrable. After cycle four, the owner may make a **per-finding release-blocker
+exception** for a critical or material finding that does not block the build,
+required CI, migration safety or repository integrity. This is not a blanket PR
+waiver. For each exception:
+
+1. record the owner's authorization and the known impact in the original review
+   thread, marked **Deferred, not fixed**;
+2. create and link a dedicated open issue carrying `status:deferred` and
+   `status:release-blocker`, with the remaining acceptance and independent review
+   evidence required;
+3. list the issue in the source PR body and release checklist; and
+4. prohibit tags, registry publication, releases, deployments, live migrations
+   and live enrollment until that issue is closed after implementation,
+   validation and independent confirmation.
+
+Thread resolution after that disposition records the approved transfer from a
+merge gate to a release gate; it never records a fix. Any finding that blocks the
+build, required CI, migration safety or repository integrity remains a merge
+blocker. Findings without an explicit per-finding exception remain merge
+blockers according to their ordinary severity. Additional correction reviews
+remain available, but cycle five and every cycle after it require a separate
+owner authorization.
 
 For PR #223, the owner explicitly authorized cycle four after the three-cycle
-pause recorded in #224. After that cycle, remaining non-critical findings may
-be deferred to linked follow-up issues with their actual status disclosed, and
-the PR may merge with required exact-head CI green. This exception does not
-waive blocking security, data-loss, acceptance or material-correctness findings,
-nor does it authorize a fifth cycle or change other PRs' three-cycle default.
-A blocking finding after an authorized fourth cycle keeps the PR unmerged;
-pause for a separate owner decision before further review. Non-critical
-deferrals still follow the next-cycle carry-forward rule above.
+pause recorded in #224. That historical exception allowed only non-critical
+linked deferrals and did not itself establish the later general per-finding
+release-blocker policy.
 
 ## Authorization
 

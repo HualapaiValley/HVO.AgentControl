@@ -7,6 +7,7 @@ WORKDIR /source
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
 RUN dotnet publish src/HVO.AgentControl/HVO.AgentControl.csproj -c Release -o /app
+RUN dotnet publish src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj -c Release -o /worker-app
 
 # The privileged launcher is the container's only setuid component. It is built
 # from source in its own stage so the runtime image never carries a compiler,
@@ -21,7 +22,7 @@ RUN gcc -std=c11 -O2 -static -Wall -Wextra -Werror -Wformat=2 -Wconversion \
         -o /agentcontrol-launch /src/agentcontrol-launch.c \
     && strip /agentcontrol-launch
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS control-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux tini ca-certificates git util-linux \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=opencode /usr/local/bin/node /usr/local/bin/node
@@ -108,3 +109,37 @@ EXPOSE 8080
 # a PID even when no controller is running (measured). The PID file is only
 # meaningful while the container runs; a stopped container leaves a stale value.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/control-entrypoint", "dotnet", "HVO.AgentControl.dll"]
+
+FROM control-runtime AS control
+
+# Independent worker artifact. It is not used by the control service unless the
+# optional Compose profile is explicitly selected. PID 1 is the fixed-operation
+# root supervisor; bridge and employee processes are distinct unprivileged UIDs.
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS worker
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates git tmux util-linux \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=opencode /usr/local/bin/node /usr/local/bin/node
+COPY --from=opencode /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/opencode-ai/bin/opencode.exe /usr/local/bin/opencode \
+    && userdel ubuntu \
+    && { groupdel ubuntu 2>/dev/null || true; } \
+    && groupadd --gid 1101 bridge \
+    && useradd --uid 1101 --gid 1101 --home-dir /worker-control --shell /usr/sbin/nologin --no-create-home bridge \
+    && groupadd --gid 1102 employee \
+    && useradd --uid 1102 --gid 1102 --home-dir /worker/home --shell /bin/bash --no-create-home employee \
+    && mkdir -p /app /worker-control /worker/home /worker/workspace /worker/session \
+    && chown 1101:1101 /worker-control \
+    && chown 1102:1102 /worker/home /worker/workspace /worker/session \
+    && chmod 0700 /worker-control /worker/home /worker/workspace /worker/session
+COPY --from=build /worker-app/ /app/
+COPY src/container/worker-supervisor.py /usr/local/bin/worker-supervisor
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
+    && chown -R root:root /app /usr/local/bin/worker-supervisor \
+    && chmod -R go-w /app \
+    && chmod 0755 /usr/local/bin/worker-supervisor
+ENV LANG=C.UTF-8
+ENTRYPOINT ["/usr/local/bin/worker-supervisor"]
+
+# Preserve the historical default build result for existing control-image jobs;
+# the worker remains available only through the explicit `--target worker`.
+FROM control AS final

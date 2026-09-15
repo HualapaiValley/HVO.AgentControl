@@ -23,8 +23,8 @@ from the `generation = 2` identity.
   because no employee-scoped safe log contract exists, so neither bulk logs nor
   another employee's logs are returned. Pending approvals are explicitly
   unsupported rather than fabricated.
-- **Persistence:** `/control-data/control.db` is the authoritative SQLite store. The released/authoritative lineage is schema v2; this unmerged branch uses a build-local schema-3 signature for orientation work. Schema 3 has never been released or deployed, is accepted only on an exact signature match, and has no migration or compatibility promise for earlier branch-local v3 files.
-  for organization, department, role, employee, runtime-binding and ACP-session
+- **Persistence:** `/control-data/control.db` is the authoritative SQLite store. Schema v3 is the merged authoritative code baseline, but semantic release `0.1.0` remains unreleased and has not been published or deployed as a release. Existing databases are accepted only on the exact supported schema signature; there is no compatibility promise for earlier branch-local v3 files.
+  It stores organization, department, role, employee, runtime-binding and ACP-session
   identity, plus versioned orientation, dispatch-hold and permission-policy records,
   in the controller-private volume. `/control-data/runtime.json` is
   retained as adoption evidence only and is no longer written by the controller;
@@ -49,23 +49,122 @@ talks ACP over stdio and uses loopback HTTP only to read native session state
 (for example the authoritative model and session status). Native HTTP never
 leaves the container. The browser talks only to the portal.
 
-## Planned components (not implemented)
+## Worker-owned ACP bridge artifact (#213)
 
-- **Worker container:** self-contained execution environment with its own
-  OpenCode runtime, private home/session storage and private repository storage.
-  No shared worker checkout, worktree or writable coordination database.
-- **Worker bridge:** process owner for OpenCode ACP stdio that keeps worker
-  lifetime independent of a controller connection. It is infrastructure, not
-  another model agent.
-- **Human views:** optional proxied native web plus tmux-hosted TUI attach.
+The separate `HVO.AgentControl.Worker` executable and Docker `worker` target now
+implement the worker side of Sections 6-7 without starting the web portal. A
+minimal root PID1 supervisor starts only the pinned OpenCode ACP operation as
+employee UID 1102 and the bridge as UID 1101, reaps fixed children, and accepts
+only authenticated-local `start`, `status` and `stop` operations. ACP stdin and
+stdout terminate at the bridge. The bridge owns a private Unix socket and a
+separate exact-signature schema-v6 SQLite journal in `/worker-control`;
+worker/process generations, supervisor lifecycle handles, ownership epochs,
+request forwarding state, replay cursors/events, holds and generation-bound
+pending permissions are durable and bounded by count and bytes. The journal refuses unknown or changed schema
+objects, corruption, foreign-key violations, symlinks, non-regular or multiply
+linked files, unexpected owners/modes, and a second live bridge instance. The
+persistent `0600` regular lock file is opened without symlink following, validated
+by descriptor/path inode identity and held with a nonblocking kernel advisory lock;
+a crash releases ownership without requiring deletion of the lock inode.
 
-There is **no worker bridge or reconnection implementation in the active code**.
-The standalone POC demonstrated the transport idea only; see
-[POC findings](POC-FINDINGS.md). The concrete Phase 1 organization, placement,
-storage and transport contracts are proposed in
-[Phase 1 contracts](PHASE-1-CONTRACTS.md). Section 11's bounded orientation and
-host permission-policy slice is implemented for the single Operations/IT employee;
-worker transport and general dispatch remain future.
+The bridge protocol is bounded newline-delimited JSON (`hvo-worker-acp/2`, 1 MiB
+control frames). ACP uses a separate buffered codec with an 8 MiB frame limit and
+128-level depth limit; control framing remains 1 MiB/64 levels. Mutual HMAC-SHA256 binds role-specific labels, independent
+nonces, controller/worker/key identities and protocol version. The bridge
+checks Linux peer credentials, rejects nonce replay and stale proofs, bounds the
+authentication exchange, and advances an ownership epoch on same-controller
+reconnect. Every operation is fenced by the exact lease captured when its socket
+authenticated; mutations additionally carry epoch plus connection nonce and must
+match both that socket lease and the current journal lease. Thus an old socket
+cannot issue even `status`, `reconcile`, or `replay`, and stale replay validation
+cannot create a replay-gap hold. Lease expiry, manual or protected safety hold, replay gap/loss, and non-running
+process state reject submit before request registration or ACP I/O. Independent
+normalized hold rows preserve manual, replay-gap, replay-loss, process, permission,
+ownership, transport and journal obligations without clobbering one another; status
+exposes the ordered reason list and retains the joined legacy reason string. Generic
+hold operations change only the manual row. Protected holds clear only through their
+own exact reconciliation transition. Submit
+accepts only `session/prompt`, requires a validated `sessionId` and host turn ID,
+and binds durable deduplication to payload, turn, session and accepting ownership
+epoch. Requests use bounded recursive canonical JSON hashing, persist ID/hash and
+forwarding ownership before write, and become `uncertain` on write ambiguity. A
+controller connection may stop awaiting a forwarded request, but the
+bridge-owned operation, active request and prompt serialization remain until ACP
+responds or its process transport terminates. Clean EOF and read failures fail all pending correlators with host-authored errors,
+mark only still-forwarding/forwarded requests uncertain and release the active
+prompt slot. Clean EOF is `process-exited`; malformed/oversized ACP frames are
+`acp-protocol-failed`; transport failures are `acp-transport-uncertain`. These
+truthful states have protected holds, and a response completed before EOF is not
+rewritten. There is no exactly-once tool-effect claim. Events are ordered by the
+`(workerGeneration, sequence)` tuple with sequence restarting at 1. Prior-generation
+events and the lexicographic generation/sequence ACK survive bridge restart and
+remain replayable; status exposes both the current generation and ACK generation.
+Pruning applies only behind that ACK cursor across the global 10,000-event/64-MiB
+bounds and removes reconciled loss rows before their referenced generation rows.
+Each missing generation/cursor creates or reuses an exact durable replay-gap
+obligation identified by a stable hash; status exposes up to 128 obligations and
+their total count. Distinct gaps cannot overwrite each other, reconciliation names
+the exact ID and tuple, and a loss reconciliation clears only gaps linked to that
+loss marker. At the 128-row bound, one non-clearable overflow obligation replaces
+additional attacker-provoked tuples while dispatch remains held. If an observational
+event cannot fit after acknowledged pruning, the journal reserves a compact
+`events-dropped` marker/sequence and accumulates bounded dropped-count/byte
+metadata, including the rejected event and each retained non-marker event evicted
+to reserve the marker. Status and replay expose the loss; ordinary observation
+continues without unbounded growth, while dispatch remains held until the controller
+explicitly acknowledges the exact loss marker through `reconcile-replay-loss`.
+A cursor-before-boundary gap tied to that unreconciled marker clears in the same
+exact transition. Unknown-generation, future-cursor and other gaps require
+`reconcile-replay-gap` with the exact gap ID, attempted generation/cursor and
+reported first-retained/last sequence values. A non-capacity observation append
+failure does not cancel ACP or alter an already-established request, cancellation
+or permission outcome. It persists a sanitized `journal-failed` marker carrying a
+random operation ID, worker generation and category, then holds new dispatch.
+`reconcile-journal`, fenced by the current lease, requires that exact marker and
+internally repeats exact-schema, quick-check and foreign-key validation, performs
+an insert/delete transaction probe and checkpoints before clearing the obligation.
+An unavailable journal that cannot persist its marker remains fail-closed in memory
+for that bridge process. Pinned OpenCode permission
+callbacks carry no trusted request identity: the bridge binds the actual `optionId`
+shape only to its single host-owned active prompt context (request ID, required
+persisted turn ID, process generation, ACP correlation and matching session ID when
+known), generates a `perm:` decision ID from host context, and stores only a bounded
+payload hash and option IDs. Unbound callbacks are rejected/cancelled; correlation
+failure after durable insertion invalidates that row before one rejection. Observation
+capacity loss is local and cannot reject an established permission, rewrite a durable
+request/cancellation/permission result, or terminate the ACP reader. Permission
+response intent is durable and bound to both the row epoch and current lease epoch
+before a bridge-lifetime write; reconnect with pending permission work installs an
+`ownership-changed-pending-permission` hold. Ambiguity becomes
+`permission-decision-uncertain`, and no blind resend or new-epoch adoption occurs;
+`stop-process` is the safe fixed recovery that terminates ACP and lets observed EOF
+atomically invalidate old permissions, clear ownership/permission holds and retain a
+`process-exited` hold. Cancellation likewise requires an explicit cancellation ID, target request,
+epoch/nonce and bounded `session/cancel` envelope. Its canonical intent is persisted
+before the bridge-lifetime write; same ID/hash is idempotent, changed reuse rejects,
+forwarded receipt is not target completion, and ambiguous writes reconcile as
+`uncertain` rather than being retried. The emitted wire is exactly a JSON-RPC 2.0
+notification (`jsonrpc`, `method`, `params`, no `id`), and concurrent duplicate
+cancellation IDs share one durable single-winner write. Raw ACP event/result/tool
+payloads are never journaled: outcomes and replay observations contain only bounded
+state/category, correlation, SHA-256 and byte-count metadata.
+
+A bootstrap-only stdin mode atomically creates a single-link `0600` 32-byte key
+in the bridge-private `0700` directory and prints only its SHA-256 key ID.
+Duplicate bootstrap verifies the exact existing key and never overwrites it.
+The local connector also takes the key on stdin and exists only for hermetic
+protocol tests and local diagnostics.
+
+**Still not implemented:** #217 controller integration, SSH/Docker routing,
+two-host provisioning/success, key rotation, hiring/tasks/UI and viewer/TUI
+transport. Consequently control-host `/api/info WorkerControlImplemented`
+remains false. The optional Compose worker profile is disabled by default, has
+no published port or Docker socket, is read-only outside named volumes/tmpfs,
+has process/CPU/memory limits and disables automatic restart. ACP exit does not
+cascade-kill the bridge: the bridge remains available for bounded reconciliation,
+but the process slot is terminal for that container because inherited ACP
+transports cannot be safely reused. Recovery is explicit container replacement;
+there is no claimed in-container child restart path in #213.
 
 ## Control contract (design)
 
@@ -79,9 +178,10 @@ suspended command. A transport ACK is not employee readiness. Phase 1 requires
 the current orientation to be both Acknowledged and Comprehended, the exact
 owned runtime/TUI to be ready, and no dispatch hold before Ready or task dispatch.
 
-Bridge/controller reconnection needs durable sequence receipts, ownership
-leases, replay bounds and stale-owner fencing. None of this is implemented in the
-baseline. An operator stop must remain authoritative when models fail.
+The #213 worker artifact implements durable sequence receipts, ownership leases,
+replay bounds and stale-owner fencing on the worker side. #217 controller
+integration and routing do not yet consume that contract. An operator stop must
+remain authoritative when models fail.
 
 ## Access and isolation
 
@@ -96,7 +196,8 @@ below is the actual security boundary.
 The control container runs two unprivileged identities plus one narrow
 privileged launcher. This satisfies the
 [Section 6](PHASE-1-CONTRACTS.md#6-credential-and-process-isolation-prerequisite)
-prerequisite for the control host; the worker-image half of Section 6 is still
+prerequisite for the control host. The separate #213 worker image now implements
+the worker-image identity split; #217 controller-to-worker integration remains
 future work.
 
 | Identity | UID:GID | Owns | Login shell |

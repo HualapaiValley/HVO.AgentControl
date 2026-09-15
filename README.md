@@ -29,8 +29,10 @@ Controller-private state lives in the `/control-data` volume (controller UID
 workspace and conversation history.
 
 This is a development slice. **Developer provisioning and task routing are not
-implemented**, and the active code has **no worker bridge or reconnect
-implementation** — the standalone POC only demonstrated that transport idea.
+implemented.** Issue #213 adds a separate, worker-owned ACP bridge artifact and
+hermetic local connector, but the control portal does not connect to it: remote
+SSH/Docker provisioning, two-host success, hiring/tasks and owner UI belong to
+#217 or later. `/api/info WorkerControlImplemented` therefore remains `false`.
 Do not expose this portal to untrusted networks or the Internet.
 
 ### Run locally
@@ -51,6 +53,37 @@ The runtime is disabled by default for host-side development. Running without
 launches OpenCode. With no password configured this development mode has no
 authentication; use loopback only. If a password file is configured, it must
 contain at least 24 characters after trimming in either runtime mode.
+
+### Disposable worker artifact
+
+The `worker` Docker target is independent of the control image. It uses a root
+PID1 fixed-operation supervisor, bridge UID 1101 and employee UID 1102, with
+separate persistent `/worker-control`, `/worker/home`, `/worker/workspace` and
+`/worker/session` trees. The optional `worker` Compose profile has no published
+port, no Docker socket, an internal network and `restart: "no"`; it is not part
+of normal `docker compose up`.
+
+Enrollment is bootstrap-only and consumes a disposable 32-byte key from stdin.
+For the checked-in Compose profile, bootstrap the named volume **before** the
+supervisor starts:
+
+```bash
+docker compose --profile worker build worker-local
+openssl rand -base64 32 | docker compose --profile worker run --rm --no-deps \
+  --user 1101:1101 --entrypoint /usr/bin/dotnet worker-local \
+  /app/HVO.AgentControl.Worker.dll --worker-bootstrap-key
+docker compose --profile worker up worker-local
+```
+
+The bootstrap command inherits the profile's fixed worker/controller IDs and
+`/worker-control` named volume, but the key exists only on stdin: it is never an
+environment or Compose configuration value. Only the non-secret key ID is
+printed. Repeating with the exact same key verifies the existing enrollment; a
+different key, symlink, hard link, wrong owner or wrong mode fails closed and is
+never overwritten. If the key is absent, the supervisor exits with a fixed
+bootstrap-required message instead of starting the bridge or ACP. This is a
+disposable local workflow, not live enrollment. Key delivery and rotation remain
+#217 maintenance work.
 
 ### Container
 

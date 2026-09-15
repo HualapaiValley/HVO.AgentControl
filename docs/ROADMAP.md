@@ -13,13 +13,8 @@ Status reflects the active code, not the standalone POC.
    the authoritative store and a failed load faults instead of being replaced.
    A member/task journal, one active writer per session, uncertain-delivery
    reconciliation and explicit resume decisions are not implemented.
-4. **Self-contained worker lifecycle — not implemented:** devcontainer
-   provisioning, independent persistent home/repo volumes, readiness,
-   cancel/checkpoint/stop/restart.
-5. **Private authenticated communication — not implemented:** controller/bridge
-   identity, connection leases, replay acknowledgments and remote-host routing.
-   The POC only proved the idea; there is no bridge/reconnect code in the active
-   repository.
+4. **Self-contained worker lifecycle — worker artifact implemented (#213), provisioning pending:** the distinct worker image has persistent private control/home/workspace/session volumes, fixed PID1 supervision, ACP start/stop/status, process generations and disconnect survival. ACP exit leaves the bridge alive for reconciliation but is terminal for that container; recovery is explicit container replacement with automatic restart disabled. Devcontainer creation, fresh transport/process restart orchestration, host readiness/provisioning and checkpoint policy remain #217+.
+5. **Private authenticated communication — worker side implemented (#213), controller/remote side pending (#217):** the worker bridge implements bounded NDJSON, mutual role-bound HMAC, local peer credentials, leases/epoch fencing, durable idempotency/replay/holds and pending permission state. The control host has no connector binding, SSH routing or two-host success path and continues to report `WorkerControlImplemented=false`.
 6. **Owner visibility — partial:** organization navigation, department counts,
    host-computed employee availability, exact safe employee diagnostics and an
    employee-ID-bound same-origin terminal are live for the single owned control

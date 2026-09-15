@@ -228,8 +228,10 @@ agent UID. What it cannot do is run anything as root, as the controller UID, or
 with access to `/control-data`, the owner secret or the launcher binary. Do not
 describe the registered-operation surface as preventing code execution.
 
-The **worker-image half below remains future work**, as does per-role UID
-allocation for additional internal roles.
+The separate #213 worker artifact now implements the worker-image bridge/employee
+identity split and fixed-operation supervisor described below. Controller routing,
+provisioning, and per-role UID allocation for additional internal roles remain
+future work (#217+).
 
 Concrete separation inside the same container:
 
@@ -370,8 +372,11 @@ Design constraints:
   acknowledges only after its own transaction commits the event/cursor. Replay
   starts after that cursor; duplicates are ignored by generation/sequence. Bound
   retained replay to 64 MiB and 10,000 events initially. An overflow or missing
-  cursor returns an explicit replay gap, holds dispatch and requires status/effect
-  reconciliation, never truncates silently or drops request/permission state.
+  cursor records an exact durable replay-gap obligation, holds dispatch and requires
+  ID-and-tuple reconciliation; distinct obligations use set semantics and a bounded
+  overflow marker prevents unbounded growth. Observation journal infrastructure
+  failure holds new dispatch but does not stop ACP or rewrite request, cancellation
+  or permission outcomes; exact integrity/schema/probe recovery is controller-reachable.
 - **Future worker-bridge contract:** status includes session/process generations,
   active request, pending permission, lease, replay bounds and hold state. Pending
   permission and decisions bind the employee session, OpenCode process generation,
@@ -625,12 +630,8 @@ These are open and must not be presented as decided or owner-accepted:
   null-safe host validation and a synchronously rejecting ACP permission evaluator
   with revisioned staged owner grants and complete matched-restriction audit IDs.
   General worker delivery/restart/bridge behavior remains unresolved.
-- Worker-image UID separation and bridge-key bootstrap/rotation interruption,
-  private-file/descriptor isolation, and compromise re-enrollment tests.
-- Supervisor PID1 termination/reaping, channel authentication, child capability
-  and descriptor stripping, generation-bound start reconciliation and explicit
-  container-restart recovery. Test viewer attach/detach with a pending permission
-  to prove no ACP generation/lease mutation, and reject stale viewer challenges.
+- **Implemented worker artifact (#213):** worker-image bridge/employee UID separation; private `0700` control/home/workspace/session trees; bootstrap-only stdin key creation with duplicate verification and symlink/hard-link refusal; no Docker socket, host checkout or controller secrets; fixed root PID1 supervision; ACP stdio ending at the unprivileged bridge; worker/process generations; and explicit bridge/container interruption behavior. **Still unresolved for #217:** key rotation interruption, compromise re-enrollment and remote custody/delivery.
+- **Implemented controller-role worker channel (#213):** bounded NDJSON, mutual role-labelled HMAC over independent nonces and exact identities/version/key ID, Linux peer credentials, nonce replay/expiry rejection, bridge-owned lease epochs/fencing, heartbeat expiry holds, durable request intent/uncertainty, ACP EOF/read-failure correlator reconciliation, retained multi-generation event replay with a lexicographic generation/sequence ACK cursor, explicit gaps/global bounds, bounded pending permission state, a crash-recoverable kernel-owned single-instance lock, and PID1 termination/reaping tests. Bridge startup transactionally increments worker generation, invalidates the lease, interrupts prior forwarding operations and converts a prior starting/running process slot to exited under a protected `process-exited` dispatch hold. The production supervisor does not cascade-stop the bridge when ACP exits; the bridge remains for reconciliation, but the process slot is terminal for that container and recovery is explicit container replacement (`restart: no`), not an in-container child restart claim. Status exposes `AcknowledgedWorkerGeneration` with `AcknowledgedSequence`, explicit replay-loss metadata, bounded exact replay-gap records/count, sanitized journal-failure recovery markers, truthful ACP protocol/transport failure states and ownership epoch on pending permission work. Viewer/TUI attach remains unimplemented and must later prove no ACP generation/lease mutation and reject stale viewer challenges.
 - Whether the existing authorized SSH/Docker credential can be used without new
   grants; secure key custody/rotation and measured host-adapter restrictions.
 - Implementation and adversarial validation of the specified bridge challenge,
@@ -659,6 +660,8 @@ These are open and must not be presented as decided or owner-accepted:
 
 ## 15. Non-goals
 
-No full role split, no finance workflows, no provisioning implementation, no
-multi-process runtime framework, no worker bridge implementation, no container
-per internal role, no V1 migration, no release, and no change to the archive.
+No full role split, no finance workflows, no controller-side provisioning or
+remote worker integration, no container per internal role, no V1 migration, no
+release, and no change to the archive. #213 provides only the independent
+worker-owned bridge/runtime artifact; #217 remains responsible for SSH/Docker
+routing, two-host success and controller binding.
