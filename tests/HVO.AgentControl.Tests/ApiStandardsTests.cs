@@ -162,6 +162,8 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
 
         var paths = root.GetProperty("paths");
         Assert.True(paths.TryGetProperty("/api/control/model", out var model));
+        Assert.True(paths.TryGetProperty("/api/organization/portal", out var portalOrganization));
+        Assert.True(paths.TryGetProperty("/api/employees/{id}", out var employee));
         Assert.True(paths.TryGetProperty("/health/ready", out var ready));
         Assert.True(paths.TryGetProperty("/health/live", out _));
 
@@ -169,6 +171,13 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
         foreach (var status in new[] { "200", "400", "403", "409", "502" })
         {
             Assert.True(modelResponses.TryGetProperty(status, out _), $"Missing model response {status}.");
+        }
+
+        Assert.True(portalOrganization.GetProperty("get").GetProperty("responses").TryGetProperty("503", out _));
+        var employeeResponses = employee.GetProperty("get").GetProperty("responses");
+        foreach (var status in new[] { "200", "400", "404", "503" })
+        {
+            Assert.True(employeeResponses.TryGetProperty(status, out _), $"Missing employee response {status}.");
         }
 
         var readyResponses = ready.GetProperty("get").GetProperty("responses");

@@ -11,8 +11,18 @@ from the `generation = 2` identity.
   owns a single OpenCode ACP process, its loopback-only native HTTP server, the
   durable organization/session record and a private persistent `/data` volume.
 - **Attach TUI:** a TUI client in tmux on the same OpenCode runtime. The browser
-  terminal connects to it through the portal over a same-origin authenticated
-  WebSocket; one viewer at a time. The TUI is a human view, not a second engine.
+  terminal connects through a same-origin authenticated WebSocket only after the
+  requested stable employee ID, authoritative runtime binding, persisted native
+  session and current host `ControlStatus` all match exactly; one viewer at a
+  time and no fallback. The TUI is a human view, not a second engine.
+- **Owner read model:** `/api/organization/portal` and `/api/employees/{id}` join
+  one authoritative store snapshot with the exact host status. Availability wire
+  values describe host readiness/orientation conditions, not worker lifecycle.
+  For the exact host-owned employee the current sanitized runtime error
+  (`ControlStatus.Error`) is exposed. Recent logs are explicitly unsupported
+  because no employee-scoped safe log contract exists, so neither bulk logs nor
+  another employee's logs are returned. Pending approvals are explicitly
+  unsupported rather than fabricated.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store. The released/authoritative lineage is schema v2; this unmerged branch uses a build-local schema-3 signature for orientation work. Schema 3 has never been released or deployed, is accepted only on an exact signature match, and has no migration or compatibility promise for earlier branch-local v3 files.
   for organization, department, role, employee, runtime-binding and ACP-session
   identity, plus versioned orientation, dispatch-hold and permission-policy records,

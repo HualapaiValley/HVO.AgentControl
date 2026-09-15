@@ -55,7 +55,9 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
         using var status = JsonDocument.Parse(await _client.GetStringAsync("/api/control"));
         Assert.Equal("disabled", status.RootElement.GetProperty("state").GetString());
         Assert.False(status.RootElement.GetProperty("modelSyncSupported").GetBoolean());
-        using var terminal = await _client.GetAsync("/terminal");
+        using var malformedTerminal = await _client.GetAsync("/terminal");
+        Assert.Equal(HttpStatusCode.BadRequest, malformedTerminal.StatusCode);
+        using var terminal = await _client.GetAsync("/terminal?employeeId=emp-disabled");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, terminal.StatusCode);
     }
 

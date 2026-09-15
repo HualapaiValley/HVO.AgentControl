@@ -261,11 +261,11 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected overview, including employee orientation readiness, with a same-origin revision-guarded rename; `/api/organization/basic-instructions` updates standing instructions and marks orientation stale
+- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, explicit unsupported pending approvals, and actionable safe diagnostics; `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.
-- `/terminal`: same-origin authenticated terminal WebSocket, one viewer at a time
+- `/terminal?employeeId=<stable-id>`: same-origin authenticated terminal WebSocket for only the exact host-owned employee/binding/native-session tuple, one viewer at a time; malformed, unknown, mismatched and unavailable selections fail closed with no fallback
 - `/health/live`: process health, not worker/provider readiness
 - `/api/version`: semantic version and architecture direction
 
@@ -275,12 +275,14 @@ protected by owner authentication when configured. Readiness is distinct from
 process liveness; a failed readiness probe must not trigger a destructive
 restart. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the API contract.
 
-Model display reads the native session, not the startup default. OpenCode
-1.18.30's attached TUI keeps its picker selection local until submission, so the
-portal labels the value it can observe as the server session model. The web
-selector is disabled (`modelSyncSupported = false`) because actual two-way TUI
-synchronization is not available; an acknowledged ACP model-setting RPC alone
-does not update the native session or the TUI picker. See
+Selected-employee control telemetry shows the observed native session model,
+transport, last synchronization time, and the model selector with its receipt and
+synchronization note. Model display reads the native session, not the startup
+default. OpenCode 1.18.30's attached TUI keeps its picker selection local until
+submission, so the portal labels the value it can observe as the server session
+model. The selector remains visible but disabled (`modelSyncSupported = false`)
+because actual two-way TUI synchronization is not available; an acknowledged ACP
+model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
 `/control-data/control.db` is the authoritative schema-v3 SQLite store for organization,

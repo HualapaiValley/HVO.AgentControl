@@ -122,21 +122,18 @@ async function measureLayout(page) {
       const r = document.querySelector(selector).getBoundingClientRect();
       return { top: r.top, bottom: r.bottom, height: r.height };
     };
-    const deck = document.querySelector('.control-deck');
-    const padding = getComputedStyle(deck);
     return {
-      viewportHeight: window.innerHeight,
-      viewportWidth: window.innerWidth,
-      documentHeight: document.documentElement.scrollHeight,
-      documentWidth: document.documentElement.scrollWidth,
-      header: rect('.app-bar'),
-      footer: rect('.app-foot'),
-      deck: rect('.control-deck'),
-      terminal: rect('.terminal-surface'),
-      stage: rect('.terminal-stage'),
-      paddingTop: parseFloat(padding.paddingTop),
-      paddingBottom: parseFloat(padding.paddingBottom),
+        viewportHeight: window.innerHeight,
+        viewportWidth: window.innerWidth,
+        documentHeight: document.documentElement.scrollHeight,
+        documentWidth: document.documentElement.scrollWidth,
+        header: rect('.app-bar'),
+        footer: rect('.app-foot'),
+        workspace: rect('.workspace'),
+        terminal: rect('.terminal-surface'),
+        stage: rect('.terminal-stage'),
     };
+
   });
 }
 
@@ -150,15 +147,17 @@ async function runLayoutChecks(page, viewports) {
         const text = banner.querySelector('.error-text');
         if (text) text.textContent = visible ? 'CI layout probe.' : '';
         banner.hidden = !visible;
-        document.querySelector('.control-deck').scrollTop = 0;
+        document.querySelector('.workspace').scrollTop = 0;
       }, bannerVisible);
       await sleep(150);
       const m = await measureLayout(page);
+      const terminalWithinViewport = viewport.width <= 720
+        ? m.terminal.height > 0
+        : m.terminal.top >= m.workspace.top && m.terminal.bottom <= m.workspace.bottom + 1;
       const passed = approx(m.footer.bottom, viewport.height)
         && approx(m.footer.height, viewport.width <= 720 ? 60 : 40)
-        && approx(m.deck.bottom, m.footer.top)
-        && approx(m.terminal.top, m.deck.top + m.paddingTop)
-        && approx(m.terminal.bottom, m.deck.bottom - m.paddingBottom)
+        && approx(m.workspace.bottom, m.footer.top)
+        && terminalWithinViewport
         && m.stage.height > 0
         && m.documentHeight <= viewport.height + 1
         && m.documentWidth <= viewport.width;
@@ -294,8 +293,10 @@ try {
   );
 
   // ---- 4. WebSocket readiness -------------------------------------------
-  const ws = await wsUpgradeStatus(base);
-  record('disabled runtime refuses WS /terminal upgrade with 503', ws.status === 503 && ws.upgraded === false, ws);
+  const malformedWs = await wsUpgradeStatus(base);
+  record('terminal requires an employeeId query before WS upgrade', malformedWs.status === 400 && malformedWs.upgraded === false, malformedWs);
+  const ws = await wsUpgradeStatus(base, '/terminal?employeeId=emp-disabled');
+  record('disabled runtime refuses exact WS /terminal upgrade with 503', ws.status === 503 && ws.upgraded === false, ws);
 
   // ---- 5. model / cancel origin + readiness -----------------------------
   const modelCross = await postJson(base, '/api/control/model', 'https://evil.example');
