@@ -220,10 +220,65 @@ try {
     state.mutations[0]?.body.revision === 4 && state.mutations[0]?.body.displayName === 'newer draft B', { mutation: state.mutations[0] });
   await page.click('[data-reset-org-name]');
 
-  await page.fill('[data-org-instructions]', 'successful clean save');
-  await stub({ resetMutations: true, mutationPlans: [{ organization: overview(6, 'save A', 'successful clean save') }] });
-  await page.click('[data-org-instructions-form] button[type="submit"]');
+  await page.fill('[data-org-name-input]', 'pending conflict A');
+  await stub({ resetMutations: true, mutationPlans: [{ gate: 'pending-conflict-a', status: 409, body: { title: 'conflict' } }] });
+  await page.click('[data-org-name-form] button[type="submit"]');
+  await waitFor(() => state.mutations.length === 1, 'pending conflict A request');
+  await page.fill('[data-org-name-input]', 'pending conflict newer B');
+  await stub({ releaseGates: ['pending-conflict-a'] });
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]').textContent.includes('HTTP 409'));
+  record('pending 409 marks a newer edit in the submitted lineage as conflict without replacing it',
+    state.mutations[0]?.body.revision === 5
+      && state.mutations[0]?.body.displayName === 'pending conflict A'
+      && await page.inputValue('[data-org-name-input]') === 'pending conflict newer B'
+      && await page.getAttribute('[data-org-name-input]', 'data-draft-state') === 'conflict'
+      && await page.isVisible('[data-reset-org-name]'), { mutation: state.mutations[0] });
+  await stub({ resetMutations: true, mutationPlans: [{ status: 409, body: { title: 'conflict' } }] });
+  await page.click('[data-org-name-form] button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]').textContent.includes('HTTP 409'));
+  record('newer edit after pending 409 retains the lineage original base revision on retry',
+    state.mutations[0]?.body.revision === 5
+      && state.mutations[0]?.body.displayName === 'pending conflict newer B', { mutation: state.mutations[0] });
+  await page.click('[data-reset-org-name]');
+
+  await page.fill('[data-org-name-input]', 'identical conflict A');
+  await stub({ resetMutations: true, mutationPlans: [{ gate: 'old-conflict-lineage', status: 409, body: { title: 'conflict' } }] });
+  await page.click('[data-org-name-form] button[type="submit"]');
+  await waitFor(() => state.mutations.length === 1, 'old conflict lineage request');
+  await page.click('[data-reset-org-name]');
+  await page.fill('[data-org-name-input]', 'identical conflict A');
+  await stub({ releaseGates: ['old-conflict-lineage'] });
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]').textContent.includes('HTTP 409'));
+  record('old 409 cannot mark an identical reset and recreated draft lineage as conflict',
+    await page.inputValue('[data-org-name-input]') === 'identical conflict A'
+      && await page.getAttribute('[data-org-name-input]', 'data-draft-state') === 'dirty'
+      && await page.isVisible('[data-reset-org-name]'));
+  await page.click('[data-reset-org-name]');
+
+  await page.fill('[data-org-name-input]', 'identical recreated A');
+  await stub({ resetMutations: true, mutationPlans: [{ gate: 'old-success-identical', organization: overview(6, 'identical recreated A') }] });
+  await page.click('[data-org-name-form] button[type="submit"]');
+  await waitFor(() => state.mutations.length === 1, 'old success identical request');
+  await page.click('[data-reset-org-name]');
+  await page.fill('[data-org-name-input]', 'identical recreated A');
+  await stub({ releaseGates: ['old-success-identical'] });
   await page.waitForSelector('[data-organization-loaded="6"]');
+  record('old success cannot clear an identical draft recreated in a new lineage',
+    await page.inputValue('[data-org-name-input]') === 'identical recreated A'
+      && await page.getAttribute('[data-org-name-input]', 'data-draft-state') === 'conflict'
+      && await page.isVisible('[data-reset-org-name]'));
+  await stub({ resetMutations: true, mutationPlans: [{ status: 409, body: { title: 'conflict' } }] });
+  await page.click('[data-org-name-form] button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]').textContent.includes('HTTP 409'));
+  record('identical recreated draft retains its own frozen revision after old success reload',
+    state.mutations[0]?.body.revision === 5
+      && state.mutations[0]?.body.displayName === 'identical recreated A', { mutation: state.mutations[0] });
+  await page.click('[data-reset-org-name]');
+
+  await page.fill('[data-org-instructions]', 'successful clean save');
+  await stub({ resetMutations: true, mutationPlans: [{ organization: overview(7, 'save A', 'successful clean save') }] });
+  await page.click('[data-org-instructions-form] button[type="submit"]');
+  await page.waitForSelector('[data-organization-loaded="7"]');
   record('successful save without newer edit clears draft and adopts new authoritative revision',
     await page.getAttribute('[data-org-instructions]', 'data-draft-state') === 'clean'
       && await page.inputValue('[data-org-instructions]') === 'successful clean save'
@@ -241,14 +296,14 @@ try {
   await page.click('[data-nav="operations"]');
   await page.click('[data-department-employees="operations"] .employee-card');
   await page.waitForSelector('[data-view="employee"]:not([hidden])');
-  await stub({ resetEmployeeRequests: true, employeePlans: { 'emp-development': [{ gate: 'explicit-b', body: development }] }, organizationPlans: [{ body: overview(7) }], organization: overview(7) });
+  await stub({ resetEmployeeRequests: true, employeePlans: { 'emp-development': [{ gate: 'explicit-b', body: development }] }, organizationPlans: [{ body: overview(8) }], organization: overview(8) });
   await page.evaluate(() => location.hash = '#employee/emp-development');
   await waitFor(() => state.employeeRequests.includes('emp-development'), 'explicit employee B request');
   await page.evaluate(() => {
     const portal = document.querySelector('[data-portal]');
     portal.dataset.runtimeState = portal.dataset.runtimeState === 'ready' ? 'degraded' : 'ready';
   });
-  await page.waitForSelector('[data-organization-loaded="7"]');
+  await page.waitForSelector('[data-organization-loaded="8"]');
   record('organization refresh does not cancel or replace pending explicit B selection',
     JSON.stringify(state.employeeRequests) === JSON.stringify(['emp-development']), { requests: state.employeeRequests });
   await stub({ releaseGates: ['explicit-b'] });
@@ -262,7 +317,7 @@ try {
   await page.click('[data-nav="operations"]');
   await page.click('[data-department-employees="operations"] .employee-card');
   await page.waitForFunction(() => document.querySelector('[data-portal]').dataset.selectedEmployeeId === 'emp-operations');
-  await stub({ resetEmployeeRequests: true, employeePlans: { 'emp-operations': [{ gate: 'passive-a', body: operations }] }, organizationPlans: [{ body: overview(8) }], organization: overview(8) });
+  await stub({ resetEmployeeRequests: true, employeePlans: { 'emp-operations': [{ gate: 'passive-a', body: operations }] }, organizationPlans: [{ body: overview(9) }], organization: overview(9) });
   await page.evaluate(() => {
     const portal = document.querySelector('[data-portal]');
     portal.dataset.runtimeState = portal.dataset.runtimeState === 'ready' ? 'degraded' : 'ready';

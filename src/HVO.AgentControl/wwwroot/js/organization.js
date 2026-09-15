@@ -15,6 +15,7 @@ if (portal && root) {
         passiveEmployeeGeneration: 0,
         passiveEmployeeAbort: null,
         navigationGeneration: 0,
+        nextDraftLineageId: 0,
         drafts: new Map(),
         loaded: false,
         runtimeState: "",
@@ -80,7 +81,8 @@ if (portal && root) {
         const existing = state.drafts.get(key);
         state.drafts.set(key, {
             value,
-            generation: (existing?.generation || 0) + 1,
+            lineageId: existing?.lineageId ?? ++state.nextDraftLineageId,
+            editSequence: (existing?.editSequence ?? 0) + 1,
             baseRevision: existing?.baseRevision ?? definition.revision(state.organization),
             conflict: existing?.conflict === true,
         });
@@ -415,7 +417,8 @@ if (portal && root) {
         const submittedDraft = options.dirtyKey ? state.drafts.get(options.dirtyKey) : null;
         if (options.dirtyKey && !submittedDraft) return null;
         const submission = submittedDraft ? {
-            generation: submittedDraft.generation,
+            lineageId: submittedDraft.lineageId,
+            editSequence: submittedDraft.editSequence,
             value: submittedDraft.value,
             baseRevision: submittedDraft.baseRevision,
         } : null;
@@ -431,9 +434,12 @@ if (portal && root) {
         let result = null;
         try { result = await response.json(); } catch { result = null; }
         if (!response.ok) {
-            if (response.status === 409 && submittedDraft) {
-                submittedDraft.conflict = true;
-                updateDraftState(options.dirtyKey);
+            if (response.status === 409 && submission) {
+                const current = state.drafts.get(options.dirtyKey);
+                if (current?.lineageId === submission.lineageId) {
+                    current.conflict = true;
+                    updateDraftState(options.dirtyKey);
+                }
             }
             const conflict = response.status === 409
                 ? " Authoritative data changed; your draft and original revision are preserved. Reset it to reconcile, or retry intentionally."
@@ -444,7 +450,9 @@ if (portal && root) {
         }
         if (submission) {
             const current = state.drafts.get(options.dirtyKey);
-            if (current?.generation === submission.generation && current.value === submission.value) {
+            if (current?.lineageId === submission.lineageId
+                && current.editSequence === submission.editSequence
+                && current.value === submission.value) {
                 state.drafts.delete(options.dirtyKey);
                 updateDraftState(options.dirtyKey, result || state.organization);
             }
