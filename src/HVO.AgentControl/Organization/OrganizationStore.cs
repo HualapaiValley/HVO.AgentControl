@@ -43,6 +43,11 @@ public sealed class OrganizationValidationException : OrganizationStoreException
         : base(message)
     {
     }
+
+    public OrganizationValidationException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }
 
 /// <summary>A host-owned update lost an optimistic-concurrency race.</summary>
@@ -84,10 +89,16 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 /// the store are serialized and use optimistic revisions for host-owned updates.
 /// </para>
 /// </remarks>
-public sealed class OrganizationStore : IDisposable
+public sealed partial class OrganizationStore : IDisposable
 {
-    /// <summary>Schema version this build writes and requires.</summary>
-    public const int CurrentSchemaVersion = 2;
+    /// <summary>
+    /// Build-local schema identifier. Schema 3 was never merged, released or
+    /// deployed; the authoritative released lineage ends at v2. Consequently a
+    /// schema-3 file is accepted only when its full normalized signature exactly
+    /// matches this build. Any other v3 shape is an unsupported disposable branch
+    /// artifact, not a migration source and not a backwards-compatibility promise.
+    /// </summary>
+    public const int CurrentSchemaVersion = 3;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -95,6 +106,8 @@ public sealed class OrganizationStore : IDisposable
     public const string AdoptionBackupHashFileName = "runtime.pre-database.sha256";
     public const string SchemaV1BackupFileName = "control.schema-v1.db";
     public const string SchemaV1BackupHashFileName = "control.schema-v1.sha256";
+    public const string SchemaV2BackupFileName = "control.schema-v2.db";
+    public const string SchemaV2BackupHashFileName = "control.schema-v2.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -276,11 +289,202 @@ public sealed class OrganizationStore : IDisposable
     /// Inline UNIQUE/PK constraints create <c>sqlite_autoindex_*</c> entries with
     /// no SQL, which are excluded; the named partial index is explicit.
     /// </summary>
+    private static readonly string[] OrientationSchemaV3Statements =
+    [
+        """
+        CREATE TABLE orientation_fragments (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+            layer TEXT NOT NULL CHECK (layer IN ('organization', 'department', 'role', 'employee')),
+            scope_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            active INTEGER NOT NULL CHECK (active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            UNIQUE (layer, scope_id, revision),
+            UNIQUE (id, organization_id)
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX one_current_orientation_fragment
+            ON orientation_fragments (layer, scope_id)
+            WHERE active = 1
+        """,
+        """
+        CREATE TABLE orientation_facts (
+            fragment_id TEXT NOT NULL REFERENCES orientation_fragments(id) ON DELETE RESTRICT,
+            category TEXT NOT NULL CHECK (category IN ('identity', 'department', 'reporting', 'duty', 'restriction', 'escalation')),
+            value TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            PRIMARY KEY (fragment_id, category, ordinal),
+            UNIQUE (fragment_id, category, value)
+        )
+        """,
+        """
+        CREATE TABLE permission_policies (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+            version TEXT NOT NULL UNIQUE,
+            revision INTEGER NOT NULL,
+            summary TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            active INTEGER NOT NULL CHECK (active IN (0, 1)),
+            UNIQUE (id, revision)
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX one_active_permission_policy
+            ON permission_policies (organization_id)
+            WHERE active = 1
+        """,
+        """
+        CREATE TABLE permission_restrictions (
+            id TEXT PRIMARY KEY,
+            policy_id TEXT NOT NULL REFERENCES permission_policies(id) ON DELETE RESTRICT,
+            fragment_id TEXT REFERENCES orientation_fragments(id) ON DELETE RESTRICT,
+            layer TEXT NOT NULL CHECK (layer IN ('host', 'organization', 'department', 'role', 'employee')),
+            stable_key TEXT NOT NULL,
+            tool_pattern TEXT NOT NULL,
+            resource_pattern TEXT NOT NULL,
+            description TEXT NOT NULL,
+            waivable INTEGER NOT NULL CHECK (waivable IN (0, 1)),
+            revision INTEGER NOT NULL,
+            UNIQUE (policy_id, stable_key),
+            UNIQUE (id, policy_id)
+        )
+        """,
+        """
+        CREATE TABLE orientation_assignments (
+            id TEXT PRIMARY KEY,
+            employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+            runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+            session_id TEXT REFERENCES acp_sessions(id) ON DELETE RESTRICT,
+            policy_id TEXT NOT NULL REFERENCES permission_policies(id) ON DELETE RESTRICT,
+            orientation_version TEXT NOT NULL,
+            artifact_file_name TEXT NOT NULL,
+            artifact_bytes INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('Assigned', 'Delivered', 'Acknowledged', 'Comprehended', 'Failed', 'TimedOut', 'Rejected', 'Stale', 'Uncertain')),
+            assigned_at TEXT NOT NULL,
+            delivered_at TEXT,
+            acknowledged_at TEXT,
+            comprehended_at TEXT,
+            evidence_hash TEXT,
+            evidence_summary TEXT,
+            evidence_source TEXT CHECK (evidence_source IN ('owner-submitted', 'live-model')),
+            required_runtime_generation INTEGER,
+            loaded_runtime_generation INTEGER,
+            last_error TEXT,
+            revision INTEGER NOT NULL,
+            UNIQUE (id, employee_id),
+            FOREIGN KEY (session_id, employee_id) REFERENCES acp_sessions(id, employee_id) ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX one_current_orientation_assignment
+            ON orientation_assignments (employee_id)
+            WHERE state <> 'Stale'
+        """,
+        """
+        CREATE TABLE orientation_assignment_fragments (
+            assignment_id TEXT NOT NULL REFERENCES orientation_assignments(id) ON DELETE RESTRICT,
+            fragment_id TEXT NOT NULL REFERENCES orientation_fragments(id) ON DELETE RESTRICT,
+            ordinal INTEGER NOT NULL,
+            PRIMARY KEY (assignment_id, ordinal),
+            UNIQUE (assignment_id, fragment_id)
+        )
+        """,
+        """
+        CREATE TABLE orientation_evidence (
+            id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL REFERENCES orientation_assignments(id) ON DELETE RESTRICT,
+            employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+            session_id TEXT NOT NULL REFERENCES acp_sessions(id) ON DELETE RESTRICT,
+            orientation_version TEXT NOT NULL,
+            evidence_hash TEXT NOT NULL,
+            sanitized_summary TEXT NOT NULL,
+            evidence_source TEXT NOT NULL CHECK (evidence_source IN ('owner-submitted', 'live-model')),
+            outcome TEXT NOT NULL CHECK (outcome IN ('Comprehended', 'Rejected', 'TimedOut', 'Failed')),
+            created_at TEXT NOT NULL,
+            UNIQUE (assignment_id, evidence_hash)
+        )
+        """,
+        """
+        CREATE TABLE dispatch_holds (
+            id TEXT PRIMARY KEY,
+            runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
+            active INTEGER NOT NULL CHECK (active IN (0, 1)),
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            cleared_at TEXT,
+            revision INTEGER NOT NULL,
+            UNIQUE (runtime_binding_id, reason)
+        )
+        """,
+        """
+        CREATE TABLE permission_grants (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+            employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+            restriction_id TEXT NOT NULL REFERENCES permission_restrictions(id) ON DELETE RESTRICT,
+            policy_id TEXT NOT NULL REFERENCES permission_policies(id) ON DELETE RESTRICT,
+            policy_revision INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            idempotency_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            UNIQUE (employee_id, idempotency_key)
+        )
+        """,
+        """
+        CREATE TABLE permission_requests (
+            id TEXT PRIMARY KEY,
+            employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+            runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+            session_id TEXT REFERENCES acp_sessions(id) ON DELETE RESTRICT,
+            generation INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            resource_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('rejected')),
+            created_at TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            UNIQUE (runtime_binding_id, generation, id)
+        )
+        """,
+        """
+        CREATE TABLE permission_audit (
+            id TEXT PRIMARY KEY,
+            permission_request_id TEXT REFERENCES permission_requests(id) ON DELETE RESTRICT,
+            employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+            policy_id TEXT NOT NULL REFERENCES permission_policies(id) ON DELETE RESTRICT,
+            policy_revision INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            resource_hash TEXT NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('allowed', 'rejected', 'cancelled', 'uncertain')),
+            restriction_id TEXT REFERENCES permission_restrictions(id) ON DELETE RESTRICT,
+            grant_id TEXT REFERENCES permission_grants(id) ON DELETE RESTRICT,
+            summary TEXT NOT NULL,
+            matched_restriction_ids TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+    ];
+
+    private static readonly string[] SchemaV3Statements =
+        [.. SchemaV2Statements, .. OrientationSchemaV3Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV1 =
         BuildExpectedSchema(SchemaV1Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV2 =
         BuildExpectedSchema(SchemaV2Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV3Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -939,6 +1143,12 @@ public sealed class OrganizationStore : IDisposable
                         $"Organization '{organizationId}' was modified concurrently; retry with the current revision.");
                 }
 
+                RefreshOrganizationFragment(connection, transaction, organizationId);
+                MarkCurrentAssignmentsStale(
+                    connection,
+                    transaction,
+                    organizationId,
+                    "Organization display name changed.");
                 transaction.Commit();
 
                 var organization = ReadSingleOrganization(connection);
@@ -1196,6 +1406,17 @@ public sealed class OrganizationStore : IDisposable
             EnsureSchemaV1Backup(connection);
             AfterMigrationBackup?.Invoke();
             MigrateV1ToV2(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV2);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 2)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV2);
+            EnsureSchemaV2Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV2ToV3(connection);
         }
         else if (version != CurrentSchemaVersion)
         {
@@ -1441,8 +1662,8 @@ public sealed class OrganizationStore : IDisposable
                 workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
                 created_at, updated_at, revision)
             SELECT id, employee_id, placement, container_ref, volume_ref, home_ref,
-                workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
-                created_at, updated_at, revision
+                   workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
+                   created_at, updated_at, revision
             FROM runtime_bindings_v1
             """);
         Execute(connection, transaction, "DROP TABLE runtime_bindings_v1");
@@ -1451,11 +1672,112 @@ public sealed class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV2Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(
+            source,
+            sourceVersion: 2,
+            SchemaV2BackupFileName,
+            SchemaV2BackupHashFileName,
+            ExpectedSchemaV2);
+
+    private void EnsureSchemaBackup(
+        SqliteConnection source,
+        int sourceVersion,
+        string backupFileName,
+        string hashFileName,
+        IReadOnlyDictionary<(string Type, string Name), string> expectedSchema)
+    {
+        var directory = Path.GetDirectoryName(_databasePath) ?? ".";
+        var backupPath = Path.Combine(directory, backupFileName);
+        var hashPath = Path.Combine(directory, hashFileName);
+        if (!File.Exists(backupPath))
+        {
+            var temporary = backupPath + "." + RandomNumberGenerator.GetHexString(8) + ".tmp";
+            try
+            {
+                using (var destination = OpenConnection(temporary))
+                {
+                    source.BackupDatabase(destination);
+                    ValidateIntegrity(destination);
+                    if (ReadSchemaVersion(destination) != sourceVersion)
+                    {
+                        throw new OrganizationStoreCorruptException($"The pre-migration backup did not preserve schema version {sourceVersion}.");
+                    }
+                    ValidateSchemaSignature(destination, expectedSchema);
+                    Checkpoint(destination, temporary);
+                }
+                ClearPoolFor(temporary);
+                RemoveSidecars(temporary);
+                RestrictFileMode(temporary);
+                File.Move(temporary, backupPath);
+            }
+            finally
+            {
+                ClearPoolFor(temporary);
+                RemoveSidecars(temporary);
+                if (File.Exists(temporary)) File.Delete(temporary);
+            }
+        }
+
+        var bytesBefore = File.ReadAllBytes(backupPath);
+        var expectedHash = Convert.ToHexString(SHA256.HashData(bytesBefore)).ToLowerInvariant();
+        if (File.Exists(hashPath))
+        {
+            if (!string.Equals(File.ReadAllText(hashPath).Trim(), expectedHash, StringComparison.Ordinal))
+                throw new OrganizationStoreCorruptException($"The schema-v{sourceVersion} backup hash does not match the retained backup.");
+        }
+        else
+        {
+            PublishEvidenceFile(hashPath, Encoding.ASCII.GetBytes(expectedHash + "\n"));
+        }
+
+        using (var verify = OpenReadOnlyEvidenceConnection(backupPath))
+        {
+            ValidateIntegrity(verify);
+            if (ReadSchemaVersion(verify) != sourceVersion)
+                throw new OrganizationStoreCorruptException($"The retained pre-migration backup is not schema version {sourceVersion}.");
+            ValidateSchemaSignature(verify, expectedSchema);
+            if (!ComputeLogicalContentDigest(source).AsSpan().SequenceEqual(ComputeLogicalContentDigest(verify)))
+                throw new OrganizationStoreCorruptException($"The retained schema-v{sourceVersion} backup does not match the current source.");
+        }
+
+        var bytesAfter = File.ReadAllBytes(backupPath);
+        if (!bytesBefore.AsSpan().SequenceEqual(bytesAfter)
+            || !string.Equals(Convert.ToHexString(SHA256.HashData(bytesAfter)).ToLowerInvariant(), expectedHash, StringComparison.Ordinal))
+            throw new OrganizationStoreCorruptException($"The retained schema-v{sourceVersion} backup changed while it was being verified.");
+        if (File.Exists(backupPath + "-wal") || File.Exists(backupPath + "-shm"))
+            throw new OrganizationStoreCorruptException($"Verifying the retained schema-v{sourceVersion} backup created an unexpected SQLite sidecar.");
+        RestrictFileMode(backupPath);
+        RestrictFileMode(hashPath);
+    }
+
+    private void MigrateV2ToV3(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in OrientationSchemaV3Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        SeedOrientationV3(connection, transaction);
+        Execute(connection, transaction, "UPDATE schema_version SET version = 3 WHERE version = 2");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
-        ValidateSchemaSignature(connection, ExpectedSchema);
         var version = ReadSchemaVersion(connection);
+        try
+        {
+            ValidateSchemaSignature(connection, ExpectedSchema);
+        }
+        catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
+        {
+            throw new OrganizationStoreCorruptException(
+                $"Unsupported build-local schema 3 signature. Schema 3 was never released; discard this branch artifact or restore an authoritative v1/v2 source. {exception.Message}",
+                exception);
+        }
         if (version != CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
@@ -1595,7 +1917,7 @@ public sealed class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV2Statements)
+        foreach (var statement in SchemaV3Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -1712,6 +2034,8 @@ public sealed class OrganizationStore : IDisposable
         var notes = adoptionSource is null
             ? "Fresh organization seed: exactly one combined Operations/IT employee bound to the internal shared control runtime."
             : "Adopted the existing persisted control runtime identity without forging a historical hire transition.";
+        SeedOrientationV3(connection, transaction);
+
         Execute(
             connection,
             transaction,
@@ -1874,6 +2198,28 @@ public sealed class OrganizationStore : IDisposable
         return (id, slug, displayName, description, basicInstructions, revision, createdAt, updatedAt);
     }
 
+    private static string ReadRoleStandingInstructions(string fragmentContent)
+    {
+        const string marker = "Standing instructions:\n";
+        const string terminator = "\n\nOperating behavior:";
+        var start = fragmentContent.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            throw new OrganizationStoreCorruptException(
+                "The active role fragment does not contain authoritative standing instructions.");
+        }
+
+        start += marker.Length;
+        var end = fragmentContent.IndexOf(terminator, start, StringComparison.Ordinal);
+        if (end < 0)
+        {
+            throw new OrganizationStoreCorruptException(
+                "The active role fragment does not delimit authoritative standing instructions.");
+        }
+
+        return fragmentContent[start..end].Trim();
+    }
+
     private OrganizationOverview BuildOverview(
         SqliteConnection connection,
         (string Id, string Slug, string DisplayName, string Description, string BasicInstructions, int Revision, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt) organization)
@@ -1906,8 +2252,10 @@ public sealed class OrganizationStore : IDisposable
         {
             command.CommandText =
                 """
-                SELECT r.id, r.department_id, r.slug, r.display_name, r.instruction_profile, r.permission_profile
+                SELECT r.id, r.department_id, r.slug, r.display_name, r.instruction_profile,
+                       r.permission_profile, f.content, f.revision
                 FROM roles r
+                JOIN orientation_fragments f ON f.layer = 'role' AND f.scope_id = r.id AND f.active = 1
                 JOIN departments d ON d.id = r.department_id
                 WHERE d.organization_id = $organization
                 ORDER BY r.slug
@@ -1922,7 +2270,9 @@ public sealed class OrganizationStore : IDisposable
                     reader.GetString(2),
                     reader.GetString(3),
                     reader.GetString(4),
-                    reader.GetString(5)));
+                    reader.GetString(5),
+                    ReadRoleStandingInstructions(reader.GetString(6)),
+                    reader.GetInt32(7)));
             }
         }
 
@@ -1967,6 +2317,15 @@ public sealed class OrganizationStore : IDisposable
                     reader.IsDBNull(16) ? null : reader.GetString(16),
                     reader.IsDBNull(17) ? null : reader.GetString(17)));
             }
+        }
+
+        for (var index = 0; index < employees.Count; index++)
+        {
+            var employee = employees[index];
+            employees[index] = employee with
+            {
+                Orientation = TryGetOrientationStatus(connection, employee.Id),
+            };
         }
 
         var audit = new List<AdoptionAuditSummary>();

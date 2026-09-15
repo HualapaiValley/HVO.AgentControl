@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Organization;
 using Microsoft.Extensions.Options;
@@ -32,6 +33,8 @@ public sealed class AcpControlHost : BackgroundService
     /// read cannot overwrite a newer selection.
     /// </summary>
     private readonly SemaphoreSlim _modelUpdateLock = new(1, 1);
+    private readonly SemaphoreSlim _orientationOperationLock = new(1, 1);
+    private readonly SemaphoreSlim _promptOperationLock = new(1, 1);
 
     private ControlState _state = ControlState.Disabled;
     private string? _error;
@@ -45,6 +48,21 @@ public sealed class AcpControlHost : BackgroundService
     private bool _isNewSession;
     private string _password = string.Empty;
     private string? _ownerToken;
+    private long _permissionGeneration;
+    private long _runtimeGeneration;
+    private long _orientationCaptureToken;
+    private OrientationTurnCapture? _orientationCapture;
+    private OrientationArtifact? _prelaunchOrientation;
+    private Task? _abandonedPromptCompletion;
+
+    /// <summary>
+    /// True from the instant the startup bootstrap prompt is scheduled until its
+    /// task releases the prompt semaphore. Publishing this before readiness makes
+    /// the initial prompt observable as <c>busy</c> without a timing window, so an
+    /// owner comprehension request cannot race bootstrap acquisition of
+    /// <see cref="_promptOperationLock"/>.
+    /// </summary>
+    private bool _bootstrapActive;
 
     private Process? _process;
     private AcpRpcSession? _session;
@@ -126,7 +144,9 @@ public sealed class AcpControlHost : BackgroundService
                 Error = _error,
                 StartedAt = _startedAt,
                 TerminalReady = _terminalReady,
-                SessionState = _sessionState,
+                SessionState = _bootstrapActive || _promptOperationLock.CurrentCount == 0
+                    ? "busy"
+                    : _sessionState,
             };
         }
     }
@@ -177,6 +197,17 @@ public sealed class AcpControlHost : BackgroundService
             return false;
         }
 
+        return await TrySendCancelAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends <c>session/cancel</c> for the owned session without consulting the
+    /// published control state. Internal startup reconciliation uses this while
+    /// the host is still <see cref="ControlState.Starting"/>; the public
+    /// <see cref="CancelAsync"/> keeps the owner-facing availability gate.
+    /// </summary>
+    private async Task<bool> TrySendCancelAsync(CancellationToken cancellationToken)
+    {
         var session = _session;
         var sessionId = _sessionId;
         if (session is null || string.IsNullOrEmpty(sessionId))
@@ -369,6 +400,8 @@ public sealed class AcpControlHost : BackgroundService
 
         _hostLifetime.Dispose();
         _modelUpdateLock.Dispose();
+        _orientationOperationLock.Dispose();
+        _promptOperationLock.Dispose();
         OrganizationStore? organization;
         lock (_gate)
         {
@@ -388,14 +421,19 @@ public sealed class AcpControlHost : BackgroundService
         var adoptionSource = LoadAdoptionEvidence();
         OpenOrganizationStore(adoptionSource);
 
+        PrepareOrientationAssignment();
         await ConnectAsync(cancellationToken).ConfigureAwait(false);
         await StartTerminalAsync(cancellationToken).ConfigureAwait(false);
 
         StartStatusPolling(cancellationToken);
         StartNotificationDrain(cancellationToken);
 
-        SetStatus(ControlState.Ready, null);
+        // Schedule the startup bootstrap before promoting readiness so the
+        // bootstrap hold on _promptOperationLock is observable as a busy session
+        // from the first ready snapshot. Promotion must not overwrite an outcome
+        // the bootstrap task has already published (degraded/faulted).
         StartBootstrap(cancellationToken);
+        PromoteReadyIfStarting();
 
         await MonitorAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -547,24 +585,334 @@ public sealed class AcpControlHost : BackgroundService
         }
     }
 
+    private void PrepareOrientationAssignment()
+    {
+        _orientationOperationLock.Wait();
+        try
+        {
+            var store = Organization ?? throw new OrganizationStoreException("The organization store is not open.");
+            var artifact = store.ComposeAndAssignCurrentOrientation();
+            var directory = InstructionsDirectory ?? HomePath;
+            OrientationArtifactPublisher.Publish(directory, artifact);
+            _prelaunchOrientation = artifact;
+            // This exact artifact is the only orientation the process being
+            // launched can have loaded. Handshake may bind it to a session, but
+            // must never recompose and claim post-launch content was preloaded.
+        }
+        finally
+        {
+            _orientationOperationLock.Release();
+        }
+    }
+
+    public OrientationStatus RecomposeAndDeliverOrientation()
+    {
+        lock (_gate)
+        {
+            if (_abandonedPromptCompletion is { IsCompleted: false })
+            {
+                throw new OrganizationConcurrencyException(
+                    "The abandoned remote prompt is still active; delivery and retry remain fenced.");
+            }
+        }
+
+        _orientationOperationLock.Wait();
+        try
+        {
+            var store = Organization ?? throw new OrganizationStoreException("The organization store is not open.");
+            var artifact = store.ComposeAndAssignCurrentOrientation();
+            try
+            {
+                OrientationArtifactPublisher.Publish(InstructionsDirectory ?? HomePath, artifact);
+            }
+            catch (Exception exception) when (exception is IOException
+                or UnauthorizedAccessException
+                or PlatformNotSupportedException)
+            {
+                throw new OrganizationStoreException(
+                    "The orientation assignment was persisted but its verified artifact could not be published; delivery did not advance.",
+                    exception);
+            }
+            return store.MarkOrientationDelivered(
+                artifact.AssignmentId,
+                artifact.OrientationVersion,
+                _sessionId,
+                artifact.AssignmentRevision,
+                checked(_runtimeGeneration + 1));
+        }
+        finally
+        {
+            _orientationOperationLock.Release();
+        }
+    }
+
+    public OrientationStatus GetOrientationStatus()
+    {
+        var identity = OrganizationIdentity ?? throw new OrganizationStoreException("The organization identity is unavailable.");
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).GetOrientationStatus(identity.EmployeeId);
+    }
+
+    public OrientationStatus RecordOrientationEvidence(OrientationEvidenceRequest request) =>
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).ValidateAndRecordComprehension(request);
+
+    public OrganizationOverview UpdateOrganizationBasicInstructions(
+        string organizationId,
+        string instructions,
+        int expectedRevision)
+    {
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+            .UpdateOrganizationBasicInstructions(organizationId, instructions, expectedRevision);
+    }
+
+    public OrganizationOverview UpdateRoleInstructions(
+        string roleId,
+        string instructions,
+        int expectedRevision)
+    {
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+            .UpdateRoleInstructions(roleId, instructions, expectedRevision);
+    }
+
+    /// <summary>Runs the explicitly owner-triggered, tool-free bounded ACP comprehension demonstration.</summary>
+    public async Task<OrientationStatus> RunOrientationComprehensionAsync(CancellationToken cancellationToken)
+    {
+        // The startup bootstrap holds the same prompt slot. Reject it explicitly
+        // under the host gate so a request that arrives while the bootstrap is
+        // scheduled but before its task acquires the semaphore is a deterministic
+        // conflict, never a race the new operation can slip through.
+        lock (_gate)
+        {
+            if (_bootstrapActive)
+            {
+                throw new OrganizationConcurrencyException("Another prompt operation is still active or being cancelled.");
+            }
+        }
+
+        if (!await _promptOperationLock.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        {
+            throw new OrganizationConcurrencyException("Another prompt operation is still active or being cancelled.");
+        }
+
+        var releasePromptLock = true;
+        OrientationTurnCapture? capture = null;
+        OrientationStatus? operationStatus = null;
+        try
+        {
+            var status = GetOrientationStatus();
+            operationStatus = status;
+            var session = _session;
+            var sessionId = _sessionId;
+            if (status.State != OrientationStates.Delivered
+                || status.RestartRequired
+                || session is null
+                || string.IsNullOrWhiteSpace(sessionId))
+            {
+                throw new OrganizationConcurrencyException(
+                    "A delivered orientation loaded by the current live runtime is required.");
+            }
+
+            var prompt = $$"""
+                Return ONLY one JSON object, no markdown and no tools, with these fields:
+                assignmentId, employeeId, sessionId, orientationVersion, identity, department,
+                reporting, duties (array), restrictions (array), escalation.
+                Use the exact standing orientation facts for assignmentId {{status.AssignmentId}},
+                employeeId {{status.EmployeeId}}, sessionId {{sessionId}},
+                orientationVersion {{status.OrientationVersion}}.
+                """;
+            capture = new OrientationTurnCapture(
+                session,
+                sessionId,
+                Interlocked.Read(ref _runtimeGeneration),
+                Interlocked.Increment(ref _orientationCaptureToken),
+                maximumBytes: 16 * 1024);
+            lock (_gate)
+            {
+                if (_orientationCapture is not null)
+                {
+                    throw new OrganizationConcurrencyException("A comprehension demonstration is already running.");
+                }
+
+                _orientationCapture = capture;
+            }
+
+            // ACP 1.18.30 does not expose a turn id. All prompt operations are
+            // therefore serialized, and this request intentionally outlives the
+            // caller deadline so its eventual result is the remote completion
+            // observation that fences a later attempt.
+            var request = session.BeginRequest(
+                "session/prompt",
+                new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["sessionId"] = sessionId,
+                    ["prompt"] = new object[]
+                    {
+                        new Dictionary<string, object?>(StringComparer.Ordinal)
+                        {
+                            ["type"] = "text",
+                            ["text"] = prompt,
+                        },
+                    },
+                },
+                timeout: null,
+                cancellationToken: _hostLifetime.Token,
+                registered: capture.BindRequest);
+            var requestTask = request.Completion;
+
+            JsonElement result;
+            try
+            {
+                result = await requestTask.WaitAsync(
+                    TimeSpan.FromSeconds(_options.PromptTimeoutSeconds),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                capture.Abandon();
+                await FenceAbandonedPromptAsync(requestTask).ConfigureAwait(false);
+                releasePromptLock = requestTask.IsCompleted;
+                if (!releasePromptLock)
+                {
+                    RetainPromptLockUntilCompletion(requestTask);
+                }
+
+                return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+                    .RecordComprehensionTimeout(
+                        status.AssignmentId,
+                        status.EmployeeId,
+                        sessionId,
+                        status.OrientationVersion,
+                        status.Revision);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                capture.Abandon();
+                await FenceAbandonedPromptAsync(requestTask).ConfigureAwait(false);
+                releasePromptLock = requestTask.IsCompleted;
+                if (!releasePromptLock)
+                {
+                    RetainPromptLockUntilCompletion(requestTask);
+                }
+
+                _ = (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+                    .RecordComprehensionFailure(
+                        status.AssignmentId,
+                        status.EmployeeId,
+                        sessionId,
+                        status.OrientationVersion,
+                        status.Revision,
+                        "The caller interrupted the live comprehension operation; remote cancellation was requested.");
+                throw;
+            }
+
+            var stopReason = result.TryGetProperty("stopReason", out var stop) ? stop.GetString() : null;
+            if (!string.Equals(stopReason, "end_turn", StringComparison.Ordinal))
+            {
+                return RecordLiveComprehensionFailure(status, "The comprehension turn did not end normally.");
+            }
+
+            var captured = capture.Complete();
+            if (captured.Overflowed)
+            {
+                return RecordLiveComprehensionFailure(status, "The comprehension response exceeds 16 KiB.");
+            }
+            if (string.IsNullOrWhiteSpace(captured.Text))
+            {
+                return RecordLiveComprehensionFailure(status, "The comprehension turn returned no structured JSON evidence.");
+            }
+
+            OrientationEvidenceRequest evidence;
+            try
+            {
+                evidence = JsonSerializer.Deserialize<OrientationEvidenceRequest>(
+                    captured.Text,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                    ?? throw new JsonException("The comprehension response was empty.");
+            }
+            catch (JsonException)
+            {
+                return RecordLiveComprehensionFailure(
+                    status,
+                    "The comprehension response was not valid unfenced JSON.");
+            }
+
+            evidence = evidence with { ExpectedRevision = status.Revision };
+            try
+            {
+                return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+                    .ValidateAndRecordComprehension(evidence, OrientationEvidenceSource.LiveModel);
+            }
+            catch (OrganizationValidationException)
+            {
+                return RecordLiveComprehensionFailure(status, "Live-model evidence failed structural validation.");
+            }
+            catch (OrganizationConcurrencyException)
+            {
+                return RecordLiveComprehensionFailure(status, "Live-model evidence did not match the started assignment.");
+            }
+            catch (OrganizationNotFoundException)
+            {
+                return RecordLiveComprehensionFailure(status, "Live-model evidence did not match the started employee.");
+            }
+        }
+        catch (Exception exception) when (exception is AcpRemoteException
+            or AcpSessionClosedException
+            or AcpProtocolException
+            or JsonException
+            or IOException
+            or InvalidOperationException)
+        {
+            if (operationStatus is null)
+            {
+                throw;
+            }
+
+            _logger.LogWarning(
+                "Live comprehension failed in host category {Category}.",
+                LiveComprehensionFailureCategory(exception));
+            return RecordLiveComprehensionFailure(operationStatus, "ACP comprehension request failed.");
+        }
+        finally
+        {
+            if (capture is not null)
+            {
+                capture.Abandon();
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_orientationCapture, capture))
+                    {
+                        _orientationCapture = null;
+                    }
+                }
+            }
+
+            if (releasePromptLock)
+            {
+                _promptOperationLock.Release();
+            }
+        }
+    }
+
+    public OrientationStatus SetManualDispatchHold(bool held, string? detail)
+    {
+        var identity = OrganizationIdentity ?? throw new OrganizationStoreException("The organization identity is unavailable.");
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).SetManualDispatchHold(identity.EmployeeId, held, detail);
+    }
+
+    public PermissionGrantSummary GrantPermission(PermissionGrantRequest request) =>
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).CreatePermissionGrant(request);
+
+    public PermissionGrantSummary RevokePermission(string id, int revision) =>
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).RevokePermissionGrant(id, revision);
+
     private async Task ConnectAsync(CancellationToken cancellationToken)
     {
         _password = RandomNumberGenerator.GetHexString(32).ToLowerInvariant();
         _stderrBuffer.SetSecrets([_password]);
 
         var instructionsPath = InstructionsPath;
-        await File.WriteAllTextAsync(
-            instructionsPath,
-            AgentControlOpenCodeConfig.BuildInstructions(OrganizationName),
-            cancellationToken).ConfigureAwait(false);
-
-        if (!OperatingSystem.IsWindows() && InstructionsDirectory is not null)
+        if (!File.Exists(instructionsPath))
         {
-            // Orientation is host-owned and agent-readable, never agent-writable.
-            File.SetUnixFileMode(
-                instructionsPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite
-                | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+            throw new AcpProtocolException("The assigned orientation artifact was not published before runtime startup.");
         }
 
         CliProxyRuntimeConfiguration? cliProxy = null;
@@ -629,6 +977,7 @@ public sealed class AcpControlHost : BackgroundService
         {
             IncomingRequestHandler = HandleIncomingRequestAsync,
         };
+        session.IncomingFrameHook = envelope => ObserveIncomingFrame(session, envelope);
         session.Start();
         _session = session;
 
@@ -823,12 +1172,15 @@ public sealed class AcpControlHost : BackgroundService
         catch (AcpRemoteException exception)
         {
             throw new AcpProtocolException(
-                $"Could not activate the '{AgentControlOpenCodeConfig.RoleName}' control role: {exception.Message}",
+                $"Could not activate the '{AgentControlOpenCodeConfig.RoleName}' control role (ACP code {exception.Code}).",
                 exception);
         }
 
         _sessionId = sessionId;
         _isNewSession = isNew;
+        Interlocked.Increment(ref _permissionGeneration);
+        var runtimeGeneration = DateTimeOffset.UtcNow.UtcTicks;
+        Interlocked.Exchange(ref _runtimeGeneration, runtimeGeneration);
 
         var title = OrganizationIdentity?.SessionTitle;
         var titled = true;
@@ -841,9 +1193,58 @@ public sealed class AcpControlHost : BackgroundService
         // The store is authoritative. Persist the established session
         // transactionally before the bootstrap prompt so a crash cannot lose the
         // organization/session mapping. runtime.json is not written back.
-        (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
-            .RecordSession(sessionId, titled ? title : null);
+        var organization = Organization ?? throw new OrganizationStoreException("The organization store is not open.");
+        organization.RecordSession(sessionId, titled ? title : null);
         SetSession(sessionId);
+        await _orientationOperationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var prelaunch = _prelaunchOrientation
+                ?? throw new AcpProtocolException("The prelaunch orientation assignment is unavailable.");
+            var current = organization.GetOrientationStatus(prelaunch.EmployeeId);
+            if (string.Equals(current.AssignmentId, prelaunch.AssignmentId, StringComparison.Ordinal)
+                && string.Equals(current.OrientationVersion, prelaunch.OrientationVersion, StringComparison.Ordinal)
+                && (prelaunch.SessionId is null
+                    || string.Equals(prelaunch.SessionId, sessionId, StringComparison.Ordinal))
+                && current.Revision == prelaunch.AssignmentRevision
+                && current.State is (OrientationStates.Assigned
+                    or OrientationStates.Delivered
+                    or OrientationStates.Acknowledged
+                    or OrientationStates.Comprehended))
+            {
+                var delivered = current.State == OrientationStates.Assigned
+                    ? organization.MarkOrientationDelivered(
+                        prelaunch.AssignmentId,
+                        prelaunch.OrientationVersion,
+                        sessionId,
+                        prelaunch.AssignmentRevision,
+                        runtimeGeneration)
+                    : current;
+                organization.ConfirmOrientationLoaded(
+                    delivered.AssignmentId,
+                    delivered.OrientationVersion,
+                    sessionId,
+                    runtimeGeneration);
+            }
+            else
+            {
+                // Organization or session binding changed after process launch.
+                // Publish the current assignment for the next generation, but do
+                // not claim this already-running process loaded it.
+                var replacement = organization.ComposeAndAssignCurrentOrientation();
+                OrientationArtifactPublisher.Publish(InstructionsDirectory ?? HomePath, replacement);
+                organization.MarkOrientationDelivered(
+                    replacement.AssignmentId,
+                    replacement.OrientationVersion,
+                    sessionId,
+                    replacement.AssignmentRevision,
+                    checked(runtimeGeneration + 1));
+            }
+        }
+        finally
+        {
+            _orientationOperationLock.Release();
+        }
 
         _logger.LogInformation(
             "OpenCode ACP {Mode} session {SessionId} established.",
@@ -1022,9 +1423,11 @@ public sealed class AcpControlHost : BackgroundService
                 _logger.LogDebug("ACP tool update {Kind} status={Status}", kind, status);
                 break;
             case "agent_thought_chunk":
-            case "agent_message_chunk":
             case "user_message_chunk":
-                // Reasoning/message text is intentionally never logged or retained.
+                // Reasoning/user text is intentionally never logged or retained.
+                break;
+            case "agent_message_chunk":
+                CaptureOrientationResponse(update);
                 break;
             case "config_option_update":
                 // The model poll reads the native session and is authoritative;
@@ -1035,6 +1438,285 @@ public sealed class AcpControlHost : BackgroundService
             default:
                 _logger.LogDebug("ACP update {Kind} received.", kind);
                 break;
+        }
+    }
+
+    private void CaptureOrientationResponse(JsonElement update)
+    {
+        // Comprehension chunks are captured by ObserveIncomingFrame before the
+        // lossy general notification channel. This drain path deliberately does
+        // not retain model text.
+    }
+
+    private void ObserveIncomingFrame(AcpRpcSession session, AcpEnvelope envelope)
+    {
+        OrientationTurnCapture? capture;
+        lock (_gate)
+        {
+            capture = _orientationCapture;
+        }
+
+        if (capture is null)
+        {
+            return;
+        }
+
+        var runtimeGeneration = Interlocked.Read(ref _runtimeGeneration);
+        var token = Interlocked.Read(ref _orientationCaptureToken);
+        if (envelope.IsResponse)
+        {
+            capture.TrySeal(session, runtimeGeneration, token, envelope);
+        }
+        else if (envelope.IsNotification && envelope.Params is { } parameters)
+        {
+            capture.TryAppend(session, runtimeGeneration, token, parameters);
+        }
+    }
+
+    private OrientationStatus RecordLiveComprehensionFailure(OrientationStatus status, string error)
+    {
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+            .RecordComprehensionFailure(
+                status.AssignmentId,
+                status.EmployeeId,
+                status.SessionId ?? throw new OrganizationConcurrencyException(
+                    "The started orientation assignment no longer has its delivery session."),
+                status.OrientationVersion,
+                status.Revision,
+                SanitizeHostError(error));
+    }
+
+    private static string LiveComprehensionFailureCategory(Exception exception) => exception switch
+    {
+        AcpRemoteException => "remote-error",
+        AcpSessionClosedException => "session-closed",
+        AcpProtocolException => "protocol",
+        JsonException => "json-shape",
+        IOException => "transport-io",
+        InvalidOperationException => "invalid-result-shape",
+        _ => "known-failure",
+    };
+
+    private static string SanitizeHostError(string error)
+    {
+        const int maximumLength = 256;
+        var sanitized = new string(error
+            .Where(character => !char.IsControl(character))
+            .Take(maximumLength)
+            .ToArray());
+        return string.IsNullOrWhiteSpace(sanitized)
+            ? "Live-model comprehension failed."
+            : sanitized;
+    }
+
+    private async Task FenceAbandonedPromptAsync(Task requestTask)
+    {
+        using var cancellation = new CancellationTokenSource(CancelDeadline);
+        _ = await TrySendCancelAsync(cancellation.Token).ConfigureAwait(false);
+        try
+        {
+            await requestTask.WaitAsync(CancelDeadline).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is TimeoutException
+            or OperationCanceledException
+            or AcpRemoteException
+            or AcpSessionClosedException)
+        {
+            // A still-running request remains fenced by the prompt semaphore.
+        }
+    }
+
+    private void RetainPromptLockUntilCompletion(Task requestTask)
+    {
+        lock (_gate)
+        {
+            _abandonedPromptCompletion = requestTask;
+        }
+
+        _ = requestTask.ContinueWith(
+            _ =>
+            {
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_abandonedPromptCompletion, requestTask))
+                    {
+                        _abandonedPromptCompletion = null;
+                    }
+                }
+                ReleaseRetainedPromptLock();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void ReleaseRetainedPromptLock()
+    {
+        try
+        {
+            _promptOperationLock.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Host disposal can race the terminal transport completion that owns
+            // this retained release. The semaphore is already unreachable.
+        }
+    }
+
+    private sealed class OrientationTurnCapture
+    {
+        private readonly object _gate = new();
+        private readonly AcpRpcSession _session;
+        private readonly string _sessionId;
+        private readonly long _runtimeGeneration;
+        private readonly long _token;
+        private readonly int _maximumBytes;
+        private readonly StringBuilder _buffer = new();
+        private int _bytes;
+        private long? _requestId;
+        private bool _sealed;
+        private bool _abandoned;
+        private bool _overflowed;
+        private (string Text, bool Overflowed)? _snapshot;
+
+        public OrientationTurnCapture(
+            AcpRpcSession session,
+            string sessionId,
+            long runtimeGeneration,
+            long token,
+            int maximumBytes)
+        {
+            _session = session;
+            _sessionId = sessionId;
+            _runtimeGeneration = runtimeGeneration;
+            _token = token;
+            _maximumBytes = maximumBytes;
+        }
+
+        public void BindRequest(long requestId)
+        {
+            lock (_gate)
+            {
+                if (_requestId is not null)
+                {
+                    throw new InvalidOperationException("The orientation capture is already request-bound.");
+                }
+
+                _requestId = requestId;
+            }
+        }
+
+        public void TrySeal(
+            AcpRpcSession session,
+            long runtimeGeneration,
+            long token,
+            AcpEnvelope envelope)
+        {
+            if (!ReferenceEquals(session, _session)
+                || runtimeGeneration != _runtimeGeneration
+                || token != _token
+                || !envelope.IsResponse
+                || envelope.Id is null)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (envelope.Id.Value.ValueKind == JsonValueKind.Number
+                    && envelope.Id.Value.TryGetInt64(out var responseId)
+                    && _requestId == responseId
+                    && !_sealed)
+                {
+                    _sealed = true;
+                    _snapshot = (_buffer.ToString(), _overflowed);
+                }
+            }
+        }
+
+        public void TryAppend(
+            AcpRpcSession session,
+            long runtimeGeneration,
+            long token,
+            JsonElement parameters)
+        {
+            if (!ReferenceEquals(session, _session)
+                || runtimeGeneration != _runtimeGeneration
+                || token != _token
+                || parameters.ValueKind != JsonValueKind.Object
+                || !parameters.TryGetProperty("sessionId", out var sessionElement)
+                || sessionElement.ValueKind != JsonValueKind.String
+                || !string.Equals(sessionElement.GetString(), _sessionId, StringComparison.Ordinal)
+                || !parameters.TryGetProperty("update", out var update)
+                || update.ValueKind != JsonValueKind.Object
+                || !update.TryGetProperty("sessionUpdate", out var kind)
+                || kind.ValueKind != JsonValueKind.String
+                || !string.Equals(kind.GetString(), "agent_message_chunk", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            string? text = null;
+            if (update.TryGetProperty("content", out var content)
+                && content.ValueKind == JsonValueKind.Object
+                && content.TryGetProperty("text", out var nested)
+                && nested.ValueKind == JsonValueKind.String)
+            {
+                text = nested.GetString();
+            }
+            else if (update.TryGetProperty("text", out var direct)
+                && direct.ValueKind == JsonValueKind.String)
+            {
+                text = direct.GetString();
+            }
+
+            if (text is null)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (_sealed || _abandoned || _overflowed)
+                {
+                    return;
+                }
+
+                var bytes = Encoding.UTF8.GetByteCount(text);
+                if (_bytes > _maximumBytes - bytes)
+                {
+                    _overflowed = true;
+                    _buffer.Clear();
+                    return;
+                }
+
+                _buffer.Append(text);
+                _bytes += bytes;
+            }
+        }
+
+        public (string Text, bool Overflowed) Complete()
+        {
+            lock (_gate)
+            {
+                if (_abandoned)
+                {
+                    return (string.Empty, _overflowed);
+                }
+
+                _sealed = true;
+                _snapshot ??= (_buffer.ToString(), _overflowed);
+                return _snapshot.Value;
+            }
+        }
+
+        public void Abandon()
+        {
+            lock (_gate)
+            {
+                _abandoned = true;
+                _buffer.Clear();
+            }
         }
     }
 
@@ -1056,13 +1738,28 @@ public sealed class AcpControlHost : BackgroundService
         var prompt = $"Bootstrap check for the {OrganizationName} AgentControl runtime. " +
                      "Reply with one brief readiness line. Do not call tools and do not perform code work.";
 
+        // Publish the busy hold before the task starts so readiness promotion and
+        // the first ready snapshot already expose it. WaitAsync(0) in the
+        // comprehension path could otherwise win the semaphore in the window
+        // before this task acquires it.
+        lock (_gate)
+        {
+            _bootstrapActive = true;
+        }
+
         _bootstrapTask = Task.Run(
             async () =>
             {
+                var promptLockHeld = false;
                 try
                 {
+                    await _promptOperationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    promptLockHeld = true;
                     SetSessionState("busy");
-                    var result = await session.RequestAsync(
+                    // Retain the underlying correlation beyond the local startup
+                    // deadline. A provider that ignores session/cancel still owns
+                    // the only prompt slot until it responds or the process dies.
+                    var requestTask = session.RequestAsync(
                         "session/prompt",
                         new Dictionary<string, object?>(StringComparer.Ordinal)
                         {
@@ -1076,8 +1773,28 @@ public sealed class AcpControlHost : BackgroundService
                                 },
                             },
                         },
-                        TimeSpan.FromSeconds(_options.PromptTimeoutSeconds),
-                        cancellationToken).ConfigureAwait(false);
+                        timeout: null,
+                        cancellationToken: cancellationToken);
+                    JsonElement result;
+                    try
+                    {
+                        result = await requestTask.WaitAsync(
+                            TimeSpan.FromSeconds(_options.PromptTimeoutSeconds),
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        SetSessionState(null);
+                        _logger.LogError(
+                            "Bootstrap prompt timed out after {Seconds}s; requesting cancellation of the abandoned turn.",
+                            _options.PromptTimeoutSeconds);
+                        await TryCancelAbandonedTurnAsync().ConfigureAwait(false);
+                        SetStatus(
+                            ControlState.Degraded,
+                            $"Bootstrap prompt timed out after {_options.PromptTimeoutSeconds}s; the turn may still have run.");
+                        await ObserveAbandonedBootstrapAsync(requestTask, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
 
                     var stopReason = result.TryGetProperty("stopReason", out var stopElement) ? stopElement.GetString() : null;
                     SetSessionState("idle");
@@ -1112,30 +1829,52 @@ public sealed class AcpControlHost : BackgroundService
                         SetStatus(ControlState.Degraded, $"Bootstrap prompt failed (code {exception.Code}).");
                     }
                 }
-                catch (TimeoutException)
-                {
-                    // The deadline abandons the local correlation only; the agent
-                    // may still be mid-turn. Reconcile the effect we know about
-                    // instead of leaving an orphaned turn running against the
-                    // owned session. This is best effort and never upgrades or
-                    // downgrades the honest Degraded outcome below.
-                    SetSessionState(null);
-                    _logger.LogError(
-                        "Bootstrap prompt timed out after {Seconds}s; requesting cancellation of the abandoned turn.",
-                        _options.PromptTimeoutSeconds);
-                    await TryCancelAbandonedTurnAsync().ConfigureAwait(false);
-                    SetStatus(
-                        ControlState.Degraded,
-                        $"Bootstrap prompt timed out after {_options.PromptTimeoutSeconds}s; the turn may still have run.");
-                }
                 catch (Exception exception)
                 {
                     SetSessionState(null);
                     _logger.LogError("Bootstrap prompt failed; see status error for detail.");
                     SetStatus(ControlState.Degraded, $"Bootstrap prompt failed: {_stderrBuffer.Redact(exception.Message)}");
                 }
+                finally
+                {
+                    if (promptLockHeld)
+                    {
+                        _promptOperationLock.Release();
+                    }
+
+                    // Clear only after the semaphore is free so an observer that
+                    // reads a non-busy session can rely on the prompt slot being
+                    // available.
+                    lock (_gate)
+                    {
+                        _bootstrapActive = false;
+                    }
+                }
             },
             CancellationToken.None);
+    }
+
+    private static async Task ObserveAbandonedBootstrapAsync(
+        Task<JsonElement> requestTask,
+        CancellationToken hostCancellation)
+    {
+        try
+        {
+            await requestTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (hostCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (exception is AcpRemoteException
+            or AcpSessionClosedException
+            or AcpProtocolException
+            or TimeoutException
+            or IOException
+            or InvalidOperationException)
+        {
+            // The timeout outcome is already published. Observation exists only
+            // to retain the fence and consume the eventual known transport fault.
+        }
     }
 
     /// <summary>
@@ -1149,7 +1888,7 @@ public sealed class AcpControlHost : BackgroundService
     {
         try
         {
-            if (!await CancelAsync(CancellationToken.None).ConfigureAwait(false))
+            if (!await TrySendCancelAsync(CancellationToken.None).ConfigureAwait(false))
             {
                 _logger.LogDebug("Abandoned bootstrap turn could not be cancelled; the session may be gone.");
             }
@@ -1203,7 +1942,31 @@ public sealed class AcpControlHost : BackgroundService
     {
         if (string.Equals(request.Method, "session/request_permission", StringComparison.Ordinal))
         {
-            _logger.LogInformation("Rejected inbound ACP permission request.");
+            try
+            {
+                var identity = OrganizationIdentity;
+                var store = Organization;
+                if (identity is not null && store is not null)
+                {
+                    PermissionPolicy.TryParseAuditClaim(request.Params, out var tool, out var resource);
+                    store.EvaluatePermission(
+                        identity.EmployeeId,
+                        _sessionId,
+                        Interlocked.Read(ref _permissionGeneration),
+                        tool,
+                        resource);
+                }
+            }
+            catch (Exception exception) when (exception is OrganizationStoreException
+                or ArgumentException
+                or InvalidOperationException)
+            {
+                // Permission handling must fail closed at the protocol boundary.
+                // Do not surface a store/session mismatch as JSON-RPC -32603.
+                _logger.LogWarning("Inbound ACP permission audit failed closed.");
+            }
+
+            _logger.LogInformation("Inbound ACP permission request rejected by Phase 1 host policy.");
             return Task.FromResult(AcpResponse.Ok(PermissionPolicy.BuildRejection(request.Params)));
         }
 
@@ -1356,6 +2119,24 @@ public sealed class AcpControlHost : BackgroundService
             _startedAt = DateTimeOffset.UtcNow;
             _state = ControlState.Starting;
             _error = null;
+        }
+    }
+
+    /// <summary>
+    /// Promotes a still-starting host to ready. The check and write share the host
+    /// gate with <see cref="SetStatus"/>, so a bootstrap outcome published by the
+    /// background task either wins (and readiness is withheld) or is superseded in
+    /// the same order a synchronous bootstrap would have produced.
+    /// </summary>
+    private void PromoteReadyIfStarting()
+    {
+        lock (_gate)
+        {
+            if (_state == ControlState.Starting)
+            {
+                _state = ControlState.Ready;
+                _error = null;
+            }
         }
     }
 

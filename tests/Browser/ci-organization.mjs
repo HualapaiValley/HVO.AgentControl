@@ -259,6 +259,49 @@ try {
     { audit },
   );
 
+  // Rename through the same API the browser uses, then prove orientation stays
+  // readable as Stale until the portal creates and delivers a fresh assignment.
+  const renameEvidence = await page.evaluate(async () => {
+    const organization = await (await fetch('/api/organization')).json();
+    const before = await (await fetch('/api/orientation')).json();
+    const renamed = await fetch('/api/organization', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Origin: location.origin },
+      body: JSON.stringify({ organizationId: organization.id, displayName: 'Browser Renamed Organization', revision: organization.revision }),
+    });
+    const staleResponse = await fetch('/api/orientation');
+    return { renameStatus: renamed.status, before, staleStatus: staleResponse.status, stale: await staleResponse.json() };
+  });
+  record(
+    'browser rename changes the organization fragment and exposes readable stale orientation',
+    renameEvidence.renameStatus === 200
+      && renameEvidence.staleStatus === 200
+      && renameEvidence.stale.state === 'Stale'
+      && renameEvidence.stale.ready === false
+      && renameEvidence.stale.assignmentId === renameEvidence.before.assignmentId,
+    renameEvidence,
+  );
+
+  // Exercise the owner controls and prove the panel reloads after mutation.
+  await page.click('[data-orientation-hold]');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Orientation state updated.');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-hold]')?.dataset.held === 'true');
+  record('manual hold button mutates and reloads orientation state', true, {});
+
+  await page.click('[data-orientation-deliver]');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Orientation delivered. Runtime restart required.');
+  const deliveredAfterRename = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()));
+  record(
+    'deliver button creates a fresh delivered assignment after rename',
+    deliveredAfterRename.state === 'Delivered'
+      && deliveredAfterRename.restartRequired === true
+      && deliveredAfterRename.ready === false
+      && deliveredAfterRename.holdReasons.includes('orientation-reload-required')
+      && deliveredAfterRename.assignmentId !== renameEvidence.before.assignmentId
+      && deliveredAfterRename.orientationVersion !== renameEvidence.before.orientationVersion,
+    { before: renameEvidence.before, after: deliveredAfterRename },
+  );
+
   // No secret fields in the rendered panel or the JSON payload.
   const panelText = await page.$eval('[data-org-overview]', (element) => element.textContent || '');
   const basic = Buffer.from(`owner:${OWNER_PASSWORD}`, 'utf8').toString('base64');

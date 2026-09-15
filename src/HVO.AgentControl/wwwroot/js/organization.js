@@ -16,6 +16,11 @@ if (root && portal) {
     const departmentsField = root.querySelector("[data-org-departments]");
     const employeesField = root.querySelector("[data-org-employees]");
     const auditField = root.querySelector("[data-org-audit]");
+    const orientationField = root.querySelector("[data-org-orientation]");
+    const deliverButton = root.querySelector("[data-orientation-deliver]");
+    const holdButton = root.querySelector("[data-orientation-hold]");
+    const comprehensionButton = root.querySelector("[data-orientation-comprehension]");
+    const orientationReceipt = root.querySelector("[data-orientation-receipt]");
 
     const text = (value) => (value === null || value === undefined ? "\u2014" : String(value));
 
@@ -61,12 +66,22 @@ if (root && portal) {
                 }
 
                 employeesField.replaceChildren();
+                orientationField.replaceChildren();
                 for (const employee of data.employees || []) {
                     appendRow(
                         employeesField,
                         employee.displayName,
                         `${employee.departmentDisplayName} \u00b7 ${employee.roleDisplayName} \u00b7 ${employee.placement}`,
                     );
+                    if (employee.orientation) {
+                        appendRow(orientationField, "Version", employee.orientation.orientationVersion);
+                        appendRow(orientationField, "State", employee.orientation.state);
+                        appendRow(orientationField, "Dispatch", employee.orientation.dispatchHeld ? `Held: ${employee.orientation.holdReasons.join(", ")}` : "Ready");
+                        appendRow(orientationField, "Runtime load", employee.orientation.restartRequired ? "Restart required" : "Loaded");
+                        appendRow(orientationField, "Artifact", `${employee.orientation.artifactFileName} (${employee.orientation.artifactBytes} bytes)`);
+                        holdButton.textContent = employee.orientation.holdReasons.includes("manual") ? "Clear manual hold" : "Set manual hold";
+                        holdButton.dataset.held = employee.orientation.holdReasons.includes("manual") ? "true" : "false";
+                    }
                 }
 
                 auditField.replaceChildren();
@@ -88,6 +103,35 @@ if (root && portal) {
                 loading = false;
             });
     };
+
+    const mutate = async (path, method, body) => {
+        orientationReceipt.textContent = "Working...";
+        const response = await fetch(path, {
+            method,
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        if (response.ok) {
+            const result = await response.clone().json().catch(() => null);
+            orientationReceipt.textContent = result?.restartRequired
+                ? "Orientation delivered. Runtime restart required."
+                : "Orientation state updated.";
+        } else {
+            orientationReceipt.textContent = `Update failed (${response.status}).`;
+        }
+        if (response.ok) {
+            loaded = false;
+            loading = false;
+            load();
+        }
+    };
+    deliverButton?.addEventListener("click", () => mutate("/api/orientation/deliver", "POST", {}));
+    comprehensionButton?.addEventListener("click", () => mutate("/api/orientation/comprehension/run", "POST", {}));
+    holdButton?.addEventListener("click", () => mutate("/api/orientation/manual-hold", "PUT", {
+        held: holdButton.dataset.held !== "true",
+        detail: "Owner portal action",
+    }));
 
     load();
     new MutationObserver(load).observe(portal, {

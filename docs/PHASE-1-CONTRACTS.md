@@ -372,15 +372,18 @@ Design constraints:
   retained replay to 64 MiB and 10,000 events initially. An overflow or missing
   cursor returns an explicit replay gap, holds dispatch and requires status/effect
   reconciliation, never truncates silently or drops request/permission state.
-- Status includes session/process generations, active request, pending permission,
-  lease, replay bounds and hold state. Pending permission and decisions bind the
-  employee session, OpenCode process generation, originating turn/request and
-  decision ID. A generation change invalidates pending permissions; never replay
-  decisions into a replacement child or a vanished turn. Conflicting repeats fail
-  closed. Automatic model retry cannot resolve an uncertain permission response.
-- A **pending permission request survives controller disconnect** and is
-  re-delivered only if the original child generation and turn are still live.
-  Otherwise report invalidated/interrupted status and require explicit recovery.
+- **Future worker-bridge contract:** status includes session/process generations,
+  active request, pending permission, lease, replay bounds and hold state. Pending
+  permission and decisions bind the employee session, OpenCode process generation,
+  originating turn/request and decision ID. A generation change invalidates pending
+  permissions; never replay decisions into a replacement child or a vanished turn.
+  Conflicting repeats fail closed. Automatic model retry cannot resolve an uncertain
+  permission response. The current co-located controller callback does not implement
+  this pending lifecycle; it responds synchronously and persists `rejected`.
+- **Future worker-bridge contract:** a pending permission request survives
+  controller disconnect and is re-delivered only if the original child generation
+  and turn are still live. Otherwise report invalidated/interrupted status and
+  require explicit recovery.
 - A **worker crash does not resume** the in-flight turn; only durable state is
   reloaded. Loading history is not resuming a command.
 - The C#-owned SSH credential may use an already-authorized development Docker
@@ -504,26 +507,62 @@ Ready -> Degraded / Stopped / Orienting
   restrictions accumulate (deny wins). A lower layer cannot grant what a higher
   layer denied.
 - Evaluate scoped exceptions in this order: collect restrictions from all layers;
-  reject any matching non-waivable deny (host-policy denies are non-waivable in
-  Phase 1); evaluate active owner-approved grants only against explicitly marked
-  waivable restriction IDs at the permitted organization/employee/tool/resource
-  scope; then reject any remaining matching restriction and apply the effective
-  allow/ask policy. A grant names restriction IDs and policy revision, expires,
-  and never erases a deny from another layer. Missing/mismatched/revoked grants
-  fail closed. Natural-language permission requests and lower-layer instructions
-  cannot mark their own restrictions waivable. Revoke or reapprove grants when
-  their policy revision changes; audit each use under host authority.
+  reject any matching non-waivable deny; require a separate active exact owner grant
+  for every matching waivable restriction; reject unknown/no-match claims. A grant
+  names restriction ID, employee, policy revision, exact tool/resource and expiry,
+  and never erases a deny from another layer. Missing/mismatched/revoked grants fail
+  closed. Natural-language permission requests and lower-layer instructions cannot
+  mark their own restrictions waivable. OpenCode 1.18.30's pinned ACP callback does
+  not provide a host-derived canonical path/resource, so Phase 1 grants are staged
+  and audited but are not executable through inbound ACP requests; the host always
+  selects a reject option (or a protocol cancellation response when none exists).
+  The current callback persists requests directly as rejected and records the
+  decisive restriction plus every matched stable restriction ID; durable pending
+  permission recovery remains a future worker-bridge contract, not an implemented
+  controller callback feature. Revoke or reapprove grants when their policy
+  revision changes.
 - Per assignment the host records: `Assigned` (persisted) -> `Delivered`
-  (runtime confirms exact artifact installation) -> `Acknowledged`
+  (the host verifies the published name/inode, ownership, single-link status,
+  exact bytes and semantic hash associated with the session; this is not runtime
+  or model confirmation) -> `Acknowledged`
   (employee response names its employee/session identity and assigned version)
   -> `Comprehended` (host-evaluated bounded evidence about duties, restrictions,
   reporting and escalation). A bridge receipt alone is not employee
   acknowledgment. Each record stores the exact
-  `orientationVersion`; a version change invalidates prior acknowledgment and
-  requires re-delivery.
-- **No-rebuild config update:** changing instructions or permission fragments
-  produces a new orientation version and updates the affected binding's private
-  config in place. No container image rebuild is required.
+  immutable assignment ID and `orientationVersion`; a version, assignment or
+  session-binding change invalidates prior acknowledgment and requires a fresh
+  assignment. Rejected, timed-out and failed attempts are terminal history:
+  redelivery marks the old row Stale and creates a new attempt even when semantic
+  content is unchanged. `Uncertain` is reserved for a future bridge reconciliation
+  state and is not produced by this control-host path. Status prefers a non-Stale
+  assignment, or returns the latest Stale row with dispatch held when no current
+  attempt exists. Evidence records carry explicit `owner-submitted` or `live-model`
+  provenance. Owner-submitted evidence is an explicit override record, not a claim
+  that a model demonstration occurred.
+- Live comprehension captures bounded agent-message chunks synchronously in ACP
+  codec-reader order before the general lossy notification channel. The result frame
+  is the completion barrier for every prior frame. Since the pinned ACP contract has
+  no turn ID, all prompt operations serialize. The startup bootstrap prompt
+  occupies that same slot and is reported as a `busy` session state from the first
+  ready snapshot; owner comprehension is rejected deterministically while it is
+  active. Timeout or caller cancellation sends bounded `session/cancel`, abandons
+  the capture token, and retains the underlying request correlation and prompt-slot
+  fence without a timer until the exact response/error frame arrives or ACP
+  transport/process termination is confirmed. Malformed, empty, oversized,
+  non-terminal, ACP-error and transport-failed host-started turns persist a
+  `live-model` failure outcome bound to the exact started assignment and session.
+  If policy replacement made that assignment Stale meanwhile, the failure evidence
+  is written to its historical row without changing Stale or mutating the current
+  replacement assignment or its holds. Malformed caller-submitted manual evidence
+  remains validation-only and does not mutate Delivered state.
+- **No-rebuild config update:** changing organization instructions, authoritative
+  role-fragment instructions, or permission fragments produces a new orientation
+  version and updates the affected binding's private config in place. The role API
+  uses the active role-fragment revision as its optimistic token. No container image
+  rebuild is required. Delivery persists a required runtime generation and leaves
+  `policy-update`/`orientation-reload-required` holds. Only startup after the
+  OpenCode process/session is established may confirm that generation loaded the
+  exact assignment and clear the reload hold; comprehension cannot clear it.
 - **Safe affected-runtime restart:** hold dispatch, checkpoint or cancel an
   active turn under explicit policy, await observed termination, reconcile
   effects, restart only that runtime, re-deliver
@@ -579,6 +618,13 @@ These are open and must not be presented as decided or owner-accepted:
 - The concrete UID/ownership model for Section 6, and whether the existing
   `/data` volume can be re-permissioned without disrupting the running dev
   container.
+- **Implemented for the one control employee (#216):** deterministic standing
+  orientation composition/versioning, atomic host-owned `/agent-config`
+  publication on Linux x64, durable attempt-preserving assignment/evidence/hold
+  records with source provenance, stale-readable dispatch blocking, bounded
+  null-safe host validation and a synchronously rejecting ACP permission evaluator
+  with revisioned staged owner grants and complete matched-restriction audit IDs.
+  General worker delivery/restart/bridge behavior remains unresolved.
 - Worker-image UID separation and bridge-key bootstrap/rotation interruption,
   private-file/descriptor isolation, and compromise re-enrollment tests.
 - Supervisor PID1 termination/reaping, channel authentication, child capability
@@ -599,7 +645,14 @@ These are open and must not be presented as decided or owner-accepted:
   band. **Not yet validated:** WAL/`synchronous=FULL` crash durability on the
   actual Docker volume filesystem has not been crash-tested; the evidence is the
   configured pragmas and the local/container test filesystems only.
-- The definition and reliability of "comprehension" evidence.
+- **Implemented bounded initial definition (#216):** the host accepts only a
+  size-limited structured record bound to the exact immutable assignment, employee,
+  native session and orientation version, and deterministically compares identity, department,
+  owner reporting, allowed duties, restrictions and escalation against persisted
+  expected facts. It stores a SHA-256 plus sanitized outcome summary, never raw
+  model reasoning. **Still unresolved:** how well this bounded check predicts
+  future behavior across models and roles; one live demonstration remains an
+  explicit operator action and was not run for #216.
 - Reachability and collateral of `home-dev-02`, and whether the disposable
   worker path can run without touching existing services.
 - Owner review and acceptance of these contracts. This document is a proposal.

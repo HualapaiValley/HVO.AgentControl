@@ -3,14 +3,17 @@ using System.Text.Json;
 namespace HVO.AgentControl.Runtime;
 
 /// <summary>
-/// Conservative permission handling for inbound ACP permission requests.
-/// The generated OpenCode config already allows ordinary bash/read/edit use and
-/// denies credential material, so any permission RPC that still arrives is
-/// rejected rather than auto-approved. Unknown options are never selected.
+/// Conservative permission handling for inbound ACP permission requests. The
+/// pinned OpenCode 1.18.30 request exposes a model-facing title and tool kind,
+/// but no host-derived canonical path/resource. Phase 1 therefore never selects
+/// an allow option; the title is retained only as untrusted, bounded audit input.
 /// </summary>
 public static class PermissionPolicy
 {
-    /// <summary>Returns the ACP result payload rejecting (or cancelling) the request.</summary>
+    public const string UnrecognizedTool = "unrecognized";
+    public const string UntrustedResource = "acp:untrusted-claim";
+
+    /// <summary>Returns the ACP result payload rejecting, or safely cancelling, the request.</summary>
     public static object BuildRejection(JsonElement? parameters)
     {
         var optionId = SelectRejectOption(parameters);
@@ -36,6 +39,33 @@ public static class PermissionPolicy
     }
 
     /// <summary>
+    /// Extracts bounded audit metadata without treating the model-authored title
+    /// as an authorization resource. The returned resource is a fixed host value.
+    /// </summary>
+    public static bool TryParseAuditClaim(JsonElement? parameters, out string tool, out string resource)
+    {
+        tool = UnrecognizedTool;
+        resource = UntrustedResource;
+        if (parameters is not { } root
+            || root.ValueKind != JsonValueKind.Object
+            || root.GetRawText().Length > 16 * 1024
+            || !root.TryGetProperty("toolCall", out var call)
+            || call.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var kind = ReadBounded(call, "kind") ?? ReadBounded(call, "tool");
+        if (kind is null || kind.Length > 128)
+        {
+            return false;
+        }
+
+        tool = kind;
+        return true;
+    }
+
+    /// <summary>
     /// Picks a reject option if one exists. Prefers reject_once, then
     /// reject_always, then any option whose id/name mentions reject.
     /// </summary>
@@ -51,7 +81,6 @@ public static class PermissionPolicy
 
         string? fallback = null;
         string? rejectAlways = null;
-
         foreach (var option in options.EnumerateArray())
         {
             if (option.ValueKind != JsonValueKind.Object)
@@ -59,10 +88,9 @@ public static class PermissionPolicy
                 continue;
             }
 
-            var optionId = option.TryGetProperty("optionId", out var idElement) ? idElement.GetString() : null;
-            var kind = option.TryGetProperty("kind", out var kindElement) ? kindElement.GetString() : null;
-            var name = option.TryGetProperty("name", out var nameElement) ? nameElement.GetString() : null;
-
+            var optionId = ReadBounded(option, "optionId");
+            var kind = ReadBounded(option, "kind");
+            var name = ReadBounded(option, "name");
             if (string.Equals(kind, "reject_once", StringComparison.OrdinalIgnoreCase))
             {
                 return optionId;
@@ -85,5 +113,15 @@ public static class PermissionPolicy
         }
 
         return rejectAlways ?? fallback;
+    }
+
+    private static string? ReadBounded(JsonElement value, string property)
+    {
+        return value.TryGetProperty(property, out var element)
+            && element.ValueKind == JsonValueKind.String
+            && element.GetString() is { Length: > 0 and <= 512 } text
+            && !text.Any(char.IsControl)
+                ? text
+                : null;
     }
 }

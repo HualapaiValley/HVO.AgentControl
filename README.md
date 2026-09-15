@@ -261,7 +261,10 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected overview, with a same-origin revision-guarded rename
+- `/api/organization`: owner-protected overview, including employee orientation readiness, with a same-origin revision-guarded rename; `/api/organization/basic-instructions` updates standing instructions and marks orientation stale
+- `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
+- `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
+- `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.
 - `/terminal`: same-origin authenticated terminal WebSocket, one viewer at a time
 - `/health/live`: process health, not worker/provider readiness
 - `/api/version`: semantic version and architecture direction
@@ -280,8 +283,10 @@ synchronization is not available; an acknowledged ACP model-setting RPC alone
 does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/control.db` is the authoritative SQLite store for organization,
-department, role, employee, runtime-binding and session identity in the
+`/control-data/control.db` is the authoritative schema-v3 SQLite store for organization,
+department, role, employee, runtime-binding and session identity plus versioned
+orientation fragments/facts/assignments/evidence, layered permission policy/grants/audit and
+dispatch holds in the
 controller-private volume; `/control-data/runtime.json` is retained as adoption
 evidence only. The database, its WAL/SHM sidecars and the writer lock are
 controller-only `0600`, and a fresh database is seed-published atomically so an
@@ -296,7 +301,24 @@ filesystem has not been crash-tested. The agent-owned data volume retains
 workspace and native conversation state. A failed session load is
 surfaced, not silently replaced. Detaching the browser leaves the TUI/runtime
 alive. Container restart restores conversation history, not a running command.
-Only an initial new-session readiness prompt is automatic.
+The composed standing orientation is published without an image rebuild and the
+preserved session/history remains authoritative. `Delivered` is a host publication
+claim: the controller verified the session-associated file name/inode, ownership,
+single-link status, exact bytes and semantic hash; it is not runtime/model
+confirmation. Terminal rejected/timed-out/failed/uncertain attempts and session
+rotation create a fresh assignment while preserving the old row as Stale. Linux
+native inode validation is supported on the shipped `linux/amd64` architecture and
+fails closed on unsupported Linux process architectures. Employee readiness is separate
+from `/health/ready`: until the exact delivered version passes host validation of
+the exact persisted identity, department/reporting, duty, restriction and escalation fact sets,
+dispatch is held. Evidence records expose truthful `owner-submitted` or
+`live-model` provenance. Owner-submitted evidence is a manual host validation
+record, not proof of a live model run. The repository separately provides an
+owner-triggered comprehension API that sends a strict, tool-free JSON prompt
+through ACP, byte-bounds and parses the unfenced response, and subjects it
+to the same host validation; no demonstration runs automatically and no live key
+was consumed for this change. The existing initial new-session informational bootstrap remains separate
+from employee readiness.
 
 A failed bootstrap leaves the runtime `degraded`, not ready. When its ACP
 session remains established, terminal/cancel controls remain available for

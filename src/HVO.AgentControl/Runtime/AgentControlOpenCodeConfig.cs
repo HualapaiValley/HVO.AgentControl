@@ -14,7 +14,7 @@ public static class AgentControlOpenCodeConfig
     public const string RoleName = "agentcontrol";
 
     /// <summary>Instruction file written into the runtime's private OpenCode home.</summary>
-    public const string InstructionsFileName = "agentcontrol-instructions.md";
+    public const string InstructionsFileName = "orientation-current.md";
 
     // Fleet/V1 tool names are denied explicitly so a stale plugin or environment
     // cannot silently reintroduce the archived control plane. The base OpenCode
@@ -39,28 +39,6 @@ public static class AgentControlOpenCodeConfig
         WriteIndented = true,
     };
 
-    /// <summary>Instruction text that defines the consolidated control role.</summary>
-    public static string BuildInstructions(string organizationName)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(organizationName);
-
-        return $$"""
-            # AgentControl Runtime
-
-            You are the consolidated manager, operations and IT role for the
-            "{{organizationName}}" AgentControl runtime. This runtime manages itself;
-            it is not a code worker.
-
-            Rules:
-            - There is no Fleet. Do not call, emulate or reference Fleet/V1 tooling.
-            - No worker runtime exists yet. Do not hire, delegate to or dispatch workers.
-            - Do not perform code work: no repository edits, builds, migrations or tests.
-            - Prefer plain informational answers. Keep responses short and factual.
-            - On your bootstrap turn, reply with a single brief readiness line. Do not
-              call tools and do not start any long-running work.
-            """;
-    }
-
     /// <summary>
     /// Produces the JSON value for <c>OPENCODE_CONFIG_CONTENT</c>.
     /// </summary>
@@ -83,11 +61,11 @@ public static class AgentControlOpenCodeConfig
 
         var permission = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            // Broad allow first, specific denies after: OpenCode evaluates the last
-            // matching permission rule, so explicit denies below always win.
+            // Broad requests route to the host as `ask`; explicit non-waivable
+            // path/command denies remain local and win by last-match precedence.
             ["bash"] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["*"] = "allow",
+                ["*"] = "ask",
                 ["*sudo *"] = "deny",
                 ["*rm -rf /*"] = "deny",
                 ["*rm -rf ~*"] = "deny",
@@ -106,7 +84,7 @@ public static class AgentControlOpenCodeConfig
             },
             ["read"] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["*"] = "allow",
+                ["*"] = "ask",
                 ["**/.env"] = "deny",
                 ["**/.env.*"] = "deny",
                 ["**/*id_rsa*"] = "deny",
@@ -122,7 +100,7 @@ public static class AgentControlOpenCodeConfig
             },
             ["edit"] = new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["*"] = "allow",
+                ["*"] = "ask",
                 ["**/.env"] = "deny",
                 ["**/.env.*"] = "deny",
                 ["**/*id_rsa*"] = "deny",

@@ -48,6 +48,8 @@ public sealed class OrganizationStoreTests
         Assert.Equal(OrganizationSeed.OperationsItRoleDisplayName, role.DisplayName);
         Assert.Equal(OrganizationSeed.OperationsItRoleInstructionProfile, role.InstructionProfile);
         Assert.Equal(OrganizationSeed.OperationsItRolePermissionProfile, role.PermissionProfile);
+        Assert.Contains(OrganizationSeed.RoleOrientation, role.StandingInstructions, StringComparison.Ordinal);
+        Assert.Equal(1, role.Revision);
         var employee = Assert.Single(overview.Employees);
         Assert.Equal("operations", employee.DepartmentSlug);
         Assert.Equal("operations-it", employee.RoleSlug);
@@ -119,6 +121,25 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
+    public void BuildLocalSchemaV3WithAnyDifferentSignatureIsUnsupported()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        ExecuteRaw(root.Path, "ALTER TABLE orientation_assignments ADD COLUMN branch_only_value TEXT;");
+        using var reopened = Open(root);
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
+            reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+
+        Assert.Contains("Unsupported build-local schema 3 signature", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("never released", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+    }
+
+    [Fact]
     public void BuildExpectedSchemaRejectsDuplicateObjectKeys()
     {
         var method = typeof(OrganizationStore).GetMethod(
@@ -149,20 +170,79 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(2, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
-        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
-        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
+        var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
+        var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
+        Assert.True(File.Exists(v1Backup));
+        Assert.Equal(
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v1Backup))).ToLowerInvariant(),
+            File.ReadAllText(v1Hash).Trim());
+        Assert.Equal(1, RawScalar(v1Backup, "SELECT version FROM schema_version;"));
+
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV2BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV2BackupHashFileName);
         Assert.True(File.Exists(backup));
         Assert.Equal(
             Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(),
             File.ReadAllText(hash).Trim());
-        Assert.Equal(1, RawScalar(backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(2, RawScalar(backup, "SELECT version FROM schema_version;"));
 
         var backupBytes = File.ReadAllBytes(backup);
         using var restarted = Open(root);
         restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(backupBytes, File.ReadAllBytes(backup));
+    }
+
+    /// <summary>
+    /// A canonical v1 database migrates through v2 to v3 in one process with
+    /// source-bound backups at both boundaries, preserving identity and history.
+    /// </summary>
+    [Fact]
+    public void ChainedV1ToV3MigrationPreservesDataAndRetainsBothSourceBoundBackups()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            store.RecordSession("ses_chain", "Chained");
+        }
+
+        DowngradeToCanonicalV1(root.Path);
+        Assert.Equal(1, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        var before = SnapshotCoreData(root.Path);
+
+        using (var migrated = Open(root))
+        {
+            var identity = migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            Assert.Equal("ses_chain", identity.SessionId);
+            Assert.Equal("Chained", identity.SessionTitle);
+        }
+
+        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(before, SnapshotCoreData(root.Path));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
+        Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM permission_policies WHERE active = 1;"));
+
+        // Both migration boundaries retained verified, source-bound evidence.
+        foreach (var (backupName, hashName, expectedVersion) in new[]
+        {
+            (OrganizationStore.SchemaV1BackupFileName, OrganizationStore.SchemaV1BackupHashFileName, 1),
+            (OrganizationStore.SchemaV2BackupFileName, OrganizationStore.SchemaV2BackupHashFileName, 2),
+        })
+        {
+            var backup = Path.Combine(root.Directory, backupName);
+            var hash = Path.Combine(root.Directory, hashName);
+            Assert.True(File.Exists(backup), $"{backupName} should be retained");
+
+            // The store must not have left WAL/SHM sidecars beside the evidence.
+            AssertNoBackupSidecars(backup);
+            Assert.Equal(
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(),
+                File.ReadAllText(hash).Trim());
+            Assert.Equal(expectedVersion, RawScalar(backup, "SELECT version FROM schema_version;"));
+        }
     }
 
     [Fact]
@@ -272,10 +352,10 @@ public sealed class OrganizationStoreTests
         }
 
         Assert.Equal(1, RawScalar(root.Path, "SELECT version FROM schema_version;"));
-        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(2, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -605,7 +685,7 @@ public sealed class OrganizationStoreTests
 
         ExecuteRaw(
             root.Path,
-            "DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments WHERE slug = 'qa';");
+            "DELETE FROM permission_audit; DELETE FROM permission_requests; DELETE FROM permission_grants; DELETE FROM dispatch_holds; DELETE FROM orientation_evidence; DELETE FROM orientation_assignment_fragments; DELETE FROM orientation_assignments; DELETE FROM permission_restrictions; DELETE FROM permission_policies; DELETE FROM orientation_facts; DELETE FROM orientation_fragments; DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments WHERE slug = 'qa';");
 
         using var reopened = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromMilliseconds(200));
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
@@ -638,7 +718,7 @@ public sealed class OrganizationStoreTests
             store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         }
 
-        ExecuteRaw(root.Path, "DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments; DELETE FROM organizations;");
+        ExecuteRaw(root.Path, "DELETE FROM permission_audit; DELETE FROM permission_requests; DELETE FROM permission_grants; DELETE FROM dispatch_holds; DELETE FROM orientation_evidence; DELETE FROM orientation_assignment_fragments; DELETE FROM orientation_assignments; DELETE FROM permission_restrictions; DELETE FROM permission_policies; DELETE FROM orientation_facts; DELETE FROM orientation_fragments; DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments; DELETE FROM organizations;");
         using var reopened = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromMilliseconds(200));
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
@@ -1157,6 +1237,21 @@ public sealed class OrganizationStoreTests
         ExecuteRaw(
             path,
             """
+            PRAGMA foreign_keys = OFF;
+            DROP TABLE permission_audit;
+            DROP TABLE permission_requests;
+            DROP TABLE permission_grants;
+            DROP TABLE dispatch_holds;
+            DROP TABLE orientation_evidence;
+            DROP TABLE orientation_assignment_fragments;
+            DROP INDEX one_current_orientation_assignment;
+            DROP TABLE orientation_assignments;
+            DROP TABLE permission_restrictions;
+            DROP INDEX one_active_permission_policy;
+            DROP TABLE permission_policies;
+            DROP TABLE orientation_facts;
+            DROP INDEX one_current_orientation_fragment;
+            DROP TABLE orientation_fragments;
             ALTER TABLE runtime_bindings RENAME TO runtime_bindings_v2;
             CREATE TABLE runtime_bindings (
                 id TEXT PRIMARY KEY,
@@ -1179,11 +1274,12 @@ public sealed class OrganizationStoreTests
                 workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
                 created_at, updated_at, revision)
             SELECT id, employee_id, placement, container_ref, volume_ref, home_ref,
-                workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
-                created_at, updated_at, revision
+                   workspace_ref, session_ref, tmux_owner_token, ownership_epoch,
+                   created_at, updated_at, revision
             FROM runtime_bindings_v2;
             DROP TABLE runtime_bindings_v2;
             UPDATE schema_version SET version = 1;
+            PRAGMA foreign_keys = ON;
             """);
     }
 

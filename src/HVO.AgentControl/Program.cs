@@ -285,6 +285,425 @@ app.MapPatch("/api/organization", (HttpContext context, AcpControlHost host, Org
     .ProducesProblem(StatusCodes.Status409Conflict)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+app.MapPut("/api/organization/basic-instructions", (
+    HttpContext context,
+    AcpControlHost host,
+    OrganizationInstructionsUpdate update) =>
+{
+    if (!TerminalProtocol.IsSameOrigin(
+            context.Request.Headers.Origin.ToString(),
+            context.Request.Scheme,
+            context.Request.Host.Value))
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status403Forbidden,
+            title: "Cross-origin request rejected.",
+            detail: "Instruction updates must originate from the portal origin.");
+    }
+
+    if (string.IsNullOrWhiteSpace(update.OrganizationId) || update.Revision is null or < 1)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid instruction update.",
+            detail: "A stable organization id and current revision are required.");
+    }
+
+    try
+    {
+        return Results.Ok(host.UpdateOrganizationBasicInstructions(
+            update.OrganizationId,
+            update.BasicInstructions ?? string.Empty,
+            update.Revision.Value));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Invalid basic instructions.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Organization not found.",
+            detail: "No organization with that stable id exists.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Instruction update conflicted.",
+            detail: "The organization changed since it was read. Reload and retry.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The basic instructions could not be updated.");
+    }
+})
+    .WithName("UpdateOrganizationBasicInstructions")
+    .WithTags("Organization")
+    .WithSummary("Updates persisted basic instructions and marks current orientation stale.")
+    .Produces<HVO.AgentControl.Organization.OrganizationOverview>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPut("/api/roles/{id}/instructions", (
+    HttpContext context,
+    AcpControlHost host,
+    string id,
+    RoleInstructionsUpdate update) =>
+{
+    if (Program.RejectCrossOrigin(context, "Role instruction updates") is { } rejection)
+    {
+        return rejection;
+    }
+
+    if (string.IsNullOrWhiteSpace(id) || update.Revision is null or < 1)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid role instruction update.",
+            detail: "A stable role id and current role revision are required.");
+    }
+
+    try
+    {
+        return Results.Ok(host.UpdateRoleInstructions(
+            id,
+            update.StandingInstructions ?? string.Empty,
+            update.Revision.Value));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Invalid role instructions.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Role not found.",
+            detail: "No role with that stable id exists.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Role instruction update conflicted.",
+            detail: "The role changed since it was read. Reload and retry.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The role instructions could not be updated.");
+    }
+})
+    .WithName("UpdateRoleInstructions")
+    .WithTags("Organization")
+    .WithSummary("Updates authoritative role standing instructions under optimistic revision and marks affected orientation stale.")
+    .Produces<HVO.AgentControl.Organization.OrganizationOverview>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/orientation", (AcpControlHost host) =>
+{
+    try
+    {
+        return Results.Ok(host.GetOrientationStatus());
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Orientation unavailable.",
+            detail: "The current employee orientation could not be read.");
+    }
+})
+    .WithName("GetOrientation")
+    .WithTags("Orientation")
+    .WithSummary("Returns employee orientation and dispatch-hold state.")
+    .Produces<HVO.AgentControl.Organization.OrientationStatus>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/orientation/deliver", (HttpContext context, AcpControlHost host) =>
+{
+    if (Program.RejectCrossOrigin(context, "Orientation delivery") is { } rejection)
+    {
+        return rejection;
+    }
+
+    try
+    {
+        return Results.Ok(host.RecomposeAndDeliverOrientation());
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Orientation changed.",
+            detail: "Reload and retry delivery.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Orientation unavailable.",
+            detail: "Orientation could not be delivered.");
+    }
+})
+    .WithName("DeliverOrientation")
+    .WithTags("Orientation")
+    .WithSummary("Recomposes and atomically delivers current standing orientation.")
+    .Produces<HVO.AgentControl.Organization.OrientationStatus>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/orientation/comprehension", (
+    HttpContext context,
+    AcpControlHost host,
+    HVO.AgentControl.Organization.OrientationEvidenceRequest evidence) =>
+{
+    if (Program.RejectCrossOrigin(context, "Orientation evidence") is { } rejection)
+    {
+        return rejection;
+    }
+
+    try
+    {
+        return Results.Ok(host.RecordOrientationEvidence(evidence));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid orientation evidence.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Orientation evidence rejected.",
+            detail: "The assignment is stale, duplicated, or no longer delivered.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Orientation unavailable.",
+            detail: "Evidence could not be recorded.");
+    }
+})
+    .WithName("RecordOrientationEvidence")
+    .WithTags("Orientation")
+    .WithSummary("Records owner-submitted structured evidence validated against exact persisted orientation facts. This is an owner override record and host validation, not a live model demonstration.")
+    .Produces<HVO.AgentControl.Organization.OrientationStatus>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/orientation/comprehension/run", async (HttpContext context, AcpControlHost host) =>
+{
+    if (Program.RejectCrossOrigin(context, "The live comprehension action") is { } rejection)
+    {
+        return rejection;
+    }
+
+    try
+    {
+        return Results.Ok(await host.RunOrientationComprehensionAsync(context.RequestAborted));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Comprehension unavailable.",
+            detail: "A current delivered orientation and idle demonstration slot are required.");
+    }
+    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Comprehension cancelled.",
+            detail: "The caller cancelled the live demonstration.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Orientation unavailable.",
+            detail: "The comprehension result could not be persisted.");
+    }
+})
+    .WithName("RunOrientationComprehension")
+    .WithTags("Orientation")
+    .WithSummary("Runs one owner-triggered bounded ACP JSON comprehension demonstration without tools. Model, ACP, malformed, empty, oversized and non-terminal outcomes are persisted as live-model failures.")
+    .Produces<HVO.AgentControl.Organization.OrientationStatus>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPut("/api/orientation/manual-hold", (HttpContext context, AcpControlHost host, ManualHoldUpdate update) =>
+{
+    if (Program.RejectCrossOrigin(context, "Dispatch holds") is { } rejection)
+    {
+        return rejection;
+    }
+
+    try
+    {
+        return Results.Ok(host.SetManualDispatchHold(update.Held, update.Detail));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid dispatch hold.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Orientation unavailable.",
+            detail: "The dispatch hold could not be changed.");
+    }
+})
+    .WithName("SetManualDispatchHold")
+    .WithTags("Orientation")
+    .WithSummary("Sets or clears the owner's independent manual dispatch hold.")
+    .Produces<HVO.AgentControl.Organization.OrientationStatus>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/permissions/grants", (
+    HttpContext context,
+    AcpControlHost host,
+    HVO.AgentControl.Organization.PermissionGrantRequest grant) =>
+{
+    if (Program.RejectCrossOrigin(context, "Permission grants") is { } rejection)
+    {
+        return rejection;
+    }
+
+    try
+    {
+        return Results.Ok(host.GrantPermission(grant));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Invalid permission grant.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Permission grant conflicted.",
+            detail: "The policy revision, expiry, or idempotency record changed.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Grant target not found.",
+            detail: "The employee or active restriction does not exist in the organization.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Permission store unavailable.",
+            detail: "The staged grant could not be recorded.");
+    }
+})
+    .WithName("CreatePermissionGrant")
+    .WithTags("Permissions")
+    .WithSummary("Persists and audits a staged owner-approved grant for an explicitly waivable restriction. Phase 1 grants are not executable through inbound ACP permission requests.")
+    .Produces<HVO.AgentControl.Organization.PermissionGrantSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/permissions/grants/{id}/revoke", (
+    HttpContext context,
+    AcpControlHost host,
+    string id,
+    GrantRevokeRequest revoke) =>
+{
+    if (Program.RejectCrossOrigin(context, "Permission revocation") is { } rejection)
+    {
+        return rejection;
+    }
+
+    try
+    {
+        return Results.Ok(host.RevokePermission(id, revoke.ExpectedRevision));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Permission grant not found.",
+            detail: "No grant with that stable id exists.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Permission revocation conflicted.",
+            detail: "The grant changed or was already revoked.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Permission store unavailable.",
+            detail: "The grant could not be revoked.");
+    }
+})
+    .WithName("RevokePermissionGrant")
+    .WithTags("Permissions")
+    .WithSummary("Revokes a staged owner-approved permission grant under optimistic revision.")
+    .Produces<HVO.AgentControl.Organization.PermissionGrantSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapPost("/api/control/model", async (HttpContext context, AcpControlHost host, ModelSelection selection) =>
 {
     if (!TerminalProtocol.IsSameOrigin(context.Request.Headers.Origin.ToString(),
@@ -433,6 +852,27 @@ public partial class Program
     public const int MinimumOwnerPasswordLength = 24;
 
     /// <summary>
+    /// Returns a ProblemDetails 403 when a state-changing request did not come
+    /// from the portal origin, or null when the request may proceed. Centralized
+    /// so every mutating endpoint applies the identical same-origin contract.
+    /// </summary>
+    internal static IResult? RejectCrossOrigin(HttpContext context, string operation)
+    {
+        if (HVO.AgentControl.Terminal.TerminalProtocol.IsSameOrigin(
+                context.Request.Headers.Origin.ToString(),
+                context.Request.Scheme,
+                context.Request.Host.Value))
+        {
+            return null;
+        }
+
+        return Results.Problem(
+            statusCode: StatusCodes.Status403Forbidden,
+            title: "Cross-origin request rejected.",
+            detail: $"{operation} must originate from the portal origin.");
+    }
+
+    /// <summary>
     /// Resolves the configured owner password for the startup auth gate.
     /// </summary>
     /// <remarks>
@@ -516,6 +956,10 @@ public partial class Program
 public sealed record ModelSelection(string? Model);
 
 public sealed record OrganizationUpdate(string? OrganizationId, string? DisplayName, int? Revision);
+public sealed record OrganizationInstructionsUpdate(string? OrganizationId, string? BasicInstructions, int? Revision);
+public sealed record RoleInstructionsUpdate(string? StandingInstructions, int? Revision);
+public sealed record ManualHoldUpdate(bool Held, string? Detail);
+public sealed record GrantRevokeRequest(int ExpectedRevision);
 
 public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented);
 

@@ -91,7 +91,12 @@ public sealed class AcpRpcCorrelator
             return TryFail(key, new AcpRemoteException(code, message, data));
         }
 
-        return response.Result is { } result && TrySucceed(key, result.Clone());
+        if (response.Result is { } result)
+        {
+            return TrySucceed(key, result.Clone());
+        }
+
+        return TryFail(key, new AcpProtocolException("ACP response contained neither a result nor an error."));
     }
 
     public bool TrySucceed(string key, JsonElement result)
