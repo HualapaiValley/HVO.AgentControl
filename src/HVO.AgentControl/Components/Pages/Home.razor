@@ -23,7 +23,7 @@
 
     <p class="error-banner" data-field="error-banner" role="alert" hidden><span class="error-tag">Runtime fault</span><span class="error-text" data-field="error"></span></p>
 
-    <main class="workspace" id="portal-content">
+    <main class="workspace" id="portal-content" tabindex="-1">
         <aside class="organization-nav" aria-label="Organization navigation">
             <button type="button" class="nav-item" data-nav="overview" aria-current="page">Overview</button>
             <button type="button" class="nav-item" data-nav="operations">Operations</button>
@@ -47,17 +47,7 @@
                 <article class="attention"><h3>Failures needing attention</h3><ul data-org-failures></ul></article>
             </section>
 
-            <section class="org-view" data-view="operations" hidden aria-labelledby="operations-title">
-                <h2 id="operations-title">Operations</h2>
-                <p>Employees persisted in the Operations department.</p>
-                <ul class="employee-list" data-department-employees="operations"></ul>
-            </section>
-            <section class="org-view" data-view="development" hidden aria-labelledby="development-title">
-                <h2 id="development-title">Development</h2><p class="empty-state">No employees are assigned to Development.</p>
-            </section>
-            <section class="org-view" data-view="qa" hidden aria-labelledby="qa-title">
-                <h2 id="qa-title">QA</h2><p class="empty-state">No employees are assigned to QA.</p>
-            </section>
+            <div data-department-views></div>
 
             <section class="org-view" data-view="employee" hidden aria-labelledby="employee-title">
                 <button type="button" class="text-button" data-back-to-department>Back to department</button>
@@ -82,18 +72,20 @@
                 <p>Persisted changes use current revision tokens. Changes await redelivery, runtime restart or comprehension before readiness returns.</p>
                 <form data-org-name-form>
                     <label for="org-name">Company display name</label>
-                    <input id="org-name" data-org-name-input required maxlength="128" />
-                    <button class="btn" type="submit">Save display name</button>
+                    <input id="org-name" data-org-name-input data-organization-control required maxlength="128" disabled />
+                    <button class="btn" type="submit" data-organization-control disabled>Save display name</button>
                 </form>
                 <form data-org-instructions-form>
                     <label for="org-instructions">Organization basic instructions</label>
-                    <textarea id="org-instructions" data-org-instructions rows="6" required></textarea>
-                    <button class="btn" type="submit">Save basic instructions</button>
+                    <textarea id="org-instructions" data-org-instructions data-organization-control rows="6" required disabled></textarea>
+                    <button class="btn" type="submit" data-organization-control disabled>Save basic instructions</button>
                 </form>
                 <form data-role-instructions-form>
-                    <label for="role-instructions">Operations / IT standing instructions</label>
-                    <textarea id="role-instructions" data-role-instructions rows="6" required></textarea>
-                    <button class="btn" type="submit">Save role instructions</button>
+                    <label for="role-select">Authoritative role</label>
+                    <select id="role-select" data-role-select data-organization-control disabled></select>
+                    <label for="role-instructions">Selected role standing instructions</label>
+                    <textarea id="role-instructions" data-role-instructions data-organization-control rows="6" required disabled></textarea>
+                    <button class="btn" type="submit" data-organization-control disabled>Save role instructions</button>
                 </form>
                 <p class="receipt" data-config-receipt role="status"></p>
             </section>
@@ -106,7 +98,18 @@
                     <div class="telemetry-row"><dt>Employee</dt><dd data-selected-employee-name>None selected</dd></div>
                     <div class="telemetry-row"><dt>Runtime state</dt><dd data-field="state-detail">Synchronizing</dd></div>
                     <div class="telemetry-row"><dt>Native session</dt><dd><code class="mono" data-field="sessionId">&mdash;</code></dd></div>
-                    <div class="telemetry-row"><dt>Session model</dt><dd><code class="mono" data-field="model">&mdash;</code></dd></div>
+                    <div class="telemetry-row"><dt>Transport</dt><dd><code class="mono" data-field="transport">ACP</code></dd></div>
+                    <div class="telemetry-row telemetry-row--model">
+                        <dt><label for="model-select">Session model</label></dt>
+                        <dd class="model-control">
+                            <select id="model-select" class="model-select" data-model-select disabled>
+                                <option value="" disabled selected>Synchronizing&hellip;</option>
+                            </select>
+                            <p class="model-receipt" data-model-receipt role="status" aria-live="polite" hidden></p>
+                            <p class="control-note" data-model-sync-note hidden>OpenCode's TUI picker is client-local. This is the server session model, not an immediate mirror of the picker. Web selection is unavailable until both can synchronize.</p>
+                        </dd>
+                    </div>
+                    <div class="telemetry-row"><dt>Last sync</dt><dd><time data-field="syncedAt">&mdash;</time></dd></div>
                 </dl>
                 <div class="controls" role="group" aria-label="Terminal controls">
                     <button type="button" class="btn btn-primary" data-action="reconnect" disabled>Reconnect terminal</button>

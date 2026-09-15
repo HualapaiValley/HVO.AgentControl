@@ -47,6 +47,34 @@ public sealed class PortalOrganizationReadModelTests
     }
 
     [Fact]
+    public void StaleWithDiagnosticLastErrorRemainsOrientationStale()
+    {
+        var employee = Employee(Orientation(
+            OrientationStates.Stale,
+            restartRequired: false,
+            dispatchHeld: true,
+            error: "Role instructions changed."));
+
+        Assert.Equal(
+            EmployeeAvailabilityCategories.OrientationStale,
+            PortalOrganizationReadModel.Classify(employee, hostOwned: true, Status()));
+    }
+
+    [Fact]
+    public void GenericLastErrorOnOtherwiseReadyStateIsOrientationFailed()
+    {
+        var employee = Employee(Orientation(
+            OrientationStates.Comprehended,
+            restartRequired: false,
+            dispatchHeld: false,
+            error: "Unexpected persisted diagnostic."));
+
+        Assert.Equal(
+            EmployeeAvailabilityCategories.OrientationFailed,
+            PortalOrganizationReadModel.Classify(employee, hostOwned: true, Status()));
+    }
+
+    [Fact]
     public void DeliveredUnacknowledgedHoldIsHeldOnlyWhileTheRuntimeIsAvailable()
     {
         var employee = Employee(Orientation(

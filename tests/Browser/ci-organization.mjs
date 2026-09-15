@@ -217,7 +217,7 @@ try {
 
   // The store opens before ready, so the panel should load immediately; give it
   // a bounded window in case the first fetch races the state transition.
-  await page.waitForSelector('[data-org-overview]:not([hidden])', { timeout: 30000 });
+  await page.waitForSelector('[data-organization-loaded]', { timeout: 30000 });
   const panelVisible = await page.evaluate(() => {
     const panel = document.querySelector('[data-org-overview]');
     return !panel.hidden && panel.getBoundingClientRect().height > 0;
@@ -243,6 +243,15 @@ try {
     JSON.stringify(navItems) === JSON.stringify(['Overview', 'Operations', 'Development', 'QA', 'System configuration']),
     { navItems },
   );
+  const availability = await readRows(page, '[data-org-availability]');
+  const expectedAvailability = [
+    ['ready', '0'], ['held', '1'], ['reload required', '0'],
+    ['orientation failed', '0'], ['orientation stale', '0'], ['runtime unavailable', '0'],
+  ];
+  record('portal renders authoritative availability counts for every supported category',
+    JSON.stringify(availability) === JSON.stringify(expectedAvailability), { availability, expectedAvailability });
+  const pending = await page.textContent('[data-pending-approvals]');
+  record('pending approvals are explicitly unsupported with count zero', pending.startsWith('Unsupported (0):'), { pending });
 
   await page.click('[data-nav="operations"]');
   const employees = await page.$$eval('[data-department-employees="operations"] .employee-card', (nodes) => nodes.map((node) => node.textContent.trim()));
@@ -260,14 +269,14 @@ try {
   await page.click('[data-nav="system"]');
   await page.fill('[data-org-instructions]', 'Browser fixture organization instructions.');
   await page.click('[data-org-instructions-form] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent.includes('Saved. Orientation'));
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent === 'Saved organization instructions. Orientation is stale.');
   const orgInstructionStatus = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()).state);
   record('System configuration saves organization basic instructions and exposes stale orientation', orgInstructionStatus === 'Stale', { orgInstructionStatus });
 
   await page.click('[data-nav="system"]');
   await page.fill('[data-role-instructions]', 'Browser fixture Operations standing instructions.');
   await page.click('[data-role-instructions-form] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent.includes('Saved. Orientation'));
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent === 'Saved role instructions. Orientation is stale.');
   const roleInstructionEvidence = await page.evaluate(async () => {
     const organization = await (await fetch('/api/organization')).json();
     return {
@@ -305,17 +314,31 @@ try {
       && renameEvidence.stale.assignmentId === renameEvidence.before.assignmentId,
     renameEvidence,
   );
+  const loadedRevisionBeforeRefresh = Number(await page.getAttribute('[data-portal]', 'data-organization-loaded'));
+  await page.evaluate(async () => {
+    const portal = document.querySelector('[data-portal]');
+    portal.dataset.runtimeState = 'degraded';
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    portal.dataset.runtimeState = 'ready';
+  });
+  await page.waitForFunction((revision) => Number(document.querySelector('[data-portal]')?.dataset.organizationLoaded) > revision,
+    loadedRevisionBeforeRefresh);
+  await page.click('[data-nav="overview"]');
+  await page.click('[data-org-failures] a');
+  await page.waitForSelector('[data-view="employee"]:not([hidden])');
+  record('actionable failure link navigates to the exact employee',
+    (await page.getAttribute('[data-portal]', 'data-selected-employee-id')) === selectedId, { selectedId });
 
   // Exercise the owner controls on the explicitly selected host-owned employee.
   await page.click('[data-nav="operations"]');
   await page.click('[data-department-employees="operations"] .employee-card');
   await page.click('[data-orientation-hold]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent.includes('Saved. Orientation'));
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent.startsWith('Manual hold set. State:'));
   await page.waitForFunction(() => document.querySelector('[data-orientation-hold]')?.dataset.held === 'true');
   record('manual hold button mutates and reloads orientation state', true, {});
 
   await page.click('[data-orientation-deliver]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent.includes('Saved. Orientation'));
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Delivered. Runtime restart required.');
   const deliveredAfterRename = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()));
   record(
     'deliver button creates a fresh delivered assignment after rename',
@@ -347,19 +370,27 @@ try {
 
   // Desktop and mobile layout: the panel stays visible with no horizontal overflow.
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await page.click('[data-nav="overview"]');
+    await page.waitForSelector('[data-view="overview"]:not([hidden])');
+    await page.click('[data-nav="operations"]');
+    await page.waitForSelector('[data-view="operations"]:not([hidden])');
+    const currentEmployees = await page.$$eval('[data-department-employees="operations"] .employee-card', (nodes) => nodes.length);
     const metric = await measurePanel(page, viewport);
     const passed = !metric.hidden
       && metric.width > 0
       && metric.documentWidth <= metric.viewportWidth + 1
-      && metric.top >= -1;
+      && metric.top >= -1
+      && currentEmployees === 1;
     record(
-      `organization panel visible without horizontal overflow at ${viewport.width}x${viewport.height}`,
+      `organization navigation and employee count stay contained at ${viewport.width}x${viewport.height}`,
       passed,
       {
         hidden: metric.hidden,
         panelWidth: Math.round(metric.width),
         viewportWidth: metric.viewportWidth,
         documentWidth: metric.documentWidth,
+        currentEmployees,
       },
     );
     await page.screenshot({ path: join(OUT_DIR, `organization-${viewport.width}x${viewport.height}.png`) });

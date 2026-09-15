@@ -275,12 +275,14 @@ protected by owner authentication when configured. Readiness is distinct from
 process liveness; a failed readiness probe must not trigger a destructive
 restart. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the API contract.
 
-Model display reads the native session, not the startup default. OpenCode
-1.18.30's attached TUI keeps its picker selection local until submission, so the
-portal labels the value it can observe as the server session model. The web
-selector is disabled (`modelSyncSupported = false`) because actual two-way TUI
-synchronization is not available; an acknowledged ACP model-setting RPC alone
-does not update the native session or the TUI picker. See
+Selected-employee control telemetry shows the observed native session model,
+transport, last synchronization time, and the model selector with its receipt and
+synchronization note. Model display reads the native session, not the startup
+default. OpenCode 1.18.30's attached TUI keeps its picker selection local until
+submission, so the portal labels the value it can observe as the server session
+model. The selector remains visible but disabled (`modelSyncSupported = false`)
+because actual two-way TUI synchronization is not available; an acknowledged ACP
+model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
 `/control-data/control.db` is the authoritative schema-v3 SQLite store for organization,

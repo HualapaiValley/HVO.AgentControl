@@ -1025,7 +1025,7 @@ body {
 .employee-card { width: 100%; }
 .availability-pill { display: inline-block; border: 1px solid var(--line-strong); border-radius: 999px; padding: 4px 10px; color: var(--amber); text-transform: uppercase; font-size: 11px; }
 .org-view form { display: grid; gap: 8px; margin: 18px 0; }
-.org-view textarea, .org-view input { width: 100%; resize: vertical; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); padding: 10px; font: inherit; }
+.org-view textarea, .org-view input, .org-view select { width: 100%; resize: vertical; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); padding: 10px; font: inherit; }
 .text-button { padding: 6px 9px; }
 
 .workspace > .control-deck {
@@ -1046,6 +1046,7 @@ body {
     .nav-item { flex: 0 0 auto; white-space: nowrap; }
     .organization-area { flex: 0 0 auto; overflow: visible; }
     .summary-grid, .detail-grid { grid-template-columns: 1fr; }
-    .workspace > .control-deck { flex: 0 0 620px; display: flex; flex-direction: column; }
-    .workspace > .control-deck .terminal-surface { order: -1; flex: 1 1 auto; }
+    .workspace > .control-deck { flex: 0 0 auto; min-height: min(620px, 78dvh); display: flex; flex-direction: column; overflow: hidden; }
+    .workspace > .control-deck .terminal-surface { order: -1; flex: 1 1 360px; min-height: 280px; max-height: 58dvh; }
+    .workspace > .control-deck .telemetry { flex: 0 0 auto; max-height: 46dvh; }
 }

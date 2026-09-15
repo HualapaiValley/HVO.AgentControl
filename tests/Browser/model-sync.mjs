@@ -420,6 +420,10 @@ try {
     }),
   });
   await waitFor(async () => (await buttonDisabled('interrupt')) === false, 'degraded allows interrupt');
+  await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: { id: 'emp-degraded', terminal: { available: true, url: '/terminal?employeeId=emp-degraded' } } },
+  )));
   record('a degraded established session can control the terminal and cancel',
     (await buttonDisabled('interrupt')) === false && (await buttonDisabled('reconnect')) === false,
     { interrupt: await buttonDisabled('interrupt'), reconnect: await buttonDisabled('reconnect') });
@@ -465,6 +469,34 @@ try {
   await waitFor(async () => (await disabled()) === true, 'modelSyncSupported false disables');
   record('modelSyncSupported false keeps the model selector disabled',
     (await disabled()) === true, { disabled: await disabled() });
+
+  // ---- 13. employee terminal target changes tear down immediately --------
+  await fetch(`${base}/__stub`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ control: { state: 'ready', sessionId: 'stub-session', terminalReady: true, canControl: true } }),
+  });
+  await sleep(2200);
+  const terminalEvents = await page.evaluate(() => {
+    const events = [];
+    const sockets = [];
+    class Socket {
+      static OPEN = 1; static CONNECTING = 0;
+      constructor(url) { this.url = url; this.readyState = 1; sockets.push(this); events.push(`open:${url}`); setTimeout(() => this.onopen?.(), 0); }
+      close(code, reason) { this.readyState = 3; events.push(`close:${code}:${reason}`); }
+      send() {}
+    }
+    window.WebSocket = Socket;
+    const root = document.querySelector('[data-portal]');
+    const dispatch = (detail) => root.dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail }));
+    dispatch({ id: 'emp-one', terminal: { available: true, url: '/terminal?employeeId=emp-one' } });
+    root.querySelector('[data-action="reconnect"]').click();
+    dispatch({ id: 'emp-one', terminal: { available: true, url: '/terminal?employeeId=emp-one&revision=2' } });
+    dispatch({ id: 'emp-one', terminal: { available: false, url: null } });
+    return events;
+  });
+  record('same employee URL change or terminal revocation closes the old socket immediately',
+    terminalEvents.filter((event) => event.startsWith('close:1000:employee-terminal-target-changed')).length === 2,
+    { terminalEvents });
 
   record('no uncaught page errors during the model sync suite', pageErrors.length === 0, { pageErrors });
 } catch (error) {

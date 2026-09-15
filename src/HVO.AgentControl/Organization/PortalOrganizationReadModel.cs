@@ -167,19 +167,24 @@ public static class PortalOrganizationReadModel
         ArgumentNullException.ThrowIfNull(status);
 
         var orientation = employee.Orientation;
-        if (orientation is not null
-            && (orientation.State is OrientationStates.Failed
-                or OrientationStates.TimedOut
-                or OrientationStates.Rejected
-                or OrientationStates.Uncertain
-                || !string.IsNullOrWhiteSpace(orientation.LastError)))
+        if (orientation?.State is OrientationStates.Failed
+            or OrientationStates.TimedOut
+            or OrientationStates.Rejected
+            or OrientationStates.Uncertain)
         {
             return EmployeeAvailabilityCategories.OrientationFailed;
         }
 
+        // A stale assignment normally carries the reason in LastError. State is
+        // authoritative, so that diagnostic must not reclassify it as failed.
         if (orientation?.State == OrientationStates.Stale)
         {
             return EmployeeAvailabilityCategories.OrientationStale;
+        }
+
+        if (!string.IsNullOrWhiteSpace(orientation?.LastError))
+        {
+            return EmployeeAvailabilityCategories.OrientationFailed;
         }
 
         if (orientation?.RestartRequired == true)

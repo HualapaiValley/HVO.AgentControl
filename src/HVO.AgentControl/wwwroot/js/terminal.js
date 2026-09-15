@@ -295,9 +295,13 @@ class TerminalPortal {
         const nextId = typeof employee.id === "string" ? employee.id : "";
         const terminal = employee.terminal && typeof employee.terminal === "object" ? employee.terminal : {};
         const nextUrl = terminal.available === true && typeof terminal.url === "string" ? terminal.url : "";
-        if (nextId !== this.selectedEmployeeId) {
+        const targetChanged = nextId !== this.selectedEmployeeId
+            || nextUrl !== this.selectedTerminalUrl
+            || !nextId
+            || !nextUrl;
+        if (targetChanged) {
             this.manualDetach = false;
-            this.closeSocket(1000, "employee-selection-changed");
+            this.closeSocket(1000, "employee-terminal-target-changed");
             this.connectFailures = 0;
             this.nextConnectAt = 0;
             this.autoConnectSuppressed = false;
