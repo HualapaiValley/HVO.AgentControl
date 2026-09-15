@@ -121,10 +121,13 @@ public sealed class ControllerIsolationLayoutTests
             StringComparison.Ordinal);
         Assert.Contains("control-private:/control-data", compose, StringComparison.Ordinal);
 
-        // The setuid launcher cannot elevate under no-new-privileges, and losing
-        // it would silently return every agent process to the controller's UID.
-        Assert.DoesNotContain("no-new-privileges:true", compose, StringComparison.Ordinal);
-        Assert.Contains("cap_drop", compose, StringComparison.Ordinal);
+        // The control service's setuid launcher cannot elevate under
+        // no-new-privileges. A separate optional worker service may and should
+        // use that hardening because its root PID1 performs direct fixed-UID
+        // lifecycle operations and has no setuid artifact.
+        var controlSection = compose[..compose.IndexOf("  worker-local:", StringComparison.Ordinal)];
+        Assert.DoesNotContain("no-new-privileges:true", controlSection, StringComparison.Ordinal);
+        Assert.Contains("cap_drop", controlSection, StringComparison.Ordinal);
     }
 
     [Fact]

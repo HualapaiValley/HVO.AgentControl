@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/HVO.AgentControl/HVO.AgentControl.csproj" />
+    <Project Path="src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/HVO.AgentControl.Tests/HVO.AgentControl.Tests.csproj" />

@@ -18,5 +18,6 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
     <ProjectReference Include="../../src/HVO.AgentControl/HVO.AgentControl.csproj" />
+    <ProjectReference Include="../../src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj" />
   </ItemGroup>
 </Project>
