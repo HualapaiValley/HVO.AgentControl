@@ -69,23 +69,23 @@
 
             <section class="org-view" data-view="system" hidden aria-labelledby="system-title">
                 <h2 id="system-title">System configuration</h2>
-                <p>Persisted changes use current revision tokens. Changes await redelivery, runtime restart or comprehension before readiness returns.</p>
+                <p>Each draft keeps the revision that was authoritative when editing began. If authoritative data changes, the draft is preserved and marked as conflicting until you reset it or intentionally submit it for revision validation.</p>
                 <form data-org-name-form>
                     <label for="org-name">Company display name</label>
                     <input id="org-name" data-org-name-input data-organization-control required maxlength="128" disabled />
-                    <button class="btn" type="submit" data-organization-control disabled>Save display name</button>
+                    <div class="draft-actions"><button class="btn" type="submit" data-organization-control disabled>Save display name</button><button class="text-button" type="button" data-reset-org-name hidden>Discard draft</button></div>
                 </form>
                 <form data-org-instructions-form>
                     <label for="org-instructions">Organization basic instructions</label>
                     <textarea id="org-instructions" data-org-instructions data-organization-control rows="6" required disabled></textarea>
-                    <button class="btn" type="submit" data-organization-control disabled>Save basic instructions</button>
+                    <div class="draft-actions"><button class="btn" type="submit" data-organization-control disabled>Save basic instructions</button><button class="text-button" type="button" data-reset-org-instructions hidden>Discard draft</button></div>
                 </form>
                 <form data-role-instructions-form>
                     <label for="role-select">Authoritative role</label>
                     <select id="role-select" data-role-select data-organization-control disabled></select>
                     <label for="role-instructions">Selected role standing instructions</label>
                     <textarea id="role-instructions" data-role-instructions data-organization-control rows="6" required disabled></textarea>
-                    <button class="btn" type="submit" data-organization-control disabled>Save role instructions</button>
+                    <div class="draft-actions"><button class="btn" type="submit" data-organization-control disabled>Save role instructions</button><button class="text-button" type="button" data-reset-role-instructions hidden>Discard draft</button></div>
                 </form>
                 <p class="receipt" data-config-receipt role="status"></p>
             </section>
