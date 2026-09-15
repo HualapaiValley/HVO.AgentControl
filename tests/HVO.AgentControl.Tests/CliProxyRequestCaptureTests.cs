@@ -347,7 +347,7 @@ public sealed class CliProxyRequestCaptureTests
             {
                 await _server;
             }
-            catch (Exception exception) when (exception is OperationCanceledException or SocketException)
+            catch (Exception exception) when (exception is OperationCanceledException or SocketException or IOException)
             {
             }
             _lifetime.Dispose();

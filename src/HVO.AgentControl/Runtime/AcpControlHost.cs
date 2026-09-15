@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Organization;
 using Microsoft.Extensions.Options;
@@ -32,6 +33,7 @@ public sealed class AcpControlHost : BackgroundService
     /// read cannot overwrite a newer selection.
     /// </summary>
     private readonly SemaphoreSlim _modelUpdateLock = new(1, 1);
+    private readonly SemaphoreSlim _orientationOperationLock = new(1, 1);
 
     private ControlState _state = ControlState.Disabled;
     private string? _error;
@@ -45,6 +47,10 @@ public sealed class AcpControlHost : BackgroundService
     private bool _isNewSession;
     private string _password = string.Empty;
     private string? _ownerToken;
+    private long _permissionGeneration;
+    private bool _capturingOrientationResponse;
+    private StringBuilder? _orientationResponseBuffer;
+    private int _orientationResponseBytes;
 
     private Process? _process;
     private AcpRpcSession? _session;
@@ -369,6 +375,7 @@ public sealed class AcpControlHost : BackgroundService
 
         _hostLifetime.Dispose();
         _modelUpdateLock.Dispose();
+        _orientationOperationLock.Dispose();
         OrganizationStore? organization;
         lock (_gate)
         {
@@ -388,6 +395,7 @@ public sealed class AcpControlHost : BackgroundService
         var adoptionSource = LoadAdoptionEvidence();
         OpenOrganizationStore(adoptionSource);
 
+        PrepareOrientationAssignment();
         await ConnectAsync(cancellationToken).ConfigureAwait(false);
         await StartTerminalAsync(cancellationToken).ConfigureAwait(false);
 
@@ -547,24 +555,159 @@ public sealed class AcpControlHost : BackgroundService
         }
     }
 
+    private void PrepareOrientationAssignment()
+    {
+        _orientationOperationLock.Wait();
+        try
+        {
+            var store = Organization ?? throw new OrganizationStoreException("The organization store is not open.");
+            var artifact = store.ComposeAndAssignCurrentOrientation();
+            var directory = InstructionsDirectory ?? HomePath;
+            OrientationArtifactPublisher.Publish(directory, artifact);
+            // Session binding is finalized after ACP load/new. Assigned is persisted
+            // before publication; Delivered follows exact artifact verification.
+        }
+        finally
+        {
+            _orientationOperationLock.Release();
+        }
+    }
+
+    public OrientationStatus RecomposeAndDeliverOrientation()
+    {
+        _orientationOperationLock.Wait();
+        try
+        {
+            var store = Organization ?? throw new OrganizationStoreException("The organization store is not open.");
+            var artifact = store.ComposeAndAssignCurrentOrientation();
+            OrientationArtifactPublisher.Publish(InstructionsDirectory ?? HomePath, artifact);
+            return store.MarkOrientationDelivered(
+                artifact.AssignmentId,
+                artifact.OrientationVersion,
+                _sessionId,
+                artifact.AssignmentRevision);
+        }
+        finally
+        {
+            _orientationOperationLock.Release();
+        }
+    }
+
+    public OrientationStatus GetOrientationStatus()
+    {
+        var identity = OrganizationIdentity ?? throw new OrganizationStoreException("The organization identity is unavailable.");
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).GetOrientationStatus(identity.EmployeeId);
+    }
+
+    public OrientationStatus RecordOrientationEvidence(OrientationEvidenceRequest request) =>
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).ValidateAndRecordComprehension(request);
+
+    public OrganizationOverview UpdateOrganizationBasicInstructions(
+        string organizationId,
+        string instructions,
+        int expectedRevision)
+    {
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+            .UpdateOrganizationBasicInstructions(organizationId, instructions, expectedRevision);
+    }
+
+    /// <summary>Runs the explicitly owner-triggered, tool-free bounded ACP comprehension demonstration.</summary>
+    public async Task<OrientationStatus> RunOrientationComprehensionAsync(CancellationToken cancellationToken)
+    {
+        var status = GetOrientationStatus();
+        if (status.State != OrientationStates.Delivered || _session is null || string.IsNullOrWhiteSpace(_sessionId))
+            throw new OrganizationConcurrencyException("A delivered orientation on the current live session is required.");
+        var prompt = $$"""
+            Return ONLY one JSON object, no markdown and no tools, with these fields:
+            employeeId, sessionId, orientationVersion, identity, department, reporting,
+            duties (array), restrictions (array), escalation.
+            Use the exact standing orientation facts for employeeId {{status.EmployeeId}},
+            sessionId {{_sessionId}}, orientationVersion {{status.OrientationVersion}}.
+            """;
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(TimeSpan.FromSeconds(_options.PromptTimeoutSeconds));
+        lock (_gate)
+        {
+            if (_capturingOrientationResponse) throw new OrganizationConcurrencyException("A comprehension demonstration is already running.");
+            _capturingOrientationResponse = true;
+            _orientationResponseBuffer = new StringBuilder();
+            _orientationResponseBytes = 0;
+        }
+        try
+        {
+            var result = await _session.RequestAsync("session/prompt", new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["sessionId"] = _sessionId,
+                ["prompt"] = new object[] { new Dictionary<string, object?>(StringComparer.Ordinal) { ["type"] = "text", ["text"] = prompt } },
+            }, TimeSpan.FromSeconds(_options.PromptTimeoutSeconds), bounded.Token).ConfigureAwait(false);
+            var stopReason = result.TryGetProperty("stopReason", out var stop) ? stop.GetString() : null;
+            if (!string.Equals(stopReason, "end_turn", StringComparison.Ordinal))
+                throw new OrganizationValidationException("The comprehension turn did not end normally.");
+            string json;
+            lock (_gate) { json = _orientationResponseBuffer?.ToString() ?? string.Empty; }
+            if (Encoding.UTF8.GetByteCount(json) > 16 * 1024) throw new OrganizationValidationException("The comprehension response exceeds 16 KiB.");
+            if (string.IsNullOrWhiteSpace(json)) throw new OrganizationValidationException("The comprehension turn returned no structured JSON evidence.");
+            OrientationEvidenceRequest evidence;
+            try
+            {
+                evidence = JsonSerializer.Deserialize<OrientationEvidenceRequest>(
+                    json,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                    ?? throw new OrganizationValidationException("The comprehension response was not the required JSON object.");
+            }
+            catch (JsonException exception)
+            {
+                throw new OrganizationValidationException(
+                    "The comprehension response was not valid unfenced JSON.",
+                    exception);
+            }
+
+            evidence = evidence with { ExpectedRevision = status.Revision };
+            return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+                .ValidateAndRecordComprehension(evidence, OrientationEvidenceSource.LiveModel);
+        }
+        catch (TimeoutException)
+        {
+            return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+                .RecordComprehensionTimeout(status.EmployeeId, status.OrientationVersion, status.Revision);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
+                .RecordComprehensionTimeout(status.EmployeeId, status.OrientationVersion, status.Revision);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _capturingOrientationResponse = false;
+                _orientationResponseBuffer = null;
+                _orientationResponseBytes = 0;
+            }
+        }
+    }
+
+    public OrientationStatus SetManualDispatchHold(bool held, string? detail)
+    {
+        var identity = OrganizationIdentity ?? throw new OrganizationStoreException("The organization identity is unavailable.");
+        return (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).SetManualDispatchHold(identity.EmployeeId, held, detail);
+    }
+
+    public PermissionGrantSummary GrantPermission(PermissionGrantRequest request) =>
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).CreatePermissionGrant(request);
+
+    public PermissionGrantSummary RevokePermission(string id, int revision) =>
+        (Organization ?? throw new OrganizationStoreException("The organization store is not open.")).RevokePermissionGrant(id, revision);
+
     private async Task ConnectAsync(CancellationToken cancellationToken)
     {
         _password = RandomNumberGenerator.GetHexString(32).ToLowerInvariant();
         _stderrBuffer.SetSecrets([_password]);
 
         var instructionsPath = InstructionsPath;
-        await File.WriteAllTextAsync(
-            instructionsPath,
-            AgentControlOpenCodeConfig.BuildInstructions(OrganizationName),
-            cancellationToken).ConfigureAwait(false);
-
-        if (!OperatingSystem.IsWindows() && InstructionsDirectory is not null)
+        if (!File.Exists(instructionsPath))
         {
-            // Orientation is host-owned and agent-readable, never agent-writable.
-            File.SetUnixFileMode(
-                instructionsPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite
-                | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+            throw new AcpProtocolException("The assigned orientation artifact was not published before runtime startup.");
         }
 
         CliProxyRuntimeConfiguration? cliProxy = null;
@@ -829,6 +972,7 @@ public sealed class AcpControlHost : BackgroundService
 
         _sessionId = sessionId;
         _isNewSession = isNew;
+        Interlocked.Increment(ref _permissionGeneration);
 
         var title = OrganizationIdentity?.SessionTitle;
         var titled = true;
@@ -841,9 +985,24 @@ public sealed class AcpControlHost : BackgroundService
         // The store is authoritative. Persist the established session
         // transactionally before the bootstrap prompt so a crash cannot lose the
         // organization/session mapping. runtime.json is not written back.
-        (Organization ?? throw new OrganizationStoreException("The organization store is not open."))
-            .RecordSession(sessionId, titled ? title : null);
+        var organization = Organization ?? throw new OrganizationStoreException("The organization store is not open.");
+        organization.RecordSession(sessionId, titled ? title : null);
         SetSession(sessionId);
+        await _orientationOperationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var assignment = organization.ComposeAndAssignCurrentOrientation();
+            OrientationArtifactPublisher.Publish(InstructionsDirectory ?? HomePath, assignment);
+            organization.MarkOrientationDelivered(
+                assignment.AssignmentId,
+                assignment.OrientationVersion,
+                sessionId,
+                assignment.AssignmentRevision);
+        }
+        finally
+        {
+            _orientationOperationLock.Release();
+        }
 
         _logger.LogInformation(
             "OpenCode ACP {Mode} session {SessionId} established.",
@@ -1022,9 +1181,11 @@ public sealed class AcpControlHost : BackgroundService
                 _logger.LogDebug("ACP tool update {Kind} status={Status}", kind, status);
                 break;
             case "agent_thought_chunk":
-            case "agent_message_chunk":
             case "user_message_chunk":
-                // Reasoning/message text is intentionally never logged or retained.
+                // Reasoning/user text is intentionally never logged or retained.
+                break;
+            case "agent_message_chunk":
+                CaptureOrientationResponse(update);
                 break;
             case "config_option_update":
                 // The model poll reads the native session and is authoritative;
@@ -1035,6 +1196,29 @@ public sealed class AcpControlHost : BackgroundService
             default:
                 _logger.LogDebug("ACP update {Kind} received.", kind);
                 break;
+        }
+    }
+
+    private void CaptureOrientationResponse(JsonElement update)
+    {
+        lock (_gate)
+        {
+            if (!_capturingOrientationResponse || _orientationResponseBuffer is null) return;
+            string? text = null;
+            if (update.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Object
+                && content.TryGetProperty("text", out var nested) && nested.ValueKind == JsonValueKind.String) text = nested.GetString();
+            else if (update.TryGetProperty("text", out var direct) && direct.ValueKind == JsonValueKind.String) text = direct.GetString();
+            if (text is null) return;
+            var textBytes = Encoding.UTF8.GetByteCount(text);
+            if (_orientationResponseBytes > 16 * 1024 - textBytes)
+            {
+                _orientationResponseBuffer.Clear();
+                _orientationResponseBuffer.Append(new string('x', 16 * 1024 + 1));
+                _orientationResponseBytes = 16 * 1024 + 1;
+                return;
+            }
+            _orientationResponseBuffer.Append(text);
+            _orientationResponseBytes += textBytes;
         }
     }
 
@@ -1203,7 +1387,31 @@ public sealed class AcpControlHost : BackgroundService
     {
         if (string.Equals(request.Method, "session/request_permission", StringComparison.Ordinal))
         {
-            _logger.LogInformation("Rejected inbound ACP permission request.");
+            try
+            {
+                var identity = OrganizationIdentity;
+                var store = Organization;
+                if (identity is not null && store is not null)
+                {
+                    PermissionPolicy.TryParseAuditClaim(request.Params, out var tool, out var resource);
+                    store.EvaluatePermission(
+                        identity.EmployeeId,
+                        _sessionId,
+                        Interlocked.Read(ref _permissionGeneration),
+                        tool,
+                        resource);
+                }
+            }
+            catch (Exception exception) when (exception is OrganizationStoreException
+                or ArgumentException
+                or InvalidOperationException)
+            {
+                // Permission handling must fail closed at the protocol boundary.
+                // Do not surface a store/session mismatch as JSON-RPC -32603.
+                _logger.LogWarning("Inbound ACP permission audit failed closed.");
+            }
+
+            _logger.LogInformation("Inbound ACP permission request rejected by Phase 1 host policy.");
             return Task.FromResult(AcpResponse.Ok(PermissionPolicy.BuildRejection(request.Params)));
         }
 

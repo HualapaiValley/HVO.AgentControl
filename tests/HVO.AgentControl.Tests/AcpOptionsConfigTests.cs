@@ -144,7 +144,9 @@ public sealed class AcpOptionsConfigTests
         Assert.Equal(instructions, root.GetProperty("instructions")[0].GetString());
 
         var permission = root.GetProperty("permission");
-        Assert.Equal("allow", permission.GetProperty("bash").GetProperty("*").GetString());
+        Assert.Equal("ask", permission.GetProperty("bash").GetProperty("*").GetString());
+        Assert.Equal("ask", permission.GetProperty("read").GetProperty("*").GetString());
+        Assert.Equal("ask", permission.GetProperty("edit").GetProperty("*").GetString());
         Assert.Equal("deny", permission.GetProperty("bash").GetProperty("*sudo *").GetString());
         Assert.Equal("deny", permission.GetProperty("read").GetProperty("**/.env").GetString());
         Assert.Equal("deny", permission.GetProperty("edit").GetProperty("**/.ssh/**").GetString());
@@ -163,10 +165,10 @@ public sealed class AcpOptionsConfigTests
         Assert.False(root.TryGetProperty("provider", out _));
         Assert.Equal(new[] { "opencode" }, root.GetProperty("enabled_providers").EnumerateArray().Select(x => x.GetString()));
 
-        // OpenCode applies the last matching permission rule, so the broad allow
+        // OpenCode applies the last matching permission rule, so the broad ask
         // must serialize before the explicit denies.
         Assert.True(
-            json.IndexOf("\"*\": \"allow\"", StringComparison.Ordinal)
+            json.IndexOf("\"*\": \"ask\"", StringComparison.Ordinal)
             < json.IndexOf("\"*sudo *\"", StringComparison.Ordinal));
     }
 
@@ -414,17 +416,6 @@ public sealed class AcpOptionsConfigTests
         Assert.Equal("cliproxy/gpt-5.6-sol", options.Model);
         var errors = options.Validate();
         Assert.DoesNotContain(errors, error => error.Contains("big-pickle", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [Fact]
-    public void InstructionsDescribeConsolidatedRoleWithoutFleetOrCodeWork()
-    {
-        var instructions = AgentControlOpenCodeConfig.BuildInstructions("Contoso");
-
-        Assert.Contains("Contoso", instructions, StringComparison.Ordinal);
-        Assert.Contains("no Fleet", instructions, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Do not perform code work", instructions, StringComparison.Ordinal);
-        Assert.Contains("readiness", instructions, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -260,6 +260,107 @@ public sealed class AcpControlHostTests
         await host.StopAsync(CancellationToken.None);
     }
 
+    /// <summary>
+    /// The pinned fake's permission request arrives while the session is not the
+    /// evaluated one. The handler must return a protocol-level reject option
+    /// rather than a JSON-RPC internal error, and must persist no allow.
+    /// </summary>
+    [Fact]
+    public async Task InboundPermissionRequestReturnsRejectOptionNeverInternalError()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-permission-").FullName;
+        using var host = CreateHost(ReadyOptions(data, scenario: "happy"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+
+        var handler = (Func<AcpEnvelope, CancellationToken, Task<AcpResponse>>)typeof(AcpControlHost)
+            .GetMethod("HandleIncomingRequestAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .CreateDelegate(typeof(Func<AcpEnvelope, CancellationToken, Task<AcpResponse>>), host);
+
+        var frame = System.Text.Encoding.UTF8.GetBytes(
+            """{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses_not_current","toolCall":{"toolCallId":"tc-1","title":"diagnostic:public","kind":"read","status":"pending"},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject once","kind":"reject_once"}]}}""");
+        var response = await handler(AcpEnvelope.Parse(frame.AsSpan()), CancellationToken.None);
+
+        Assert.Null(response.ErrorCode);
+        Assert.Null(response.ErrorMessage);
+        var result = Assert.IsType<Dictionary<string, object?>>(response.Result);
+        var outcome = Assert.IsType<Dictionary<string, object?>>(result["outcome"]);
+        Assert.Equal("selected", outcome["outcome"]);
+        Assert.Equal("reject_once", outcome["optionId"]);
+
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task OrientationComprehensionLinkedDeadlinePersistsTimedOutAndFailedHold()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-hang-").FullName;
+        var options = ReadyOptions(data, scenario: "orientation_hang");
+        options.PromptTimeoutSeconds = 1;
+        using var host = CreateHost(options);
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal(OrientationStates.TimedOut, result.State);
+        Assert.Contains(DispatchHoldReasons.OrientationFailed, result.HoldReasons);
+        Assert.Contains("timed out", result.LastError!, StringComparison.OrdinalIgnoreCase);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("orientation_malformed")]
+    [InlineData("orientation_fenced")]
+    public async Task MalformedLiveComprehensionIsValidationFailureAndDoesNotComprehend(string scenario)
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-invalid-").FullName;
+        using var host = CreateHost(ReadyOptions(data, scenario));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        await Assert.ThrowsAsync<OrganizationValidationException>(() =>
+            host.RunOrientationComprehensionAsync(CancellationToken.None));
+
+        Assert.Equal(OrientationStates.Delivered, host.GetOrientationStatus().State);
+        Assert.Null(host.GetOrientationStatus().EvidenceSource);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task LiveComprehensionPersistsLiveModelProvenance()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-live-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_fast"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal(OrientationStates.Comprehended, result.State);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task OrientationComprehensionCallerCancellationIsNotRecordedAsTimeout()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-cancel-").FullName;
+        var options = ReadyOptions(data, scenario: "orientation_hang");
+        options.PromptTimeoutSeconds = 20;
+        using var host = CreateHost(options);
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        using var cancelled = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            host.RunOrientationComprehensionAsync(cancelled.Token));
+
+        Assert.Equal(OrientationStates.Delivered, host.GetOrientationStatus().State);
+        await host.StopAsync(CancellationToken.None);
+    }
+
     [Fact]
     public async Task ReadySessionCanControlAndDisabledRuntimeCannot()
     {

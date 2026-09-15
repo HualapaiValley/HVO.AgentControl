@@ -13,9 +13,10 @@ from the `generation = 2` identity.
 - **Attach TUI:** a TUI client in tmux on the same OpenCode runtime. The browser
   terminal connects to it through the portal over a same-origin authenticated
   WebSocket; one viewer at a time. The TUI is a human view, not a second engine.
-- **Persistence:** `/control-data/control.db` is the authoritative SQLite store
+- **Persistence:** `/control-data/control.db` is the authoritative schema-v3 SQLite store
   for organization, department, role, employee, runtime-binding and ACP-session
-  identity in the controller-private volume. `/control-data/runtime.json` is
+  identity, plus versioned orientation, dispatch-hold and permission-policy records,
+  in the controller-private volume. `/control-data/runtime.json` is
   retained as adoption evidence only and is no longer written by the controller;
   the agent-owned `/data` volume retains the workspace, the private OpenCode home
   and native conversation state. A failed session load is surfaced, not silently
@@ -51,8 +52,10 @@ leaves the container. The browser talks only to the portal.
 There is **no worker bridge or reconnection implementation in the active code**.
 The standalone POC demonstrated the transport idea only; see
 [POC findings](POC-FINDINGS.md). The concrete Phase 1 organization, placement,
-storage, orientation and transport contracts are proposed (not implemented) in
-[Phase 1 contracts](PHASE-1-CONTRACTS.md).
+storage and transport contracts are proposed in
+[Phase 1 contracts](PHASE-1-CONTRACTS.md). Section 11's bounded orientation and
+host permission-policy slice is implemented for the single Operations/IT employee;
+worker transport and general dispatch remain future.
 
 ## Control contract (design)
 
@@ -136,9 +139,41 @@ starts a shell and keeps `nologin`.
 - **Owner secret.** Mounted read-only and owned by the controller. The entrypoint
   verifies from both sides that the controller can read it and the agent cannot,
   and refuses to start otherwise.
-- **Orientation.** `/agent-config/agentcontrol-instructions.md` is host-owned and
+- **Orientation.** `/agent-config/orientation-current.md` is host-owned and
   agent-readable (`0644` in a `0755` controller-owned directory): the agent reads
-  its orientation but can never rewrite, unlink or swap it.
+  it but can never rewrite, unlink or swap it. The controller composes canonical
+  UTF-8 Markdown from active revisioned organization, department, role and employee
+  fragments followed by the host policy; SHA-256 of canonical semantic content
+  (excluding fragment record IDs/revision metadata) is the `orientationVersion`.
+  Assignment is durable before atomic publication. `Delivered` means the host
+  verified the published name, inode ownership/link count, exact bytes and semantic
+  hash for the session-associated assignment; it is not runtime or model
+  confirmation. A version or session-binding change, or a terminal failed/rejected/
+  timed-out/uncertain attempt, marks the old assignment Stale and creates a fresh
+  attempt while preserving history. Linux publication uses the native stat layout
+  only on x64 and fails closed on unsupported Linux architectures. Structured
+  evidence is bounded and host validated against persisted facts; only sanitized
+  summary/hash and truthful `owner-submitted` or `live-model` provenance are
+  retained, not model reasoning. Recomposition updates the store/artifact without rebuilding the
+  image and preserves employee/session/history. OpenCode reads the generated file
+  at process start; an affected-runtime restart is therefore the reload mechanism,
+  preceded by an explicit durable dispatch hold. There is still no general task
+  dispatcher.
+- **Permission policy.** Stable persisted restrictions are attached to host,
+  organization, department, role and employee layers. Evaluation collects every
+  active matching restriction; any non-waivable match rejects regardless of order,
+  and every waivable match requires its own exact active owner grant. OpenCode routes
+  broad bash/read/edit classes through `ask`, while explicit secret/controller paths
+  and Fleet/network classes remain local denies. The pinned ACP 1.18.30 callback has
+  no host-derived canonical path/resource—only an untrusted model-facing title—so
+  Phase 1 never selects an allow option. Owner grants are validated, persisted and
+  audited as staged records for a future canonical adapter, but are not executable.
+  Requests are persisted directly as synchronously rejected; pending/cancellation
+  recovery is reserved for the future worker bridge and is not claimed by this
+  callback path. Audits retain the decisive restriction plus a canonical JSON list
+  of every matched stable restriction ID. Requests and decisions persist only
+  fixed/bounded claims, hashes and sanitized summaries; no requested secret content
+  is retained.
 - **Privileged launcher.** `src/launcher/agentcontrol-launch.c` is the container's
   only setuid binary (root:control, mode `4750`, so the agent cannot execute it).
   It exposes four fixed operations — `acp`, `tmux`, `pty` and `signal` — with the

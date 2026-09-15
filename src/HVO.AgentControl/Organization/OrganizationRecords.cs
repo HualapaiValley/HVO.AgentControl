@@ -16,6 +16,15 @@ public static class OrganizationIds
     public const string RuntimeBindingPrefix = "rtb-";
     public const string SessionPrefix = "acps-";
     public const string AuditPrefix = "audit-";
+    public const string FragmentPrefix = "frag-";
+    public const string AssignmentPrefix = "ora-";
+    public const string EvidencePrefix = "ore-";
+    public const string PolicyPrefix = "pol-";
+    public const string RestrictionPrefix = "rst-";
+    public const string HoldPrefix = "hold-";
+    public const string GrantPrefix = "grant-";
+    public const string PermissionAuditPrefix = "paud-";
+    public const string PermissionRequestPrefix = "preq-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -24,6 +33,15 @@ public static class OrganizationIds
     public static string NewRuntimeBindingId() => NewId(RuntimeBindingPrefix);
     public static string NewSessionId() => NewId(SessionPrefix);
     public static string NewAuditId() => NewId(AuditPrefix);
+    public static string NewFragmentId() => NewId(FragmentPrefix);
+    public static string NewAssignmentId() => NewId(AssignmentPrefix);
+    public static string NewEvidenceId() => NewId(EvidencePrefix);
+    public static string NewPolicyId() => NewId(PolicyPrefix);
+    public static string NewRestrictionId() => NewId(RestrictionPrefix);
+    public static string NewHoldId() => NewId(HoldPrefix);
+    public static string NewGrantId() => NewId(GrantPrefix);
+    public static string NewPermissionAuditId() => NewId(PermissionAuditPrefix);
+    public static string NewPermissionRequestId() => NewId(PermissionRequestPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -66,7 +84,128 @@ public static class OrganizationSeed
     public const string AdoptedEmployeeInstructions = "Request privileged or organizational changes through host-owned operations and report uncertain effects instead of retrying them.";
     public const string AdoptedEmployeeRules = "Use stable persisted identities; preserve existing sessions and history; treat owner approval as a host record, never a model assertion.";
     public const string AdoptedEmployeeRestrictions = "No direct edits to the authoritative store, no autonomous hiring or provisioning, and no access to controller secrets or another employee's history.";
+    public const string DepartmentOrientation = "Department: Operations. Report organizational or privileged changes to the owner. Escalate uncertainty, failed controls, suspected secret exposure, and irreversible effects before retrying.";
+    public const string RoleOrientation = "Allowed duties: operate and maintain the control host; inspect runtime health and sanitized diagnostics; explain organization state; request owner-authorized changes. This is not a code worker and has no task-dispatch authority.";
+    public const string HostPolicyVersion = "host-policy-phase1-v1";
+    public const string HostPolicySummary = "Phase 1 host policy: informational Operations/IT duties only; no secrets, control-state mutation, unrestricted Docker/GitHub/host authority, autonomous hiring, Fleet/V1, or cross-employee history.";
 }
+
+public static class OrientationStates
+{
+    public const string Assigned = "Assigned";
+    public const string Delivered = "Delivered";
+    public const string Acknowledged = "Acknowledged";
+    public const string Comprehended = "Comprehended";
+    public const string Failed = "Failed";
+    public const string TimedOut = "TimedOut";
+    public const string Rejected = "Rejected";
+    public const string Stale = "Stale";
+    public const string Uncertain = "Uncertain";
+}
+
+public static class DispatchHoldReasons
+{
+    public const string OrientationUnacknowledged = "orientation-unacknowledged";
+    public const string OrientationStale = "stale";
+    public const string OrientationFailed = "failed";
+    public const string PolicyUpdate = "policy-update";
+    public const string Manual = "manual";
+}
+
+public enum OrientationEvidenceSource
+{
+    OwnerSubmitted,
+    LiveModel,
+}
+
+public static class OrientationEvidenceSources
+{
+    public const string OwnerSubmitted = "owner-submitted";
+    public const string LiveModel = "live-model";
+
+    public static string ToWireValue(this OrientationEvidenceSource source) => source switch
+    {
+        OrientationEvidenceSource.OwnerSubmitted => OwnerSubmitted,
+        OrientationEvidenceSource.LiveModel => LiveModel,
+        _ => throw new ArgumentOutOfRangeException(nameof(source)),
+    };
+}
+
+public sealed record OrientationStatus(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string? SessionId,
+    string AssignmentId,
+    int Revision,
+    string OrientationVersion,
+    string State,
+    DateTimeOffset AssignedAt,
+    DateTimeOffset? DeliveredAt,
+    DateTimeOffset? AcknowledgedAt,
+    DateTimeOffset? ComprehendedAt,
+    string? EvidenceHash,
+    string? EvidenceSummary,
+    string? EvidenceSource,
+    string ArtifactFileName,
+    long ArtifactBytes,
+    string PolicyVersion,
+    int PolicyRevision,
+    bool DispatchHeld,
+    IReadOnlyList<string> HoldReasons,
+    string? LastError)
+{
+    public bool Ready => State == OrientationStates.Comprehended && !DispatchHeld;
+}
+
+public sealed record OrientationArtifact(
+    string AssignmentId,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string? SessionId,
+    string OrientationVersion,
+    string Content,
+    string ArtifactFileName,
+    int AssignmentRevision);
+
+public sealed record OrientationEvidenceRequest(
+    string EmployeeId,
+    string SessionId,
+    string OrientationVersion,
+    string Identity,
+    string Department,
+    string Reporting,
+    IReadOnlyList<string>? Duties,
+    IReadOnlyList<string>? Restrictions,
+    string Escalation,
+    int ExpectedRevision);
+
+public sealed record PermissionGrantRequest(
+    string EmployeeId,
+    string RestrictionId,
+    string Tool,
+    string Resource,
+    DateTimeOffset ExpiresAt,
+    int PolicyRevision,
+    string IdempotencyKey);
+
+public sealed record PermissionGrantSummary(
+    string Id,
+    string EmployeeId,
+    string RestrictionId,
+    string Tool,
+    string Resource,
+    int PolicyRevision,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset? RevokedAt,
+    int Revision);
+
+public sealed record PermissionDecision(
+    bool Allowed,
+    string Decision,
+    string? OptionId,
+    string? RestrictionId,
+    string Tool,
+    string Resource);
 
 /// <summary>A department and its current employee count.</summary>
 public sealed record DepartmentSummary(
@@ -103,7 +242,8 @@ public sealed record EmployeeSummary(
     string RuntimeBindingId,
     string Placement,
     string? SessionId,
-    string? SessionTitle);
+    string? SessionTitle,
+    OrientationStatus? Orientation = null);
 
 /// <summary>An adoption audit record: who adopted what, under which authorization.</summary>
 public sealed record AdoptionAuditSummary(

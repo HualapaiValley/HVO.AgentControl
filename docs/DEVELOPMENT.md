@@ -267,7 +267,9 @@ V2 does have an authoritative controller-private SQLite store at the fixed path
 not depend on it: the store is opened and validated before the runtime starts and
 `/health/ready` never probes it. This differs from archived V1, whose
 `/health/ready` checked control-plane database connectivity. Do not reintroduce a
-database probe into the V2 readiness signal.
+database probe into the V2 readiness signal. Employee orientation readiness is a
+separate persisted state exposed by the organization/orientation APIs; changing or
+failing orientation must not change the control host's health semantics.
 
 The portal readiness contract always requires its TUI. Setting
 `Control:EnableTerminal=false` intentionally leaves `/health/ready` at 503,
@@ -290,7 +292,8 @@ unconfirmed upstream change, `503` not ready or cancellation not accepted.
 | `/health/live` | Implemented, returns `{ "status": "healthy" }`, process only, unauthenticated | Unchanged: process liveness only |
 | `/health/ready` | Not implemented | Readiness of the exact owned ACP session and attached TUI |
 | `/`, `/api/info`, `/api/control`, `/api/control/model`, `/api/control/cancel`, `/terminal`, `/api/version` | Implemented | Unchanged |
-| `/api/organization` | Not implemented | Owner-protected overview plus same-origin revision-guarded rename backed by the authoritative SQLite store |
+| `/api/organization` | Not implemented | Owner-protected overview plus same-origin revision-guarded rename and basic-instruction update backed by the authoritative SQLite store; employee rows include orientation readiness/holds |
+| `/api/orientation*`, `/api/permissions/grants*` | Not implemented | Owner-authenticated stale-readable orientation status, host-verified delivery, provenance-labelled manual/live comprehension, manual hold and staged grant/revoke operations; malformed live JSON is 422, grants are not ACP-executable in Phase 1, permission callbacks persist synchronous rejection plus every matched restriction ID, and all mutations require same origin and ProblemDetails |
 
 The new endpoints and ProblemDetails behavior have local regression coverage;
 publication remains subject to CI and PR review. `/health/ready` is a

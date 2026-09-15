@@ -263,12 +263,17 @@ public sealed class EnabledRuntimeFactory : WebApplicationFactory<Program>, IDis
     private readonly string _passwordPath;
 
     public EnabledRuntimeFactory()
+        : this("prompt_fast")
+    {
+    }
+
+    internal EnabledRuntimeFactory(string scenario)
     {
         _root = Path.Combine(Path.GetTempPath(), "agentcontrol-enabled-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(DataDirectory);
         _passwordPath = Path.Combine(_root, "owner-password");
         File.WriteAllText(_passwordPath, OwnerPassword);
-        OpenCodeExecutable = AcpFakeServer.CreateExecutable("prompt_fast");
+        OpenCodeExecutable = AcpFakeServer.CreateExecutable(scenario);
         NativePort = GetFreePort();
     }
 

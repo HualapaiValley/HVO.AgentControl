@@ -28,6 +28,7 @@ HOME = os.environ.get("HOME")
 CALLS = os.path.join(HOME, "calls.log") if HOME else None
 SESSION_ID = "ses_fake_0001"
 WRITE_LOCK = threading.Lock()
+PROMPT_COUNT = 0
 
 
 def log_call(method):
@@ -83,7 +84,44 @@ for line in sys.stdin:
     elif method == "session/set_mode":
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/prompt":
-        if SCENARIO == "prompt_fast":
+        PROMPT_COUNT += 1
+        if SCENARIO == "orientation_hang" and PROMPT_COUNT > 1:
+            pass
+        elif SCENARIO in ("orientation_fast", "orientation_malformed", "orientation_fenced") and PROMPT_COUNT > 1:
+            params = message.get("params") or {}
+            prompt = params.get("prompt") or []
+            text = prompt[0].get("text", "") if prompt else ""
+            def value(label):
+                marker = label + " "
+                start = text.find(marker)
+                if start < 0:
+                    return ""
+                start += len(marker)
+                end = text.find(",", start)
+                return text[start:] if end < 0 else text[start:end]
+            evidence = {
+                "employeeId": value("employeeId"),
+                "sessionId": value("sessionId"),
+                "orientationVersion": value("orientationVersion").rstrip("."),
+                "identity": "Operations / IT",
+                "department": "Operations",
+                "reporting": "owner",
+                "duties": ["operate and maintain the control host", "inspect runtime health and sanitized diagnostics", "explain organization state", "request owner-authorized changes"],
+                "restrictions": ["no secrets or controller-private state", "no unrestricted Docker, GitHub, or host authority", "no autonomous hiring, provisioning, delegation, or dispatch", "no Fleet or V1", "no cross-employee history"],
+                "escalation": "escalate uncertainty, failed controls, suspected secret exposure, and irreversible effects before retrying"
+            }
+            response_text = json.dumps(evidence)
+            if SCENARIO == "orientation_malformed":
+                response_text = "{not-json"
+            elif SCENARIO == "orientation_fenced":
+                response_text = "```json\n" + response_text + "\n```"
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SESSION_ID, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": response_text}}}})
+            # The host intentionally drains notifications independently from RPC
+            # responses. Give that consumer a deterministic chance to retain the
+            # preceding chunk before completing the prompt.
+            time.sleep(0.05)
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+        elif SCENARIO == "prompt_fast":
             send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
         elif SCENARIO == "prompt_error":
             send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "prompt exploded"}})
