@@ -91,7 +91,13 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 /// </remarks>
 public sealed partial class OrganizationStore : IDisposable
 {
-    /// <summary>Schema version this build writes and requires.</summary>
+    /// <summary>
+    /// Build-local schema identifier. Schema 3 was never merged, released or
+    /// deployed; the authoritative released lineage ends at v2. Consequently a
+    /// schema-3 file is accepted only when its full normalized signature exactly
+    /// matches this build. Any other v3 shape is an unsupported disposable branch
+    /// artifact, not a migration source and not a backwards-compatibility promise.
+    /// </summary>
     public const int CurrentSchemaVersion = 3;
 
     public const string DatabaseFileName = "control.db";
@@ -1761,8 +1767,17 @@ public sealed partial class OrganizationStore : IDisposable
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
-        ValidateSchemaSignature(connection, ExpectedSchema);
         var version = ReadSchemaVersion(connection);
+        try
+        {
+            ValidateSchemaSignature(connection, ExpectedSchema);
+        }
+        catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
+        {
+            throw new OrganizationStoreCorruptException(
+                $"Unsupported build-local schema 3 signature. Schema 3 was never released; discard this branch artifact or restore an authoritative v1/v2 source. {exception.Message}",
+                exception);
+        }
         if (version != CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(

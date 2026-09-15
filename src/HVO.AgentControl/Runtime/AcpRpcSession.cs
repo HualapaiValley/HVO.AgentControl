@@ -5,6 +5,8 @@ using System.Threading.Channels;
 namespace HVO.AgentControl.Runtime;
 
 /// <summary>Result the client returns for an inbound ACP request.</summary>
+public sealed record AcpRequest(long Id, Task<JsonElement> Completion);
+
 public sealed record AcpResponse
 {
     public object? Result { get; init; }
@@ -79,14 +81,47 @@ public sealed class AcpRpcSession
 
     public void RequestStop() => _lifetime.Cancel();
 
-    public async Task<JsonElement> RequestAsync(
+    public Task<JsonElement> RequestAsync(
+        string method,
+        object? parameters,
+        TimeSpan timeout,
+        CancellationToken cancellationToken) =>
+        BeginRequest(method, parameters, timeout, cancellationToken).Completion;
+
+    /// <summary>
+    /// Registers a request and exposes its exact JSON-RPC id before any response
+    /// can be correlated. The returned completion still owns write failures,
+    /// cancellation and timeout cleanup.
+    /// </summary>
+    public AcpRequest BeginRequest(
+        string method,
+        object? parameters,
+        TimeSpan timeout,
+        CancellationToken cancellationToken,
+        Action<long>? registered = null)
+    {
+        var call = _correlator.Register(method, cancellationToken);
+        try
+        {
+            registered?.Invoke(call.Id);
+        }
+        catch
+        {
+            _correlator.TryFail(call.Key, new AcpSessionClosedException("ACP request registration hook failed."));
+            throw;
+        }
+
+        var completion = CompleteRequestAsync(call, method, parameters, timeout, cancellationToken);
+        return new AcpRequest(call.Id, completion);
+    }
+
+    private async Task<JsonElement> CompleteRequestAsync(
+        AcpRpcCorrelator.PendingCall call,
         string method,
         object? parameters,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        var call = _correlator.Register(method, cancellationToken);
-
         try
         {
             await WriteAsync(

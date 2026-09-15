@@ -26,6 +26,29 @@ public sealed class AcpRpcSessionTests
     }
 
     [Fact]
+    public async Task BeginRequestPublishesExactIdBeforeMatchingResponseCanComplete()
+    {
+        using var input = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n"));
+        long registeredId = 0;
+        await using var session = new AcpRpcSession(input, static (_, _) => ValueTask.CompletedTask);
+        var request = session.BeginRequest(
+            "test/exact-id",
+            null,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None,
+            id => registeredId = id);
+        session.Start();
+
+        var result = await request.Completion;
+
+        Assert.Equal(request.Id, registeredId);
+        Assert.Equal(1, request.Id);
+        Assert.True(result.GetProperty("ok").GetBoolean());
+        await session.Completion;
+    }
+
+    [Fact]
     public async Task IncomingFrameHookObservesOrderedChunksBeforeAdjacentResultCompletionUnderChannelPressure()
     {
         var inputText = """

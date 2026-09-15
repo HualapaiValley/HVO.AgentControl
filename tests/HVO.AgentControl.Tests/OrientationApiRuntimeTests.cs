@@ -242,6 +242,27 @@ public sealed class OrientationApiRuntimeTests : IClassFixture<EnabledRuntimeFac
     }
 
     [Fact]
+    public async Task MalformedOwnerSubmittedEvidenceIsBadRequestWithoutMutation()
+    {
+        using var factory = new EnabledRuntimeFactory("orientation_fast");
+        await factory.WaitForReadyAsync(TimeSpan.FromSeconds(45));
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Basic",
+            Convert.ToBase64String(Encoding.UTF8.GetBytes($"owner:{EnabledRuntimeFactory.OwnerPassword}")));
+        var before = factory.Host.GetOrientationStatus();
+
+        using var request = SameOrigin(HttpMethod.Post, "/api/orientation/comprehension", new { });
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var after = factory.Host.GetOrientationStatus();
+        Assert.Equal(before.AssignmentId, after.AssignmentId);
+        Assert.Equal(before.Revision, after.Revision);
+        Assert.Equal(before.State, after.State);
+    }
+
+    [Fact]
     public async Task MalformedLiveResponseEndpointPersistsFailureOutcome()
     {
         using var factory = new EnabledRuntimeFactory("orientation_malformed");

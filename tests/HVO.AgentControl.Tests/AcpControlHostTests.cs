@@ -247,9 +247,10 @@ public sealed class AcpControlHostTests
         // Uncertainty is reported honestly: a timeout is not proof the turn did
         // not run, and the session state is unknown rather than a stale "busy".
         Assert.Contains("may still have run", status.Error!, StringComparison.Ordinal);
-        Assert.NotEqual("busy", status.SessionState);
+        Assert.Equal("busy", status.SessionState);
 
-        // The abandoned turn is reconciled, not left running.
+        // The abandoned turn is reconciled, not left running, while the busy
+        // fence remains until transport closure or eventual response.
         var callsPath = Path.Combine(data, "home", "calls.log");
         await WaitForFileContainsAsync(callsPath, "session/cancel", TimeSpan.FromSeconds(15));
 
@@ -257,6 +258,33 @@ public sealed class AcpControlHostTests
         Assert.True(host.GetStatus().CanControl);
         Assert.True(await host.CancelAsync(CancellationToken.None));
 
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task BootstrapTimeoutRetainsBusyFenceUntilIgnoredCancelPromptCompletes()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-bootstrap-abandoned-").FullName;
+        var options = ReadyOptions(data, scenario: "bootstrap_ignores_cancel");
+        options.PromptTimeoutSeconds = 1;
+        using var host = CreateHost(options);
+
+        await host.StartAsync(CancellationToken.None);
+        var degraded = await WaitForStateAsync(host, "degraded", TimeSpan.FromSeconds(30));
+        Assert.Equal("busy", degraded.SessionState);
+        await WaitForFileContainsAsync(Path.Combine(data, "home", "calls.log"), "session/cancel", TimeSpan.FromSeconds(15));
+
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            host.RunOrientationComprehensionAsync(CancellationToken.None));
+        Assert.Equal("busy", host.GetStatus().SessionState);
+
+        File.WriteAllText(Path.Combine(data, "home", "bootstrap-release"), "release");
+        await WaitForAsync(
+            host,
+            status => !string.Equals(status.SessionState, "busy", StringComparison.Ordinal),
+            "the abandoned bootstrap response to release the prompt fence",
+            TimeSpan.FromSeconds(30));
+        Assert.Equal("degraded", host.GetStatus().State);
         await host.StopAsync(CancellationToken.None);
     }
 
@@ -317,6 +345,13 @@ public sealed class AcpControlHostTests
     [InlineData("orientation_oversized")]
     [InlineData("orientation_non_end")]
     [InlineData("orientation_wrong_session")]
+    [InlineData("orientation_wrong_assignment")]
+    [InlineData("orientation_wrong_employee")]
+    [InlineData("orientation_wrong_version")]
+    [InlineData("orientation_null_fields")]
+    [InlineData("orientation_empty_object")]
+    [InlineData("orientation_bad_facts")]
+    [InlineData("orientation_bad_result_shape")]
     public async Task MalformedLiveComprehensionIsValidationFailureAndDoesNotComprehend(string scenario)
     {
         var data = Directory.CreateTempSubdirectory("acp-host-orientation-invalid-").FullName;
@@ -400,6 +435,35 @@ public sealed class AcpControlHostTests
     }
 
     [Fact]
+    public async Task UnrelatedResponseDoesNotSealPromptCapture()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-unrelated-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_unrelated_response"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal(OrientationStates.Comprehended, result.State);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task MatchingPromptResponseSealsCaptureBeforeLateChunks()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-seal-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_post_response"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal(OrientationStates.Comprehended, result.State);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task AcpErrorLiveComprehensionPersistsLiveModelFailure()
     {
         var data = Directory.CreateTempSubdirectory("acp-host-orientation-error-").FullName;
@@ -412,6 +476,49 @@ public sealed class AcpControlHostTests
         Assert.Equal(OrientationStates.Failed, result.State);
         Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
         Assert.Contains("ACP comprehension request failed", result.LastError, StringComparison.Ordinal);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TransportClosureDuringLiveComprehensionRetainsFailedEvidence()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-close-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_transport_close"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal(OrientationStates.Failed, result.State);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
+        Assert.Equal("ACP comprehension request failed.", result.LastError);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task AcpErrorTextIsNeverPersistedOrExposed()
+    {
+        const string sentinel = "SENTINEL_PROVIDER_SECRET_246";
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-secret-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_secret_error"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal("ACP comprehension request failed.", result.LastError);
+        Assert.DoesNotContain(sentinel, result.LastError, StringComparison.Ordinal);
+        Assert.DoesNotContain(sentinel, host.GetOrientationStatus().LastError, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            sentinel,
+            System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(data, "control.db"))),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            sentinel,
+            (string?)typeof(AcpControlHost)
+                .GetField("_error", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .GetValue(host) ?? string.Empty,
+            StringComparison.Ordinal);
         await host.StopAsync(CancellationToken.None);
     }
 
@@ -517,6 +624,35 @@ public sealed class AcpControlHostTests
         var callsPath = Path.Combine(data, "home", "calls.log");
         await WaitForFileContainsAsync(callsPath, "session/prompt", TimeSpan.FromSeconds(15));
 
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task InstructionsChangedAfterLaunchAreDeliveredForNextGenerationNotConfirmedLoaded()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-handshake-").FullName;
+        using var host = CreateHost(ReadyOptions(data, scenario: "orientation_gated_handshake"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForFileContainsAsync(Path.Combine(data, "home", "calls.log"), "session/set_mode", TimeSpan.FromSeconds(15));
+        var original = host.GetOrientationStatus();
+        var overview = host.Organization!.GetOverview();
+        host.UpdateOrganizationBasicInstructions(
+            overview.Id,
+            "Changed after process launch but before session establishment.",
+            overview.Revision);
+        Assert.Equal(OrientationStates.Stale, host.GetOrientationStatus().State);
+
+        File.WriteAllText(Path.Combine(data, "home", "handshake-release"), "release");
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var replacement = host.GetOrientationStatus();
+
+        Assert.NotEqual(original.AssignmentId, replacement.AssignmentId);
+        Assert.Equal(OrientationStates.Delivered, replacement.State);
+        Assert.True(replacement.RestartRequired);
+        Assert.Contains(DispatchHoldReasons.OrientationReloadRequired, replacement.HoldReasons);
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            host.RunOrientationComprehensionAsync(CancellationToken.None));
         await host.StopAsync(CancellationToken.None);
     }
 

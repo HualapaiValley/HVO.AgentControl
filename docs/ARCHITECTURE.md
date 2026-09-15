@@ -13,7 +13,7 @@ from the `generation = 2` identity.
 - **Attach TUI:** a TUI client in tmux on the same OpenCode runtime. The browser
   terminal connects to it through the portal over a same-origin authenticated
   WebSocket; one viewer at a time. The TUI is a human view, not a second engine.
-- **Persistence:** `/control-data/control.db` is the authoritative schema-v3 SQLite store
+- **Persistence:** `/control-data/control.db` is the authoritative SQLite store. The released/authoritative lineage is schema v2; this unmerged branch uses a build-local schema-3 signature for orientation work. Schema 3 has never been released or deployed, is accepted only on an exact signature match, and has no migration or compatibility promise for earlier branch-local v3 files.
   for organization, department, role, employee, runtime-binding and ACP-session
   identity, plus versioned orientation, dispatch-hold and permission-policy records,
   in the controller-private volume. `/control-data/runtime.json` is

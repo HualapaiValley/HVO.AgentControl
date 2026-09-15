@@ -53,6 +53,16 @@ def respond_slow(request_id):
     send({"jsonrpc": "2.0", "id": request_id, "result": {"method": "test/slow"}})
 
 
+def respond_gated_bootstrap(request_id, late_chunk):
+    release = os.path.join(HOME, "bootstrap-release") if HOME else None
+    deadline = time.time() + 30
+    while release and not os.path.exists(release) and time.time() < deadline:
+        time.sleep(0.05)
+    if late_chunk:
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SESSION_ID, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "late bootstrap chunk"}}}})
+    send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -84,23 +94,30 @@ for line in sys.stdin:
         else:
             send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/set_mode":
+        if SCENARIO == "orientation_gated_handshake":
+            release = os.path.join(HOME, "handshake-release") if HOME else None
+            deadline = time.time() + 30
+            while release and not os.path.exists(release) and time.time() < deadline:
+                time.sleep(0.05)
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/prompt":
         PROMPT_COUNT += 1
         if SCENARIO == "orientation_hang" and PROMPT_COUNT > 1:
             pass
-        elif SCENARIO == "orientation_error" and (PROMPT_COUNT > 1 or SESSION_LOADED):
-            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "orientation prompt exploded"}})
-        elif SCENARIO == "orientation_gated_bootstrap" and PROMPT_COUNT == 1:
-            # Hold the startup bootstrap open until the test releases it. This
-            # makes the busy session state and the prompt-slot conflict fully
-            # deterministic instead of depending on process scheduling.
-            release = os.path.join(HOME, "bootstrap-release") if HOME else None
-            deadline = time.time() + 30
-            while release and not os.path.exists(release) and time.time() < deadline:
-                time.sleep(0.05)
-            send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
-        elif SCENARIO in ("orientation_fast", "orientation_malformed", "orientation_fenced", "orientation_empty", "orientation_oversized", "orientation_non_end", "orientation_wrong_session", "orientation_gated_bootstrap") and (PROMPT_COUNT > 1 or SESSION_LOADED):
+        elif SCENARIO in ("orientation_error", "orientation_secret_error") and (PROMPT_COUNT > 1 or SESSION_LOADED):
+            message_text = "SENTINEL_PROVIDER_SECRET_246" if SCENARIO == "orientation_secret_error" else "orientation prompt exploded"
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": message_text}})
+        elif SCENARIO == "orientation_transport_close" and (PROMPT_COUNT > 1 or SESSION_LOADED):
+            sys.stdout.close()
+            sys.exit(0)
+        elif SCENARIO in ("orientation_gated_bootstrap", "bootstrap_ignores_cancel") and PROMPT_COUNT == 1:
+            # Keep reading the transport while the provider-side turn is gated so
+            # session/cancel can be received and deliberately ignored.
+            threading.Thread(
+                target=respond_gated_bootstrap,
+                args=(request_id, SCENARIO == "bootstrap_ignores_cancel"),
+                daemon=True).start()
+        elif SCENARIO in ("orientation_fast", "orientation_malformed", "orientation_fenced", "orientation_empty", "orientation_oversized", "orientation_non_end", "orientation_wrong_session", "orientation_wrong_assignment", "orientation_wrong_employee", "orientation_wrong_version", "orientation_null_fields", "orientation_empty_object", "orientation_bad_facts", "orientation_bad_result_shape", "orientation_post_response", "orientation_unrelated_response", "orientation_gated_bootstrap") and (PROMPT_COUNT > 1 or SESSION_LOADED):
             params = message.get("params") or {}
             prompt = params.get("prompt") or []
             text = prompt[0].get("text", "") if prompt else ""
@@ -133,15 +150,38 @@ for line in sys.stdin:
                 response_text = ""
             elif SCENARIO == "orientation_oversized":
                 response_text = "x" * (16 * 1024 + 1)
+            elif SCENARIO == "orientation_wrong_assignment":
+                evidence["assignmentId"] = "asn_wrong"
+                response_text = json.dumps(evidence)
+            elif SCENARIO == "orientation_wrong_employee":
+                evidence["employeeId"] = "emp_wrong"
+                response_text = json.dumps(evidence)
+            elif SCENARIO == "orientation_wrong_version":
+                evidence["orientationVersion"] = "sha256:wrong"
+                response_text = json.dumps(evidence)
+            elif SCENARIO == "orientation_null_fields":
+                evidence["identity"] = None
+                evidence["duties"] = None
+                response_text = json.dumps(evidence)
+            elif SCENARIO == "orientation_empty_object":
+                response_text = "{}"
+            elif SCENARIO == "orientation_bad_facts":
+                evidence["department"] = "Finance"
+                response_text = json.dumps(evidence)
             midpoint = len(response_text) // 2
             chunks = [response_text[:midpoint], response_text[midpoint:]]
+            if SCENARIO == "orientation_unrelated_response":
+                send({"jsonrpc": "2.0", "id": 424242, "result": {}})
             chunk_session = "ses_wrong" if SCENARIO == "orientation_wrong_session" else SESSION_ID
             for chunk in chunks:
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": chunk_session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}}}})
             # Adjacent chunks and result intentionally have no sleep. The host's
             # codec-order frame hook is the completion barrier.
             stop_reason = "max_tokens" if SCENARIO == "orientation_non_end" else "end_turn"
-            send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": stop_reason}})
+            result = [] if SCENARIO == "orientation_bad_result_shape" else {"stopReason": stop_reason}
+            send({"jsonrpc": "2.0", "id": request_id, "result": result})
+            if SCENARIO == "orientation_post_response":
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SESSION_ID, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "post-response-corruption"}}}})
         elif SCENARIO == "prompt_fast":
             send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
         elif SCENARIO == "prompt_error":

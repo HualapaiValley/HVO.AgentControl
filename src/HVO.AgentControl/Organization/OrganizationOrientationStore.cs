@@ -1021,6 +1021,7 @@ public sealed partial class OrganizationStore
         OrientationEvidenceSource source,
         string error)
     {
+        error = SanitizeFailureCategory(error);
         return TranslateStoreFaults(() =>
         {
             lock (_gate)
@@ -1097,6 +1098,8 @@ public sealed partial class OrganizationStore
         string source,
         string reason)
     {
+        var liveModel = string.Equals(source, OrientationEvidenceSources.LiveModel, StringComparison.Ordinal);
+        var outcome = liveModel ? OrientationStates.Failed : OrientationStates.Rejected;
         var hash = OrientationComposer.Hash(CanonicalEvidence(request));
         var now = Timestamp();
         Execute(
@@ -1104,7 +1107,7 @@ public sealed partial class OrganizationStore
             transaction,
             """
             UPDATE orientation_assignments
-            SET state = 'Rejected',
+            SET state = $outcome,
                 acknowledged_at = $now,
                 evidence_hash = $hash,
                 evidence_summary = $summary,
@@ -1113,9 +1116,12 @@ public sealed partial class OrganizationStore
                 revision = revision + 1
             WHERE id = $id
             """,
+            ("$outcome", outcome),
             ("$now", now),
             ("$hash", hash),
-            ("$summary", $"Rejected {source} structured orientation evidence."),
+            ("$summary", liveModel
+                ? "Host rejected invalid live-model structured orientation evidence."
+                : "Rejected owner-submitted structured orientation evidence."),
             ("$source", source),
             ("$reason", reason),
             ("$id", current.AssignmentId));
@@ -1127,7 +1133,7 @@ public sealed partial class OrganizationStore
                 id, assignment_id, employee_id, session_id, orientation_version,
                 evidence_hash, sanitized_summary, evidence_source, outcome, created_at)
             SELECT $evidence, id, employee_id, session_id, orientation_version,
-                   $hash, $summary, $source, 'Rejected', $now
+                   $hash, $summary, $source, $outcome, $now
             FROM orientation_assignments
             WHERE id = $assignment AND session_id IS NOT NULL
             """,
@@ -1135,6 +1141,7 @@ public sealed partial class OrganizationStore
             ("$hash", hash),
             ("$summary", $"{source} evidence was rejected by exact persisted fact validation."),
             ("$source", source),
+            ("$outcome", outcome),
             ("$now", now),
             ("$assignment", current.AssignmentId));
         if (evidenceRows != 1)
@@ -1231,6 +1238,17 @@ public sealed partial class OrganizationStore
     private static bool EqualFact(string supplied, string expected)
     {
         return string.Equals(supplied?.Trim(), expected, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string SanitizeFailureCategory(string? value)
+    {
+        const int maximumLength = 256;
+        var sanitized = new string((value ?? string.Empty)
+            .Where(character => !char.IsControl(character))
+            .Take(maximumLength)
+            .ToArray())
+            .Trim();
+        return sanitized.Length == 0 ? "Live-model comprehension failed." : sanitized;
     }
 
     private static string Sanitize(string? value, int max)

@@ -121,6 +121,25 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
+    public void BuildLocalSchemaV3WithAnyDifferentSignatureIsUnsupported()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        ExecuteRaw(root.Path, "ALTER TABLE orientation_assignments ADD COLUMN branch_only_value TEXT;");
+        using var reopened = Open(root);
+        var exception = Assert.Throws<OrganizationStoreCorruptException>(() =>
+            reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+
+        Assert.Contains("Unsupported build-local schema 3 signature", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("never released", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(3, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+    }
+
+    [Fact]
     public void BuildExpectedSchemaRejectsDuplicateObjectKeys()
     {
         var method = typeof(OrganizationStore).GetMethod(
