@@ -20,9 +20,11 @@ Status reflects the active code, not the standalone POC.
    identity, connection leases, replay acknowledgments and remote-host routing.
    The POC only proved the idea; there is no bridge/reconnect code in the active
    repository.
-6. **Owner visibility — partial:** runtime/session/terminal status and a
-   same-origin terminal are live. Worker status, pending decisions, proxied
-   native web and multi-worker views are future work.
+6. **Owner visibility — partial:** organization navigation, department counts,
+   host-computed employee availability, exact safe employee diagnostics and an
+   employee-ID-bound same-origin terminal are live for the single owned control
+   host. Pending approvals are explicitly unsupported/empty; worker lifecycle,
+   hiring, tasks, proxied native web and multi-host routing remain future work.
 7. **Development workflow — not implemented:** manager delegation, independent
    review, exact-head evidence, GitHub App integration and bounded write
    authorization. Developer provisioning and task routing are absent.
@@ -34,5 +36,5 @@ Status reflects the active code, not the standalone POC.
 None of the not-implemented milestones may be claimed complete merely because
 the standalone connectivity POC passed. The concrete Phase 1 contracts for
 organization identity, internal-role placement, storage, orientation, authority,
-transport and the disposable two-host test are proposed (not implemented) in
+transport and the disposable two-host test are proposed or partially implemented as marked in
 [Phase 1 contracts](PHASE-1-CONTRACTS.md).

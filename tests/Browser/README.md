@@ -14,7 +14,7 @@ neither performs an inference call.
 | Script | Runtime | What it proves |
 | --- | --- | --- |
 | `ci-smoke.mjs` | `Control__Enabled=false`, no owner password | Portal shell, disabled-runtime status, terminal/model/cancel gates, responsive layout |
-| `ci-organization.mjs` | `Control__Enabled=true`, disposable owner password, checked-in fake ACP fixture | Enabled runtime reaches ready; the organization panel fetches and renders the seeded departments, one employee and the adoption audit; no secret field is exposed; desktop/mobile layout |
+| `ci-organization.mjs` | `Control__Enabled=true`, disposable owner password, checked-in fake ACP fixture | Five-view organization navigation, exact department/availability counts, unsupported approvals, actual Operations employee selection/detail, Development/QA empty states, orientation mutation receipts, no secret field, desktop/mobile layout |
 
 `ci-organization.mjs` copies `tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`
 into a temporary directory with a `prompt_fast` scenario sidecar and points

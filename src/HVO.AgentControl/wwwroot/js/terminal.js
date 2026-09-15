@@ -47,7 +47,6 @@ const MAX_AUTO_ATTEMPTS = 5;
 const STATUS_ENDPOINT = "/api/control";
 const MODEL_ENDPOINT = "/api/control/model";
 const CANCEL_ENDPOINT = "/api/control/cancel";
-const TERMINAL_ENDPOINT = "/terminal";
 
 const DEFAULT_ORGANIZATION = "AgentControl Development";
 
@@ -153,6 +152,8 @@ class TerminalPortal {
 
         this.running = false;
         this.terminalReady = false;
+        this.selectedEmployeeId = "";
+        this.selectedTerminalUrl = "";
         this.runtimeState = "";
         this.runtimeSessionId = "";
         this.canControl = false;
@@ -207,6 +208,7 @@ class TerminalPortal {
         document.addEventListener("visibilitychange", this.onVisibility, { passive: true });
         window.addEventListener("pagehide", this.onPageHide);
         window.addEventListener("pageshow", this.onPageShow);
+        root.addEventListener("agentcontrol:employee-selected", (event) => this.selectEmployee(event.detail));
     }
 
     // ---- lifecycle -------------------------------------------------------
@@ -282,7 +284,29 @@ class TerminalPortal {
     }
 
     canAttach() {
-        return this.isRuntimeEstablished() && this.terminalReady === true;
+        return this.isRuntimeEstablished()
+            && this.terminalReady === true
+            && Boolean(this.selectedEmployeeId)
+            && Boolean(this.selectedTerminalUrl);
+    }
+
+    selectEmployee(detail) {
+        const employee = detail && typeof detail === "object" ? detail : {};
+        const nextId = typeof employee.id === "string" ? employee.id : "";
+        const terminal = employee.terminal && typeof employee.terminal === "object" ? employee.terminal : {};
+        const nextUrl = terminal.available === true && typeof terminal.url === "string" ? terminal.url : "";
+        if (nextId !== this.selectedEmployeeId) {
+            this.manualDetach = false;
+            this.closeSocket(1000, "employee-selection-changed");
+            this.connectFailures = 0;
+            this.nextConnectAt = 0;
+            this.autoConnectSuppressed = false;
+        }
+        this.selectedEmployeeId = nextId;
+        this.selectedTerminalUrl = nextUrl;
+        if (this.canAttach()) this.maybeAutoConnect();
+        else this.renderNotAttachable();
+        this.updateButtons();
     }
 
     // ---- terminal --------------------------------------------------------
@@ -469,7 +493,7 @@ class TerminalPortal {
         const scheme = window.location.protocol === "https:" ? "wss" : "ws";
         let socket;
         try {
-            socket = new WebSocket(`${scheme}://${window.location.host}${TERMINAL_ENDPOINT}`);
+            socket = new WebSocket(`${scheme}://${window.location.host}${this.selectedTerminalUrl}`);
         } catch {
             this.renderConnection("faulted", true);
             this.setOverlay("Could not open the terminal transport");

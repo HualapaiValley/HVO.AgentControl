@@ -237,27 +237,51 @@ try {
     { departments, expectedDepartments },
   );
 
-  // Exactly one employee: the combined Operations/IT role in Operations.
-  const employees = await readRows(page, '[data-org-employees]');
-  const expectedEmployees = [
-    ['Operations / IT', 'Operations \u00b7 Operations / IT \u00b7 InternalSharedContainer'],
-  ];
+  const navItems = await page.$$eval('[data-nav]', (nodes) => nodes.map((node) => node.textContent.trim()));
   record(
-    'organization panel renders exactly one seeded employee',
-    JSON.stringify(employees) === JSON.stringify(expectedEmployees),
-    { employees, expectedEmployees },
+    'portal renders all five organization navigation items',
+    JSON.stringify(navItems) === JSON.stringify(['Overview', 'Operations', 'Development', 'QA', 'System configuration']),
+    { navItems },
   );
 
-  // Exactly one adoption-audit row with the owner-approved reference.
-  const audit = await readRows(page, '[data-org-audit]');
-  const auditExact = audit.length === 1
-    && audit[0][0] === 'owner-approved:issue-211'
-    && (audit[0][1] || '').startsWith('seed://fresh-organization');
+  await page.click('[data-nav="operations"]');
+  const employees = await page.$$eval('[data-department-employees="operations"] .employee-card', (nodes) => nodes.map((node) => node.textContent.trim()));
+  record('Operations renders exactly the actual seeded employee', employees.length === 1 && employees[0].startsWith('Operations / IT'), { employees });
+  await page.click('[data-department-employees="operations"] .employee-card');
+  await page.waitForSelector('[data-view="employee"]:not([hidden])');
+  const selectedId = await page.getAttribute('[data-portal]', 'data-selected-employee-id');
+  const detailText = await page.textContent('[data-view="employee"]');
+  record('employee selection opens exact safe detail by stable id', /^emp-/.test(selectedId || '') && detailText.includes(selectedId), { selectedId });
+
+  await page.click('[data-nav="development"]');
+  record('Development shows an explicit empty state', (await page.textContent('[data-view="development"]')).includes('No employees'), {});
+  await page.click('[data-nav="qa"]');
+  record('QA shows an explicit empty state', (await page.textContent('[data-view="qa"]')).includes('No employees'), {});
+  await page.click('[data-nav="system"]');
+  await page.fill('[data-org-instructions]', 'Browser fixture organization instructions.');
+  await page.click('[data-org-instructions-form] button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent.includes('Saved. Orientation'));
+  const orgInstructionStatus = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()).state);
+  record('System configuration saves organization basic instructions and exposes stale orientation', orgInstructionStatus === 'Stale', { orgInstructionStatus });
+
+  await page.click('[data-nav="system"]');
+  await page.fill('[data-role-instructions]', 'Browser fixture Operations standing instructions.');
+  await page.click('[data-role-instructions-form] button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent.includes('Saved. Orientation'));
+  const roleInstructionEvidence = await page.evaluate(async () => {
+    const organization = await (await fetch('/api/organization')).json();
+    return {
+      instructions: organization.roles.find((role) => role.slug === 'operations-it')?.standingInstructions,
+      orientation: await (await fetch('/api/orientation')).json(),
+    };
+  });
   record(
-    'organization panel renders exactly one owner-approved adoption-audit row',
-    auditExact,
-    { audit },
+    'System configuration saves role standing instructions with revision validation',
+    roleInstructionEvidence.instructions === 'Browser fixture Operations standing instructions.'
+      && roleInstructionEvidence.orientation.state === 'Stale',
+    roleInstructionEvidence,
   );
+  await page.click('[data-nav="overview"]');
 
   // Rename through the same API the browser uses, then prove orientation stays
   // readable as Stale until the portal creates and delivers a fresh assignment.
@@ -282,14 +306,16 @@ try {
     renameEvidence,
   );
 
-  // Exercise the owner controls and prove the panel reloads after mutation.
+  // Exercise the owner controls on the explicitly selected host-owned employee.
+  await page.click('[data-nav="operations"]');
+  await page.click('[data-department-employees="operations"] .employee-card');
   await page.click('[data-orientation-hold]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Orientation state updated.');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent.includes('Saved. Orientation'));
   await page.waitForFunction(() => document.querySelector('[data-orientation-hold]')?.dataset.held === 'true');
   record('manual hold button mutates and reloads orientation state', true, {});
 
   await page.click('[data-orientation-deliver]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Orientation delivered. Runtime restart required.');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent.includes('Saved. Orientation'));
   const deliveredAfterRename = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()));
   record(
     'deliver button creates a fresh delivered assignment after rename',

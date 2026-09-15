@@ -96,12 +96,12 @@ port, need no Docker, credentials, or model provider, and perform no inference.
 - `ci-organization.mjs` (`npm run ci-organization`) runs with
   `Control__Enabled=true`, a disposable owner password and the checked-in fake
   ACP fixture (`tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`). It asserts
-  the enabled runtime reaches ready, the organization panel fetches and renders
-  the seeded Development/Operations/QA departments, one Operations/IT employee
-  and the `owner-approved:issue-211` adoption audit, exposes no owner password or
-  tmux owner token, and stays visible without horizontal overflow at desktop and
-  mobile widths. It is intentionally separate from the disabled smoke so that
-  baseline keeps its exact coverage.
+  the enabled runtime reaches ready; all five navigation items render; Overview
+  reports exact department/availability counts and unsupported pending approvals;
+  Operations selects the one persisted Operations/IT employee by stable ID;
+  Development/QA show empty states; safe detail and orientation actions render;
+  and desktop/mobile layouts expose no owner password, tmux owner token or
+  horizontal overflow. It is intentionally separate from the disabled smoke.
 
 ```bash
 npm ci --prefix tests/Browser

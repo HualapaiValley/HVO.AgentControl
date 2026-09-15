@@ -70,6 +70,71 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
     }
 
     [Fact]
+    public async Task PortalAndEmployeeEndpointsReturnExactSafeDiagnostics()
+    {
+        using var client = await CreateReadyClientAsync();
+        using var portalResponse = await client.GetAsync("/api/organization/portal");
+        Assert.Equal(HttpStatusCode.OK, portalResponse.StatusCode);
+        var portalBody = await portalResponse.Content.ReadAsStringAsync();
+        using var portalDocument = JsonDocument.Parse(portalBody);
+        var portal = portalDocument.RootElement;
+        Assert.False(portal.GetProperty("pendingApprovals").GetProperty("supported").GetBoolean());
+        Assert.Equal(0, portal.GetProperty("pendingApprovals").GetProperty("count").GetInt32());
+        var employee = Assert.Single(portal.GetProperty("employees").EnumerateArray());
+        var employeeId = employee.GetProperty("id").GetString()!;
+
+        using var detailResponse = await client.GetAsync($"/api/employees/{employeeId}");
+        Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
+        var detailBody = await detailResponse.Content.ReadAsStringAsync();
+        using var detailDocument = JsonDocument.Parse(detailBody);
+        var detail = detailDocument.RootElement;
+        Assert.Equal(employeeId, detail.GetProperty("id").GetString());
+        Assert.Equal(_factory.Host.OrganizationIdentity!.RuntimeBindingId, detail.GetProperty("runtime").GetProperty("bindingId").GetString());
+        Assert.Equal(_factory.Host.GetStatus().SessionId, detail.GetProperty("runtime").GetProperty("nativeSessionId").GetString());
+        Assert.False(detail.GetProperty("recentLogs").GetProperty("supported").GetBoolean());
+        Assert.False(detail.GetProperty("terminal").GetProperty("available").GetBoolean());
+        Assert.DoesNotContain(_factory.Host.OrganizationIdentity.TmuxOwnerToken, detailBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("tmuxOwnerToken", detailBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmployeeEndpointReturns404ForUnknownStableId()
+    {
+        using var client = await CreateReadyClientAsync();
+        using var response = await client.GetAsync("/api/employees/emp-does-not-exist");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TerminalRejectsMalformedUnknownAndUnreadySelectionsWithoutFallback()
+    {
+        using var client = await CreateReadyClientAsync();
+
+        foreach (var path in new[] { "/terminal", "/terminal?employeeId=emp-", "/terminal?employeeId=EMP-test" })
+        {
+            using var malformed = await client.GetAsync(path);
+            Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
+        }
+
+        using var unknown = await client.GetAsync("/terminal?employeeId=emp-does-not-exist");
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+
+        // The seeded employee is the exact host-owned binding/session, but the
+        // enabled test runtime starts with Control:EnableTerminal=false so
+        // TerminalReady stays false. The exact tuple must still fail closed with
+        // 503 and never accept a WebSocket.
+        using var portal = await client.GetAsync("/api/organization/portal");
+        Assert.Equal(HttpStatusCode.OK, portal.StatusCode);
+        using var document = JsonDocument.Parse(await portal.Content.ReadAsStringAsync());
+        var employeeId = Assert.Single(document.RootElement.GetProperty("employees").EnumerateArray())
+            .GetProperty("id").GetString()!;
+
+        using var unready = await client.GetAsync(
+            $"/terminal?employeeId={Uri.EscapeDataString(employeeId)}");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, unready.StatusCode);
+    }
+
+    [Fact]
     public async Task PatchRenamesUnderTheCurrentRevision()
     {
         using var client = await CreateReadyClientAsync();

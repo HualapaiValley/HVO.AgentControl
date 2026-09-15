@@ -3,12 +3,8 @@
 
 <PageTitle>AgentControl V2</PageTitle>
 
-@* The server render is static. Every dynamic value below starts as a neutral
-   placeholder and is replaced from GET /api/control by the external module.
-   Nothing about workers, tasks or sessions is fabricated client-side. *@
 <div class="portal" data-portal data-runtime-state="unknown">
-    <a class="skip-link" href="#terminal-surface">Skip to terminal</a>
-
+    <a class="skip-link" href="#portal-content">Skip to organization</a>
     <header class="app-bar">
         <div class="brand">
             <span class="brand-mark" aria-hidden="true"><span class="brand-led"></span></span>
@@ -17,155 +13,120 @@
                 <span class="brand-org" data-field="organizationName">AgentControl Development</span>
             </span>
         </div>
-
         <dl class="app-bar-meta" aria-label="Runtime summary">
-            <div class="meta-item meta-item--state">
-                <dt>Runtime</dt>
-                <dd>
-                    <span class="state-pill" data-field="state" data-state="unknown">
-                        <span class="state-led" aria-hidden="true"></span>
-                        <span class="state-text">Synchronizing</span>
-                    </span>
-                </dd>
-            </div>
-            <div class="meta-item">
-                <dt>Native session</dt>
-                <dd><code class="mono" data-field="sessionId">&mdash;</code></dd>
-            </div>
-            <div class="meta-item">
-                <dt>Transport</dt>
-                <dd><code class="mono" data-field="transport">ACP</code></dd>
-            </div>
-            <div class="meta-item">
-                <dt>Session model</dt>
-                <dd><code class="mono" data-field="model">&mdash;</code></dd>
-            </div>
+            <div class="meta-item"><dt>Runtime</dt><dd><span class="state-pill" data-field="state" data-state="unknown"><span class="state-led" aria-hidden="true"></span><span class="state-text">Synchronizing</span></span></dd></div>
+            <div class="meta-item"><dt>Selected employee</dt><dd data-selected-employee-name>None</dd></div>
+            <div class="meta-item"><dt>Native session</dt><dd><code class="mono" data-field="sessionId">&mdash;</code></dd></div>
+            <div class="meta-item"><dt>Session model</dt><dd><code class="mono" data-field="model">&mdash;</code></dd></div>
         </dl>
     </header>
 
-    <p class="error-banner" data-field="error-banner" role="alert" hidden>
-        <span class="error-tag">Runtime fault</span>
-        <span class="error-text" data-field="error"></span>
-    </p>
+    <p class="error-banner" data-field="error-banner" role="alert" hidden><span class="error-tag">Runtime fault</span><span class="error-text" data-field="error"></span></p>
 
-    <main class="control-deck">
-        <section class="telemetry" aria-labelledby="telemetry-title">
-            <h2 id="telemetry-title" class="panel-title">Control console</h2>
+    <main class="workspace" id="portal-content">
+        <aside class="organization-nav" aria-label="Organization navigation">
+            <button type="button" class="nav-item" data-nav="overview" aria-current="page">Overview</button>
+            <button type="button" class="nav-item" data-nav="operations">Operations</button>
+            <button type="button" class="nav-item" data-nav="development">Development</button>
+            <button type="button" class="nav-item" data-nav="qa">QA</button>
+            <button type="button" class="nav-item" data-nav="system">System configuration</button>
+        </aside>
 
-            <dl class="telemetry-grid">
-                <div class="telemetry-row">
-                    <dt>Workspace</dt>
-                    <dd><span class="tag tag-scope">Manager-only</span></dd>
-                </div>
-                <div class="telemetry-row">
-                    <dt>Runtime state</dt>
-                    <dd data-field="state-detail">Synchronizing</dd>
-                </div>
-                <div class="telemetry-row">
-                    <dt>Native session</dt>
-                    <dd><code class="mono" data-field="sessionId">&mdash;</code></dd>
-                </div>
-                <div class="telemetry-row">
-                    <dt>Transport</dt>
-                    <dd><code class="mono" data-field="transport">ACP</code></dd>
-                </div>
-                <div class="telemetry-row telemetry-row--model">
-                    <dt><label for="model-select">Session model</label></dt>
-                    <dd class="model-control">
-                        <select id="model-select" class="model-select" data-model-select disabled>
-                            <option value="" disabled selected>Synchronizing&hellip;</option>
-                        </select>
-                        <p class="model-receipt" data-model-receipt role="status" aria-live="polite" hidden></p>
-                        <p class="control-note" data-model-sync-note hidden>OpenCode's TUI picker is client-local. This is the server session model, not an immediate mirror of the picker. Web selection is unavailable until both can synchronize.</p>
-                    </dd>
-                </div>
-                <div class="telemetry-row">
-                    <dt>Last sync</dt>
-                    <dd><time data-field="syncedAt">&mdash;</time></dd>
-                </div>
-            </dl>
+        <section class="organization-area" data-org-overview aria-live="polite">
+            <p class="org-state" data-org-state>Loading authoritative organization diagnostics&hellip;</p>
 
-            <div class="controls" role="group" aria-label="Terminal controls">
-                <button type="button" class="btn btn-primary" data-action="reconnect" disabled>
-                    Reconnect terminal
-                </button>
-                <button type="button" class="btn" data-action="detach" disabled>
-                    Detach
-                </button>
-                <button type="button" class="btn" data-action="clear">
-                    Clear view
-                </button>
-                <button type="button" class="btn btn-interrupt" data-action="interrupt" disabled>
-                    Interrupt turn
-                </button>
-            </div>
-            <p class="control-note">
-                <strong>Detach</strong> closes this browser attachment only; the native session keeps running.
-            </p>
+            <section class="org-view" data-view="overview" aria-labelledby="overview-title">
+                <h2 id="overview-title">Organization overview</h2>
+                <p class="lead" data-org-description>&mdash;</p>
+                <p data-org-basic-instructions>&mdash;</p>
+                <div class="summary-grid">
+                    <article class="summary-card"><h3>Departments</h3><dl data-org-departments></dl></article>
+                    <article class="summary-card"><h3>Availability</h3><dl data-org-availability></dl></article>
+                    <article class="summary-card"><h3>Pending owner approvals</h3><p data-pending-approvals>Unavailable</p></article>
+                </div>
+                <article class="attention"><h3>Failures needing attention</h3><ul data-org-failures></ul></article>
+            </section>
 
-            <p class="receipt" data-field="receipt" role="status" aria-live="polite"></p>
+            <section class="org-view" data-view="operations" hidden aria-labelledby="operations-title">
+                <h2 id="operations-title">Operations</h2>
+                <p>Employees persisted in the Operations department.</p>
+                <ul class="employee-list" data-department-employees="operations"></ul>
+            </section>
+            <section class="org-view" data-view="development" hidden aria-labelledby="development-title">
+                <h2 id="development-title">Development</h2><p class="empty-state">No employees are assigned to Development.</p>
+            </section>
+            <section class="org-view" data-view="qa" hidden aria-labelledby="qa-title">
+                <h2 id="qa-title">QA</h2><p class="empty-state">No employees are assigned to QA.</p>
+            </section>
+
+            <section class="org-view" data-view="employee" hidden aria-labelledby="employee-title">
+                <button type="button" class="text-button" data-back-to-department>Back to department</button>
+                <h2 id="employee-title" data-employee-name>Employee</h2>
+                <p><span class="availability-pill" data-employee-availability>unknown</span></p>
+                <div class="detail-grid">
+                    <article><h3>Identity and instructions</h3><dl data-employee-identity></dl></article>
+                    <article><h3>Runtime binding</h3><dl data-employee-runtime></dl></article>
+                    <article><h3>Orientation</h3><dl data-employee-orientation></dl></article>
+                    <article><h3>Safe diagnostics</h3><dl data-employee-diagnostics></dl></article>
+                </div>
+                <div class="orientation-actions">
+                    <button type="button" class="btn" data-orientation-deliver disabled>Recompose &amp; deliver</button>
+                    <button type="button" class="btn" data-orientation-comprehension disabled>Run comprehension</button>
+                    <button type="button" class="btn" data-orientation-hold disabled>Set manual hold</button>
+                </div>
+                <p class="receipt" data-orientation-receipt role="status"></p>
+            </section>
+
+            <section class="org-view" data-view="system" hidden aria-labelledby="system-title">
+                <h2 id="system-title">System configuration</h2>
+                <p>Persisted changes use current revision tokens. Changes await redelivery, runtime restart or comprehension before readiness returns.</p>
+                <form data-org-name-form>
+                    <label for="org-name">Company display name</label>
+                    <input id="org-name" data-org-name-input required maxlength="128" />
+                    <button class="btn" type="submit">Save display name</button>
+                </form>
+                <form data-org-instructions-form>
+                    <label for="org-instructions">Organization basic instructions</label>
+                    <textarea id="org-instructions" data-org-instructions rows="6" required></textarea>
+                    <button class="btn" type="submit">Save basic instructions</button>
+                </form>
+                <form data-role-instructions-form>
+                    <label for="role-instructions">Operations / IT standing instructions</label>
+                    <textarea id="role-instructions" data-role-instructions rows="6" required></textarea>
+                    <button class="btn" type="submit">Save role instructions</button>
+                </form>
+                <p class="receipt" data-config-receipt role="status"></p>
+            </section>
         </section>
 
-        <section class="terminal-surface" id="terminal-surface" aria-labelledby="terminal-title">
-            <div class="terminal-head">
-                <div class="terminal-heading">
-                    <span class="terminal-lamp" data-connection-led aria-hidden="true"></span>
-                    <h2 id="terminal-title" class="terminal-title">Native terminal</h2>
-                    <span class="terminal-link-state" data-field="connection" role="status" aria-live="polite">Idle</span>
+        <section class="control-deck" aria-label="Selected employee control console">
+            <section class="telemetry">
+                <h2 class="panel-title">Selected employee control</h2>
+                <dl class="telemetry-grid">
+                    <div class="telemetry-row"><dt>Employee</dt><dd data-selected-employee-name>None selected</dd></div>
+                    <div class="telemetry-row"><dt>Runtime state</dt><dd data-field="state-detail">Synchronizing</dd></div>
+                    <div class="telemetry-row"><dt>Native session</dt><dd><code class="mono" data-field="sessionId">&mdash;</code></dd></div>
+                    <div class="telemetry-row"><dt>Session model</dt><dd><code class="mono" data-field="model">&mdash;</code></dd></div>
+                </dl>
+                <div class="controls" role="group" aria-label="Terminal controls">
+                    <button type="button" class="btn btn-primary" data-action="reconnect" disabled>Reconnect terminal</button>
+                    <button type="button" class="btn" data-action="detach" disabled>Detach</button>
+                    <button type="button" class="btn" data-action="clear">Clear view</button>
+                    <button type="button" class="btn btn-interrupt" data-action="interrupt" disabled>Interrupt turn</button>
                 </div>
-                <p class="terminal-hint">Type to send &middot; resize follows the pane &middot; output is streamed, not buffered</p>
-            </div>
-
-            <div class="terminal-stage" data-field="terminal-stage">
-                <div id="terminal" class="terminal-mount" data-terminal tabindex="0" role="application"
-                     aria-label="Interactive ACP terminal session"></div>
-                <div class="terminal-overlay" data-field="terminal-overlay" hidden>
-                    <span class="spinner" aria-hidden="true"></span>
-                    <span class="overlay-text" data-field="overlay-text">Waiting for runtime</span>
+                <p class="receipt" data-field="receipt" role="status"></p>
+            </section>
+            <section class="terminal-surface" id="terminal-surface" aria-labelledby="terminal-title">
+                <div class="terminal-head"><div class="terminal-heading"><span class="terminal-lamp" data-connection-led aria-hidden="true"></span><h2 id="terminal-title" class="terminal-title">Selected employee native terminal</h2><span class="terminal-link-state" data-field="connection">Idle</span></div></div>
+                <div class="terminal-stage" data-field="terminal-stage">
+                    <div id="terminal" class="terminal-mount" data-terminal tabindex="0" role="application" aria-label="Interactive selected employee terminal session"></div>
+                    <div class="terminal-overlay" data-field="terminal-overlay"><span class="spinner" aria-hidden="true"></span><span data-field="overlay-text">Select an employee</span></div>
                 </div>
-            </div>
+            </section>
         </section>
     </main>
 
-    @* Minimal organization overview, populated from the authoritative store
-       through the owner-protected /api/organization endpoint. Hidden until the
-       data loads so the disabled runtime renders nothing fabricated. *@
-    <section class="org-overview" data-org-overview aria-labelledby="org-title" hidden>
-        <h2 id="org-title" class="panel-title">Organization</h2>
-        <p class="org-overview-meta">
-            <span class="brand-org" data-org-name>&mdash;</span>
-            <code class="mono" data-org-slug>&mdash;</code>
-        </p>
-        <div class="org-overview-columns">
-            <div>
-                <h3>Departments</h3>
-                <dl class="org-overview-list" data-org-departments></dl>
-            </div>
-            <div>
-                <h3>Employees</h3>
-                <dl class="org-overview-list" data-org-employees></dl>
-            </div>
-            <div>
-                <h3>Orientation diagnostics</h3>
-                <dl class="org-overview-list" data-org-orientation></dl>
-                <div class="orientation-actions">
-                    <button type="button" class="btn" data-orientation-deliver>Recompose &amp; deliver</button>
-                    <button type="button" class="btn" data-orientation-comprehension>Run comprehension</button>
-                    <button type="button" class="btn" data-orientation-hold>Set manual hold</button>
-                </div>
-                <p class="control-note" data-orientation-receipt role="status" aria-live="polite"></p>
-            </div>
-            <div>
-                <h3>Adoption audit</h3>
-                <dl class="org-overview-list" data-org-audit></dl>
-            </div>
-        </div>
-    </section>
-
-    <footer class="app-foot">
-        <span>AgentControl V2 &middot; @HVO.AgentControl.ApplicationVersion.Current &middot; manager workspace</span>
-        <span class="mono">GET /api/control &middot; WS /terminal</span>
-    </footer>
+    <footer class="app-foot"><span>AgentControl V2 &middot; @HVO.AgentControl.ApplicationVersion.Current &middot; owner workspace</span><span class="mono">GET /api/organization/portal &middot; GET /api/employees/{id}</span></footer>
 </div>
 
 <script type="module" src="/js/organization.js"></script>

@@ -222,6 +222,90 @@ app.MapGet("/api/organization", (AcpControlHost host) =>
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+app.MapGet("/api/organization/portal", (AcpControlHost host) =>
+{
+    var store = host.Organization;
+    if (store is null)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The control runtime is disabled or the authoritative store has not opened.");
+    }
+
+    try
+    {
+        var result = HVO.AgentControl.Organization.PortalOrganizationReadModel.Build(
+            store.GetOverview(),
+            host.OrganizationIdentity,
+            host.GetStatus());
+        return Results.Ok(result);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The authoritative store could not be read.");
+    }
+})
+    .WithName("GetPortalOrganization")
+    .WithTags("Organization")
+    .WithSummary("Returns owner-facing organization diagnostics from the authoritative store and exact host status.")
+    .Produces<HVO.AgentControl.Organization.PortalOrganizationOverview>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/employees/{id}", (AcpControlHost host, string id) =>
+{
+    if (!Program.IsValidEmployeeId(id))
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid employee id.",
+            detail: "A bounded stable employee id is required.");
+    }
+
+    var store = host.Organization;
+    if (store is null)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The control runtime is disabled or the authoritative store has not opened.");
+    }
+
+    try
+    {
+        var employee = HVO.AgentControl.Organization.PortalOrganizationReadModel.FindEmployee(
+            store.GetOverview(),
+            host.OrganizationIdentity,
+            host.GetStatus(),
+            id);
+        return employee is null
+            ? Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "Employee not found.",
+                detail: "No employee with that stable id exists.")
+            : Results.Ok(employee);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The authoritative store could not be read.");
+    }
+})
+    .WithName("GetEmployee")
+    .WithTags("Organization")
+    .WithSummary("Returns exact safe diagnostics for one employee selected by stable id.")
+    .Produces<HVO.AgentControl.Organization.PortalEmployeeDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapPatch("/api/organization", (HttpContext context, AcpControlHost host, OrganizationUpdate update) =>
 {
     if (!TerminalProtocol.IsSameOrigin(context.Request.Headers.Origin.ToString(),
@@ -786,12 +870,49 @@ app.MapPost("/api/control/cancel", async (HttpContext context, AcpControlHost ho
 
 app.Map("/terminal", async (HttpContext context, AcpControlHost host) =>
 {
-    var status = host.GetStatus();
-    if (!status.CanControl || !status.TerminalReady)
+    var employeeId = context.Request.Query["employeeId"].ToString();
+    if (!Program.IsValidEmployeeId(employeeId))
     {
-        context.Response.StatusCode = 503;
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
         return;
     }
+
+    // Read the authoritative overview only when the store and host identity are
+    // both available; a missing host identity still fails closed as 503 without
+    // turning an unknown id into a 404.
+    var store = host.Organization;
+    var identity = host.OrganizationIdentity;
+    HVO.AgentControl.Organization.OrganizationOverview? overview = null;
+    if (store is not null && identity is not null)
+    {
+        try
+        {
+            overview = store.GetOverview();
+        }
+        catch (HVO.AgentControl.Organization.OrganizationStoreException)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            return;
+        }
+    }
+
+    var route = HVO.AgentControl.Organization.TerminalAttachmentResolver.Resolve(
+        overview,
+        identity,
+        host.GetStatus(),
+        employeeId);
+    if (route == HVO.AgentControl.Organization.TerminalAttachmentRoute.EmployeeNotFound)
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+
+    if (route != HVO.AgentControl.Organization.TerminalAttachmentRoute.Eligible)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        return;
+    }
+
     await TerminalEndpoint.HandleAsync(
         context,
         Path.Combine(host.DataDirectory, "home"),
@@ -804,6 +925,7 @@ app.Map("/terminal", async (HttpContext context, AcpControlHost host) =>
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
     .ProducesProblem(StatusCodes.Status409Conflict)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
@@ -850,6 +972,9 @@ public partial class Program
 {
     /// <summary>Minimum length required of a configured owner password, after trimming.</summary>
     public const int MinimumOwnerPasswordLength = 24;
+
+    /// <summary>Maximum length accepted for a stable employee id on the wire.</summary>
+    public const int MaximumEmployeeIdLength = 64;
 
     /// <summary>
     /// Returns a ProblemDetails 403 when a state-changing request did not come
@@ -926,6 +1051,40 @@ public partial class Program
         }
 
         return password;
+    }
+
+    /// <summary>
+    /// Validates the stable employee-id wire shape before any store or terminal
+    /// work. A valid id carries the <c>emp-</c> prefix, at least one lower-case
+    /// alphanumeric suffix character, only ASCII lower-case letters, digits and
+    /// internal hyphens, and a bounded total length. A bare prefix or a suffix
+    /// made only of hyphens is rejected. Generated hex ids and persisted test
+    /// ids such as <c>emp-test</c> both fit this shape.
+    /// </summary>
+    public static bool IsValidEmployeeId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > MaximumEmployeeIdLength)
+        {
+            return false;
+        }
+
+        var prefix = HVO.AgentControl.Organization.OrganizationIds.EmployeePrefix;
+        if (!value.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var suffix = value.AsSpan(prefix.Length);
+        if (suffix.IsEmpty
+            || suffix.IndexOfAnyExcept("abcdefghijklmnopqrstuvwxyz0123456789-".AsSpan()) >= 0)
+        {
+            return false;
+        }
+
+        // A suffix of only hyphens is not a usable stable id: it must contain at
+        // least one lower-case letter or digit after the prefix.
+        return suffix.IndexOfAnyInRange('a', 'z') >= 0
+            || suffix.IndexOfAnyInRange('0', '9') >= 0;
     }
 
     /// <summary>
