@@ -147,18 +147,30 @@ starts a shell and keeps `nologin`.
   (excluding fragment record IDs/revision metadata) is the `orientationVersion`.
   Assignment is durable before atomic publication. `Delivered` means the host
   verified the published name, inode ownership/link count, exact bytes and semantic
-  hash for the session-associated assignment; it is not runtime or model
-  confirmation. A version or session-binding change, or a terminal failed/rejected/
-  timed-out/uncertain attempt, marks the old assignment Stale and creates a fresh
-  attempt while preserving history. Linux publication uses the native stat layout
-  only on x64 and fails closed on unsupported Linux architectures. Structured
-  evidence is bounded and host validated against persisted facts; only sanitized
-  summary/hash and truthful `owner-submitted` or `live-model` provenance are
-  retained, not model reasoning. Recomposition updates the store/artifact without rebuilding the
-  image and preserves employee/session/history. OpenCode reads the generated file
-  at process start; an affected-runtime restart is therefore the reload mechanism,
-  preceded by an explicit durable dispatch hold. There is still no general task
-  dispatcher.
+  hash for the session-associated assignment; it also records the runtime generation
+  required to load that artifact, but is not itself runtime or model confirmation.
+  Startup after OpenCode process/session establishment confirms the exact assignment,
+  version, session and generation loaded, then clears `orientation-reload-required`.
+  A live recomposition/delivery deliberately leaves `policy-update` and reload holds;
+  comprehension cannot clear them and status exposes `restartRequired`. A version or
+  session-binding change, or a terminal failed/rejected/timed-out attempt, marks the
+  old assignment Stale and creates a fresh attempt while preserving history. Linux
+  publication uses the native stat layout only on x64 and fails closed on unsupported
+  Linux architectures; publication errors distinguish persisted assignment from an
+  unadvanced delivery. Structured evidence is bounded and host validated against
+  persisted facts, including the immutable assignment ID; only sanitized summary/hash
+  and truthful `owner-submitted` or `live-model` provenance are retained, not model
+  reasoning. The active role fragment is the authoritative mutable role-instruction
+  record and carries its own optimistic revision. Live comprehension captures chunks
+  in ACP codec-reader order before the lossy observation channel and treats the result
+  frame as the barrier. Because ACP exposes no turn ID, prompt operations serialize,
+  and the startup bootstrap occupies the same slot and is reported as `busy` before
+  readiness is promoted, so owner comprehension is a deterministic conflict while it
+  runs; abandoned turns receive bounded `session/cancel` and fence retries until remote
+  completion or process restart. Recomposition updates the store/artifact without
+  rebuilding the image and preserves employee/session/history. OpenCode reads the
+  generated file at process start, so affected-runtime restart is the reload mechanism.
+  There is still no general task dispatcher.
 - **Permission policy.** Stable persisted restrictions are attached to host,
   organization, department, role and employee layers. Evaluation collects every
   active matching restriction; any non-waivable match rejects regardless of order,

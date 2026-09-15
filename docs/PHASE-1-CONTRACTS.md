@@ -529,16 +529,36 @@ Ready -> Degraded / Stopped / Orienting
   -> `Comprehended` (host-evaluated bounded evidence about duties, restrictions,
   reporting and escalation). A bridge receipt alone is not employee
   acknowledgment. Each record stores the exact
-  `orientationVersion`; a version or session-binding change invalidates prior
-  acknowledgment and requires a fresh assignment. Rejected, timed-out, failed and
-  uncertain attempts are terminal history: redelivery marks the old row Stale and
-  creates a new attempt even when semantic content is unchanged. Status prefers a
-  non-Stale assignment, or returns the latest Stale row with dispatch held when no
-  current attempt exists. Evidence records carry explicit `owner-submitted` or
-  `live-model` provenance.
-- **No-rebuild config update:** changing instructions or permission fragments
-  produces a new orientation version and updates the affected binding's private
-  config in place. No container image rebuild is required.
+  immutable assignment ID and `orientationVersion`; a version, assignment or
+  session-binding change invalidates prior acknowledgment and requires a fresh
+  assignment. Rejected, timed-out and failed attempts are terminal history:
+  redelivery marks the old row Stale and creates a new attempt even when semantic
+  content is unchanged. `Uncertain` is reserved for a future bridge reconciliation
+  state and is not produced by this control-host path. Status prefers a non-Stale
+  assignment, or returns the latest Stale row with dispatch held when no current
+  attempt exists. Evidence records carry explicit `owner-submitted` or `live-model`
+  provenance. Owner-submitted evidence is an explicit override record, not a claim
+  that a model demonstration occurred.
+- Live comprehension captures bounded agent-message chunks synchronously in ACP
+  codec-reader order before the general lossy notification channel. The result frame
+  is the completion barrier for every prior frame. Since the pinned ACP contract has
+  no turn ID, all prompt operations serialize. The startup bootstrap prompt
+  occupies that same slot and is reported as a `busy` session state from the first
+  ready snapshot; owner comprehension is rejected deterministically while it is
+  active. Timeout or caller cancellation sends
+  bounded `session/cancel`, abandons the capture token, and fences another prompt
+  until the original request completes or the affected process restarts. Malformed,
+  empty, oversized, non-terminal and ACP-error host-started turns persist a
+  `live-model` failure outcome and failed hold; malformed caller-submitted manual
+  evidence remains validation-only and does not mutate Delivered state.
+- **No-rebuild config update:** changing organization instructions, authoritative
+  role-fragment instructions, or permission fragments produces a new orientation
+  version and updates the affected binding's private config in place. The role API
+  uses the active role-fragment revision as its optimistic token. No container image
+  rebuild is required. Delivery persists a required runtime generation and leaves
+  `policy-update`/`orientation-reload-required` holds. Only startup after the
+  OpenCode process/session is established may confirm that generation loaded the
+  exact assignment and clear the reload hold; comprehension cannot clear it.
 - **Safe affected-runtime restart:** hold dispatch, checkpoint or cancel an
   active turn under explicit policy, await observed termination, reconcile
   effects, restart only that runtime, re-deliver
@@ -622,8 +642,8 @@ These are open and must not be presented as decided or owner-accepted:
   actual Docker volume filesystem has not been crash-tested; the evidence is the
   configured pragmas and the local/container test filesystems only.
 - **Implemented bounded initial definition (#216):** the host accepts only a
-  size-limited structured record bound to the exact employee, native session and
-  orientation version, and deterministically compares identity, department,
+  size-limited structured record bound to the exact immutable assignment, employee,
+  native session and orientation version, and deterministically compares identity, department,
   owner reporting, allowed duties, restrictions and escalation against persisted
   expected facts. It stores a SHA-256 plus sanitized outcome summary, never raw
   model reasoning. **Still unresolved:** how well this bounded check predicts

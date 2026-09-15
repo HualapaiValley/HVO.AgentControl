@@ -77,6 +77,7 @@ if (root && portal) {
                         appendRow(orientationField, "Version", employee.orientation.orientationVersion);
                         appendRow(orientationField, "State", employee.orientation.state);
                         appendRow(orientationField, "Dispatch", employee.orientation.dispatchHeld ? `Held: ${employee.orientation.holdReasons.join(", ")}` : "Ready");
+                        appendRow(orientationField, "Runtime load", employee.orientation.restartRequired ? "Restart required" : "Loaded");
                         appendRow(orientationField, "Artifact", `${employee.orientation.artifactFileName} (${employee.orientation.artifactBytes} bytes)`);
                         holdButton.textContent = employee.orientation.holdReasons.includes("manual") ? "Clear manual hold" : "Set manual hold";
                         holdButton.dataset.held = employee.orientation.holdReasons.includes("manual") ? "true" : "false";
@@ -111,7 +112,14 @@ if (root && portal) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
         });
-        orientationReceipt.textContent = response.ok ? "Orientation state updated." : `Update failed (${response.status}).`;
+        if (response.ok) {
+            const result = await response.clone().json().catch(() => null);
+            orientationReceipt.textContent = result?.restartRequired
+                ? "Orientation delivered. Runtime restart required."
+                : "Orientation state updated.";
+        } else {
+            orientationReceipt.textContent = `Update failed (${response.status}).`;
+        }
         if (response.ok) {
             loaded = false;
             loading = false;

@@ -53,7 +53,7 @@ public sealed partial class OrganizationStore
             seed.OrganizationDescription,
             seed.OrganizationInstructions);
         var departmentContent = OrientationComposer.BuildDepartmentFragment();
-        var roleContent = OrientationComposer.BuildRoleFragment();
+        var roleContent = OrientationComposer.BuildRoleFragment(OrganizationSeed.RoleOrientation);
         var employeeContent = OrientationComposer.BuildEmployeeFragment(
             seed.EmployeeId,
             seed.EmployeeDisplayName,
@@ -267,7 +267,8 @@ public sealed partial class OrganizationStore
         string assignmentId,
         string orientationVersion,
         string? nativeSessionId,
-        int expectedRevision)
+        int expectedRevision,
+        long requiredRuntimeGeneration = 0)
     {
         var current = TranslateStoreFaults(() =>
         {
@@ -289,9 +290,73 @@ public sealed partial class OrganizationStore
             orientationVersion,
             nativeSessionId,
             expectedRevision,
+            requiredRuntimeGeneration,
             OrientationStates.Assigned,
             OrientationStates.Delivered,
             "delivered_at");
+    }
+
+    public OrientationStatus ConfirmOrientationLoaded(
+        string assignmentId,
+        string orientationVersion,
+        string nativeSessionId,
+        long runtimeGeneration)
+    {
+        return TranslateStoreFaults(() =>
+        {
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadCurrentStatus(connection, transaction, _employeeId!);
+                if (!string.Equals(current.AssignmentId, assignmentId, StringComparison.Ordinal)
+                    || !string.Equals(current.OrientationVersion, orientationVersion, StringComparison.Ordinal)
+                    || !string.Equals(current.SessionId, nativeSessionId, StringComparison.Ordinal)
+                    || current.State is not (OrientationStates.Delivered or OrientationStates.Acknowledged or OrientationStates.Comprehended)
+                    || current.RequiredRuntimeGeneration is null
+                    || runtimeGeneration < current.RequiredRuntimeGeneration)
+                {
+                    throw new OrganizationConcurrencyException(
+                        "The runtime load confirmation does not match the current delivered assignment.");
+                }
+
+                var affected = Execute(
+                    connection,
+                    transaction,
+                    """
+                    UPDATE orientation_assignments
+                    SET loaded_runtime_generation = $generation,
+                        revision = revision + 1
+                    WHERE id = $assignment
+                      AND orientation_version = $version
+                      AND state IN ('Delivered', 'Acknowledged', 'Comprehended')
+                    """,
+                    ("$generation", runtimeGeneration),
+                    ("$assignment", assignmentId),
+                    ("$version", orientationVersion));
+                if (affected != 1)
+                {
+                    throw new OrganizationConcurrencyException(
+                        "The runtime load confirmation lost its assignment transition.");
+                }
+                SetHold(
+                    connection,
+                    transaction,
+                    current.RuntimeBindingId,
+                    DispatchHoldReasons.OrientationReloadRequired,
+                    false,
+                    null);
+                SetHold(
+                    connection,
+                    transaction,
+                    current.RuntimeBindingId,
+                    DispatchHoldReasons.PolicyUpdate,
+                    false,
+                    null);
+                transaction.Commit();
+                return GetOrientationStatusCore(connection, current.EmployeeId);
+            }
+        });
     }
 
     public OrientationStatus ValidateAndRecordComprehension(OrientationEvidenceRequest request) =>
@@ -311,10 +376,18 @@ public sealed partial class OrganizationStore
                 using var connection = OpenConnection();
                 using var transaction = connection.BeginTransaction();
                 var current = ReadCurrentStatus(connection, transaction, request.EmployeeId);
-                if (current.State != OrientationStates.Delivered || current.Revision != request.ExpectedRevision)
+                if (current.State != OrientationStates.Delivered
+                    || current.Revision != request.ExpectedRevision
+                    || !string.Equals(current.AssignmentId, request.AssignmentId, StringComparison.Ordinal))
                 {
                     throw new OrganizationConcurrencyException(
-                        "The current delivered orientation revision does not match the request.");
+                        "The current delivered orientation assignment and revision do not match the request.");
+                }
+
+                if (current.RestartRequired)
+                {
+                    throw new OrganizationConcurrencyException(
+                        "The current runtime has not confirmed loading this orientation assignment.");
                 }
 
                 if (!string.Equals(current.OrientationVersion, request.OrientationVersion, StringComparison.Ordinal)
@@ -443,16 +516,36 @@ public sealed partial class OrganizationStore
     }
 
     public OrientationStatus RecordComprehensionTimeout(
+        string assignmentId,
         string employeeId,
         string orientationVersion,
         int expectedRevision)
     {
         return TransitionAssignmentForFailure(
+            assignmentId,
             employeeId,
             orientationVersion,
             expectedRevision,
             OrientationStates.TimedOut,
+            OrientationEvidenceSource.LiveModel,
             "The bounded comprehension operation timed out.");
+    }
+
+    public OrientationStatus RecordComprehensionFailure(
+        string assignmentId,
+        string employeeId,
+        string orientationVersion,
+        int expectedRevision,
+        string error)
+    {
+        return TransitionAssignmentForFailure(
+            assignmentId,
+            employeeId,
+            orientationVersion,
+            expectedRevision,
+            OrientationStates.Failed,
+            OrientationEvidenceSource.LiveModel,
+            error);
     }
 
     public OrientationStatus GetOrientationStatus(string employeeId)
@@ -743,6 +836,63 @@ public sealed partial class OrganizationStore
         });
     }
 
+    public OrganizationOverview UpdateRoleInstructions(
+        string roleId,
+        string instructions,
+        int expectedRevision)
+    {
+        var value = Sanitize(instructions, 4096);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new OrganizationValidationException("Role standing instructions are required.");
+        }
+
+        return TranslateStoreFaults(() =>
+        {
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                using (var current = connection.CreateCommand())
+                {
+                    current.Transaction = transaction;
+                    current.CommandText =
+                        "SELECT revision FROM orientation_fragments WHERE layer = 'role' AND scope_id = $id AND active = 1";
+                    current.Parameters.AddWithValue("$id", roleId);
+                    var revision = current.ExecuteScalar();
+                    if (revision is null)
+                    {
+                        throw new OrganizationNotFoundException($"Role '{roleId}' does not exist.");
+                    }
+                    if (Convert.ToInt32(revision, CultureInfo.InvariantCulture) != expectedRevision)
+                    {
+                        throw new OrganizationConcurrencyException("The role instruction revision changed.");
+                    }
+                }
+
+                ReplaceFragment(
+                    connection,
+                    transaction,
+                    "role",
+                    roleId,
+                    OrientationComposer.BuildRoleFragment(value));
+                string organizationId;
+                using (var organization = connection.CreateCommand())
+                {
+                    organization.Transaction = transaction;
+                    organization.CommandText =
+                        "SELECT d.organization_id FROM roles r JOIN departments d ON d.id = r.department_id WHERE r.id = $id";
+                    organization.Parameters.AddWithValue("$id", roleId);
+                    organizationId = (string?)organization.ExecuteScalar()
+                        ?? throw new OrganizationStoreCorruptException("The updated role department is missing.");
+                }
+                MarkCurrentAssignmentsStale(connection, transaction, organizationId, "Role instructions changed.");
+                transaction.Commit();
+                return BuildOverview(connection, ReadSingleOrganization(connection));
+            }
+        });
+    }
+
     public OrganizationOverview UpdateOrganizationBasicInstructions(
         string organizationId,
         string instructions,
@@ -792,6 +942,7 @@ public sealed partial class OrganizationStore
         string version,
         string? session,
         int expectedRevision,
+        long requiredRuntimeGeneration,
         string from,
         string to,
         string timestampColumn)
@@ -821,6 +972,8 @@ public sealed partial class OrganizationStore
                     UPDATE orientation_assignments
                     SET state = $to,
                         {timestampColumn} = $now,
+                        required_runtime_generation = $generation,
+                        loaded_runtime_generation = $loadedGeneration,
                         last_error = NULL,
                         revision = revision + 1,
                         session_id = $session
@@ -831,6 +984,8 @@ public sealed partial class OrganizationStore
                     """,
                     ("$to", to),
                     ("$now", now),
+                    ("$generation", requiredRuntimeGeneration),
+                    ("$loadedGeneration", requiredRuntimeGeneration == 0 ? 0 : null),
                     ("$session", sessionRowId),
                     ("$id", assignmentId),
                     ("$version", version),
@@ -842,6 +997,15 @@ public sealed partial class OrganizationStore
                         "The orientation assignment changed, is stale, or is in the wrong state.");
                 }
 
+                SetHold(
+                    connection,
+                    transaction,
+                    binding: BindingForAssignment(connection, transaction, assignmentId),
+                    reason: DispatchHoldReasons.OrientationReloadRequired,
+                    active: requiredRuntimeGeneration > 0,
+                    detail: requiredRuntimeGeneration > 0
+                        ? $"Runtime restart required to load orientation generation {requiredRuntimeGeneration}."
+                        : null);
                 transaction.Commit();
                 return GetOrientationStatusByAssignment(connection, assignmentId);
             }
@@ -849,10 +1013,12 @@ public sealed partial class OrganizationStore
     }
 
     private OrientationStatus TransitionAssignmentForFailure(
+        string assignmentId,
         string employeeId,
         string version,
         int revision,
         string state,
+        OrientationEvidenceSource source,
         string error)
     {
         return TranslateStoreFaults(() =>
@@ -862,22 +1028,54 @@ public sealed partial class OrganizationStore
                 using var connection = OpenConnection();
                 using var transaction = connection.BeginTransaction();
                 var current = ReadCurrentStatus(connection, transaction, employeeId);
-                if (current.OrientationVersion != version || current.Revision != revision)
+                if (!string.Equals(current.AssignmentId, assignmentId, StringComparison.Ordinal)
+                    || current.OrientationVersion != version
+                    || current.Revision != revision)
                 {
                     throw new OrganizationConcurrencyException("The orientation assignment changed.");
                 }
 
+                var sourceValue = source.ToWireValue();
+                var summary = $"{sourceValue} comprehension attempt ended in {state}.";
+                var hash = OrientationComposer.Hash($"{assignmentId}\n{version}\n{state}\n{error}");
                 Execute(
                     connection,
                     transaction,
                     """
                     UPDATE orientation_assignments
-                    SET state = $state, last_error = $error, revision = revision + 1
+                    SET state = $state,
+                        evidence_hash = $hash,
+                        evidence_summary = $summary,
+                        evidence_source = $source,
+                        last_error = $error,
+                        revision = revision + 1
                     WHERE id = $id
                     """,
                     ("$state", state),
+                    ("$hash", hash),
+                    ("$summary", summary),
+                    ("$source", sourceValue),
                     ("$error", error),
                     ("$id", current.AssignmentId));
+                Execute(
+                    connection,
+                    transaction,
+                    """
+                    INSERT INTO orientation_evidence (
+                        id, assignment_id, employee_id, session_id, orientation_version,
+                        evidence_hash, sanitized_summary, evidence_source, outcome, created_at)
+                    SELECT $evidence, id, employee_id, session_id, orientation_version,
+                           $hash, $summary, $source, $outcome, $now
+                    FROM orientation_assignments
+                    WHERE id = $assignment AND session_id IS NOT NULL
+                    """,
+                    ("$evidence", OrganizationIds.NewEvidenceId()),
+                    ("$hash", hash),
+                    ("$summary", summary),
+                    ("$source", sourceValue),
+                    ("$outcome", state),
+                    ("$now", Timestamp()),
+                    ("$assignment", current.AssignmentId));
                 SetHold(
                     connection,
                     transaction,
@@ -962,6 +1160,7 @@ public sealed partial class OrganizationStore
             throw new OrganizationValidationException("Orientation evidence is required.");
         }
 
+        ValidateEvidenceScalar(request.AssignmentId, nameof(request.AssignmentId), 256);
         ValidateEvidenceScalar(request.EmployeeId, nameof(request.EmployeeId), 256);
         ValidateEvidenceScalar(request.SessionId, nameof(request.SessionId), 256);
         ValidateEvidenceScalar(request.OrientationVersion, nameof(request.OrientationVersion), 128);
@@ -1009,6 +1208,7 @@ public sealed partial class OrganizationStore
     {
         return JsonSerializer.Serialize(new SortedDictionary<string, object?>(StringComparer.Ordinal)
         {
+            ["assignmentId"] = request.AssignmentId ?? string.Empty,
             ["department"] = request.Department?.Trim() ?? string.Empty,
             ["duties"] = NormalizeSet(request.Duties).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             ["employeeId"] = request.EmployeeId ?? string.Empty,
@@ -1099,6 +1299,19 @@ public sealed partial class OrganizationStore
             ("$detail", detail),
             ("$now", now),
             ("$cleared", active ? null : now));
+    }
+
+    private static string BindingForAssignment(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string assignmentId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT runtime_binding_id FROM orientation_assignments WHERE id = $assignment";
+        command.Parameters.AddWithValue("$assignment", assignmentId);
+        return (string?)command.ExecuteScalar()
+            ?? throw new OrganizationNotFoundException("Orientation assignment not found.");
     }
 
     private static string BindingForEmployee(
@@ -1263,6 +1476,13 @@ public sealed partial class OrganizationStore
                 transaction,
                 binding,
                 DispatchHoldReasons.OrientationStale,
+                true,
+                detail);
+            SetHold(
+                connection,
+                transaction,
+                binding,
+                DispatchHoldReasons.PolicyUpdate,
                 true,
                 detail);
         }
@@ -1471,7 +1691,8 @@ public sealed partial class OrganizationStore
                        a.revision, a.orientation_version, a.state, a.assigned_at,
                        a.delivered_at, a.acknowledged_at, a.comprehended_at,
                         a.evidence_hash, a.evidence_summary, a.evidence_source,
-                        a.artifact_file_name, a.artifact_bytes, p.version, p.revision, a.last_error
+                        a.artifact_file_name, a.artifact_bytes, p.version, p.revision,
+                        a.required_runtime_generation, a.loaded_runtime_generation, a.last_error
                 FROM orientation_assignments a
                 JOIN permission_policies p ON p.id = a.policy_id
                 LEFT JOIN acp_sessions s ON s.id = a.session_id
@@ -1503,7 +1724,9 @@ public sealed partial class OrganizationStore
                 reader.GetInt64(15),
                 reader.GetString(16),
                 reader.GetInt32(17),
-                reader.IsDBNull(18) ? null : reader.GetString(18));
+                reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                reader.IsDBNull(19) ? null : reader.GetInt64(19),
+                reader.IsDBNull(20) ? null : reader.GetString(20));
         }
 
         var holds = new List<string>();
@@ -1539,6 +1762,11 @@ public sealed partial class OrganizationStore
             row.ArtifactBytes,
             row.PolicyVersion,
             row.PolicyRevision,
+            row.RequiredRuntimeGeneration,
+            row.LoadedRuntimeGeneration,
+            row.RequiredRuntimeGeneration is not null
+                && (row.LoadedRuntimeGeneration is null
+                    || row.LoadedRuntimeGeneration < row.RequiredRuntimeGeneration),
             holds.Count > 0,
             holds,
             row.LastError);
@@ -2200,6 +2428,8 @@ public sealed partial class OrganizationStore
         long ArtifactBytes,
         string PolicyVersion,
         int PolicyRevision,
+        long? RequiredRuntimeGeneration,
+        long? LoadedRuntimeGeneration,
         string? LastError);
 }
 
@@ -2256,13 +2486,14 @@ public static class OrientationComposer
             """);
     }
 
-    public static string BuildRoleFragment()
+    public static string BuildRoleFragment(string standingInstructions)
     {
         return Normalize($"""
             # Role
 
             Profile references: {OrganizationSeed.OperationsItRoleInstructionProfile}; {OrganizationSeed.OperationsItRolePermissionProfile}
-            {OrganizationSeed.RoleOrientation}
+            Standing instructions:
+            {standingInstructions}
 
             Operating behavior:
             - There is no Fleet. Do not call, emulate, or reference Fleet/V1 tooling.

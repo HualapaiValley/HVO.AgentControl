@@ -81,7 +81,7 @@ public sealed class OrientationTests
         Assert.Equal(OrientationStates.Delivered, delivered.State);
         Assert.True(delivered.DispatchHeld);
 
-        var evidence = ValidEvidence(identity.EmployeeId, "ses-orientation", delivered.OrientationVersion, delivered.Revision);
+        var evidence = ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-orientation", delivered.OrientationVersion, delivered.Revision);
         var ready = store.ValidateAndRecordComprehension(evidence);
         Assert.Equal(OrientationStates.Comprehended, ready.State);
         Assert.False(ready.DispatchHeld);
@@ -161,7 +161,7 @@ public sealed class OrientationTests
             var first = store.ComposeAndAssignCurrentOrientation();
             version = first.OrientationVersion;
             var delivered = store.MarkOrientationDelivered(first.AssignmentId, version, "ses-recovery", first.AssignmentRevision);
-            var bad = ValidEvidence(employeeId, "ses-wrong", version, delivered.Revision);
+            var bad = ValidEvidence(delivered.AssignmentId, employeeId, "ses-wrong", version, delivered.Revision);
             rejectedAssignment = store.ValidateAndRecordComprehension(bad).AssignmentId;
 
             var redelivery = store.ComposeAndAssignCurrentOrientation();
@@ -171,7 +171,7 @@ public sealed class OrientationTests
                 redelivery.AssignmentId, version, "ses-recovery", redelivery.AssignmentRevision);
             Assert.Equal(OrientationStates.Delivered, redelivered.State);
             Assert.Equal(OrientationStates.Comprehended, store.ValidateAndRecordComprehension(
-                ValidEvidence(employeeId, "ses-recovery", version, redelivered.Revision)).State);
+                ValidEvidence(redelivered.AssignmentId, employeeId, "ses-recovery", version, redelivered.Revision)).State);
             Assert.Equal(1, RawCount(root.Path, "SELECT COUNT(*) FROM orientation_assignments WHERE id = $id AND state = 'Stale'", rejectedAssignment));
         }
 
@@ -195,6 +195,122 @@ public sealed class OrientationTests
     }
 
     [Fact]
+    public void EvidenceIsBoundToImmutableAssignmentAcrossAtoBtoAReplacement()
+    {
+        using var root = new TempOrientationStore();
+        using var store = root.Open();
+        var identity = store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        store.RecordSession("ses-assignment-binding", null);
+
+        var first = store.ComposeAndAssignCurrentOrientation();
+        var firstDelivered = store.MarkOrientationDelivered(
+            first.AssignmentId, first.OrientationVersion, "ses-assignment-binding", first.AssignmentRevision);
+        var staleEvidence = ValidEvidence(
+            firstDelivered.AssignmentId,
+            identity.EmployeeId,
+            "ses-assignment-binding",
+            firstDelivered.OrientationVersion,
+            firstDelivered.Revision);
+
+        var overview = store.GetOverview();
+        store.UpdateOrganizationBasicInstructions(overview.Id, "Temporary B instructions.", overview.Revision);
+        _ = store.ComposeAndAssignCurrentOrientation();
+        overview = store.GetOverview();
+        store.UpdateOrganizationBasicInstructions(overview.Id, OrganizationSeed.OrganizationInstructions, overview.Revision);
+        var replacement = store.ComposeAndAssignCurrentOrientation();
+        var replacementDelivered = store.MarkOrientationDelivered(
+            replacement.AssignmentId,
+            replacement.OrientationVersion,
+            "ses-assignment-binding",
+            replacement.AssignmentRevision);
+
+        Assert.Equal(first.OrientationVersion, replacementDelivered.OrientationVersion);
+        Assert.NotEqual(first.AssignmentId, replacementDelivered.AssignmentId);
+        Assert.Equal(firstDelivered.Revision, replacementDelivered.Revision);
+        Assert.Throws<OrganizationConcurrencyException>(() => store.ValidateAndRecordComprehension(staleEvidence));
+        Assert.Equal(OrientationStates.Delivered, store.GetOrientationStatus(identity.EmployeeId).State);
+    }
+
+    [Fact]
+    public void ReloadConfirmationIsRequiredBeforeComprehensionAndPreservesAssignmentHistory()
+    {
+        using var root = new TempOrientationStore();
+        using var store = root.Open();
+        var identity = store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        store.RecordSession("ses-reload", null);
+        var assignment = store.ComposeAndAssignCurrentOrientation();
+        var delivered = store.MarkOrientationDelivered(
+            assignment.AssignmentId,
+            assignment.OrientationVersion,
+            "ses-reload",
+            assignment.AssignmentRevision,
+            requiredRuntimeGeneration: 10);
+
+        Assert.True(delivered.RestartRequired);
+        Assert.Contains(DispatchHoldReasons.OrientationReloadRequired, delivered.HoldReasons);
+        Assert.False(delivered.Ready);
+        Assert.Throws<OrganizationConcurrencyException>(() => store.ValidateAndRecordComprehension(
+            ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-reload", delivered.OrientationVersion, delivered.Revision)));
+
+        var loaded = store.ConfirmOrientationLoaded(
+            delivered.AssignmentId,
+            delivered.OrientationVersion,
+            "ses-reload",
+            runtimeGeneration: 10);
+        Assert.False(loaded.RestartRequired);
+        Assert.DoesNotContain(DispatchHoldReasons.OrientationReloadRequired, loaded.HoldReasons);
+        Assert.Throws<OrganizationConcurrencyException>(() => store.ConfirmOrientationLoaded(
+            delivered.AssignmentId,
+            delivered.OrientationVersion,
+            "ses-reload",
+            runtimeGeneration: 9));
+        var comprehended = store.ValidateAndRecordComprehension(
+            ValidEvidence(loaded.AssignmentId, identity.EmployeeId, "ses-reload", loaded.OrientationVersion, loaded.Revision));
+        Assert.Equal(OrientationStates.Comprehended, comprehended.State);
+        Assert.Equal(delivered.AssignmentId, comprehended.AssignmentId);
+    }
+
+    [Fact]
+    public void RoleInstructionUpdateRevisesFragmentAndStalesOrientationWithoutChangingIdentity()
+    {
+        using var root = new TempOrientationStore();
+        using var store = root.Open();
+        var identity = store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        store.RecordSession("ses-role-update", "Preserved");
+        var original = store.ComposeAndAssignCurrentOrientation();
+        _ = store.MarkOrientationDelivered(
+            original.AssignmentId, original.OrientationVersion, "ses-role-update", original.AssignmentRevision);
+        var before = store.GetOverview();
+        var role = Assert.Single(before.Roles);
+
+        var updated = store.UpdateRoleInstructions(
+            role.Id,
+            "Operate the control host.\nExplicitly ask the owner before changing standing policy.",
+            role.Revision);
+        var updatedRole = Assert.Single(updated.Roles);
+        Assert.Equal(role.Id, updatedRole.Id);
+        Assert.Equal(role.Revision + 1, updatedRole.Revision);
+        Assert.Equal(
+            "Operate the control host.\nExplicitly ask the owner before changing standing policy.",
+            updatedRole.StandingInstructions);
+        Assert.Throws<OrganizationConcurrencyException>(() => store.UpdateRoleInstructions(
+            role.Id,
+            "stale update",
+            role.Revision));
+
+        var stale = store.GetOrientationStatus(identity.EmployeeId);
+        Assert.Equal(OrientationStates.Stale, stale.State);
+        Assert.Contains(DispatchHoldReasons.PolicyUpdate, stale.HoldReasons);
+        var replacement = store.ComposeAndAssignCurrentOrientation();
+        Assert.NotEqual(original.AssignmentId, replacement.AssignmentId);
+        Assert.NotEqual(original.OrientationVersion, replacement.OrientationVersion);
+        Assert.Equal(identity.EmployeeId, replacement.EmployeeId);
+        Assert.Equal(identity.RuntimeBindingId, replacement.RuntimeBindingId);
+        Assert.Equal("ses-role-update", replacement.SessionId);
+        Assert.Contains("Explicitly ask the owner", replacement.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TimedOutAttemptCanBeRedeliveredAfterStoreRestart()
     {
         using var root = new TempOrientationStore();
@@ -210,7 +326,7 @@ public sealed class OrientationTests
             version = assignment.OrientationVersion;
             var delivered = store.MarkOrientationDelivered(
                 assignment.AssignmentId, version, "ses-timeout-restart", assignment.AssignmentRevision);
-            var timedOut = store.RecordComprehensionTimeout(employeeId, version, delivered.Revision);
+            var timedOut = store.RecordComprehensionTimeout(delivered.AssignmentId, employeeId, version, delivered.Revision);
             timedOutAssignment = timedOut.AssignmentId;
             Assert.Equal(OrientationStates.TimedOut, timedOut.State);
         }
@@ -234,7 +350,7 @@ public sealed class OrientationTests
         store.RecordSession("ses-evidence", null);
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(assignment.AssignmentId, assignment.OrientationVersion, "ses-evidence", assignment.AssignmentRevision);
-        var bad = ValidEvidence(identity.EmployeeId, "ses-wrong", delivered.OrientationVersion, delivered.Revision);
+        var bad = ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-wrong", delivered.OrientationVersion, delivered.Revision);
 
         var rejected = store.ValidateAndRecordComprehension(bad);
         Assert.Equal(OrientationStates.Rejected, rejected.State);
@@ -252,7 +368,7 @@ public sealed class OrientationTests
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(
             assignment.AssignmentId, assignment.OrientationVersion, "ses-null-evidence", assignment.AssignmentRevision);
-        var valid = ValidEvidence(identity.EmployeeId, "ses-null-evidence", delivered.OrientationVersion, delivered.Revision);
+        var valid = ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-null-evidence", delivered.OrientationVersion, delivered.Revision);
 
         Assert.Throws<OrganizationValidationException>(() => store.ValidateAndRecordComprehension(valid with { Identity = null! }));
         Assert.Throws<OrganizationValidationException>(() => store.ValidateAndRecordComprehension(valid with { Duties = null }));
@@ -268,7 +384,7 @@ public sealed class OrientationTests
         store.RecordSession("ses-permission", null);
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(assignment.AssignmentId, assignment.OrientationVersion, "ses-permission", assignment.AssignmentRevision);
-        store.ValidateAndRecordComprehension(ValidEvidence(identity.EmployeeId, "ses-permission", delivered.OrientationVersion, delivered.Revision));
+        store.ValidateAndRecordComprehension(ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-permission", delivered.OrientationVersion, delivered.Revision));
 
         Assert.Throws<OrganizationValidationException>(() => store.CreatePermissionGrant(new PermissionGrantRequest(
             identity.EmployeeId, "rst-host-secrets", "read", "secret:key", DateTimeOffset.UtcNow.AddHours(1), 1, "deny-cannot-waive")));
@@ -289,7 +405,7 @@ public sealed class OrientationTests
         store.RecordSession("ses-layers", null);
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(assignment.AssignmentId, assignment.OrientationVersion, "ses-layers", assignment.AssignmentRevision);
-        store.ValidateAndRecordComprehension(ValidEvidence(identity.EmployeeId, "ses-layers", delivered.OrientationVersion, delivered.Revision));
+        store.ValidateAndRecordComprehension(ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-layers", delivered.OrientationVersion, delivered.Revision));
 
         // A waivable overlapping restriction is inserted both before and after the
         // non-waivable key so the outcome cannot depend on evaluation order.
@@ -320,7 +436,7 @@ public sealed class OrientationTests
         store.RecordSession("ses-lower", null);
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(assignment.AssignmentId, assignment.OrientationVersion, "ses-lower", assignment.AssignmentRevision);
-        store.ValidateAndRecordComprehension(ValidEvidence(identity.EmployeeId, "ses-lower", delivered.OrientationVersion, delivered.Revision));
+        store.ValidateAndRecordComprehension(ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-lower", delivered.OrientationVersion, delivered.Revision));
 
         // A role-layer deny (no code work) is not a host restriction, and no owner
         // grant exists for it: the claim must still be rejected.
@@ -341,7 +457,7 @@ public sealed class OrientationTests
         store.RecordSession("ses-current", null);
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(assignment.AssignmentId, assignment.OrientationVersion, "ses-current", assignment.AssignmentRevision);
-        store.ValidateAndRecordComprehension(ValidEvidence(identity.EmployeeId, "ses-current", delivered.OrientationVersion, delivered.Revision));
+        store.ValidateAndRecordComprehension(ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-current", delivered.OrientationVersion, delivered.Revision));
 
         var absent = store.EvaluatePermission(identity.EmployeeId, null, 7, "read", "secret:key");
         var wrong = store.EvaluatePermission(identity.EmployeeId, "ses-wrong", 8, "read", "secret:key");
@@ -361,7 +477,7 @@ public sealed class OrientationTests
         store.RecordSession("ses-grant", null);
         var assignment = store.ComposeAndAssignCurrentOrientation();
         var delivered = store.MarkOrientationDelivered(assignment.AssignmentId, assignment.OrientationVersion, "ses-grant", assignment.AssignmentRevision);
-        store.ValidateAndRecordComprehension(ValidEvidence(identity.EmployeeId, "ses-grant", delivered.OrientationVersion, delivered.Revision));
+        store.ValidateAndRecordComprehension(ValidEvidence(delivered.AssignmentId, identity.EmployeeId, "ses-grant", delivered.OrientationVersion, delivered.Revision));
         var request = new PermissionGrantRequest(identity.EmployeeId, "rst-host-safe-diagnostic-example", "read", "diagnostic:public", DateTimeOffset.UtcNow.AddHours(1), 1, "grant-1");
         var grant = store.CreatePermissionGrant(request);
         Assert.Equal(grant.Id, store.CreatePermissionGrant(request).Id);
@@ -529,8 +645,8 @@ public sealed class OrientationTests
         Assert.Single(Directory.GetFiles(directory));
     }
 
-    private static OrientationEvidenceRequest ValidEvidence(string employee, string session, string version, int revision) => new(
-        employee, session, version, OrganizationSeed.AdoptedEmployeeDisplayName, OrganizationSeed.OperationsDisplayName, "owner",
+    private static OrientationEvidenceRequest ValidEvidence(string assignment, string employee, string session, string version, int revision) => new(
+        assignment, employee, session, version, OrganizationSeed.AdoptedEmployeeDisplayName, OrganizationSeed.OperationsDisplayName, "owner",
         ["operate and maintain the control host", "inspect runtime health and sanitized diagnostics", "explain organization state", "request owner-authorized changes"],
         ["no secrets or controller-private state", "no unrestricted Docker, GitHub, or host authority", "no autonomous hiring, provisioning, delegation, or dispatch", "no Fleet or V1", "no cross-employee history"],
         "escalate uncertainty, failed controls, suspected secret exposure, and irreversible effects before retrying", revision);

@@ -357,6 +357,73 @@ app.MapPut("/api/organization/basic-instructions", (
     .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+app.MapPut("/api/roles/{id}/instructions", (
+    HttpContext context,
+    AcpControlHost host,
+    string id,
+    RoleInstructionsUpdate update) =>
+{
+    if (Program.RejectCrossOrigin(context, "Role instruction updates") is { } rejection)
+    {
+        return rejection;
+    }
+
+    if (string.IsNullOrWhiteSpace(id) || update.Revision is null or < 1)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid role instruction update.",
+            detail: "A stable role id and current role revision are required.");
+    }
+
+    try
+    {
+        return Results.Ok(host.UpdateRoleInstructions(
+            id,
+            update.StandingInstructions ?? string.Empty,
+            update.Revision.Value));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Invalid role instructions.",
+            detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Role not found.",
+            detail: "No role with that stable id exists.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Role instruction update conflicted.",
+            detail: "The role changed since it was read. Reload and retry.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The role instructions could not be updated.");
+    }
+})
+    .WithName("UpdateRoleInstructions")
+    .WithTags("Organization")
+    .WithSummary("Updates authoritative role standing instructions under optimistic revision and marks affected orientation stale.")
+    .Produces<HVO.AgentControl.Organization.OrganizationOverview>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapGet("/api/orientation", (AcpControlHost host) =>
 {
     try
@@ -470,13 +537,6 @@ app.MapPost("/api/orientation/comprehension/run", async (HttpContext context, Ac
     {
         return Results.Ok(await host.RunOrientationComprehensionAsync(context.RequestAborted));
     }
-    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
-    {
-        return Results.Problem(
-            statusCode: StatusCodes.Status422UnprocessableEntity,
-            title: "Comprehension failed.",
-            detail: exception.Message);
-    }
     catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
     {
         return Results.Problem(
@@ -501,12 +561,11 @@ app.MapPost("/api/orientation/comprehension/run", async (HttpContext context, Ac
 })
     .WithName("RunOrientationComprehension")
     .WithTags("Orientation")
-    .WithSummary("Runs one owner-triggered bounded ACP JSON comprehension demonstration without tools. This is the live model demonstration path.")
+    .WithSummary("Runs one owner-triggered bounded ACP JSON comprehension demonstration without tools. Model, ACP, malformed, empty, oversized and non-terminal outcomes are persisted as live-model failures.")
     .Produces<HVO.AgentControl.Organization.OrientationStatus>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status403Forbidden)
     .ProducesProblem(StatusCodes.Status409Conflict)
-    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPut("/api/orientation/manual-hold", (HttpContext context, AcpControlHost host, ManualHoldUpdate update) =>
@@ -898,6 +957,7 @@ public sealed record ModelSelection(string? Model);
 
 public sealed record OrganizationUpdate(string? OrganizationId, string? DisplayName, int? Revision);
 public sealed record OrganizationInstructionsUpdate(string? OrganizationId, string? BasicInstructions, int? Revision);
+public sealed record RoleInstructionsUpdate(string? StandingInstructions, int? Revision);
 public sealed record ManualHoldUpdate(bool Held, string? Detail);
 public sealed record GrantRevokeRequest(int ExpectedRevision);
 

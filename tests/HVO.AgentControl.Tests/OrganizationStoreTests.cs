@@ -48,6 +48,8 @@ public sealed class OrganizationStoreTests
         Assert.Equal(OrganizationSeed.OperationsItRoleDisplayName, role.DisplayName);
         Assert.Equal(OrganizationSeed.OperationsItRoleInstructionProfile, role.InstructionProfile);
         Assert.Equal(OrganizationSeed.OperationsItRolePermissionProfile, role.PermissionProfile);
+        Assert.Contains(OrganizationSeed.RoleOrientation, role.StandingInstructions, StringComparison.Ordinal);
+        Assert.Equal(1, role.Revision);
         var employee = Assert.Single(overview.Employees);
         Assert.Equal("operations", employee.DepartmentSlug);
         Assert.Equal("operations-it", employee.RoleSlug);
@@ -1216,6 +1218,7 @@ public sealed class OrganizationStoreTests
         ExecuteRaw(
             path,
             """
+            PRAGMA foreign_keys = OFF;
             DROP TABLE permission_audit;
             DROP TABLE permission_requests;
             DROP TABLE permission_grants;
@@ -1257,6 +1260,7 @@ public sealed class OrganizationStoreTests
             FROM runtime_bindings_v2;
             DROP TABLE runtime_bindings_v2;
             UPDATE schema_version SET version = 1;
+            PRAGMA foreign_keys = ON;
             """);
     }
 

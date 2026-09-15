@@ -109,6 +109,7 @@ public static class DispatchHoldReasons
     public const string OrientationStale = "stale";
     public const string OrientationFailed = "failed";
     public const string PolicyUpdate = "policy-update";
+    public const string OrientationReloadRequired = "orientation-reload-required";
     public const string Manual = "manual";
 }
 
@@ -150,11 +151,14 @@ public sealed record OrientationStatus(
     long ArtifactBytes,
     string PolicyVersion,
     int PolicyRevision,
+    long? RequiredRuntimeGeneration,
+    long? LoadedRuntimeGeneration,
+    bool RestartRequired,
     bool DispatchHeld,
     IReadOnlyList<string> HoldReasons,
     string? LastError)
 {
-    public bool Ready => State == OrientationStates.Comprehended && !DispatchHeld;
+    public bool Ready => State == OrientationStates.Comprehended && !RestartRequired && !DispatchHeld;
 }
 
 public sealed record OrientationArtifact(
@@ -168,6 +172,7 @@ public sealed record OrientationArtifact(
     int AssignmentRevision);
 
 public sealed record OrientationEvidenceRequest(
+    string AssignmentId,
     string EmployeeId,
     string SessionId,
     string OrientationVersion,
@@ -221,7 +226,9 @@ public sealed record RoleSummary(
     string Slug,
     string DisplayName,
     string InstructionProfile,
-    string PermissionProfile);
+    string PermissionProfile,
+    string StandingInstructions,
+    int Revision);
 
 /// <summary>An employee joined to its department, role and runtime binding.</summary>
 public sealed record EmployeeSummary(

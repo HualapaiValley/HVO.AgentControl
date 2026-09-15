@@ -289,11 +289,14 @@ try {
   record('manual hold button mutates and reloads orientation state', true, {});
 
   await page.click('[data-orientation-deliver]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Orientation state updated.');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Orientation delivered. Runtime restart required.');
   const deliveredAfterRename = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()));
   record(
     'deliver button creates a fresh delivered assignment after rename',
     deliveredAfterRename.state === 'Delivered'
+      && deliveredAfterRename.restartRequired === true
+      && deliveredAfterRename.ready === false
+      && deliveredAfterRename.holdReasons.includes('orientation-reload-required')
       && deliveredAfterRename.assignmentId !== renameEvidence.before.assignmentId
       && deliveredAfterRename.orientationVersion !== renameEvidence.before.orientationVersion,
     { before: renameEvidence.before, after: deliveredAfterRename },

@@ -366,6 +366,8 @@ public sealed partial class OrganizationStore : IDisposable
             evidence_hash TEXT,
             evidence_summary TEXT,
             evidence_source TEXT CHECK (evidence_source IN ('owner-submitted', 'live-model')),
+            required_runtime_generation INTEGER,
+            loaded_runtime_generation INTEGER,
             last_error TEXT,
             revision INTEGER NOT NULL,
             UNIQUE (id, employee_id),
@@ -405,7 +407,7 @@ public sealed partial class OrganizationStore : IDisposable
         CREATE TABLE dispatch_holds (
             id TEXT PRIMARY KEY,
             runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
-            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'manual')),
+            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
             active INTEGER NOT NULL CHECK (active IN (0, 1)),
             detail TEXT,
             created_at TEXT NOT NULL,
@@ -2181,6 +2183,28 @@ public sealed partial class OrganizationStore : IDisposable
         return (id, slug, displayName, description, basicInstructions, revision, createdAt, updatedAt);
     }
 
+    private static string ReadRoleStandingInstructions(string fragmentContent)
+    {
+        const string marker = "Standing instructions:\n";
+        const string terminator = "\n\nOperating behavior:";
+        var start = fragmentContent.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            throw new OrganizationStoreCorruptException(
+                "The active role fragment does not contain authoritative standing instructions.");
+        }
+
+        start += marker.Length;
+        var end = fragmentContent.IndexOf(terminator, start, StringComparison.Ordinal);
+        if (end < 0)
+        {
+            throw new OrganizationStoreCorruptException(
+                "The active role fragment does not delimit authoritative standing instructions.");
+        }
+
+        return fragmentContent[start..end].Trim();
+    }
+
     private OrganizationOverview BuildOverview(
         SqliteConnection connection,
         (string Id, string Slug, string DisplayName, string Description, string BasicInstructions, int Revision, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt) organization)
@@ -2213,8 +2237,10 @@ public sealed partial class OrganizationStore : IDisposable
         {
             command.CommandText =
                 """
-                SELECT r.id, r.department_id, r.slug, r.display_name, r.instruction_profile, r.permission_profile
+                SELECT r.id, r.department_id, r.slug, r.display_name, r.instruction_profile,
+                       r.permission_profile, f.content, f.revision
                 FROM roles r
+                JOIN orientation_fragments f ON f.layer = 'role' AND f.scope_id = r.id AND f.active = 1
                 JOIN departments d ON d.id = r.department_id
                 WHERE d.organization_id = $organization
                 ORDER BY r.slug
@@ -2229,7 +2255,9 @@ public sealed partial class OrganizationStore : IDisposable
                     reader.GetString(2),
                     reader.GetString(3),
                     reader.GetString(4),
-                    reader.GetString(5)));
+                    reader.GetString(5),
+                    ReadRoleStandingInstructions(reader.GetString(6)),
+                    reader.GetInt32(7)));
             }
         }
 

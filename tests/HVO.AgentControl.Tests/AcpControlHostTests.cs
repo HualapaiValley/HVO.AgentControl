@@ -313,6 +313,10 @@ public sealed class AcpControlHostTests
     [Theory]
     [InlineData("orientation_malformed")]
     [InlineData("orientation_fenced")]
+    [InlineData("orientation_empty")]
+    [InlineData("orientation_oversized")]
+    [InlineData("orientation_non_end")]
+    [InlineData("orientation_wrong_session")]
     public async Task MalformedLiveComprehensionIsValidationFailureAndDoesNotComprehend(string scenario)
     {
         var data = Directory.CreateTempSubdirectory("acp-host-orientation-invalid-").FullName;
@@ -320,11 +324,94 @@ public sealed class AcpControlHostTests
 
         await host.StartAsync(CancellationToken.None);
         await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
-        await Assert.ThrowsAsync<OrganizationValidationException>(() =>
-            host.RunOrientationComprehensionAsync(CancellationToken.None));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
 
-        Assert.Equal(OrientationStates.Delivered, host.GetOrientationStatus().State);
-        Assert.Null(host.GetOrientationStatus().EvidenceSource);
+        Assert.Equal(OrientationStates.Failed, result.State);
+        Assert.Contains(DispatchHoldReasons.OrientationFailed, result.HoldReasons);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    /// <summary>
+    /// The startup bootstrap prompt holds the single prompt slot. A host that
+    /// advertises readiness must also expose that the session is still busy, and
+    /// an explicit comprehension request during that window must be a
+    /// deterministic conflict rather than a race that either slips through or
+    /// reports a generic failure.
+    /// </summary>
+    [Fact]
+    public async Task BootstrapPromptActiveIsObservableAndRejectsComprehension()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-bootstrap-busy-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_gated_bootstrap"));
+
+        await host.StartAsync(CancellationToken.None);
+        var busy = await WaitForAsync(
+            host,
+            status => string.Equals(status.State, "ready", StringComparison.Ordinal)
+                && string.Equals(status.SessionState, "busy", StringComparison.Ordinal),
+            "a ready host whose bootstrap prompt is still active",
+            TimeSpan.FromSeconds(30));
+
+        // The control plane is available (cancel/terminal), but the prompt slot
+        // is observably occupied.
+        Assert.True(busy.CanControl);
+        Assert.Equal("ready", busy.State);
+        Assert.Equal("busy", busy.SessionState);
+
+        var conflict = await Assert.ThrowsAsync<OrganizationConcurrencyException>(
+            () => host.RunOrientationComprehensionAsync(CancellationToken.None));
+        Assert.Contains("prompt operation", conflict.Message, StringComparison.OrdinalIgnoreCase);
+
+        File.WriteAllText(Path.Combine(data, "home", "bootstrap-release"), "release");
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Regression for the PR #246 correction race: waiting for the advertised
+    /// ready state and immediately running comprehension must not observe the
+    /// bootstrap prompt still holding <c>_promptOperationLock</c>. No sleep and
+    /// no retry are used; the bootstrap is only released after its busy hold is
+    /// observed.
+    /// </summary>
+    [Fact]
+    public async Task ImmediateComprehensionAfterBootstrapSettlesDoesNotRace()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-bootstrap-settle-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_gated_bootstrap"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForAsync(
+            host,
+            status => string.Equals(status.SessionState, "busy", StringComparison.Ordinal),
+            "the gated bootstrap prompt to start",
+            TimeSpan.FromSeconds(30));
+
+        File.WriteAllText(Path.Combine(data, "home", "bootstrap-release"), "release");
+        var ready = await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        Assert.NotEqual("busy", ready.SessionState);
+
+        // Immediate owner comprehension against exactly the advertised state.
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+        Assert.Equal(OrientationStates.Comprehended, result.State);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task AcpErrorLiveComprehensionPersistsLiveModelFailure()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-error-").FullName;
+        using var host = CreateHost(ReadyOptions(data, "orientation_error"));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var result = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+
+        Assert.Equal(OrientationStates.Failed, result.State);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, result.EvidenceSource);
+        Assert.Contains("ACP comprehension request failed", result.LastError, StringComparison.Ordinal);
         await host.StopAsync(CancellationToken.None);
     }
 
@@ -344,6 +431,29 @@ public sealed class AcpControlHostTests
     }
 
     [Fact]
+    public async Task TimedOutRemoteTurnFencesRetryAndLateChunksCannotEnterReplacementAttempt()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-fence-").FullName;
+        var options = ReadyOptions(data, scenario: "orientation_hang");
+        options.PromptTimeoutSeconds = 1;
+        using var host = CreateHost(options);
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var first = await host.RunOrientationComprehensionAsync(CancellationToken.None);
+        Assert.Equal(OrientationStates.TimedOut, first.State);
+
+        var retry = await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            host.RunOrientationComprehensionAsync(CancellationToken.None));
+        Assert.Contains("prompt operation", retry.Message, StringComparison.OrdinalIgnoreCase);
+        var redelivery = Assert.Throws<OrganizationConcurrencyException>(() => host.RecomposeAndDeliverOrientation());
+        Assert.Contains("remote prompt", redelivery.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(first.AssignmentId, host.GetOrientationStatus().AssignmentId);
+        Assert.Equal(OrientationStates.TimedOut, host.GetOrientationStatus().State);
+        await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task OrientationComprehensionCallerCancellationIsNotRecordedAsTimeout()
     {
         var data = Directory.CreateTempSubdirectory("acp-host-orientation-cancel-").FullName;
@@ -357,7 +467,8 @@ public sealed class AcpControlHostTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             host.RunOrientationComprehensionAsync(cancelled.Token));
 
-        Assert.Equal(OrientationStates.Delivered, host.GetOrientationStatus().State);
+        Assert.Equal(OrientationStates.Failed, host.GetOrientationStatus().State);
+        Assert.Equal(OrientationEvidenceSources.LiveModel, host.GetOrientationStatus().EvidenceSource);
         await host.StopAsync(CancellationToken.None);
     }
 
@@ -407,6 +518,51 @@ public sealed class AcpControlHostTests
         await WaitForFileContainsAsync(callsPath, "session/prompt", TimeSpan.FromSeconds(15));
 
         await host.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task SameNativeSessionRestartConfirmsDeliveredArtifactGenerationAndAllowsComprehension()
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-reload-confirm-").FullName;
+        var options = ReadyOptions(data, scenario: "orientation_fast");
+        string sessionId;
+        string assignmentId;
+        string orientationVersion;
+
+        using (var first = CreateHost(options))
+        {
+            await first.StartAsync(CancellationToken.None);
+            await WaitForStateAsync(first, "ready", TimeSpan.FromSeconds(30));
+            sessionId = first.GetStatus().SessionId!;
+            var overview = first.Organization!.GetOverview();
+            first.UpdateOrganizationBasicInstructions(
+                overview.Id,
+                "Restart-confirmed standing instructions.",
+                overview.Revision);
+            var delivered = first.RecomposeAndDeliverOrientation();
+            assignmentId = delivered.AssignmentId;
+            orientationVersion = delivered.OrientationVersion;
+            Assert.True(delivered.RestartRequired);
+            Assert.Contains(DispatchHoldReasons.OrientationReloadRequired, delivered.HoldReasons);
+            await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+                first.RunOrientationComprehensionAsync(CancellationToken.None));
+            await first.StopAsync(CancellationToken.None);
+        }
+
+        using var restarted = CreateHost(options);
+        await restarted.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(restarted, "ready", TimeSpan.FromSeconds(30));
+        var loaded = restarted.GetOrientationStatus();
+        Assert.Equal(sessionId, restarted.GetStatus().SessionId);
+        Assert.Equal(assignmentId, loaded.AssignmentId);
+        Assert.Equal(orientationVersion, loaded.OrientationVersion);
+        Assert.False(loaded.RestartRequired);
+        Assert.DoesNotContain(DispatchHoldReasons.OrientationReloadRequired, loaded.HoldReasons);
+
+        var comprehended = await restarted.RunOrientationComprehensionAsync(CancellationToken.None);
+        Assert.Equal(OrientationStates.Comprehended, comprehended.State);
+        Assert.Equal(assignmentId, comprehended.AssignmentId);
+        await restarted.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -692,7 +848,15 @@ public sealed class AcpControlHostTests
             var status = host.GetStatus();
             if (string.Equals(status.State, expected, StringComparison.Ordinal))
             {
-                return status;
+                // "ready" is only a suitable owner-work state once the startup
+                // bootstrap prompt has settled: the host serializes all prompt
+                // operations, so a busy session means the prompt slot is still
+                // held and a comprehension attempt would (correctly) conflict.
+                if (!string.Equals(expected, "ready", StringComparison.Ordinal)
+                    || !string.Equals(status.SessionState, "busy", StringComparison.Ordinal))
+                {
+                    return status;
+                }
             }
 
             if (string.Equals(status.State, "faulted", StringComparison.Ordinal) && expected != "faulted")

@@ -60,6 +60,13 @@ public sealed class AcpRpcSession
 
     public Func<AcpEnvelope, CancellationToken, Task<AcpResponse>>? IncomingRequestHandler { get; set; }
 
+    /// <summary>
+    /// Optional non-blocking observer invoked synchronously in codec-reader order
+    /// for every inbound frame, before a response can complete its correlator.
+    /// The hook must copy any data it retains and must never perform blocking I/O.
+    /// </summary>
+    public Action<AcpEnvelope>? IncomingFrameHook { get; set; }
+
     public void Start()
     {
         if (_readLoop is not null)
@@ -216,6 +223,8 @@ public sealed class AcpRpcSession
                 {
                     break;
                 }
+
+                IncomingFrameHook?.Invoke(envelope);
 
                 if (envelope.IsResponse)
                 {
