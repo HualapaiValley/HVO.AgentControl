@@ -84,19 +84,20 @@ public sealed class AcpRpcSession
     public Task<JsonElement> RequestAsync(
         string method,
         object? parameters,
-        TimeSpan timeout,
+        TimeSpan? timeout,
         CancellationToken cancellationToken) =>
         BeginRequest(method, parameters, timeout, cancellationToken).Completion;
 
     /// <summary>
     /// Registers a request and exposes its exact JSON-RPC id before any response
     /// can be correlated. The returned completion still owns write failures,
-    /// cancellation and timeout cleanup.
+    /// cancellation and optional timeout cleanup. A null timeout retains remote
+    /// ownership until an exact terminal frame or session-lifetime cancellation.
     /// </summary>
     public AcpRequest BeginRequest(
         string method,
         object? parameters,
-        TimeSpan timeout,
+        TimeSpan? timeout,
         CancellationToken cancellationToken,
         Action<long>? registered = null)
     {
@@ -119,7 +120,7 @@ public sealed class AcpRpcSession
         AcpRpcCorrelator.PendingCall call,
         string method,
         object? parameters,
-        TimeSpan timeout,
+        TimeSpan? timeout,
         CancellationToken cancellationToken)
     {
         try
@@ -134,25 +135,33 @@ public sealed class AcpRpcSession
                 },
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException exception)
+        {
+            _correlator.TryFail(call.Key, exception);
+        }
         catch (Exception exception)
         {
             _correlator.TryFail(
                 call.Key,
-                exception is OperationCanceledException
+                exception is AcpSessionClosedException
                     ? exception
-                    : new AcpSessionClosedException($"Failed to write ACP request '{method}'.", exception));
-            throw;
+                    : new AcpSessionClosedException(
+                        "ACP request could not be written because the session transport closed.",
+                        exception));
         }
 
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
+        if (timeout is null)
+        {
+            return await call.Completion.Task.ConfigureAwait(false);
+        }
+
         try
         {
-            return await call.Completion.Task.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
+            return await call.Completion.Task.WaitAsync(timeout.Value, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (TimeoutException)
         {
-            var timeoutException = new TimeoutException($"ACP request '{method}' timed out after {timeout}.");
+            var timeoutException = new TimeoutException($"ACP request '{method}' timed out after {timeout.Value}.");
             _correlator.TryFail(call.Key, timeoutException);
             throw timeoutException;
         }
@@ -228,12 +237,11 @@ public sealed class AcpRpcSession
             }
             catch (AcpProtocolException)
             {
+                // Protocol and normalized transport faults remain observable on
+                // Completion; disposal itself suppresses expected teardown.
             }
             catch (IOException)
             {
-                // The child pipe closed mid-read (process exit or teardown).
-                // The read loop fault is preserved on Completion; disposal itself
-                // must never surface an expected transport failure to the host.
             }
             catch (ObjectDisposedException)
             {
@@ -283,7 +291,7 @@ public sealed class AcpRpcSession
         }
         catch (Exception exception)
         {
-            failure = exception;
+            failure = NormalizeTransportFailure(exception);
         }
         finally
         {
@@ -344,11 +352,25 @@ public sealed class AcpRpcSession
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _output(frame, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _output(frame, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+            {
+                throw new AcpSessionClosedException("ACP session transport closed while writing.", exception);
+            }
         }
         finally
         {
             _writeLock.Release();
         }
     }
+
+    private static Exception NormalizeTransportFailure(Exception exception) => exception switch
+    {
+        IOException or ObjectDisposedException =>
+            new AcpSessionClosedException("ACP session transport closed while reading.", exception),
+        _ => exception,
+    };
 }

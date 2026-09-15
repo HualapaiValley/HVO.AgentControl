@@ -518,12 +518,14 @@ public sealed partial class OrganizationStore
     public OrientationStatus RecordComprehensionTimeout(
         string assignmentId,
         string employeeId,
+        string sessionId,
         string orientationVersion,
         int expectedRevision)
     {
-        return TransitionAssignmentForFailure(
+        return RecordHistoricalAttemptFailure(
             assignmentId,
             employeeId,
+            sessionId,
             orientationVersion,
             expectedRevision,
             OrientationStates.TimedOut,
@@ -534,13 +536,15 @@ public sealed partial class OrganizationStore
     public OrientationStatus RecordComprehensionFailure(
         string assignmentId,
         string employeeId,
+        string sessionId,
         string orientationVersion,
         int expectedRevision,
         string error)
     {
-        return TransitionAssignmentForFailure(
+        return RecordHistoricalAttemptFailure(
             assignmentId,
             employeeId,
+            sessionId,
             orientationVersion,
             expectedRevision,
             OrientationStates.Failed,
@@ -1012,12 +1016,13 @@ public sealed partial class OrganizationStore
         });
     }
 
-    private OrientationStatus TransitionAssignmentForFailure(
+    private OrientationStatus RecordHistoricalAttemptFailure(
         string assignmentId,
         string employeeId,
+        string sessionId,
         string version,
-        int revision,
-        string state,
+        int startedRevision,
+        string outcome,
         OrientationEvidenceSource source,
         string error)
     {
@@ -1028,62 +1033,111 @@ public sealed partial class OrganizationStore
             {
                 using var connection = OpenConnection();
                 using var transaction = connection.BeginTransaction();
-                var current = ReadCurrentStatus(connection, transaction, employeeId);
-                if (!string.Equals(current.AssignmentId, assignmentId, StringComparison.Ordinal)
-                    || current.OrientationVersion != version
-                    || current.Revision != revision)
+                var assignment = GetOrientationStatusByAssignment(connection, assignmentId, transaction);
+                if (!string.Equals(assignment.EmployeeId, employeeId, StringComparison.Ordinal)
+                    || !string.Equals(assignment.SessionId, sessionId, StringComparison.Ordinal)
+                    || !string.Equals(assignment.OrientationVersion, version, StringComparison.Ordinal))
                 {
-                    throw new OrganizationConcurrencyException("The orientation assignment changed.");
+                    throw new OrganizationConcurrencyException(
+                        "The failed orientation attempt does not match its started assignment, employee, version, and session.");
                 }
 
                 var sourceValue = source.ToWireValue();
-                var summary = $"{sourceValue} comprehension attempt ended in {state}.";
-                var hash = OrientationComposer.Hash($"{assignmentId}\n{version}\n{state}\n{error}");
+                var summary = $"{sourceValue} comprehension attempt ended in {outcome}.";
+                var hash = OrientationComposer.Hash(
+                    $"{assignmentId}\n{employeeId}\n{sessionId}\n{version}\n{startedRevision}\n{outcome}\n{error}");
+                var duplicate = string.Equals(assignment.EvidenceHash, hash, StringComparison.Ordinal)
+                    && string.Equals(assignment.EvidenceSource, sourceValue, StringComparison.Ordinal)
+                    && string.Equals(assignment.LastError, error, StringComparison.Ordinal);
+                var deliveredStart = string.Equals(assignment.State, OrientationStates.Delivered, StringComparison.Ordinal)
+                    && assignment.Revision == startedRevision;
+                var supersededStart = string.Equals(assignment.State, OrientationStates.Stale, StringComparison.Ordinal)
+                    && assignment.Revision >= startedRevision + 1;
+                var terminalDuplicate = string.Equals(assignment.State, outcome, StringComparison.Ordinal)
+                    && assignment.Revision == startedRevision + 1
+                    && duplicate;
+                if (!deliveredStart && !supersededStart && !terminalDuplicate)
+                {
+                    throw new OrganizationConcurrencyException(
+                        "The failed orientation attempt does not match the assignment state captured at operation start.");
+                }
+
+                if (!duplicate)
+                {
+                    var affected = Execute(
+                        connection,
+                        transaction,
+                        deliveredStart
+                            ? """
+                              UPDATE orientation_assignments
+                              SET state = $outcome,
+                                  evidence_hash = $hash,
+                                  evidence_summary = $summary,
+                                  evidence_source = $source,
+                                  last_error = $error,
+                                  revision = revision + 1
+                              WHERE id = $id AND state = 'Delivered' AND revision = $revision
+                              """
+                            : """
+                              UPDATE orientation_assignments
+                              SET evidence_hash = $hash,
+                                  evidence_summary = $summary,
+                                  evidence_source = $source,
+                                  last_error = $error
+                              WHERE id = $id AND state = 'Stale'
+                              """,
+                        ("$outcome", outcome),
+                        ("$hash", hash),
+                        ("$summary", summary),
+                        ("$source", sourceValue),
+                        ("$error", error),
+                        ("$id", assignmentId),
+                        ("$revision", startedRevision));
+                    if (affected != 1)
+                    {
+                        throw new OrganizationConcurrencyException(
+                            "The failed orientation attempt changed while its outcome was recorded.");
+                    }
+                }
+
                 Execute(
                     connection,
                     transaction,
                     """
-                    UPDATE orientation_assignments
-                    SET state = $state,
-                        evidence_hash = $hash,
-                        evidence_summary = $summary,
-                        evidence_source = $source,
-                        last_error = $error,
-                        revision = revision + 1
-                    WHERE id = $id
-                    """,
-                    ("$state", state),
-                    ("$hash", hash),
-                    ("$summary", summary),
-                    ("$source", sourceValue),
-                    ("$error", error),
-                    ("$id", current.AssignmentId));
-                Execute(
-                    connection,
-                    transaction,
-                    """
-                    INSERT INTO orientation_evidence (
+                    INSERT OR IGNORE INTO orientation_evidence (
                         id, assignment_id, employee_id, session_id, orientation_version,
                         evidence_hash, sanitized_summary, evidence_source, outcome, created_at)
-                    SELECT $evidence, id, employee_id, session_id, orientation_version,
+                    SELECT $evidence, a.id, a.employee_id, a.session_id, a.orientation_version,
                            $hash, $summary, $source, $outcome, $now
-                    FROM orientation_assignments
-                    WHERE id = $assignment AND session_id IS NOT NULL
+                    FROM orientation_assignments a
+                    JOIN acp_sessions s ON s.id = a.session_id
+                    WHERE a.id = $assignment
+                      AND a.employee_id = $employee
+                      AND a.orientation_version = $version
+                      AND s.native_session_id = $session
                     """,
                     ("$evidence", OrganizationIds.NewEvidenceId()),
                     ("$hash", hash),
                     ("$summary", summary),
                     ("$source", sourceValue),
-                    ("$outcome", state),
+                    ("$outcome", outcome),
                     ("$now", Timestamp()),
-                    ("$assignment", current.AssignmentId));
-                SetHold(
-                    connection,
-                    transaction,
-                    current.RuntimeBindingId,
-                    DispatchHoldReasons.OrientationFailed,
-                    true,
-                    error);
+                    ("$assignment", assignmentId),
+                    ("$employee", employeeId),
+                    ("$version", version),
+                    ("$session", sessionId));
+
+                if (deliveredStart)
+                {
+                    SetHold(
+                        connection,
+                        transaction,
+                        assignment.RuntimeBindingId,
+                        DispatchHoldReasons.OrientationFailed,
+                        true,
+                        error);
+                }
+
                 transaction.Commit();
                 return GetOrientationStatusCore(connection, employeeId);
             }

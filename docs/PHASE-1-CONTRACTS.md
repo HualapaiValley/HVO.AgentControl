@@ -545,12 +545,16 @@ Ready -> Degraded / Stopped / Orienting
   no turn ID, all prompt operations serialize. The startup bootstrap prompt
   occupies that same slot and is reported as a `busy` session state from the first
   ready snapshot; owner comprehension is rejected deterministically while it is
-  active. Timeout or caller cancellation sends
-  bounded `session/cancel`, abandons the capture token, and fences another prompt
-  until the original request completes or the affected process restarts. Malformed,
-  empty, oversized, non-terminal and ACP-error host-started turns persist a
-  `live-model` failure outcome and failed hold; malformed caller-submitted manual
-  evidence remains validation-only and does not mutate Delivered state.
+  active. Timeout or caller cancellation sends bounded `session/cancel`, abandons
+  the capture token, and retains the underlying request correlation and prompt-slot
+  fence without a timer until the exact response/error frame arrives or ACP
+  transport/process termination is confirmed. Malformed, empty, oversized,
+  non-terminal, ACP-error and transport-failed host-started turns persist a
+  `live-model` failure outcome bound to the exact started assignment and session.
+  If policy replacement made that assignment Stale meanwhile, the failure evidence
+  is written to its historical row without changing Stale or mutating the current
+  replacement assignment or its holds. Malformed caller-submitted manual evidence
+  remains validation-only and does not mutate Delivered state.
 - **No-rebuild config update:** changing organization instructions, authoritative
   role-fragment instructions, or permission fragments produces a new orientation
   version and updates the affected binding's private config in place. The role API

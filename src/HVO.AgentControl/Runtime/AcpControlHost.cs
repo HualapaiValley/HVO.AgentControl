@@ -753,9 +753,9 @@ public sealed class AcpControlHost : BackgroundService
                         },
                     },
                 },
-                TimeSpan.FromHours(24),
-                _hostLifetime.Token,
-                capture.BindRequest);
+                timeout: null,
+                cancellationToken: _hostLifetime.Token,
+                registered: capture.BindRequest);
             var requestTask = request.Completion;
 
             JsonElement result;
@@ -779,6 +779,7 @@ public sealed class AcpControlHost : BackgroundService
                     .RecordComprehensionTimeout(
                         status.AssignmentId,
                         status.EmployeeId,
+                        sessionId,
                         status.OrientationVersion,
                         status.Revision);
             }
@@ -796,6 +797,7 @@ public sealed class AcpControlHost : BackgroundService
                     .RecordComprehensionFailure(
                         status.AssignmentId,
                         status.EmployeeId,
+                        sessionId,
                         status.OrientationVersion,
                         status.Revision,
                         "The caller interrupted the live comprehension operation; remote cancellation was requested.");
@@ -856,6 +858,7 @@ public sealed class AcpControlHost : BackgroundService
             or AcpSessionClosedException
             or AcpProtocolException
             or JsonException
+            or IOException
             or InvalidOperationException)
         {
             if (operationStatus is null)
@@ -1476,6 +1479,8 @@ public sealed class AcpControlHost : BackgroundService
             .RecordComprehensionFailure(
                 status.AssignmentId,
                 status.EmployeeId,
+                status.SessionId ?? throw new OrganizationConcurrencyException(
+                    "The started orientation assignment no longer has its delivery session."),
                 status.OrientationVersion,
                 status.Revision,
                 SanitizeHostError(error));
@@ -1487,6 +1492,7 @@ public sealed class AcpControlHost : BackgroundService
         AcpSessionClosedException => "session-closed",
         AcpProtocolException => "protocol",
         JsonException => "json-shape",
+        IOException => "transport-io",
         InvalidOperationException => "invalid-result-shape",
         _ => "known-failure",
     };
@@ -1537,11 +1543,24 @@ public sealed class AcpControlHost : BackgroundService
                         _abandonedPromptCompletion = null;
                     }
                 }
-                _promptOperationLock.Release();
+                ReleaseRetainedPromptLock();
             },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    private void ReleaseRetainedPromptLock()
+    {
+        try
+        {
+            _promptOperationLock.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Host disposal can race the terminal transport completion that owns
+            // this retained release. The semaphore is already unreachable.
+        }
     }
 
     private sealed class OrientationTurnCapture
@@ -1754,8 +1773,8 @@ public sealed class AcpControlHost : BackgroundService
                                 },
                             },
                         },
-                        TimeSpan.FromHours(24),
-                        cancellationToken);
+                        timeout: null,
+                        cancellationToken: cancellationToken);
                     JsonElement result;
                     try
                     {

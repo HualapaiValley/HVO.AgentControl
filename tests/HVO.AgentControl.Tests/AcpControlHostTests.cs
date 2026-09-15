@@ -463,6 +463,71 @@ public sealed class AcpControlHostTests
         await host.StopAsync(CancellationToken.None);
     }
 
+    [Theory]
+    [InlineData("orientation_gated_malformed")]
+    [InlineData("orientation_gated_wrong_employee")]
+    [InlineData("orientation_gated_transport_close")]
+    public async Task SupersededLiveAttemptPersistsFailureOnOriginalWithoutMutatingReplacement(string scenario)
+    {
+        var data = Directory.CreateTempSubdirectory("acp-host-orientation-superseded-").FullName;
+        using var host = CreateHost(ReadyOptions(data, scenario));
+
+        await host.StartAsync(CancellationToken.None);
+        await WaitForStateAsync(host, "ready", TimeSpan.FromSeconds(30));
+        var original = host.GetOrientationStatus();
+        var operation = host.RunOrientationComprehensionAsync(CancellationToken.None);
+        await WaitForFileContainsCountAsync(
+            Path.Combine(data, "home", "calls.log"),
+            "session/prompt",
+            2,
+            TimeSpan.FromSeconds(15));
+
+        var overview = host.Organization!.GetOverview();
+        host.UpdateOrganizationBasicInstructions(
+            overview.Id,
+            "Changed while the original live-model attempt was active.",
+            overview.Revision);
+        var replacement = host.RecomposeAndDeliverOrientation();
+        var replacementHolds = replacement.HoldReasons.ToArray();
+
+        File.WriteAllText(Path.Combine(data, "home", "orientation-release"), "release");
+        var result = await operation.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(replacement.AssignmentId, result.AssignmentId);
+        Assert.Equal(replacement.State, result.State);
+        Assert.Equal(replacement.Revision, result.Revision);
+        Assert.Equal(replacementHolds, result.HoldReasons);
+        var current = host.GetOrientationStatus();
+        Assert.Equal(replacement.AssignmentId, current.AssignmentId);
+        Assert.Equal(replacement.State, current.State);
+        Assert.Equal(replacement.Revision, current.Revision);
+        Assert.Equal(replacementHolds, current.HoldReasons);
+
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(data, OrganizationStore.DatabaseFileName)};Mode=ReadOnly");
+        connection.Open();
+        using (var assignment = connection.CreateCommand())
+        {
+            assignment.CommandText =
+                "SELECT state, evidence_source, last_error FROM orientation_assignments WHERE id = $id";
+            assignment.Parameters.AddWithValue("$id", original.AssignmentId);
+            using var reader = assignment.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(OrientationStates.Stale, reader.GetString(0));
+            Assert.Equal(OrientationEvidenceSources.LiveModel, reader.GetString(1));
+            Assert.False(reader.IsDBNull(2));
+        }
+        using (var evidence = connection.CreateCommand())
+        {
+            evidence.CommandText =
+                "SELECT COUNT(*) FROM orientation_evidence WHERE assignment_id = $id AND outcome = 'Failed' AND evidence_source = 'live-model'";
+            evidence.Parameters.AddWithValue("$id", original.AssignmentId);
+            Assert.Equal(1L, (long)evidence.ExecuteScalar()!);
+        }
+
+        await host.StopAsync(CancellationToken.None);
+    }
+
     [Fact]
     public async Task AcpErrorLiveComprehensionPersistsLiveModelFailure()
     {
@@ -1044,6 +1109,28 @@ public sealed class AcpControlHostTests
         }
 
         throw new Xunit.Sdk.XunitException($"Timed out waiting for '{value}' in '{path}'.");
+    }
+
+    private static async Task WaitForFileContainsCountAsync(
+        string path,
+        string value,
+        int expectedCount,
+        TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(path)
+                && CountOccurrences(File.ReadAllText(path), value) >= expectedCount)
+            {
+                return;
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new Xunit.Sdk.XunitException(
+            $"Timed out waiting for {expectedCount} occurrences of '{value}' in '{path}'.");
     }
 
     private static int CountOccurrences(string text, string value)

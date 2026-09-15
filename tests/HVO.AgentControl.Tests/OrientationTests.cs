@@ -311,6 +311,75 @@ public sealed class OrientationTests
     }
 
     [Fact]
+    public void SupersededAttemptFailureIsHistoricalIdempotentAndDoesNotMutateReplacement()
+    {
+        using var root = new TempOrientationStore();
+        using var store = root.Open();
+        var identity = store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        store.RecordSession("ses-historical-failure", null);
+        var originalArtifact = store.ComposeAndAssignCurrentOrientation();
+        var original = store.MarkOrientationDelivered(
+            originalArtifact.AssignmentId,
+            originalArtifact.OrientationVersion,
+            "ses-historical-failure",
+            originalArtifact.AssignmentRevision);
+
+        var overview = store.GetOverview();
+        store.UpdateOrganizationBasicInstructions(
+            overview.Id,
+            "Replacement instructions while the original attempt is live.",
+            overview.Revision);
+        var replacementArtifact = store.ComposeAndAssignCurrentOrientation();
+        var replacement = store.MarkOrientationDelivered(
+            replacementArtifact.AssignmentId,
+            replacementArtifact.OrientationVersion,
+            "ses-historical-failure",
+            replacementArtifact.AssignmentRevision,
+            requiredRuntimeGeneration: 7);
+
+        var first = store.RecordComprehensionFailure(
+            original.AssignmentId,
+            identity.EmployeeId,
+            "ses-historical-failure",
+            original.OrientationVersion,
+            original.Revision,
+            "Host-authored historical failure.");
+        var duplicate = store.RecordComprehensionFailure(
+            original.AssignmentId,
+            identity.EmployeeId,
+            "ses-historical-failure",
+            original.OrientationVersion,
+            original.Revision,
+            "Host-authored historical failure.");
+
+        Assert.Equal(replacement.AssignmentId, first.AssignmentId);
+        Assert.Equal(replacement.State, first.State);
+        Assert.Equal(replacement.Revision, first.Revision);
+        Assert.Equal(replacement.HoldReasons, first.HoldReasons);
+        Assert.Equal(first.AssignmentId, duplicate.AssignmentId);
+        Assert.Equal(first.State, duplicate.State);
+        Assert.Equal(first.Revision, duplicate.Revision);
+        Assert.Equal(first.HoldReasons, duplicate.HoldReasons);
+        Assert.Equal(OrientationStates.Stale, RawString(
+            root.Path,
+            $"SELECT state FROM orientation_assignments WHERE id = '{original.AssignmentId}'"));
+        Assert.Equal(OrientationEvidenceSources.LiveModel, RawString(
+            root.Path,
+            $"SELECT evidence_source FROM orientation_assignments WHERE id = '{original.AssignmentId}'"));
+        Assert.Equal(1, RawCount(
+            root.Path,
+            "SELECT COUNT(*) FROM orientation_evidence WHERE assignment_id = $id AND outcome = 'Failed'",
+            original.AssignmentId));
+        Assert.Throws<OrganizationConcurrencyException>(() => store.RecordComprehensionFailure(
+            original.AssignmentId,
+            identity.EmployeeId,
+            "ses-wrong",
+            original.OrientationVersion,
+            original.Revision,
+            "Host-authored historical failure."));
+    }
+
+    [Fact]
     public void TimedOutAttemptCanBeRedeliveredAfterStoreRestart()
     {
         using var root = new TempOrientationStore();
@@ -326,7 +395,12 @@ public sealed class OrientationTests
             version = assignment.OrientationVersion;
             var delivered = store.MarkOrientationDelivered(
                 assignment.AssignmentId, version, "ses-timeout-restart", assignment.AssignmentRevision);
-            var timedOut = store.RecordComprehensionTimeout(delivered.AssignmentId, employeeId, version, delivered.Revision);
+            var timedOut = store.RecordComprehensionTimeout(
+                delivered.AssignmentId,
+                employeeId,
+                "ses-timeout-restart",
+                version,
+                delivered.Revision);
             timedOutAssignment = timedOut.AssignmentId;
             Assert.Equal(OrientationStates.TimedOut, timedOut.State);
         }

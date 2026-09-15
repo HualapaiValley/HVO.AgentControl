@@ -166,8 +166,12 @@ starts a shell and keeps `nologin`.
   frame as the barrier. Because ACP exposes no turn ID, prompt operations serialize,
   and the startup bootstrap occupies the same slot and is reported as `busy` before
   readiness is promoted, so owner comprehension is a deterministic conflict while it
-  runs; abandoned turns receive bounded `session/cancel` and fence retries until remote
-  completion or process restart. Recomposition updates the store/artifact without
+  runs; abandoned turns receive bounded `session/cancel`, while their correlator and
+  prompt-slot ownership remain indefinitely fenced until an exact terminal frame or
+  confirmed transport/process termination. A host-started failure remains bound to
+  its exact assignment/session; if policy replacement has made that assignment Stale,
+  sanitized live-model failure evidence is added to that historical row without
+  changing Stale or the replacement assignment/holds. Recomposition updates the store/artifact without
   rebuilding the image and preserves employee/session/history. OpenCode reads the
   generated file at process start, so affected-runtime restart is the reload mechanism.
   There is still no general task dispatcher.

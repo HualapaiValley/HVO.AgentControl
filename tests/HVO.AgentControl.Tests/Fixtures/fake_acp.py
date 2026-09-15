@@ -117,7 +117,20 @@ for line in sys.stdin:
                 target=respond_gated_bootstrap,
                 args=(request_id, SCENARIO == "bootstrap_ignores_cancel"),
                 daemon=True).start()
-        elif SCENARIO in ("orientation_fast", "orientation_malformed", "orientation_fenced", "orientation_empty", "orientation_oversized", "orientation_non_end", "orientation_wrong_session", "orientation_wrong_assignment", "orientation_wrong_employee", "orientation_wrong_version", "orientation_null_fields", "orientation_empty_object", "orientation_bad_facts", "orientation_bad_result_shape", "orientation_post_response", "orientation_unrelated_response", "orientation_gated_bootstrap") and (PROMPT_COUNT > 1 or SESSION_LOADED):
+        elif SCENARIO in ("orientation_fast", "orientation_malformed", "orientation_fenced", "orientation_empty", "orientation_oversized", "orientation_non_end", "orientation_wrong_session", "orientation_wrong_assignment", "orientation_wrong_employee", "orientation_wrong_version", "orientation_null_fields", "orientation_empty_object", "orientation_bad_facts", "orientation_bad_result_shape", "orientation_post_response", "orientation_unrelated_response", "orientation_gated_bootstrap", "orientation_gated_malformed", "orientation_gated_wrong_employee", "orientation_gated_transport_close") and (PROMPT_COUNT > 1 or SESSION_LOADED):
+            response_scenario = {
+                "orientation_gated_malformed": "orientation_malformed",
+                "orientation_gated_wrong_employee": "orientation_wrong_employee",
+                "orientation_gated_transport_close": "orientation_transport_close",
+            }.get(SCENARIO, SCENARIO)
+            if response_scenario != SCENARIO:
+                release = os.path.join(HOME, "orientation-release") if HOME else None
+                deadline = time.time() + 30
+                while release and not os.path.exists(release) and time.time() < deadline:
+                    time.sleep(0.05)
+            if response_scenario == "orientation_transport_close":
+                sys.stdout.close()
+                sys.exit(0)
             params = message.get("params") or {}
             prompt = params.get("prompt") or []
             text = prompt[0].get("text", "") if prompt else ""
@@ -142,45 +155,45 @@ for line in sys.stdin:
                 "escalation": "escalate uncertainty, failed controls, suspected secret exposure, and irreversible effects before retrying"
             }
             response_text = json.dumps(evidence)
-            if SCENARIO == "orientation_malformed":
+            if response_scenario == "orientation_malformed":
                 response_text = "{not-json"
-            elif SCENARIO == "orientation_fenced":
+            elif response_scenario == "orientation_fenced":
                 response_text = "```json\n" + response_text + "\n```"
-            elif SCENARIO == "orientation_empty":
+            elif response_scenario == "orientation_empty":
                 response_text = ""
-            elif SCENARIO == "orientation_oversized":
+            elif response_scenario == "orientation_oversized":
                 response_text = "x" * (16 * 1024 + 1)
-            elif SCENARIO == "orientation_wrong_assignment":
+            elif response_scenario == "orientation_wrong_assignment":
                 evidence["assignmentId"] = "asn_wrong"
                 response_text = json.dumps(evidence)
-            elif SCENARIO == "orientation_wrong_employee":
+            elif response_scenario == "orientation_wrong_employee":
                 evidence["employeeId"] = "emp_wrong"
                 response_text = json.dumps(evidence)
-            elif SCENARIO == "orientation_wrong_version":
+            elif response_scenario == "orientation_wrong_version":
                 evidence["orientationVersion"] = "sha256:wrong"
                 response_text = json.dumps(evidence)
-            elif SCENARIO == "orientation_null_fields":
+            elif response_scenario == "orientation_null_fields":
                 evidence["identity"] = None
                 evidence["duties"] = None
                 response_text = json.dumps(evidence)
-            elif SCENARIO == "orientation_empty_object":
+            elif response_scenario == "orientation_empty_object":
                 response_text = "{}"
-            elif SCENARIO == "orientation_bad_facts":
+            elif response_scenario == "orientation_bad_facts":
                 evidence["department"] = "Finance"
                 response_text = json.dumps(evidence)
             midpoint = len(response_text) // 2
             chunks = [response_text[:midpoint], response_text[midpoint:]]
-            if SCENARIO == "orientation_unrelated_response":
+            if response_scenario == "orientation_unrelated_response":
                 send({"jsonrpc": "2.0", "id": 424242, "result": {}})
-            chunk_session = "ses_wrong" if SCENARIO == "orientation_wrong_session" else SESSION_ID
+            chunk_session = "ses_wrong" if response_scenario == "orientation_wrong_session" else SESSION_ID
             for chunk in chunks:
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": chunk_session, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": chunk}}}})
             # Adjacent chunks and result intentionally have no sleep. The host's
             # codec-order frame hook is the completion barrier.
-            stop_reason = "max_tokens" if SCENARIO == "orientation_non_end" else "end_turn"
-            result = [] if SCENARIO == "orientation_bad_result_shape" else {"stopReason": stop_reason}
+            stop_reason = "max_tokens" if response_scenario == "orientation_non_end" else "end_turn"
+            result = [] if response_scenario == "orientation_bad_result_shape" else {"stopReason": stop_reason}
             send({"jsonrpc": "2.0", "id": request_id, "result": result})
-            if SCENARIO == "orientation_post_response":
+            if response_scenario == "orientation_post_response":
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SESSION_ID, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "post-response-corruption"}}}})
         elif SCENARIO == "prompt_fast":
             send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
