@@ -57,18 +57,19 @@ minimal root PID1 supervisor starts only the pinned OpenCode ACP operation as
 employee UID 1102 and the bridge as UID 1101, reaps fixed children, and accepts
 only authenticated-local `start`, `status` and `stop` operations. ACP stdin and
 stdout terminate at the bridge. The bridge owns a private Unix socket and a
-separate exact-signature schema-v4 SQLite journal in `/worker-control`;
+separate exact-signature schema-v5 SQLite journal in `/worker-control`;
 worker/process generations, supervisor lifecycle handles, ownership epochs,
 request forwarding state, replay cursors/events, holds and generation-bound
-pending permissions are durable. The journal refuses unknown or changed schema
+pending permissions are durable and bounded by count and bytes. The journal refuses unknown or changed schema
 objects, corruption, foreign-key violations, symlinks, non-regular or multiply
 linked files, unexpected owners/modes, and a second live bridge instance. The
 persistent `0600` regular lock file is opened without symlink following, validated
 by descriptor/path inode identity and held with a nonblocking kernel advisory lock;
 a crash releases ownership without requiring deletion of the lock inode.
 
-The bridge protocol is bounded newline-delimited JSON (`hvo-worker-acp/1`, 1 MiB
-control frames). Mutual HMAC-SHA256 binds role-specific labels, independent
+The bridge protocol is bounded newline-delimited JSON (`hvo-worker-acp/2`, 1 MiB
+control frames). ACP uses a separate buffered codec with an 8 MiB frame limit and
+128-level depth limit; control framing remains 1 MiB/64 levels. Mutual HMAC-SHA256 binds role-specific labels, independent
 nonces, controller/worker/key identities and protocol version. The bridge
 checks Linux peer credentials, rejects nonce replay and stale proofs, bounds the
 authentication exchange, and advances an ownership epoch on same-controller
@@ -76,37 +77,50 @@ reconnect. Every operation is fenced by the exact lease captured when its socket
 authenticated; mutations additionally carry epoch plus connection nonce and must
 match both that socket lease and the current journal lease. Thus an old socket
 cannot issue even `status`, `reconcile`, or `replay`, and stale replay validation
-cannot create a replay-gap hold. Lease expiry, manual hold, replay gap/overflow,
-and non-running process state reject submit before request registration or ACP
-I/O. Requests use bounded recursive canonical JSON hashing, persist ID/hash before
-receipt, record forwarding intent before write, and become `uncertain` on write
-ambiguity. A
+cannot create a replay-gap hold. Lease expiry, manual or protected safety hold, replay gap/loss, and non-running
+process state reject submit before request registration or ACP I/O. Generic hold
+operations cannot clear or overwrite protected process, replay, permission, frame
+or transport holds; only their exact reconciliation transition may do so. Submit
+accepts only `session/prompt`, requires a validated `sessionId` and host turn ID,
+and binds durable deduplication to payload, turn, session and accepting ownership
+epoch. Requests use bounded recursive canonical JSON hashing, persist ID/hash and
+forwarding ownership before write, and become `uncertain` on write ambiguity. A
 controller connection may stop awaiting a forwarded request, but the
 bridge-owned operation, active request and prompt serialization remain until ACP
-responds or its process transport terminates. Clean EOF and read failures fail all
-pending correlators with host-authored errors, mark only still-forwarding/forwarded
-requests uncertain, release the active/prompt slot after each durable task ends,
-and hold dispatch as `process-exited`; a response completed before EOF is not
+responds or its process transport terminates. Clean EOF and read failures fail all pending correlators with host-authored errors,
+mark only still-forwarding/forwarded requests uncertain and release the active
+prompt slot. Clean EOF is `process-exited`; malformed/oversized ACP frames are
+`acp-protocol-failed`; transport failures are `acp-transport-uncertain`. These
+truthful states have protected holds, and a response completed before EOF is not
 rewritten. There is no exactly-once tool-effect claim. Events are ordered by the
 `(workerGeneration, sequence)` tuple with sequence restarting at 1. Prior-generation
 events and the lexicographic generation/sequence ACK survive bridge restart and
 remain replayable; status exposes both the current generation and ACK generation.
 Pruning applies only behind that ACK cursor across the global 10,000-event/64-MiB
-bounds. A missing generation/cursor causes an explicit replay-gap hold, and a new
-observational event that cannot fit after acknowledged pruning is rejected without
-insertion, so repeated overflow cannot grow the journal. Pinned OpenCode permission
+bounds. A missing generation/cursor causes an explicit replay-gap hold. If an observational
+event cannot fit after acknowledged pruning, the journal reserves a compact
+`events-dropped` marker/sequence and accumulates bounded dropped-count/byte
+metadata. Status and replay expose the loss; ordinary observation continues without
+unbounded growth, while dispatch remains held until the controller explicitly
+acknowledges the exact loss marker through `reconcile-replay-loss`. Pinned OpenCode permission
 callbacks carry no trusted request identity: the bridge binds the actual `optionId`
 shape only to its single host-owned active prompt context (request ID, required
 persisted turn ID, process generation, ACP correlation and matching session ID when
 known), generates a `perm:` decision ID from host context, and stores only a bounded
 payload hash and option IDs. Unbound or ambiguous callbacks are rejected/cancelled
-without silently terminating the ACP reader. Permission response intent is durable
-before a bridge-lifetime write; ambiguity becomes `uncertain`, and no blind resend
-occurs. Cancellation likewise requires an explicit cancellation ID, target request,
+without silently terminating the ACP reader. Permission response intent is durable and bound to the accepting ownership epoch
+before a bridge-lifetime write; reconnect with pending permission work installs an
+`ownership-changed-pending-permission` hold. Ambiguity becomes
+`permission-decision-uncertain`, and no blind resend or new-epoch adoption occurs;
+`stop-process` is the safe fixed recovery that terminates ACP and lets EOF reconcile. Cancellation likewise requires an explicit cancellation ID, target request,
 epoch/nonce and bounded `session/cancel` envelope. Its canonical intent is persisted
 before the bridge-lifetime write; same ID/hash is idempotent, changed reuse rejects,
 forwarded receipt is not target completion, and ambiguous writes reconcile as
-`uncertain` rather than being retried.
+`uncertain` rather than being retried. The emitted wire is exactly a JSON-RPC 2.0
+notification (`jsonrpc`, `method`, `params`, no `id`), and concurrent duplicate
+cancellation IDs share one durable single-winner write. Raw ACP event/result/tool
+payloads are never journaled: outcomes and replay observations contain only bounded
+state/category, correlation, SHA-256 and byte-count metadata.
 
 A bootstrap-only stdin mode atomically creates a single-link `0600` 32-byte key
 in the bridge-private `0700` directory and prints only its SHA-256 key ID.
@@ -118,7 +132,12 @@ protocol tests and local diagnostics.
 two-host provisioning/success, key rotation, hiring/tasks/UI and viewer/TUI
 transport. Consequently control-host `/api/info WorkerControlImplemented`
 remains false. The optional Compose worker profile is disabled by default, has
-no published port or Docker socket and disables restart.
+no published port or Docker socket, is read-only outside named volumes/tmpfs,
+has process/CPU/memory limits and disables automatic restart. ACP exit does not
+cascade-kill the bridge: the bridge remains available for bounded reconciliation,
+but the process slot is terminal for that container because inherited ACP
+transports cannot be safely reused. Recovery is explicit container replacement;
+there is no claimed in-container child restart path in #213.
 
 ## Control contract (design)
 

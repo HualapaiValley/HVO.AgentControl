@@ -2,6 +2,7 @@ using HVO.AgentControl.Worker;
 using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -108,14 +109,15 @@ public sealed class WorkerBridgeTests
     {
         if (!OperatingSystem.IsLinux()) return;
         using var temp = new WorkerTemp();
-        var assembly = typeof(WorkerStore).Assembly.Location;
+        var helper = System.IO.Path.Combine(RepoRoot(), "tests/WorkerLockHolder/bin/Release/net10.0/WorkerLockHolder.dll");
+        Assert.True(File.Exists(helper), $"Missing lock-holder helper: {helper}");
         var start = new ProcessStartInfo("dotnet")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
-        start.ArgumentList.Add(assembly); start.ArgumentList.Add("--worker-test-hold-store"); start.ArgumentList.Add(temp.Path);
+        start.ArgumentList.Add(helper); start.ArgumentList.Add(temp.Path);
         using var process = Process.Start(start)!;
         Assert.Equal("locked", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
         process.Kill(entireProcessTree: true); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
@@ -156,7 +158,7 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
-    public void StoreRestartInterruptsPriorProcessAndFreshStartAcknowledgmentClearsHold()
+    public void StoreRestartInterruptsPriorProcessAndExactStartAcknowledgmentClearsHold()
     {
         using var temp = new WorkerTemp(); var options = temp.Options();
         using (var first = new WorkerStore(options))
@@ -176,7 +178,7 @@ public sealed class WorkerBridgeTests
     public void DispatchGateRejectsHoldExpiryAndReplayGapBeforeRequestPersistence()
     {
         using var temp = new WorkerTemp(); var clock = new FakeClock(); using var store = new WorkerStore(temp.Options(lease: TimeSpan.FromSeconds(2)), clock); Start(store);
-        var lease = store.AcquireLease("controller-test", Nonce(1)); using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}");
+        var lease = store.AcquireLease("controller-test", Nonce(1)); using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         store.SetHold(true, "manual"); Assert.Throws<WorkerProtocolException>(() => store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "held", payload.RootElement, "turn"));
         store.SetHold(false, null); clock.Advance(TimeSpan.FromSeconds(3)); Assert.Throws<WorkerProtocolException>(() => store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "expired", payload.RootElement, "turn"));
         var fresh = store.AcquireLease("controller-test", Nonce(2)); store.SetHold(false, null); Assert.Throws<WorkerProtocolException>(() => store.Replay(store.WorkerGeneration, 1));
@@ -188,7 +190,7 @@ public sealed class WorkerBridgeTests
     public void SemanticRequestIdempotencyDoesNotDuplicateAndChangedValueRejects()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
-        using var firstJson = JsonDocument.Parse("{\"method\":\"x\",\"params\":{\"b\":2,\"a\":1}}"); using var sameJson = JsonDocument.Parse("{\"params\":{\"a\":1,\"b\":2},\"method\":\"x\"}"); using var changed = JsonDocument.Parse("{\"method\":\"x\",\"params\":{\"a\":2,\"b\":2}}");
+        using var firstJson = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"b\":2,\"a\":1}}"); using var sameJson = JsonDocument.Parse("{\"params\":{\"a\":1,\"b\":2,\"sessionId\":\"ses-test\"},\"method\":\"session/prompt\"}"); using var changed = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"a\":2,\"b\":2}}");
         var first = store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "req", firstJson.RootElement, "turn"); var same = store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "req", sameJson.RootElement, "turn");
         Assert.Equal(first.PayloadHash, same.PayloadHash); Assert.Throws<WorkerProtocolException>(() => store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "req", changed.RootElement, "turn")); Assert.Equal(1L, CountRows(System.IO.Path.Combine(temp.Path, "bridge.db"), "requests"));
     }
@@ -196,14 +198,15 @@ public sealed class WorkerBridgeTests
     [Fact]
     public void ReplayBoundsNeverGrowOnOverflowAndAckAllowsPruneAndAppend()
     {
-        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 2, eventBytes: 4));
-        var one = store.AppendEvent("one", "{}"); var two = store.AppendEvent("two", "{}");
-        Assert.Throws<WorkerProtocolException>(() => store.AppendEvent("three", "{}")); Assert.Throws<WorkerProtocolException>(() => store.AppendEvent("four", "{}"));
-        Assert.Equal(2, store.Replay(one.WorkerGeneration, 0).Count); Assert.True(store.Status().DispatchHeld);
-        store.Acknowledge(one.WorkerGeneration, one.Sequence); var three = store.AppendEvent("three", "{}");
-        Assert.Equal([two.Sequence, three.Sequence], store.Replay(three.WorkerGeneration, one.Sequence).Select(x => x.Sequence));
-        Assert.Throws<WorkerProtocolException>(() => store.Replay(three.WorkerGeneration, three.Sequence + 1));
-        Assert.Throws<WorkerProtocolException>(() => store.Replay(three.WorkerGeneration + 1, 0));
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 3, eventBytes: 64));
+        var one = store.AppendEvent("one", "{}"); var two = store.AppendEvent("two", "{}"); var three = store.AppendEvent("three", "{}");
+        Assert.Throws<WorkerProtocolException>(() => store.AppendEvent("four", "{}")); Assert.Throws<WorkerProtocolException>(() => store.AppendEvent("five", "{}"));
+        var loss = store.Status().ReplayLoss!; Assert.Equal(2, loss.DroppedCount); Assert.Contains(store.Replay(one.WorkerGeneration, loss.MarkerSequence - 1), item => item.Kind == "events-dropped"); Assert.True(store.Status().DispatchHeld);
+        store.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence); Assert.False(store.Status().DispatchHeld);
+        store.Acknowledge(one.WorkerGeneration, loss.MarkerSequence); var after = store.AppendEvent("after", "{}");
+        Assert.Equal([after.Sequence], store.Replay(after.WorkerGeneration, loss.MarkerSequence).Select(x => x.Sequence));
+        Assert.Throws<WorkerProtocolException>(() => store.Replay(after.WorkerGeneration, after.Sequence + 1));
+        Assert.Throws<WorkerProtocolException>(() => store.Replay(after.WorkerGeneration + 1, 0));
     }
 
     [Fact]
@@ -227,8 +230,10 @@ public sealed class WorkerBridgeTests
         second.Acknowledge(one.WorkerGeneration, 2);
         Assert.Equal(one.WorkerGeneration, second.Status().AcknowledgedWorkerGeneration);
         Assert.Equal(2, second.Status().AcknowledgedSequence);
+        var loss = second.Status().ReplayLoss!;
+        second.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence);
         var appended = second.AppendEvent("after-ack", "{}");
-        Assert.Equal([current.Sequence, appended.Sequence], second.Replay(current.WorkerGeneration, 0).Select(x => x.Sequence));
+        Assert.Contains(second.Replay(current.WorkerGeneration, loss.MarkerSequence), item => item.Sequence == appended.Sequence);
         Assert.Throws<WorkerProtocolException>(() => second.Acknowledge(one.WorkerGeneration, 1));
         Assert.Throws<WorkerProtocolException>(() => second.Replay(one.WorkerGeneration, 0));
         Assert.True(second.Status().DispatchHeld);
@@ -243,7 +248,7 @@ public sealed class WorkerBridgeTests
     [Fact]
     public void PermissionRequiresOfferedOptionAndExactTupleAndSanitizesPayload()
     {
-        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); var generation = store.BeginProcessStart(); store.CompleteProcessStart("handle", 1);
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); var generation = store.BeginProcessStart(); store.CompleteProcessStart("handle", 1); _ = store.AcquireLease("controller-test", Nonce(1));
         using var frame = JsonDocument.Parse("{\"requestId\":\"req\",\"turnId\":\"turn\",\"decisionId\":\"decision\",\"secret\":\"do-not-expose\",\"options\":[{\"optionId\":\"allow_once\"},{\"optionId\":\"reject_once\"}]}");
         var pending = store.AddPermission("req", "turn", "decision", frame.RootElement); Assert.DoesNotContain("do-not-expose", JsonSerializer.Serialize(store.Status().PendingPermission));
         Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision("decision", generation, "req", "turn", "arbitrary"));
@@ -256,7 +261,7 @@ public sealed class WorkerBridgeTests
     [Fact]
     public void PermissionInvalidatesOnProcessGenerationChange()
     {
-        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); var generation = store.BeginProcessStart(); store.CompleteProcessStart("one", 1);
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); var generation = store.BeginProcessStart(); store.CompleteProcessStart("one", 1); _ = store.AcquireLease("controller-test", Nonce(1));
         using var frame = JsonDocument.Parse("{\"options\":[{\"optionId\":\"reject_once\"}]}"); store.AddPermission("req", "turn", "decision", frame.RootElement); store.SetProcess("stopped"); store.BeginProcessStart();
         Assert.Null(store.Status().PendingPermission); Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision("decision", generation, "req", "turn", "reject_once"));
     }
@@ -323,17 +328,17 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = throwOnRead ? new FailingGateStream() : new GateStream();
         await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"text\":\"transport\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"transport\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         if (input is FailingGateStream failing) failing.Fail(new IOException("raw injected transport detail")); else ((GateStream)input).Complete();
         var failure = await Assert.ThrowsAsync<WorkerProtocolException>(() => submit.WaitAsync(TimeSpan.FromSeconds(2)));
         Assert.DoesNotContain("raw injected", failure.Message, StringComparison.Ordinal);
         await Eventually(() => store.GetRequest("req")?.State == "uncertain" && store.Status().ActiveRequestId is null);
-        Assert.Equal("exited", store.Status().ProcessState); Assert.Equal("process-exited", store.Status().HoldReason);
+        Assert.Equal(throwOnRead ? "transport-uncertain" : "exited", store.Status().ProcessState); Assert.Equal(throwOnRead ? "acp-transport-uncertain" : "process-exited", store.Status().HoldReason);
         var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         Assert.Equal("uncertain", replayed.State);
-        using var fresh = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}");
+        using var fresh = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "new", fresh.RootElement, "turn2", CancellationToken.None));
         Assert.Equal(1, output.Text.Count(character => character == '\n'));
     }
@@ -343,7 +348,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
@@ -358,7 +363,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"text\":\"delayed\"}}"); using var disconnected = new CancellationTokenSource();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"delayed\"}}"); using var disconnected = new CancellationTokenSource();
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", disconnected.Token);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2)); disconnected.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => submit);
         Assert.Equal("req", store.Status().ActiveRequestId); Assert.Equal("forwarded", store.GetRequest("req")!.State);
@@ -371,36 +376,29 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var first = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "prompt-1", prompt.RootElement, "turn-1", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "prompt-2", prompt.RootElement, "turn-2", CancellationToken.None));
         Assert.Null(store.GetRequest("prompt-2"));
 
         using var nonPrompt = JsonDocument.Parse("{\"method\":\"session/status\",\"params\":{}}");
-        var concurrent = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "status-1", nonPrompt.RootElement, null, CancellationToken.None);
-        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "status-1", nonPrompt.RootElement, null, CancellationToken.None));
         Assert.Equal("prompt-1", store.Status().ActiveRequestId);
-        var frames = output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(value => JsonDocument.Parse(value)).ToArray();
-        var promptId = frames.Single(x => x.RootElement.GetProperty("method").GetString() == "session/prompt").RootElement.GetProperty("id").GetInt64();
-        var statusId = frames.Single(x => x.RootElement.GetProperty("method").GetString() == "session/status").RootElement.GetProperty("id").GetInt64();
-        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{statusId},\"result\":{{}}}}\n");
-        await concurrent.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal("prompt-1", store.Status().ActiveRequestId);
-        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
+        var frame = JsonDocument.Parse(output.Text);
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{frame.RootElement.GetProperty("id").GetInt64()},\"result\":{{}}}}\n");
         await first.WaitAsync(TimeSpan.FromSeconds(2));
-        foreach (var frame in frames) frame.Dispose();
     }
 
     [Fact]
     public async Task StoreSerializesConcurrentConnectionUse()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1000)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
-        using var payload = JsonDocument.Parse("{\"method\":\"session/status\"}");
+        using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var tasks = Enumerable.Range(0, 100).Select(index => Task.Run(() =>
         {
             store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
-            var request = store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, $"req-{index}", payload.RootElement, null);
+            var request = store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, $"req-{index}", payload.RootElement, $"turn-{index}");
             store.MarkForwarded(request.RequestId);
             store.CompleteRequest(request.RequestId, "completed", "{}");
             store.AppendEvent("stress", "{}");
@@ -442,7 +440,7 @@ public sealed class WorkerBridgeTests
     public void CancellationIntentIsDurableIdempotentAndChangedReuseRejects()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
         using var first = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"one\"}}");
         using var same = JsonDocument.Parse("{\"params\":{\"sessionId\":\"one\"},\"method\":\"session/cancel\"}");
         using var changed = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"two\"}}");
@@ -457,14 +455,25 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new FailAfterNewlinesStream(1); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses\"}}");
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-failed", "target", cancellation.RootElement, CancellationToken.None));
         Assert.Equal("uncertain", store.GetCancellation("cancel-failed")!.State);
+        Assert.Equal("acp-transport-uncertain", store.Status().HoldReason);
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "after-fault", prompt.RootElement, "turn-after", CancellationToken.None));
         Assert.Equal("uncertain", (await runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-failed", "target", cancellation.RootElement, CancellationToken.None)).State);
         Assert.Equal(1, output.NewlineWrites);
-        input.Complete(); await Assert.ThrowsAsync<WorkerProtocolException>(() => submit.WaitAsync(TimeSpan.FromSeconds(2)));
+        input.Complete(); try { await submit.WaitAsync(TimeSpan.FromSeconds(2)); } catch (WorkerProtocolException) { }
+    }
+
+    [Fact]
+    public async Task MalformedAcpFrameIsProtocolFailureNotObservedExit()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        input.Enqueue("{malformed}\n"); await Eventually(() => store.Status().ProcessState == "protocol-failed");
+        Assert.Equal("acp-protocol-failed", store.Status().HoldReason);
     }
 
     [Fact]
@@ -472,14 +481,113 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new GatedFlushStream(2); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.FirstFlush.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancelEnvelope = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses\"}}"); using var disconnected = new CancellationTokenSource();
         var cancel = runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-1", "target", cancelEnvelope.RootElement, disconnected.Token);
         await output.Blocked.Task.WaitAsync(TimeSpan.FromSeconds(2)); disconnected.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancel); output.Release.TrySetResult();
         await Eventually(() => store.GetCancellation("cancel-1")?.State == "forwarded");
         Assert.Equal(2, output.FlushCount); Assert.Equal("forwarded", store.GetCancellation("cancel-1")!.State);
-        input.Complete(); await Assert.ThrowsAsync<WorkerProtocolException>(() => submit.WaitAsync(TimeSpan.FromSeconds(2)));
+        input.Complete(); try { await submit.WaitAsync(TimeSpan.FromSeconds(2)); } catch (WorkerProtocolException) { }
+    }
+
+    [Fact]
+    public async Task RealUnixSocketHandshakeAuthenticatesAndFencesReconnectedOldSocket()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
+        await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token);
+        await Eventually(() => File.Exists(temp.Options().SocketPath));
+        using var first = await AuthenticateAsync(temp.Options(), key, Nonce(10));
+        using var authenticatedOne = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); var leaseOne = authenticatedOne!.RootElement.GetProperty("lease");
+        using var second = await AuthenticateAsync(temp.Options(), key, Nonce(11));
+        using var authenticatedTwo = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); var leaseTwo = authenticatedTwo!.RootElement.GetProperty("lease");
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None); using var rejected = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString());
+        await WorkerProtocol.WriteFrameAsync(second, new { operation = "status" }, CancellationToken.None); using var accepted = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); Assert.Equal("result", accepted!.RootElement.GetProperty("type").GetString());
+        Assert.True(leaseTwo.GetProperty("epoch").GetInt64() > leaseOne.GetProperty("epoch").GetInt64());
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task RealUnixSocketRejectsWrongKeyExtraHelloAndReplayedNonce()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
+        foreach (var hello in new object[]
+        {
+            new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = "controller-test", workerId = "worker-test", keyId = WorkerProtocol.KeyId(Enumerable.Repeat((byte)1, 32).ToArray()), clientNonce = Nonce(20) },
+            new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = "wrong-controller", workerId = "worker-test", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(23) },
+            new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = "controller-test", workerId = "wrong-worker", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(24) },
+            new { type = "hello", version = "wrong-version", role = "controller", controllerId = "controller-test", workerId = "worker-test", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(25) },
+            new { type = "hello", version = WorkerProtocol.Version, role = "worker", controllerId = "controller-test", workerId = "worker-test", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(26) },
+            new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = "controller-test", workerId = "worker-test", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(21), extra = true },
+        })
+        {
+            using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified); await socket.ConnectAsync(new UnixDomainSocketEndPoint(temp.Options().SocketPath)); using var stream = new NetworkStream(socket); await WorkerProtocol.WriteFrameAsync(stream, hello, CancellationToken.None); using var rejected = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString());
+        }
+        using (var accepted = await AuthenticateAsync(temp.Options(), key, Nonce(22))) { using var authenticated = await WorkerProtocol.ReadFrameAsync(accepted, CancellationToken.None); Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString()); }
+        using (var replay = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified)) { await replay.ConnectAsync(new UnixDomainSocketEndPoint(temp.Options().SocketPath)); using var stream = new NetworkStream(replay); await WorkerProtocol.WriteFrameAsync(stream, new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = "controller-test", workerId = "worker-test", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(22) }, CancellationToken.None); using var rejected = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString()); }
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public void ProtectedHoldCannotBeClearedOrOverwrittenThroughGenericHold()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); store.SetProcessFailure("exited", "process-exited");
+        Assert.Throws<WorkerProtocolException>(() => store.SetHold(false, null));
+        Assert.Throws<WorkerProtocolException>(() => store.SetHold(true, "manual"));
+        Assert.Equal("process-exited", store.Status().HoldReason);
+    }
+
+    [Fact]
+    public async Task CancellationIsPinnedJsonRpcNotificationAndConcurrentDuplicatesWriteOnce()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        var attempts = Enumerable.Range(0, 16).Select(_ => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel", "target", cancellation.RootElement, CancellationToken.None)).ToArray();
+        await Task.WhenAll(attempts);
+        var frames = output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(value => JsonDocument.Parse(value)).ToArray();
+        var cancel = Assert.Single(frames, frame => frame.RootElement.GetProperty("method").GetString() == "session/cancel");
+        Assert.Equal("2.0", cancel.RootElement.GetProperty("jsonrpc").GetString()); Assert.False(cancel.RootElement.TryGetProperty("id", out _)); Assert.True(cancel.RootElement.TryGetProperty("params", out _));
+        var promptId = frames.Single(frame => frame.RootElement.GetProperty("method").GetString() == "session/prompt").RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n"); await submit.WaitAsync(TimeSpan.FromSeconds(2));
+        foreach (var frame in frames) frame.Dispose();
+    }
+
+    [Fact]
+    public async Task SubmitRequiresPromptSessionAndExactTurnDedupAndJournalContainsNoRawAcpSecret()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        using var unsupported = JsonDocument.Parse("{\"method\":\"session/status\"}");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "unsupported", unsupported.RootElement, "turn", CancellationToken.None));
+        using var missing = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "missing", missing.RootElement, "turn", CancellationToken.None));
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"raw-request-secret\"}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", prompt.RootElement, "turn-a", CancellationToken.None); await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", prompt.RootElement, "turn-b", CancellationToken.None));
+        var id = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64(); input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"secret\":\"raw-result-secret\"}}}}\n"); await submit.WaitAsync(TimeSpan.FromSeconds(2));
+        var database = File.ReadAllBytes(System.IO.Path.Combine(temp.Path, "bridge.db")); var journalText = Encoding.UTF8.GetString(database);
+        Assert.DoesNotContain("raw-request-secret", journalText, StringComparison.Ordinal); Assert.DoesNotContain("raw-result-secret", journalText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PermissionIsBoundToAcceptingOwnershipEpochAndCapacityIsBounded()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options() with { PendingPermissionLimit = 1 }); Start(store); var first = store.AcquireLease("controller-test", Nonce(1));
+        using var frame = JsonDocument.Parse("{\"options\":[{\"optionId\":\"reject_once\"}]}");
+        var pending = store.AddPermission(first.Epoch, "req", "turn", "decision", frame.RootElement);
+        Assert.Throws<WorkerProtocolException>(() => store.AddPermission(first.Epoch, "req2", "turn2", "decision2", frame.RootElement));
+        var second = store.AcquireLease("controller-test", Nonce(2)); Assert.Equal("ownership-changed-pending-permission", store.Status().HoldReason);
+        Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision(second.Epoch, pending.DecisionId, pending.ProcessGeneration, pending.RequestId, pending.TurnId, "reject_once"));
     }
 
     [Fact]
@@ -488,6 +596,15 @@ public sealed class WorkerBridgeTests
         var source = File.ReadAllText(System.IO.Path.Combine(RepoRoot(), "src/HVO.AgentControl/Program.cs")); Assert.Contains("WorkerControlImplemented: false", source, StringComparison.Ordinal);
     }
 
+    private static async Task<NetworkStream> AuthenticateAsync(WorkerOptions options, byte[] key, string clientNonce)
+    {
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified); await socket.ConnectAsync(new UnixDomainSocketEndPoint(options.SocketPath)); var stream = new NetworkStream(socket, ownsSocket: true); var keyId = WorkerProtocol.KeyId(key);
+        await WorkerProtocol.WriteFrameAsync(stream, new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = options.ControllerId, workerId = options.WorkerId, keyId, clientNonce }, CancellationToken.None);
+        using var challenge = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var root = challenge!.RootElement; Assert.True(root.TryGetProperty("serverNonce", out var serverNonceElement), root.GetRawText()); var serverNonce = serverNonceElement.GetString()!; var issued = root.GetProperty("issuedUnixMilliseconds").GetInt64();
+        Assert.True(WorkerProtocol.VerifyMac(WorkerProtocol.ComputeMac(key, "server-proof", "controller", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued), root.GetProperty("mac").GetString()!));
+        await WorkerProtocol.WriteFrameAsync(stream, new { type = "proof", mac = WorkerProtocol.ComputeMac(key, "client-proof", "controller", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued) }, CancellationToken.None);
+        return stream;
+    }
     private static void Start(WorkerStore store) { store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); }
     private static string Nonce(byte value) => Convert.ToBase64String(Enumerable.Repeat(value, 32).ToArray());
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False"); connection.Open(); return connection; }

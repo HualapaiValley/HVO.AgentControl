@@ -17,6 +17,7 @@ public static class WorkerKeyBootstrap
         try
         {
             var uid = EffectiveUid(); WorkerStore.ValidateControlDirectory(controlDirectory, uid);
+            CleanOwnedTemps(controlDirectory, uid);
             var path = Path.Combine(controlDirectory, KeyFileName);
             if (File.Exists(path)) return VerifyExisting(path, key, uid);
             var temporary = Path.Combine(controlDirectory, $".{KeyFileName}.{Guid.NewGuid():N}.tmp");
@@ -79,6 +80,20 @@ public static class WorkerKeyBootstrap
         var fd = open(path, 0x20000 | 0x80000, 0); // O_RDONLY|O_NOFOLLOW|O_CLOEXEC
         if (fd < 0) throw new WorkerProtocolException("The enrolled bridge key could not be opened safely.");
         return new FileStream(new SafeFileHandle((IntPtr)fd, ownsHandle: true), FileAccess.Read, 4096, isAsync: false);
+    }
+
+    private static void CleanOwnedTemps(string directory, int uid)
+    {
+        foreach (var path in Directory.EnumerateFileSystemEntries(directory, $".{KeyFileName}.*.tmp", SearchOption.TopDirectoryOnly))
+        {
+            var name = Path.GetFileName(path);
+            var token = name[$".{KeyFileName}.".Length..^".tmp".Length];
+            if (token.Length != 32 || !token.All(Uri.IsHexDigit)) throw new WorkerProtocolException("An unexpected bridge key temporary requires reconciliation.");
+            WorkerStore.ValidateAbsentOrPrivateRegular(path, false, uid);
+            var bytes = File.ReadAllBytes(path);
+            try { CryptographicOperations.ZeroMemory(bytes); File.Delete(path); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        }
     }
 
     private static int EffectiveUid() => OperatingSystem.IsWindows() ? -1 : checked((int)geteuid());

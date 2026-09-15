@@ -22,14 +22,6 @@ internal static class WorkerProgram
                 Console.Out.WriteLine(WorkerKeyBootstrap.Bootstrap(directory, input));
                 return 0;
             }
-            if (args is ["--worker-test-hold-store", var controlDirectory])
-            {
-                var options = new WorkerOptions(controlDirectory, "worker-test", "controller-test", Path.Combine(controlDirectory, "bridge.sock"), TimeSpan.FromSeconds(1), TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(20));
-                using var store = new WorkerStore(options);
-                Console.Out.WriteLine("locked"); Console.Out.Flush();
-                await Task.Delay(Timeout.InfiniteTimeSpan).ConfigureAwait(false);
-                return 0;
-            }
             if (args is ["--worker-bridge"])
             {
                 var options = Options();
@@ -90,13 +82,18 @@ internal static class WorkerProgram
             await socket.ConnectAsync(new UnixDomainSocketEndPoint(options.SocketPath)).ConfigureAwait(false);
             using var stream = new NetworkStream(socket);
             var keyId = WorkerProtocol.KeyId(key);
-            var clientNonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(WorkerProtocol.NonceBytes));
+            var clientNonceBytes = RandomNumberGenerator.GetBytes(WorkerProtocol.NonceBytes);
+            string clientNonce;
+            try { clientNonce = Convert.ToBase64String(clientNonceBytes); }
+            finally { CryptographicOperations.ZeroMemory(clientNonceBytes); }
             await WorkerProtocol.WriteFrameAsync(stream, new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = options.ControllerId, workerId = options.WorkerId, keyId, clientNonce }, CancellationToken.None);
             using var challenge = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None).ConfigureAwait(false) ?? throw new WorkerProtocolException("Bridge closed during authentication.");
             var c = challenge.RootElement;
-            var serverNonce = c.GetProperty("serverNonce").GetString()!;
-            var issued = c.GetProperty("issuedUnixMilliseconds").GetInt64();
-            var serverMac = c.GetProperty("mac").GetString()!;
+            RequireExactFields(c, "type", "version", "role", "controllerId", "workerId", "keyId", "clientNonce", "serverNonce", "issuedUnixMilliseconds", "mac");
+            if (Required(c, "type") != "challenge" || Required(c, "version") != WorkerProtocol.Version || Required(c, "role") != "controller" || Required(c, "controllerId") != options.ControllerId || Required(c, "workerId") != options.WorkerId || Required(c, "keyId") != keyId || Required(c, "clientNonce") != clientNonce) throw new WorkerProtocolException("Bridge challenge identity is invalid.");
+            var serverNonce = Required(c, "serverNonce"); using var nonce = new ZeroingBuffer(WorkerProtocol.ParseNonce(serverNonce, "server nonce"));
+            if (!c.TryGetProperty("issuedUnixMilliseconds", out var issuedElement) || !issuedElement.TryGetInt64(out var issued) || !WorkerBridge.IsProofFresh(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), issued, options.ChallengeLifetime)) throw new WorkerProtocolException("Bridge challenge is stale.");
+            var serverMac = Required(c, "mac");
             var expected = WorkerProtocol.ComputeMac(key, "server-proof", "controller", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued);
             if (!WorkerProtocol.VerifyMac(expected, serverMac)) throw new WorkerProtocolException("Bridge server proof rejected.");
             var clientMac = WorkerProtocol.ComputeMac(key, "client-proof", "controller", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued);
@@ -135,6 +132,9 @@ internal static class WorkerProgram
         return new SupervisorStart(lifecycleHandle, pid);
     }
 
+    private static string Required(JsonElement element, string name) => element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String && property.GetString() is { Length: > 0 } value ? value : throw new WorkerProtocolException($"Missing {name}.");
+    private static void RequireExactFields(JsonElement element, params string[] fields) { if (element.ValueKind != JsonValueKind.Object || !element.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(fields.Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw new WorkerProtocolException("Connector authentication fields are invalid."); }
     private static string RequiredEnvironment(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 and <= 512 } value ? value : throw new WorkerProtocolException($"Required fixed configuration {name} is missing or invalid.");
+    private sealed class ZeroingBuffer(byte[] value) : IDisposable { public void Dispose() => CryptographicOperations.ZeroMemory(value); }
     private sealed record SupervisorStart(string LifecycleHandle, long? Pid);
 }

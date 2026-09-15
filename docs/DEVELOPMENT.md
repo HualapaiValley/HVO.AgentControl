@@ -128,11 +128,13 @@ python3 -m py_compile src/container/worker-supervisor.py
 ```
 
 `WorkerBridgeTests` are host-local and use disposable keys/databases plus fake
-streams. They cover persistent advisory-lock reopen/live-holder rejection, ACP
-EOF/read-failure reconciliation, host-bound pinned permission callbacks, stale-socket
-fencing for read and write operations, durable cancellation/permission writes across
-connector disconnect, prior-generation replay/ACK pruning and restart process-slot
-holds. They require no provider credentials or inference. `WorkerImageContractTests`
+streams plus a separate test-only lock-holder executable that is not copied into
+the worker image. They cover persistent advisory-lock reopen/live-holder rejection,
+separate bounded ACP/control codecs, truthful EOF/protocol/transport reconciliation,
+host/session/epoch-bound permissions with count/byte caps, protected holds,
+stale-socket fencing, single-write JSON-RPC cancellation, sanitized journal data,
+explicit replay-loss markers/reconciliation, reconnect fencing and terminal
+container process-slot behavior. They require no provider credentials or inference. `WorkerImageContractTests`
 build and run the real image with alternate UIDs and validate private path/socket
 access, empty bridge capabilities/setuid inventory and PID1 signal/reaping. The
 local connector mode reads its key from the first stdin line; never put a worker

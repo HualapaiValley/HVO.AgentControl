@@ -8,26 +8,27 @@ namespace HVO.AgentControl.Worker;
 
 public static class WorkerProtocol
 {
-    public const string Version = "hvo-worker-acp/1";
+    public const string Version = "hvo-worker-acp/2";
     public const int MaxControlFrameBytes = 1024 * 1024;
+    public const int MaxAcpFrameBytes = 8 * 1024 * 1024;
     public const int MaxCanonicalPayloadBytes = 1024 * 1024;
-    public const int MaxJsonDepth = 64;
+    public const int MaxControlJsonDepth = 64;
+    public const int MaxAcpJsonDepth = 128;
+    public const int MaxJsonDepth = MaxControlJsonDepth;
     public const int NonceBytes = 32;
     public const int MaxIdentifierLength = 128;
 
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
-        MaxDepth = MaxJsonDepth,
+        MaxDepth = MaxControlJsonDepth,
     };
 
     public static byte[] CanonicalPayloadHash(JsonElement payload)
     {
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = false, SkipValidation = false, MaxDepth = MaxJsonDepth }))
-        {
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = false, SkipValidation = false, MaxDepth = MaxControlJsonDepth }))
             WriteCanonical(writer, payload, 0);
-        }
         if (buffer.WrittenCount > MaxCanonicalPayloadBytes)
             throw new WorkerProtocolException("Canonical request payload is too large.");
         return SHA256.HashData(buffer.WrittenSpan);
@@ -35,7 +36,7 @@ public static class WorkerProtocol
 
     private static void WriteCanonical(Utf8JsonWriter writer, JsonElement value, int depth)
     {
-        if (depth > MaxJsonDepth) throw new WorkerProtocolException("JSON payload nesting is too deep.");
+        if (depth > MaxControlJsonDepth) throw new WorkerProtocolException("JSON payload nesting is too deep.");
         switch (value.ValueKind)
         {
             case JsonValueKind.Object:
@@ -52,23 +53,12 @@ public static class WorkerProtocol
                 foreach (var item in value.EnumerateArray()) WriteCanonical(writer, item, depth + 1);
                 writer.WriteEndArray();
                 break;
-            case JsonValueKind.String:
-                writer.WriteStringValue(value.GetString());
-                break;
-            case JsonValueKind.Number:
-                WriteCanonicalNumber(writer, value);
-                break;
-            case JsonValueKind.True:
-                writer.WriteBooleanValue(true);
-                break;
-            case JsonValueKind.False:
-                writer.WriteBooleanValue(false);
-                break;
-            case JsonValueKind.Null:
-                writer.WriteNullValue();
-                break;
-            default:
-                throw new WorkerProtocolException("Unsupported JSON value in request payload.");
+            case JsonValueKind.String: writer.WriteStringValue(value.GetString()); break;
+            case JsonValueKind.Number: WriteCanonicalNumber(writer, value); break;
+            case JsonValueKind.True: writer.WriteBooleanValue(true); break;
+            case JsonValueKind.False: writer.WriteBooleanValue(false); break;
+            case JsonValueKind.Null: writer.WriteNullValue(); break;
+            default: throw new WorkerProtocolException("Unsupported JSON value in request payload.");
         }
     }
 
@@ -148,38 +138,100 @@ public static class WorkerProtocol
         }
     }
 
-    public static async ValueTask<JsonDocument?> ReadFrameAsync(Stream stream, CancellationToken cancellationToken)
-    {
-        var writer = new ArrayBufferWriter<byte>();
-        var one = new byte[1];
-        while (true)
-        {
-            var read = await stream.ReadAsync(one, cancellationToken).ConfigureAwait(false);
-            if (read == 0)
-            {
-                if (writer.WrittenCount == 0) return null;
-                throw new WorkerProtocolException("The peer closed a partial frame.");
-            }
-            if (one[0] == (byte)'\n') break;
-            if (writer.WrittenCount >= MaxControlFrameBytes) throw new WorkerProtocolException("Control frame is too large.");
-            writer.Write(one);
-        }
-        if (writer.WrittenCount == 0) throw new WorkerProtocolException("Empty frames are not allowed.");
-        try { return JsonDocument.Parse(writer.WrittenMemory, new JsonDocumentOptions { MaxDepth = MaxJsonDepth }); }
-        catch (JsonException exception) { throw new WorkerProtocolException("Malformed JSON frame.", exception); }
-    }
+    public static ValueTask<JsonDocument?> ReadFrameAsync(Stream stream, CancellationToken cancellationToken) =>
+        new NdjsonFrameReader(stream, MaxControlFrameBytes, MaxControlJsonDepth, acp: false, readBufferBytes: 1).ReadAsync(cancellationToken);
 
-    public static async ValueTask WriteFrameAsync(Stream stream, object value, CancellationToken cancellationToken)
+    internal static NdjsonFrameReader CreateControlReader(Stream stream) =>
+        new(stream, MaxControlFrameBytes, MaxControlJsonDepth, acp: false, readBufferBytes: 16 * 1024);
+
+    internal static NdjsonFrameReader CreateAcpReader(Stream stream) =>
+        new(stream, MaxAcpFrameBytes, MaxAcpJsonDepth, acp: true, readBufferBytes: 64 * 1024);
+
+    public static ValueTask WriteFrameAsync(Stream stream, object value, CancellationToken cancellationToken) =>
+        WriteFrameCoreAsync(stream, value, MaxControlFrameBytes, JsonOptions, cancellationToken);
+
+    internal static ValueTask WriteAcpFrameAsync(Stream stream, object value, CancellationToken cancellationToken) =>
+        WriteFrameCoreAsync(stream, value, MaxAcpFrameBytes, new JsonSerializerOptions(JsonOptions) { MaxDepth = MaxAcpJsonDepth }, cancellationToken);
+
+    private static async ValueTask WriteFrameCoreAsync(Stream stream, object value, int maximumBytes, JsonSerializerOptions options, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
-        if (json.Length > MaxControlFrameBytes) throw new WorkerProtocolException("Outgoing control frame is too large.");
-        await stream.WriteAsync(json, cancellationToken).ConfigureAwait(false);
-        await stream.WriteAsync("\n"u8.ToArray(), cancellationToken).ConfigureAwait(false);
+        var json = JsonSerializer.SerializeToUtf8Bytes(value, options);
+        if (json.Length >= maximumBytes) throw new WorkerProtocolException("Outgoing frame is too large.");
+        var frame = GC.AllocateUninitializedArray<byte>(json.Length + 1);
+        json.CopyTo(frame, 0);
+        frame[^1] = (byte)'\n';
+        await stream.WriteAsync(frame, cancellationToken).ConfigureAwait(false);
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 }
 
+internal sealed class NdjsonFrameReader
+{
+    private readonly Stream _stream;
+    private readonly int _maximumBytes;
+    private readonly int _maximumDepth;
+    private readonly bool _acp;
+    private byte[] _buffer;
+    private int _start;
+    private int _end;
+
+    public NdjsonFrameReader(Stream stream, int maximumBytes, int maximumDepth, bool acp, int readBufferBytes)
+    {
+        _stream = stream;
+        _maximumBytes = maximumBytes;
+        _maximumDepth = maximumDepth;
+        _acp = acp;
+        _buffer = new byte[Math.Min(maximumBytes + 1, readBufferBytes)];
+    }
+
+    public async ValueTask<JsonDocument?> ReadAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var newline = _buffer.AsSpan(_start, _end - _start).IndexOf((byte)'\n');
+            if (newline >= 0)
+            {
+                var length = newline;
+                if (length == 0) throw Failure("Empty frames are not allowed.");
+                try
+                {
+                    var document = JsonDocument.Parse(_buffer.AsMemory(_start, length), new JsonDocumentOptions { MaxDepth = _maximumDepth });
+                    _start += length + 1;
+                    return document;
+                }
+                catch (JsonException exception) { throw Failure("Malformed JSON frame.", exception); }
+            }
+            if (_end - _start >= _maximumBytes) throw Failure("Frame is too large.");
+            CompactOrGrow();
+            var read = await _stream.ReadAsync(_buffer.AsMemory(_end), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                if (_end == _start) return null;
+                throw Failure("The peer closed a partial frame.");
+            }
+            _end += read;
+        }
+    }
+
+    private void CompactOrGrow()
+    {
+        if (_start > 0)
+        {
+            _buffer.AsSpan(_start, _end - _start).CopyTo(_buffer);
+            _end -= _start;
+            _start = 0;
+        }
+        if (_end < _buffer.Length) return;
+        var next = Math.Min(_maximumBytes + 1, checked(_buffer.Length * 2));
+        if (next <= _buffer.Length) throw Failure("Frame is too large.");
+        Array.Resize(ref _buffer, next);
+    }
+
+    private Exception Failure(string message, Exception? inner = null) => _acp ? new AcpProtocolException(message, inner) : new WorkerProtocolException(message, inner);
+}
+
 public sealed class WorkerProtocolException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class AcpProtocolException(string message, Exception? inner = null) : Exception(message, inner);
 public sealed class WorkerStoreException(string message, Exception? inner = null) : Exception(message, inner);
 
 public interface IWorkerClock { DateTimeOffset UtcNow { get; } long MonotonicMilliseconds { get; } }
@@ -192,7 +244,8 @@ public sealed class SystemWorkerClock : IWorkerClock
 
 public sealed record WorkerOptions(string ControlDirectory, string WorkerId, string ControllerId, string SocketPath,
     TimeSpan ChallengeLifetime, TimeSpan HeartbeatInterval, TimeSpan LeaseLifetime, int EventLimit = 10_000,
-    long EventByteLimit = 64L * 1024 * 1024, int NonceCacheLimit = 4096, int ExpectedBridgeUid = -1)
+    long EventByteLimit = 64L * 1024 * 1024, int NonceCacheLimit = 4096, int ExpectedBridgeUid = -1,
+    int PendingPermissionLimit = 64, long PendingPermissionByteLimit = 256 * 1024, int MaxConnections = 32, int MaxAuthenticatingConnections = 8)
 {
     public static WorkerOptions Production(string controlDirectory, string workerId, string controllerId) => new(
         controlDirectory, workerId, controllerId, Path.Combine(controlDirectory, "bridge.sock"), TimeSpan.FromSeconds(10),
@@ -201,13 +254,14 @@ public sealed record WorkerOptions(string ControlDirectory, string WorkerId, str
 
 public sealed record Lease(long Epoch, string ControllerId, string ConnectionNonce, DateTimeOffset ObservedUtc);
 public sealed record WorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle,
-    long? ObservedPid, string? SessionId, string? ActiveRequestId, PendingPermission? PendingPermission, long OwnershipEpoch,
+    long? ObservedPid, string? ActiveRequestId, PendingPermission? PendingPermission, long OwnershipEpoch,
     bool LeaseActive, bool DispatchHeld, string? HoldReason, long FirstRetainedSequence, long LastSequence,
-    long AcknowledgedWorkerGeneration, long AcknowledgedSequence);
-public sealed record PendingPermission(long ProcessGeneration, string RequestId, string TurnId, string DecisionId,
+    long AcknowledgedWorkerGeneration, long AcknowledgedSequence, ReplayLoss? ReplayLoss);
+public sealed record PendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId,
     string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision);
 public sealed record StoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson,
-    long ProcessGeneration, string? TurnId);
+    long ProcessGeneration, long OwnershipEpoch, string TurnId, string SessionId);
 public sealed record StoredCancellation(string CancellationId, string TargetRequestId, string PayloadHash,
-    string State, long ProcessGeneration);
+    string State, long ProcessGeneration, long OwnershipEpoch);
 public sealed record WorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
+public sealed record ReplayLoss(long WorkerGeneration, long MarkerSequence, long DroppedCount, long DroppedBytes);

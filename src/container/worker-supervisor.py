@@ -121,8 +121,12 @@ def reap():
     for name, child in list(children.items()):
         if child.poll() is not None:
             children.pop(name, None)
-            if not stopping:
+            if not stopping and name == "bridge":
                 terminate_all()
+            # ACP exit is terminal for this container's process slot, but the
+            # bridge remains alive for status/replay/reconciliation and an
+            # explicit stop. Recovery is container replacement, not an
+            # unreachable reuse of inherited stdio descriptors.
 
 
 def peer_uid(conn):

@@ -19,21 +19,26 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly ConcurrentDictionary<string, Task<StoredRequest>> _operations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<StoredCancellation>> _cancellations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<PendingPermission>> _permissionDecisions = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, (JsonElement Envelope, PendingPermission Pending)> _permissionFrames = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (JsonElement RequestId, PendingPermission Pending)> _permissionFrames = new(StringComparer.Ordinal);
     private readonly object _activePromptGate = new();
     private readonly object _submitGate = new();
+    private readonly object _cancellationGate = new();
     private ActivePromptContext? _activePrompt;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly CancellationTokenSource _transportFault = new();
+    private readonly NdjsonFrameReader _acpReader;
     private long _nextAcpId;
+    private int _transportFailed;
     private Task? _reader;
 
-    public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput) { _store = store; _acpInput = acpInput; _acpOutput = acpOutput; }
+    public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput) { _store = store; _acpInput = acpInput; _acpOutput = acpOutput; _acpReader = WorkerProtocol.CreateAcpReader(acpInput); }
     public void Start(long? employeePid = null) { _reader = Task.Run(ReadAcpAsync); }
 
     public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken)
     {
-        var prompt = IsPrompt(envelope);
-        if (prompt && turnId is null) throw new WorkerProtocolException("Prompt submissions require a host turn id.");
+        ValidatePromptEnvelope(envelope);
+        const bool prompt = true;
+        if (turnId is null) throw new WorkerProtocolException("Prompt submissions require a host turn id.");
         Task<StoredRequest> durable;
         lock (_submitGate)
         {
@@ -79,7 +84,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
             correlationId = Interlocked.Increment(ref _nextAcpId);
             if (prompt)
             {
-                promptContext = new ActivePromptContext(requestId, registered.TurnId!, registered.ProcessGeneration, correlationId.Value, ExtractSessionId(envelope));
+                promptContext = new ActivePromptContext(requestId, registered.TurnId, registered.ProcessGeneration, registered.OwnershipEpoch, correlationId.Value, registered.SessionId);
                 lock (_activePromptGate)
                 {
                     if (_activePrompt is not null) throw new WorkerProtocolException("Active prompt ownership is ambiguous.");
@@ -93,8 +98,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
             _store.MarkForwarded(requestId);
             var result = await completion.Task.ConfigureAwait(false);
             var state = result.TryGetProperty("error", out _) ? "failed" : "completed";
-            _store.CompleteRequest(requestId, state, result.GetRawText());
-            TryAppendObservation("acp-response", JsonSerializer.Serialize(new { requestId, envelope = result }, WorkerProtocol.JsonOptions));
+            _store.CompleteRequest(requestId, state, SanitizeOutcome(result, state));
+            TryAppendObservation("acp-response", SanitizeObservation(result, requestId, correlationId));
             return _store.GetRequest(requestId)!;
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
@@ -121,18 +126,24 @@ public sealed class WorkerRuntime : IAsyncDisposable
 
     public Task<StoredCancellation> CancelAsync(long epoch, string connectionNonce, string cancellationId, string targetRequestId, JsonElement envelope, CancellationToken connectionToken)
     {
-        ValidateCancellationEnvelope(envelope);
-        var registered = _store.RegisterCancellation(epoch, connectionNonce, cancellationId, targetRequestId, envelope);
-        if (registered.State != "persisted") return Task.FromResult(registered);
-        var durable = _cancellations.GetOrAdd(cancellationId, _ => RunCancellationAsync(registered, envelope.Clone()));
+        using var normalized = NormalizeCancellationEnvelope(envelope);
+        Task<StoredCancellation> durable;
+        lock (_cancellationGate)
+        {
+            if (_cancellations.TryGetValue(cancellationId, out var active)) return active.WaitAsync(connectionToken);
+            var registered = _store.RegisterCancellation(epoch, connectionNonce, cancellationId, targetRequestId, normalized.RootElement);
+            if (registered.State != "forwarding") return Task.FromResult(registered);
+            durable = RunCancellationAsync(registered, normalized.RootElement.Clone());
+            if (!_cancellations.TryAdd(cancellationId, durable)) throw new WorkerProtocolException("Cancellation ownership is ambiguous.");
+        }
         return durable.WaitAsync(connectionToken);
     }
 
     private async Task<StoredCancellation> RunCancellationAsync(StoredCancellation registered, JsonElement envelope)
     {
+        await Task.Yield();
         try
         {
-            _store.MarkCancellationForwarding(registered.CancellationId);
             await WriteAcpAsync(envelope, _lifetime.Token).ConfigureAwait(false);
             _store.MarkCancellationForwarded(registered.CancellationId);
             TryAppendObservation("cancel-forwarded", JsonSerializer.Serialize(new { registered.CancellationId, registered.TargetRequestId }, WorkerProtocol.JsonOptions));
@@ -143,12 +154,13 @@ public sealed class WorkerRuntime : IAsyncDisposable
             _store.MarkCancellationUncertain(registered.CancellationId);
             throw new WorkerProtocolException("Cancellation delivery is uncertain.", exception);
         }
-        finally { _cancellations.TryRemove(registered.CancellationId, out _); }
+        finally { lock (_cancellationGate) _cancellations.TryRemove(registered.CancellationId, out _); }
     }
 
-    public Task<PendingPermission> DecidePermissionAsync(string decisionId, long generation, string requestId, string turnId, string decision, CancellationToken connectionToken)
+    public Task<PendingPermission> DecidePermissionAsync(string decisionId, long generation, string requestId, string turnId, string decision, CancellationToken connectionToken) => DecidePermissionAsync(_store.Status().OwnershipEpoch, decisionId, generation, requestId, turnId, decision, connectionToken);
+    public Task<PendingPermission> DecidePermissionAsync(long ownershipEpoch, string decisionId, long generation, string requestId, string turnId, string decision, CancellationToken connectionToken)
     {
-        var deciding = _store.BeginPermissionDecision(decisionId, generation, requestId, turnId, decision);
+        var deciding = _store.BeginPermissionDecision(ownershipEpoch, decisionId, generation, requestId, turnId, decision);
         if (deciding.State == "decided") return Task.FromResult(deciding);
         var durable = _permissionDecisions.GetOrAdd(decisionId, _ => RunPermissionDecisionAsync(deciding));
         return durable.WaitAsync(connectionToken);
@@ -159,7 +171,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         try
         {
             if (!_permissionFrames.TryGetValue(deciding.DecisionId, out var frame)) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerProtocolException("Permission response transport requires reconciliation."); }
-            var response = new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = frame.Envelope.GetProperty("id").Clone(), ["result"] = new { outcome = new { outcome = "selected", optionId = deciding.Decision } } };
+            var response = new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = frame.RequestId, ["result"] = new { outcome = new { outcome = "selected", optionId = deciding.Decision } } };
             try { await WriteAcpObjectAsync(response, _lifetime.Token).ConfigureAwait(false); }
             catch (Exception exception) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerProtocolException("Permission response delivery is uncertain.", exception); }
             _store.CompletePermissionDecision(deciding.DecisionId);
@@ -183,7 +195,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         {
             while (!_lifetime.IsCancellationRequested)
             {
-                var document = await WorkerProtocol.ReadFrameAsync(_acpInput, _lifetime.Token).ConfigureAwait(false);
+                var document = await _acpReader.ReadAsync(_lifetime.Token).ConfigureAwait(false);
                 if (document is null) break;
                 using (document)
                 {
@@ -191,16 +203,17 @@ public sealed class WorkerRuntime : IAsyncDisposable
                     if (root.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number && !root.TryGetProperty("method", out _) && _responses.TryRemove(id.GetInt64(), out var response)) { response.TrySetResult(root.Clone()); continue; }
                     if (root.TryGetProperty("method", out var method) && method.ValueKind == JsonValueKind.String && method.GetString() == "session/request_permission" && root.TryGetProperty("id", out _))
                         await HandlePermissionRequestAsync(root).ConfigureAwait(false);
-                    else TryAppendObservation("acp-event", root.GetRawText());
+                    else TryAppendObservation("acp-event", SanitizeObservation(root, null, root.TryGetProperty("id", out var observedId) && observedId.TryGetInt64(out var value) ? value : null));
                 }
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception) { }
+        catch (AcpProtocolException) { _store.SetProcessFailure("protocol-failed", "acp-protocol-failed"); }
+        catch (Exception) { _store.SetProcessFailure("transport-uncertain", "acp-transport-uncertain"); }
         finally
         {
             FailPendingResponses();
-            _store.SetProcess("exited"); _store.SetHold(true, "process-exited");
+            if (_store.Status().ProcessState == "running") _store.SetProcessFailure("exited", "process-exited");
         }
     }
 
@@ -228,8 +241,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
         var decisionId = CreateDecisionId();
         try
         {
-            var pending = _store.AddPermission(context.RequestId, context.TurnId, decisionId, parameters);
-            if (!_permissionFrames.TryAdd(decisionId, (root.Clone(), pending))) throw new WorkerProtocolException("Permission correlation is ambiguous.");
+            var pending = _store.AddPermission(context.OwnershipEpoch, context.RequestId, context.TurnId, decisionId, parameters);
+            if (!_permissionFrames.TryAdd(decisionId, (root.GetProperty("id").Clone(), pending))) throw new WorkerProtocolException("Permission correlation is ambiguous.");
             TryAppendObservation("permission-pending", JsonSerializer.Serialize(pending, WorkerProtocol.JsonOptions));
         }
         catch (WorkerProtocolException)
@@ -245,7 +258,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
             result = new { outcome = new { outcome = "selected", optionId } };
         var response = new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = root.GetProperty("id").Clone(), ["result"] = result };
         try { await WriteAcpObjectAsync(response, _lifetime.Token).ConfigureAwait(false); }
-        catch { _store.SetHold(true, "permission-binding-uncertain"); }
+        catch { _store.SetProcessFailure("transport-uncertain", "permission-binding-uncertain"); }
     }
 
     private static string? TrySelectRejectOption(JsonElement parameters)
@@ -262,28 +275,26 @@ public sealed class WorkerRuntime : IAsyncDisposable
 
     private static string CreateDecisionId() => "perm:" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
 
-    private static bool SessionMatches(string? expected, JsonElement parameters)
-    {
-        if (expected is null) return true;
-        return parameters.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && string.Equals(expected, session.GetString(), StringComparison.Ordinal);
-    }
-
-    private static string? ExtractSessionId(JsonElement envelope)
-    {
-        if (!envelope.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object || !parameters.TryGetProperty("sessionId", out var session) || session.ValueKind != JsonValueKind.String) return null;
-        var value = session.GetString();
-        if (value is null) return null;
-        WorkerProtocol.ValidateIdentifier(value, WorkerProtocol.MaxIdentifierLength, "session id");
-        return value;
-    }
+    private static bool SessionMatches(string expected, JsonElement parameters) =>
+        parameters.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && string.Equals(expected, session.GetString(), StringComparison.Ordinal);
 
     private static bool IsPrompt(JsonElement envelope) => envelope.TryGetProperty("method", out var method) && method.ValueKind == JsonValueKind.String && method.GetString() == "session/prompt";
 
-    private static void ValidateCancellationEnvelope(JsonElement envelope)
+    private static void ValidatePromptEnvelope(JsonElement envelope)
+    {
+        if (!IsPrompt(envelope)) throw new WorkerProtocolException("Only session/prompt submissions are supported.");
+        foreach (var property in envelope.EnumerateObject()) if (property.Name is not ("method" or "params")) throw new WorkerProtocolException("ACP envelope contains unsupported fields.");
+        if (!envelope.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object || !parameters.TryGetProperty("sessionId", out var session) || session.ValueKind != JsonValueKind.String || session.GetString() is not { } sessionId) throw new WorkerProtocolException("session/prompt requires sessionId.");
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+    }
+
+    private static JsonDocument NormalizeCancellationEnvelope(JsonElement envelope)
     {
         if (envelope.ValueKind != JsonValueKind.Object || !envelope.TryGetProperty("method", out var method) || method.ValueKind != JsonValueKind.String || method.GetString() != "session/cancel")
             throw new WorkerProtocolException("Cancellation envelope must use session/cancel.");
         foreach (var property in envelope.EnumerateObject()) if (property.Name is not ("method" or "params")) throw new WorkerProtocolException("Cancellation envelope contains unsupported fields.");
+        if (!envelope.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Cancellation params are required.");
+        return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["method"] = "session/cancel", ["params"] = parameters.Clone() }, WorkerProtocol.JsonOptions));
     }
 
     private static JsonDocument NormalizeEnvelope(JsonElement envelope, long id)
@@ -294,10 +305,45 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (envelope.TryGetProperty("params", out var parameters)) value["params"] = parameters.Clone();
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(value, WorkerProtocol.JsonOptions));
     }
+    private static string SanitizeOutcome(JsonElement result, string state)
+    {
+        var raw = result.GetRawText();
+        var category = result.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var code) ? code.ToString() : null;
+        return JsonSerializer.Serialize(new { state, errorCategory = category, sha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(raw))).ToLowerInvariant(), byteCount = System.Text.Encoding.UTF8.GetByteCount(raw) }, WorkerProtocol.JsonOptions);
+    }
+
+    private static string SanitizeObservation(JsonElement frame, string? requestId, long? correlationId)
+    {
+        var raw = frame.GetRawText();
+        var method = frame.TryGetProperty("method", out var methodElement) && methodElement.ValueKind == JsonValueKind.String ? methodElement.GetString() : null;
+        return JsonSerializer.Serialize(new { method, requestId, correlationId, sha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(raw))).ToLowerInvariant(), byteCount = System.Text.Encoding.UTF8.GetByteCount(raw) }, WorkerProtocol.JsonOptions);
+    }
+
     private Task WriteAcpAsync(JsonElement value, CancellationToken token) => WriteAcpObjectAsync(value, token);
-    private async Task WriteAcpObjectAsync(object value, CancellationToken token) { await _writeLock.WaitAsync(token).ConfigureAwait(false); try { await WorkerProtocol.WriteFrameAsync(_acpOutput, value, token).ConfigureAwait(false); } finally { _writeLock.Release(); } }
-    private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long CorrelationId, string? SessionId);
-    public async ValueTask DisposeAsync() { _lifetime.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).ConfigureAwait(false); } catch { } _writeLock.Dispose(); _promptLock.Dispose(); _lifetime.Dispose(); }
+    private async Task WriteAcpObjectAsync(object value, CancellationToken token)
+    {
+        if (Volatile.Read(ref _transportFailed) != 0) throw new WorkerProtocolException("ACP transport is faulted and cannot accept writes.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, _transportFault.Token);
+        await _writeLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            if (Volatile.Read(ref _transportFailed) != 0) throw new WorkerProtocolException("ACP transport is faulted and cannot accept writes.");
+            try { await WorkerProtocol.WriteAcpFrameAsync(_acpOutput, value, linked.Token).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException or SocketException or OperationCanceledException && !_lifetime.IsCancellationRequested)
+            {
+                if (Interlocked.Exchange(ref _transportFailed, 1) == 0)
+                {
+                    _transportFault.Cancel();
+                    _store.SetProcessFailure("transport-uncertain", "acp-transport-uncertain");
+                    FailPendingResponses();
+                }
+                throw new WorkerProtocolException("ACP transport write is uncertain.", exception);
+            }
+        }
+        finally { _writeLock.Release(); }
+    }
+    private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long OwnershipEpoch, long CorrelationId, string SessionId);
+    public async ValueTask DisposeAsync() { _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
     public static FileStream OpenInheritedFd(int fd, FileAccess access) => new(new SafeFileHandle((IntPtr)fd, ownsHandle: false), access, 4096, isAsync: false);
 }
 
@@ -305,18 +351,38 @@ public sealed class WorkerBridge : IAsyncDisposable
 {
     private readonly WorkerOptions _options; private readonly WorkerStore _store; private readonly WorkerRuntime _runtime; private readonly byte[] _key; private readonly IWorkerClock _clock;
     private readonly Dictionary<string, long> _nonces = new(StringComparer.Ordinal); private readonly object _nonceLock = new(); private Socket? _listener;
-    public WorkerBridge(WorkerOptions options, WorkerStore store, WorkerRuntime runtime, byte[] key, IWorkerClock? clock = null) { _options = options; _store = store; _runtime = runtime; _key = key; _clock = clock ?? new SystemWorkerClock(); }
+    private readonly SemaphoreSlim _connections;
+    private readonly SemaphoreSlim _authenticating;
+    private readonly CancellationTokenSource _shutdown = new();
+    private readonly ConcurrentDictionary<long, Task> _handlers = new();
+    private long _nextHandler;
+    public WorkerBridge(WorkerOptions options, WorkerStore store, WorkerRuntime runtime, byte[] key, IWorkerClock? clock = null) { _options = options; _store = store; _runtime = runtime; _key = key; _clock = clock ?? new SystemWorkerClock(); _connections = new(options.MaxConnections, options.MaxConnections); _authenticating = new(options.MaxAuthenticatingConnections, options.MaxAuthenticatingConnections); }
 
     public async Task RunAsync(CancellationToken token)
     {
         SecureStaleSocket();
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token);
+        var bridgeToken = lifetime.Token;
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified); _listener.Bind(new UnixDomainSocketEndPoint(_options.SocketPath));
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(_options.SocketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        _listener.Listen(16);
-        while (!token.IsCancellationRequested)
+        _listener.Listen(Math.Min(128, _options.MaxConnections));
+        var failures = 0;
+        while (!bridgeToken.IsCancellationRequested)
         {
-            Socket socket; try { socket = await _listener.AcceptAsync(token).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
-            _ = Task.Run(() => HandleAsync(socket, token), CancellationToken.None);
+            Socket socket;
+            try { socket = await _listener.AcceptAsync(bridgeToken).ConfigureAwait(false); failures = 0; }
+            catch (OperationCanceledException) { break; }
+            catch (SocketException exception) when (exception.SocketErrorCode is SocketError.Interrupted or SocketError.TryAgain or SocketError.WouldBlock or SocketError.NoBufferSpaceAvailable or SocketError.TooManyOpenSockets)
+            {
+                failures = Math.Min(failures + 1, 6);
+                await Task.Delay(TimeSpan.FromMilliseconds(25 * (1 << failures)), bridgeToken).ConfigureAwait(false);
+                continue;
+            }
+            if (!_connections.Wait(0)) { socket.Dispose(); continue; }
+            var id = Interlocked.Increment(ref _nextHandler);
+            var handler = Task.Run(async () => { try { await HandleAsync(socket, bridgeToken).ConfigureAwait(false); } finally { _connections.Release(); } }, CancellationToken.None);
+            _handlers[id] = handler;
+            _ = handler.ContinueWith(_ => { _handlers.TryRemove(id, out Task? ignored); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
 
@@ -324,8 +390,11 @@ public sealed class WorkerBridge : IAsyncDisposable
     {
         using (socket) using (var stream = new NetworkStream(socket, ownsSocket: false))
         {
+            var authOwned = false;
             try
             {
+                if (!_authenticating.Wait(0)) throw new WorkerProtocolException("Authentication capacity is exhausted.");
+                authOwned = true;
                 VerifyPeer(socket);
                 using var authTimeout = CancellationTokenSource.CreateLinkedTokenSource(bridgeToken); authTimeout.CancelAfter(_options.ChallengeLifetime);
                 using var hello = await WorkerProtocol.ReadFrameAsync(stream, authTimeout.Token).ConfigureAwait(false) ?? throw new WorkerProtocolException("Authentication hello is required.");
@@ -352,11 +421,14 @@ public sealed class WorkerBridge : IAsyncDisposable
                 try { lease = _store.AcquireLease(controller, Convert.ToBase64String(connectionNonceBytes)); }
                 finally { CryptographicOperations.ZeroMemory(connectionNonceBytes); }
                 await WorkerProtocol.WriteFrameAsync(stream, new { type = "authenticated", lease }, bridgeToken);
-                while (true) { using var frame = await WorkerProtocol.ReadFrameAsync(stream, bridgeToken).ConfigureAwait(false); if (frame is null) break; await DispatchAsync(stream, frame.RootElement, lease, bridgeToken).ConfigureAwait(false); }
+                _authenticating.Release(); authOwned = false;
+                var reader = WorkerProtocol.CreateControlReader(stream);
+                while (true) { using var frame = await reader.ReadAsync(bridgeToken).ConfigureAwait(false); if (frame is null) break; await DispatchAsync(stream, frame.RootElement, lease, bridgeToken).ConfigureAwait(false); }
             }
             catch (OperationCanceledException) { }
             catch (WorkerProtocolException) { try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-request-rejected" }, CancellationToken.None); } catch { } }
             catch (Exception) { try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-operation-failed" }, CancellationToken.None); } catch { } }
+            finally { if (authOwned) _authenticating.Release(); }
         }
     }
 
@@ -365,7 +437,7 @@ public sealed class WorkerBridge : IAsyncDisposable
         if (message.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Control message must be an object.");
         var operation = Required(message, "operation");
         _store.RequireLease(socketLease.Epoch, socketLease.ConnectionNonce);
-        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "submit" or "cancel" or "permission";
+        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "submit" or "cancel" or "permission" or "stop-process";
         if (mutation)
         {
             var epoch = RequiredInt64(message, "epoch", 1);
@@ -380,13 +452,26 @@ public sealed class WorkerBridge : IAsyncDisposable
             "hold" => Run(() => _store.SetHold(RequiredBoolean(message, "held"), OptionalString(message, "reason", 128))),
             "replay" => _store.Replay(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0)),
             "ack-events" => Run(() => _store.Acknowledge(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "sequence", 0))),
+            "reconcile-replay-loss" => Run(() => _store.ReconcileReplayLoss(RequiredInt64(message, "workerGeneration", 1), RequiredInt64(message, "markerSequence", 1))),
             "reconcile" => Reconcile(message),
+            "stop-process" => await RunAsync(StopProcessAsync).ConfigureAwait(false),
             "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken).ConfigureAwait(false),
             "cancel" => await _runtime.CancelAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "cancellationId"), RequiredBounded(message, "targetRequestId"), RequiredElement(message, "envelope", JsonValueKind.Object), connectionToken).ConfigureAwait(false),
-            "permission" => await _runtime.DecidePermissionAsync(RequiredBounded(message, "decisionId"), RequiredInt64(message, "processGeneration", 0), RequiredBounded(message, "requestId"), RequiredBounded(message, "turnId"), RequiredBounded(message, "decision"), connectionToken).ConfigureAwait(false),
+            "permission" => await _runtime.DecidePermissionAsync(socketLease.Epoch, RequiredBounded(message, "decisionId"), RequiredInt64(message, "processGeneration", 0), RequiredBounded(message, "requestId"), RequiredBounded(message, "turnId"), RequiredBounded(message, "decision"), connectionToken).ConfigureAwait(false),
             _ => throw new WorkerProtocolException("Unsupported operation.")
         };
         await WorkerProtocol.WriteFrameAsync(stream, new { type = "result", operation, result }, connectionToken);
+    }
+
+    private static async Task StopProcessAsync()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await socket.ConnectAsync(new UnixDomainSocketEndPoint("/run/worker-supervisor.sock"), timeout.Token).ConfigureAwait(false);
+        using var stream = new NetworkStream(socket);
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "stop" }, timeout.Token).ConfigureAwait(false);
+        using var response = await WorkerProtocol.ReadFrameAsync(stream, timeout.Token).ConfigureAwait(false);
+        if (response is null || !response.RootElement.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.True) throw new WorkerProtocolException("The fixed supervisor stop result is uncertain.");
     }
 
     private object Reconcile(JsonElement message)
@@ -422,7 +507,8 @@ public sealed class WorkerBridge : IAsyncDisposable
     {
         if (!File.Exists(_options.SocketPath)) return;
         if (!OperatingSystem.IsLinux()) throw new WorkerProtocolException("An existing bridge socket requires operator reconciliation.");
-        if (lstat(_options.SocketPath, out var stat) != 0 || (stat.Mode & 0xF000) != 0xC000 || stat.LinkCount != 1 || (_options.ExpectedBridgeUid >= 0 && stat.Uid != (uint)_options.ExpectedBridgeUid)) throw new WorkerProtocolException("The existing bridge socket is not a stale owned socket.");
+        try { WorkerStore.ValidateOwnedSocket(_options.SocketPath, _options.ExpectedBridgeUid); }
+        catch (WorkerStoreException exception) { throw new WorkerProtocolException("The existing bridge socket is not a stale owned socket.", exception); }
         File.Delete(_options.SocketPath);
     }
     private static object Run(Action action) { action(); return new { ok = true }; }
@@ -434,11 +520,10 @@ public sealed class WorkerBridge : IAsyncDisposable
     private static string? OptionalString(JsonElement element, string name, int maximum) { if (!element.TryGetProperty(name, out var property) || property.ValueKind == JsonValueKind.Null) return null; if (property.ValueKind != JsonValueKind.String || property.GetString() is not { } value || value.Length > maximum) throw new WorkerProtocolException($"Invalid {name}."); return value; }
     private static JsonElement RequiredElement(JsonElement element, string name, JsonValueKind kind) => element.TryGetProperty(name, out var property) && property.ValueKind == kind ? property : throw new WorkerProtocolException($"Invalid {name}.");
     private static void RequireExactFields(JsonElement element, params string[] fields) { if (element.ValueKind != JsonValueKind.Object || element.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(fields.Order(StringComparer.Ordinal), StringComparer.Ordinal) is false) throw new WorkerProtocolException("Authentication message fields are invalid."); }
-    private static void VerifyPeer(Socket socket) { if (!OperatingSystem.IsLinux()) return; var size = Marshal.SizeOf<UCred>(); var buffer = new byte[size]; socket.GetSocketOption(SocketOptionLevel.Socket, (SocketOptionName)17, buffer); var credential = MemoryMarshal.Read<UCred>(buffer); if (credential.Uid != (uint)geteuid()) throw new WorkerProtocolException("Local peer identity is invalid."); }
+    private static void VerifyPeer(Socket socket) { if (!OperatingSystem.IsLinux()) return; var size = (uint)Marshal.SizeOf<UCred>(); if (getsockopt(socket.Handle.ToInt32(), 1, 17, out var credential, ref size) != 0 || size != Marshal.SizeOf<UCred>() || credential.Uid != (uint)geteuid()) throw new WorkerProtocolException("Local peer identity is invalid."); }
     [StructLayout(LayoutKind.Sequential)] private struct UCred { public int Pid; public uint Uid; public uint Gid; }
-    [StructLayout(LayoutKind.Sequential)] private struct StatBuffer { public ulong Device, Inode, LinkCount; public uint Mode, Uid, Gid, Pad; public ulong Rdev; public long Size, BlockSize, Blocks, Atime, AtimeNs, Mtime, MtimeNs, Ctime, CtimeNs; private long R0, R1, R2; }
     private sealed class ZeroingBuffer(byte[] value) : IDisposable { public void Dispose() => CryptographicOperations.ZeroMemory(value); }
     [DllImport("libc")] private static extern int geteuid();
-    [DllImport("libc", SetLastError = true)] private static extern int lstat(string path, out StatBuffer stat);
-    public async ValueTask DisposeAsync() { _listener?.Dispose(); CryptographicOperations.ZeroMemory(_key); await _runtime.DisposeAsync(); _store.Dispose(); try { SecureStaleSocket(); } catch { } }
+    [DllImport("libc", SetLastError = true)] private static extern int getsockopt(int socket, int level, int optionName, out UCred value, ref uint length);
+    public async ValueTask DisposeAsync() { _shutdown.Cancel(); _listener?.Dispose(); var handlers = _handlers.Values.ToArray(); if (handlers.Length > 0) try { await Task.WhenAll(handlers).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } CryptographicOperations.ZeroMemory(_key); await _runtime.DisposeAsync(); _store.Dispose(); _connections.Dispose(); _authenticating.Dispose(); _shutdown.Dispose(); try { SecureStaleSocket(); } catch { } }
 }

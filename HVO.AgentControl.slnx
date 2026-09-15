@@ -5,5 +5,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/HVO.AgentControl.Tests/HVO.AgentControl.Tests.csproj" />
+    <Project Path="tests/WorkerLockHolder/WorkerLockHolder.csproj" />
   </Folder>
 </Solution>

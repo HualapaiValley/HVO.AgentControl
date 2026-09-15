@@ -25,6 +25,7 @@ public sealed class WorkerImageContractTests
         Assert.Contains("find / -xdev -perm /6000 -type f -exec chmod a-s", dockerfile);
         Assert.Contains("profiles: [\"worker\"]", compose);
         Assert.Contains("restart: \"no\"", compose);
+        Assert.Contains("read_only: true", compose); Assert.Contains("pids_limit: 256", compose); Assert.Contains("mem_limit: 2g", compose); Assert.Contains("cpus: 2.0", compose);
         Assert.DoesNotContain("docker.sock", compose, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("DOCKER_HOST", compose, StringComparison.Ordinal);
         Assert.DoesNotContain("owner-password", compose[compose.IndexOf("worker-local:", StringComparison.Ordinal)..], StringComparison.Ordinal);
@@ -33,6 +34,8 @@ public sealed class WorkerImageContractTests
         Assert.Contains("socket.SO_PEERCRED", supervisor);
         Assert.Contains("IO_TIMEOUT", supervisor);
         Assert.DoesNotContain("time.sleep(0.05)", supervisor);
+        Assert.Contains("name == \"bridge\"", supervisor);
+        Assert.DoesNotContain("--worker-test-hold-store", dockerfile);
         Assert.DoesNotContain("shell=True", supervisor);
     }
 

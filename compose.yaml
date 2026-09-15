@@ -95,6 +95,13 @@ services:
       - KILL
     security_opt:
       - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run:rw,nosuid,nodev,noexec,mode=0755
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
     restart: "no"
     networks:
       - worker-isolated
