@@ -133,8 +133,10 @@ the worker image. They cover persistent advisory-lock reopen/live-holder rejecti
 separate bounded ACP/control codecs, truthful EOF/protocol/transport reconciliation,
 host/session/epoch-bound permissions with count/byte caps, protected holds,
 stale-socket fencing, single-write JSON-RPC cancellation, sanitized journal data,
-explicit replay-loss markers/reconciliation, reconnect fencing and terminal
-container process-slot behavior. They require no provider credentials or inference. `WorkerImageContractTests`
+exact durable replay-gap sets/caps, replay-loss marker reconciliation, journal-FK
+pruning across generations, recoverable injected observation-store failures and
+exact journal-failure reconciliation, reconnect fencing and terminal container
+process-slot behavior. They require no provider credentials or inference. `WorkerImageContractTests`
 build and run the real image with alternate UIDs and validate private path/socket
 access, empty bridge capabilities/setuid inventory and PID1 signal/reaping. The
 local connector mode reads its key from the first stdin line; never put a worker

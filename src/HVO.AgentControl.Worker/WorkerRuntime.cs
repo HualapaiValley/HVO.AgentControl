@@ -11,6 +11,7 @@ namespace HVO.AgentControl.Worker;
 public sealed class WorkerRuntime : IAsyncDisposable
 {
     private readonly WorkerStore _store;
+    private readonly IWorkerObservationSink _observations;
     private readonly Stream _acpInput;
     private readonly Stream _acpOutput;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -31,7 +32,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private int _transportFailed;
     private Task? _reader;
 
-    public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput) { _store = store; _acpInput = acpInput; _acpOutput = acpOutput; _acpReader = WorkerProtocol.CreateAcpReader(acpInput); }
+    public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput, IWorkerObservationSink? observations = null) { _store = store; _observations = observations ?? store; _acpInput = acpInput; _acpOutput = acpOutput; _acpReader = WorkerProtocol.CreateAcpReader(acpInput); }
     public void Start(long? employeePid = null) { _reader = Task.Run(ReadAcpAsync); }
 
     public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken)
@@ -185,13 +186,13 @@ public sealed class WorkerRuntime : IAsyncDisposable
 
     private void TryAppendObservation(string kind, string payload)
     {
-        try { _store.AppendEvent(kind, payload); }
+        try { _observations.AppendEvent(kind, payload); }
         catch (WorkerReplayLossException) { }
         catch (ObjectDisposedException) when (_lifetime.IsCancellationRequested) { }
         catch
         {
-            try { _store.SetJournalFailure(); } catch { }
-            _lifetime.Cancel();
+            try { _observations.SetJournalFailure("observation-append"); }
+            catch { _store.FailClosedJournalInMemory(); }
         }
     }
 
@@ -448,7 +449,7 @@ public sealed class WorkerBridge : IAsyncDisposable
         if (message.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Control message must be an object.");
         var operation = Required(message, "operation");
         _store.RequireLease(socketLease.Epoch, socketLease.ConnectionNonce);
-        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "submit" or "cancel" or "permission" or "stop-process";
+        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "reconcile-journal" or "submit" or "cancel" or "permission" or "stop-process";
         if (mutation)
         {
             var epoch = RequiredInt64(message, "epoch", 1);
@@ -464,7 +465,8 @@ public sealed class WorkerBridge : IAsyncDisposable
             "replay" => _store.Replay(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0)),
             "ack-events" => Run(() => _store.Acknowledge(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "sequence", 0))),
             "reconcile-replay-loss" => Run(() => _store.ReconcileReplayLoss(RequiredInt64(message, "workerGeneration", 1), RequiredInt64(message, "markerSequence", 1))),
-            "reconcile-replay-gap" => Run(() => _store.ReconcileReplayGap(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0), RequiredInt64(message, "firstRetainedSequence", 0), RequiredInt64(message, "lastSequence", 0))),
+            "reconcile-replay-gap" => Run(() => _store.ReconcileReplayGap(RequiredBounded(message, "gapId"), RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0), RequiredInt64(message, "firstRetainedSequence", 0), RequiredInt64(message, "lastSequence", 0))),
+            "reconcile-journal" => Run(() => _store.ReconcileJournalFailure(RequiredBounded(message, "operationId"), RequiredInt64(message, "workerGeneration", 1))),
             "reconcile" => Reconcile(message),
             "stop-process" => await RunAsync(StopProcessAsync).ConfigureAwait(false),
             "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken).ConfigureAwait(false),

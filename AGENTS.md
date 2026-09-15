@@ -130,13 +130,23 @@ implementer and bound to an exact head SHA; PR #208 Round 1 baseline is
 `002e826`. Triage every finding, including all owner comments, and answer each
 fix in its own thread with the change, the validation that exercised it, and the
 exact head it applies to. Defer a finding only with owner approval and a linked
-follow-up issue; security, data-loss, acceptance, failing-CI and
-material-correctness findings are never deferrable. Allow at most three review
-rounds, then pause and ask the owner before a fourth; route remaining
-non-blocking findings to one linked issue. CI must be green on the exact
-reviewed head, but green CI is necessary, not sufficient. Do not amend or
-force-push a reviewed head. Merge only when the owner explicitly authorizes it;
-never auto-merge, and never treat a merge as a release.
+follow-up issue. Before completion of an authorized fourth review cycle,
+security, data-loss, acceptance, failing-CI and material-correctness findings
+are not deferrable. After cycle four, the owner may grant a per-finding exception
+that converts a critical or material finding which does not block build, required
+CI, migration safety or repository integrity from a merge blocker into a release
+blocker. Record the exception in the original thread, link a dedicated open
+issue carrying `status:deferred` and `status:release-blocker`, list it in the PR
+and release checklist, and resolve the thread only as **Deferred, not fixed**.
+No tag, registry publication, release, deployment, live migration or live
+enrollment is authorized while that release blocker remains open and
+independently unverified. The exception is never blanket authorization for other
+findings or PRs. Allow at most three review rounds, then pause and ask the owner
+before a fourth; every later cycle also requires explicit owner authorization.
+CI must be green on the exact reviewed head, but green CI is necessary, not
+sufficient. Do not amend or force-push a reviewed head. Merge only when the
+owner explicitly authorizes it; never auto-merge, and never treat a merge as a
+release.
 
 ## Secrets and data
 

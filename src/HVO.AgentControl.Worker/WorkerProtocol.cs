@@ -253,11 +253,18 @@ public sealed record WorkerOptions(string ControlDirectory, string WorkerId, str
         TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), ExpectedBridgeUid: 1101);
 }
 
+public interface IWorkerObservationSink
+{
+    WorkerEvent AppendEvent(string kind, string payloadJson);
+    JournalFailure SetJournalFailure(string errorCategory);
+}
+
 public sealed record Lease(long Epoch, string ControllerId, string ConnectionNonce, DateTimeOffset ObservedUtc);
 public sealed record WorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle,
     long? ObservedPid, string? ActiveRequestId, PendingPermission? PendingPermission, long OwnershipEpoch,
     bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence,
-    long AcknowledgedWorkerGeneration, long AcknowledgedSequence, ReplayLoss? ReplayLoss);
+    long AcknowledgedWorkerGeneration, long AcknowledgedSequence, ReplayLoss? ReplayLoss, JournalFailure? JournalFailure,
+    int ReplayGapCount, IReadOnlyList<ReplayGap> ReplayGaps);
 public sealed record PendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId,
     string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision);
 public sealed record StoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson,
@@ -266,3 +273,6 @@ public sealed record StoredCancellation(string CancellationId, string TargetRequ
     string State, long ProcessGeneration, long OwnershipEpoch);
 public sealed record WorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
 public sealed record ReplayLoss(long WorkerGeneration, long MarkerSequence, long DroppedCount, long DroppedBytes);
+public sealed record JournalFailure(string OperationId, long WorkerGeneration, string ErrorCategory);
+public sealed record ReplayGap(string Id, string Kind, long WorkerGeneration, long AfterSequence, long FirstRetainedSequence,
+    long LastSequence, long? LossMarkerGeneration, long? LossMarkerSequence);

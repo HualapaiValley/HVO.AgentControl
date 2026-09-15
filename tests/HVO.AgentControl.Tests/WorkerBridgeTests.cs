@@ -212,6 +212,30 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
+    public void AcknowledgedPriorGenerationLossPrunesForeignKeysBeforeNextGenerationAppend()
+    {
+        using var temp = new WorkerTemp(); var options = temp.Options(eventLimit: 2, eventBytes: 64);
+        ReplayLoss loss;
+        using (var first = new WorkerStore(options))
+        {
+            first.AppendEvent("one", "{}");
+            first.AppendEvent("two", "{}");
+            Assert.Throws<WorkerReplayLossException>(() => first.AppendEvent("overflow", "{}"));
+            loss = first.Status().ReplayLoss!;
+            first.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence);
+        }
+
+        using var second = new WorkerStore(options);
+        Assert.Equal(loss.WorkerGeneration + 1, second.WorkerGeneration);
+        Assert.Empty(second.Replay(second.WorkerGeneration, 0));
+        second.Acknowledge(loss.WorkerGeneration, loss.MarkerSequence);
+        second.Acknowledge(second.WorkerGeneration, 0);
+        var exception = Record.Exception(() => second.AppendEvent("acp-response", "{}"));
+        Assert.Null(exception);
+        Assert.Equal([1L], second.Replay(second.WorkerGeneration, 0).Select(item => item.Sequence));
+    }
+
+    [Fact]
     public void PriorGenerationEventsSurviveRestartReplayAndLexicographicAcknowledgment()
     {
         using var temp = new WorkerTemp(); var options = temp.Options(eventLimit: 3, eventBytes: 20);
@@ -419,6 +443,34 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
+    public async Task ReconnectedControllerCanReachExactReplayGapAndJournalRecoveryMutations()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        var oldLease = store.AcquireLease("controller-test", Nonce(1));
+        Assert.Throws<WorkerProtocolException>(() => store.Replay(store.WorkerGeneration + 1, 0));
+        var gap = Assert.Single(store.Status().ReplayGaps);
+        var journal = store.SetJournalFailure("observation-append");
+        var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
+        await using var bridge = new WorkerBridge(temp.Options(), store, runtime, new byte[32]);
+        var currentLease = store.AcquireLease("controller-test", Nonce(2));
+
+        using var staleGap = JsonDocument.Parse(JsonSerializer.Serialize(new { operation = "reconcile-replay-gap", epoch = oldLease.Epoch, connectionNonce = oldLease.ConnectionNonce, gapId = gap.Id, workerGeneration = gap.WorkerGeneration, afterSequence = gap.AfterSequence, firstRetainedSequence = gap.FirstRetainedSequence, lastSequence = gap.LastSequence }));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => bridge.DispatchAsync(new MemoryStream(), staleGap.RootElement, oldLease, CancellationToken.None));
+        Assert.Equal(1, store.Status().ReplayGapCount);
+
+        using var gapMessage = JsonDocument.Parse(JsonSerializer.Serialize(new { operation = "reconcile-replay-gap", epoch = currentLease.Epoch, connectionNonce = currentLease.ConnectionNonce, gapId = gap.Id, workerGeneration = gap.WorkerGeneration, afterSequence = gap.AfterSequence, firstRetainedSequence = gap.FirstRetainedSequence, lastSequence = gap.LastSequence }));
+        await bridge.DispatchAsync(new MemoryStream(), gapMessage.RootElement, currentLease, CancellationToken.None);
+        Assert.Empty(store.Status().ReplayGaps);
+        Assert.True(store.Status().DispatchHeld);
+
+        using var wrongJournal = JsonDocument.Parse(JsonSerializer.Serialize(new { operation = "reconcile-journal", epoch = currentLease.Epoch, connectionNonce = currentLease.ConnectionNonce, operationId = journal.OperationId + "x", workerGeneration = journal.WorkerGeneration }));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => bridge.DispatchAsync(new MemoryStream(), wrongJournal.RootElement, currentLease, CancellationToken.None));
+        using var journalMessage = JsonDocument.Parse(JsonSerializer.Serialize(new { operation = "reconcile-journal", epoch = currentLease.Epoch, connectionNonce = currentLease.ConnectionNonce, operationId = journal.OperationId, workerGeneration = journal.WorkerGeneration }));
+        await bridge.DispatchAsync(new MemoryStream(), journalMessage.RootElement, currentLease, CancellationToken.None);
+        Assert.False(store.Status().DispatchHeld);
+    }
+
+    [Fact]
     public async Task CapturedOldSocketLeaseRejectsStatusReplayAndReconcileBeforeSideEffects()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var first = store.AcquireLease("controller-test", Nonce(1));
@@ -614,7 +666,8 @@ public sealed class WorkerBridgeTests
         var loss = store.Status().ReplayLoss!;
         Assert.Throws<WorkerProtocolException>(() => store.Replay(one.WorkerGeneration, 0));
         Assert.Contains("replay-loss-unreconciled", store.Status().HoldReasons);
-        Assert.Contains(store.Status().HoldReasons, reason => reason.StartsWith("loss:", StringComparison.Ordinal));
+        Assert.Contains("replay-gap-unreconciled", store.Status().HoldReasons);
+        Assert.Equal("loss", Assert.Single(store.Status().ReplayGaps).Kind);
         Assert.Throws<WorkerProtocolException>(() => store.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence + 1));
         Assert.True(store.Status().DispatchHeld);
         store.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence);
@@ -629,10 +682,103 @@ public sealed class WorkerBridgeTests
         var attempted = item.Sequence + 1;
         Assert.Throws<WorkerProtocolException>(() => store.Replay(item.WorkerGeneration, attempted));
         var status = store.Status();
-        Assert.Throws<WorkerProtocolException>(() => store.ReconcileReplayGap(item.WorkerGeneration, attempted, status.FirstRetainedSequence, status.LastSequence + 1));
+        var gap = Assert.Single(status.ReplayGaps);
+        Assert.Throws<WorkerProtocolException>(() => store.ReconcileReplayGap(gap.Id, item.WorkerGeneration, attempted, status.FirstRetainedSequence, status.LastSequence + 1));
         Assert.True(store.Status().DispatchHeld);
-        store.ReconcileReplayGap(item.WorkerGeneration, attempted, status.FirstRetainedSequence, status.LastSequence);
+        store.ReconcileReplayGap(gap.Id, item.WorkerGeneration, attempted, status.FirstRetainedSequence, status.LastSequence);
         Assert.False(store.Status().DispatchHeld);
+    }
+
+    [Fact]
+    public void ReplayGapObligationsAreExactDurableSetsAndLossClearsOnlyLinkedGaps()
+    {
+        using var temp = new WorkerTemp(); var options = temp.Options(eventLimit: 2, eventBytes: 64);
+        using (var store = new WorkerStore(options))
+        {
+            var item = store.AppendEvent("one", "{}");
+            Assert.Throws<WorkerProtocolException>(() => store.Replay(item.WorkerGeneration, item.Sequence + 1));
+            Assert.Throws<WorkerProtocolException>(() => store.Replay(item.WorkerGeneration, item.Sequence + 2));
+            Assert.Throws<WorkerProtocolException>(() => store.Replay(item.WorkerGeneration, item.Sequence + 2));
+            var statusGaps = store.Status().ReplayGaps.Where(gap => gap.Kind == "status").ToArray();
+            Assert.Equal(2, statusGaps.Length);
+            var newer = statusGaps.Single(gap => gap.AfterSequence == item.Sequence + 2);
+            var older = statusGaps.Single(gap => gap.AfterSequence == item.Sequence + 1);
+            store.ReconcileReplayGap(newer.Id, newer.WorkerGeneration, newer.AfterSequence, newer.FirstRetainedSequence, newer.LastSequence);
+            Assert.True(store.Status().DispatchHeld);
+
+            store.AppendEvent("two", "{}");
+            Assert.Throws<WorkerReplayLossException>(() => store.AppendEvent("overflow", "{}"));
+            var loss = store.Status().ReplayLoss!;
+            Assert.Throws<WorkerProtocolException>(() => store.Replay(loss.WorkerGeneration, 0));
+            Assert.Contains(store.Status().ReplayGaps, gap => gap.Kind == "loss");
+            store.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence);
+            Assert.Single(store.Status().ReplayGaps);
+            Assert.Equal(older.Id, store.Status().ReplayGaps[0].Id);
+            store.ReconcileReplayGap(older.Id, older.WorkerGeneration, older.AfterSequence, older.FirstRetainedSequence, older.LastSequence);
+            Assert.False(store.Status().DispatchHeld);
+        }
+
+        using var reopened = new WorkerStore(options);
+        Assert.Empty(reopened.Status().ReplayGaps);
+    }
+
+    [Fact]
+    public void ReplayGapSetIsBoundedWithOnePermanentOverflowObligation()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options());
+        for (var index = 1; index <= WorkerStore.ReplayGapLimit + 20; index++)
+            Assert.Throws<WorkerProtocolException>(() => store.Replay(store.WorkerGeneration + index, 0));
+        var status = store.Status();
+        Assert.Equal(WorkerStore.ReplayGapLimit, status.ReplayGapCount);
+        Assert.Equal(WorkerStore.ReplayGapLimit, status.ReplayGaps.Count);
+        Assert.Single(status.ReplayGaps, gap => gap.Kind == "overflow");
+    }
+
+    [Fact]
+    public async Task RecoverableObservationJournalFailureHoldsWithoutStoppingAcpAndReconcilesExactly()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        var observations = new OneShotFailingObservationSink(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output, observations); runtime.Start();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        input.Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{}}\n");
+        await Eventually(() => store.Status().JournalFailure is not null);
+        var marker = store.Status().JournalFailure!;
+        Assert.Equal("observation-append", marker.ErrorCategory);
+        Assert.Equal("running", store.Status().ProcessState);
+        var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
+        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        Assert.Throws<WorkerProtocolException>(() => store.ReconcileJournalFailure(marker.OperationId + "x", marker.WorkerGeneration));
+        Assert.True(store.Status().DispatchHeld);
+        store.ReconcileJournalFailure(marker.OperationId, marker.WorkerGeneration);
+        Assert.Null(store.Status().JournalFailure);
+        Assert.False(store.Status().DispatchHeld);
+
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-next\"}}");
+        var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None);
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{nextId},\"result\":{{}}}}\n");
+        Assert.Equal("completed", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        Assert.Equal("running", store.Status().ProcessState);
+    }
+
+    [Fact]
+    public void JournalFailurePersistsAcrossReopenUntilExactRecovery()
+    {
+        using var temp = new WorkerTemp(); var options = temp.Options(); JournalFailure marker;
+        using (var first = new WorkerStore(options)) marker = first.SetJournalFailure("observation-append");
+        using var second = new WorkerStore(options);
+        Assert.Equal(marker, second.Status().JournalFailure);
+        Assert.Contains("journal-failed", second.Status().HoldReasons);
+        second.SetHold(false, null);
+        Assert.Contains("journal-failed", second.Status().HoldReasons);
+        Assert.Throws<WorkerProtocolException>(() => second.ReconcileJournalFailure(marker.OperationId, marker.WorkerGeneration + 1));
+        second.ReconcileJournalFailure(marker.OperationId, marker.WorkerGeneration);
+        Assert.Null(second.Status().JournalFailure);
     }
 
     [Fact]
@@ -756,6 +902,16 @@ public sealed class WorkerBridgeTests
         public void Dispose() { try { Directory.Delete(Path, true); } catch { } }
     }
     private sealed class FakeClock : IWorkerClock { public DateTimeOffset UtcNow { get; private set; } = DateTimeOffset.UnixEpoch; public long MonotonicMilliseconds { get; private set; } public void Advance(TimeSpan value) { UtcNow += value; MonotonicMilliseconds += (long)value.TotalMilliseconds; } }
+    private sealed class OneShotFailingObservationSink(WorkerStore store) : IWorkerObservationSink
+    {
+        private int _failed;
+        public WorkerEvent AppendEvent(string kind, string payloadJson)
+        {
+            if (Interlocked.Exchange(ref _failed, 1) == 0) throw new WorkerStoreException("injected recoverable append failure");
+            return store.AppendEvent(kind, payloadJson);
+        }
+        public JournalFailure SetJournalFailure(string errorCategory) => store.SetJournalFailure(errorCategory);
+    }
     private sealed class ChunkedStream(byte[] bytes, int chunk) : MemoryStream(bytes) { public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => base.ReadAsync(buffer[..Math.Min(buffer.Length, chunk)], cancellationToken); }
     private class GateStream : Stream
     {

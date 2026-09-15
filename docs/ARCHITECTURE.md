@@ -100,7 +100,13 @@ rewritten. There is no exactly-once tool-effect claim. Events are ordered by the
 events and the lexicographic generation/sequence ACK survive bridge restart and
 remain replayable; status exposes both the current generation and ACK generation.
 Pruning applies only behind that ACK cursor across the global 10,000-event/64-MiB
-bounds. A missing generation/cursor causes an explicit replay-gap hold. If an observational
+bounds and removes reconciled loss rows before their referenced generation rows.
+Each missing generation/cursor creates or reuses an exact durable replay-gap
+obligation identified by a stable hash; status exposes up to 128 obligations and
+their total count. Distinct gaps cannot overwrite each other, reconciliation names
+the exact ID and tuple, and a loss reconciliation clears only gaps linked to that
+loss marker. At the 128-row bound, one non-clearable overflow obligation replaces
+additional attacker-provoked tuples while dispatch remains held. If an observational
 event cannot fit after acknowledged pruning, the journal reserves a compact
 `events-dropped` marker/sequence and accumulates bounded dropped-count/byte
 metadata, including the rejected event and each retained non-marker event evicted
@@ -109,8 +115,16 @@ continues without unbounded growth, while dispatch remains held until the contro
 explicitly acknowledges the exact loss marker through `reconcile-replay-loss`.
 A cursor-before-boundary gap tied to that unreconciled marker clears in the same
 exact transition. Unknown-generation, future-cursor and other gaps require
-`reconcile-replay-gap` with the exact attempted generation/cursor plus the reported
-first-retained and last sequence values. Pinned OpenCode permission
+`reconcile-replay-gap` with the exact gap ID, attempted generation/cursor and
+reported first-retained/last sequence values. A non-capacity observation append
+failure does not cancel ACP or alter an already-established request, cancellation
+or permission outcome. It persists a sanitized `journal-failed` marker carrying a
+random operation ID, worker generation and category, then holds new dispatch.
+`reconcile-journal`, fenced by the current lease, requires that exact marker and
+internally repeats exact-schema, quick-check and foreign-key validation, performs
+an insert/delete transaction probe and checkpoints before clearing the obligation.
+An unavailable journal that cannot persist its marker remains fail-closed in memory
+for that bridge process. Pinned OpenCode permission
 callbacks carry no trusted request identity: the bridge binds the actual `optionId`
 shape only to its single host-owned active prompt context (request ID, required
 persisted turn ID, process generation, ACP correlation and matching session ID when
