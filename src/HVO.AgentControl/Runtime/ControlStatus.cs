@@ -132,7 +132,12 @@ public sealed record ControlStatus
     [JsonPropertyName("terminalReady")]
     public bool TerminalReady { get; init; }
 
-    /// <summary>Best-effort native session status: "idle", "busy" or null when unknown.</summary>
+    /// <summary>
+    /// Session status: "idle", "busy" or null when unknown. The host reports
+    /// "busy" whenever it owns an in-flight prompt operation (startup bootstrap or
+    /// owner comprehension), even if the best-effort native poll is unknown, so a
+    /// caller can wait for the prompt slot to settle without racing it.
+    /// </summary>
     [JsonPropertyName("sessionState")]
     public string? SessionState { get; init; }
 
