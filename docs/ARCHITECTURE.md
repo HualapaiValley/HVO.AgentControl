@@ -57,7 +57,7 @@ minimal root PID1 supervisor starts only the pinned OpenCode ACP operation as
 employee UID 1102 and the bridge as UID 1101, reaps fixed children, and accepts
 only authenticated-local `start`, `status` and `stop` operations. ACP stdin and
 stdout terminate at the bridge. The bridge owns a private Unix socket and a
-separate exact-signature schema-v5 SQLite journal in `/worker-control`;
+separate exact-signature schema-v6 SQLite journal in `/worker-control`;
 worker/process generations, supervisor lifecycle handles, ownership epochs,
 request forwarding state, replay cursors/events, holds and generation-bound
 pending permissions are durable and bounded by count and bytes. The journal refuses unknown or changed schema
@@ -78,9 +78,12 @@ authenticated; mutations additionally carry epoch plus connection nonce and must
 match both that socket lease and the current journal lease. Thus an old socket
 cannot issue even `status`, `reconcile`, or `replay`, and stale replay validation
 cannot create a replay-gap hold. Lease expiry, manual or protected safety hold, replay gap/loss, and non-running
-process state reject submit before request registration or ACP I/O. Generic hold
-operations cannot clear or overwrite protected process, replay, permission, frame
-or transport holds; only their exact reconciliation transition may do so. Submit
+process state reject submit before request registration or ACP I/O. Independent
+normalized hold rows preserve manual, replay-gap, replay-loss, process, permission,
+ownership, transport and journal obligations without clobbering one another; status
+exposes the ordered reason list and retains the joined legacy reason string. Generic
+hold operations change only the manual row. Protected holds clear only through their
+own exact reconciliation transition. Submit
 accepts only `session/prompt`, requires a validated `sessionId` and host turn ID,
 and binds durable deduplication to payload, turn, session and accepting ownership
 epoch. Requests use bounded recursive canonical JSON hashing, persist ID/hash and
@@ -100,19 +103,29 @@ Pruning applies only behind that ACK cursor across the global 10,000-event/64-Mi
 bounds. A missing generation/cursor causes an explicit replay-gap hold. If an observational
 event cannot fit after acknowledged pruning, the journal reserves a compact
 `events-dropped` marker/sequence and accumulates bounded dropped-count/byte
-metadata. Status and replay expose the loss; ordinary observation continues without
-unbounded growth, while dispatch remains held until the controller explicitly
-acknowledges the exact loss marker through `reconcile-replay-loss`. Pinned OpenCode permission
+metadata, including the rejected event and each retained non-marker event evicted
+to reserve the marker. Status and replay expose the loss; ordinary observation
+continues without unbounded growth, while dispatch remains held until the controller
+explicitly acknowledges the exact loss marker through `reconcile-replay-loss`.
+A cursor-before-boundary gap tied to that unreconciled marker clears in the same
+exact transition. Unknown-generation, future-cursor and other gaps require
+`reconcile-replay-gap` with the exact attempted generation/cursor plus the reported
+first-retained and last sequence values. Pinned OpenCode permission
 callbacks carry no trusted request identity: the bridge binds the actual `optionId`
 shape only to its single host-owned active prompt context (request ID, required
 persisted turn ID, process generation, ACP correlation and matching session ID when
 known), generates a `perm:` decision ID from host context, and stores only a bounded
-payload hash and option IDs. Unbound or ambiguous callbacks are rejected/cancelled
-without silently terminating the ACP reader. Permission response intent is durable and bound to the accepting ownership epoch
+payload hash and option IDs. Unbound callbacks are rejected/cancelled; correlation
+failure after durable insertion invalidates that row before one rejection. Observation
+capacity loss is local and cannot reject an established permission, rewrite a durable
+request/cancellation/permission result, or terminate the ACP reader. Permission
+response intent is durable and bound to both the row epoch and current lease epoch
 before a bridge-lifetime write; reconnect with pending permission work installs an
 `ownership-changed-pending-permission` hold. Ambiguity becomes
 `permission-decision-uncertain`, and no blind resend or new-epoch adoption occurs;
-`stop-process` is the safe fixed recovery that terminates ACP and lets EOF reconcile. Cancellation likewise requires an explicit cancellation ID, target request,
+`stop-process` is the safe fixed recovery that terminates ACP and lets observed EOF
+atomically invalidate old permissions, clear ownership/permission holds and retain a
+`process-exited` hold. Cancellation likewise requires an explicit cancellation ID, target request,
 epoch/nonce and bounded `session/cancel` envelope. Its canonical intent is persisted
 before the bridge-lifetime write; same ID/hash is idempotent, changed reuse rejects,
 forwarded receipt is not target completion, and ambiguous writes reconcile as

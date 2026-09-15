@@ -230,7 +230,8 @@ internal sealed class NdjsonFrameReader
     private Exception Failure(string message, Exception? inner = null) => _acp ? new AcpProtocolException(message, inner) : new WorkerProtocolException(message, inner);
 }
 
-public sealed class WorkerProtocolException(string message, Exception? inner = null) : Exception(message, inner);
+public class WorkerProtocolException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class WorkerReplayLossException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
 public sealed class AcpProtocolException(string message, Exception? inner = null) : Exception(message, inner);
 public sealed class WorkerStoreException(string message, Exception? inner = null) : Exception(message, inner);
 
@@ -255,7 +256,7 @@ public sealed record WorkerOptions(string ControlDirectory, string WorkerId, str
 public sealed record Lease(long Epoch, string ControllerId, string ConnectionNonce, DateTimeOffset ObservedUtc);
 public sealed record WorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle,
     long? ObservedPid, string? ActiveRequestId, PendingPermission? PendingPermission, long OwnershipEpoch,
-    bool LeaseActive, bool DispatchHeld, string? HoldReason, long FirstRetainedSequence, long LastSequence,
+    bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence,
     long AcknowledgedWorkerGeneration, long AcknowledgedSequence, ReplayLoss? ReplayLoss);
 public sealed record PendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId,
     string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision);

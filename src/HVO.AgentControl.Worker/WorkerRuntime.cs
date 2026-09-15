@@ -186,7 +186,13 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private void TryAppendObservation(string kind, string payload)
     {
         try { _store.AppendEvent(kind, payload); }
-        catch (WorkerProtocolException) when (_store.Status().HoldReason == "replay-overflow") { }
+        catch (WorkerReplayLossException) { }
+        catch (ObjectDisposedException) when (_lifetime.IsCancellationRequested) { }
+        catch
+        {
+            try { _store.SetJournalFailure(); } catch { }
+            _lifetime.Cancel();
+        }
     }
 
     private async Task ReadAcpAsync()
@@ -239,16 +245,20 @@ public sealed class WorkerRuntime : IAsyncDisposable
             return;
         }
         var decisionId = CreateDecisionId();
-        try
-        {
-            var pending = _store.AddPermission(context.OwnershipEpoch, context.RequestId, context.TurnId, decisionId, parameters);
-            if (!_permissionFrames.TryAdd(decisionId, (root.GetProperty("id").Clone(), pending))) throw new WorkerProtocolException("Permission correlation is ambiguous.");
-            TryAppendObservation("permission-pending", JsonSerializer.Serialize(pending, WorkerProtocol.JsonOptions));
-        }
+        PendingPermission pending;
+        try { pending = _store.AddPermission(context.OwnershipEpoch, context.RequestId, context.TurnId, decisionId, parameters); }
         catch (WorkerProtocolException)
         {
             await RejectUnboundPermissionAsync(root, parameters).ConfigureAwait(false);
+            return;
         }
+        if (!_permissionFrames.TryAdd(decisionId, (root.GetProperty("id").Clone(), pending)))
+        {
+            _store.InvalidatePermission(decisionId);
+            await RejectUnboundPermissionAsync(root, parameters).ConfigureAwait(false);
+            return;
+        }
+        TryAppendObservation("permission-pending", JsonSerializer.Serialize(pending, WorkerProtocol.JsonOptions));
     }
 
     private async Task RejectUnboundPermissionAsync(JsonElement root, JsonElement parameters)
@@ -308,7 +318,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private static string SanitizeOutcome(JsonElement result, string state)
     {
         var raw = result.GetRawText();
-        var category = result.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var code) ? code.ToString() : null;
+        long? category = null;
+        if (result.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.Number && code.TryGetInt64(out var numericCode)) category = numericCode;
         return JsonSerializer.Serialize(new { state, errorCategory = category, sha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(raw))).ToLowerInvariant(), byteCount = System.Text.Encoding.UTF8.GetByteCount(raw) }, WorkerProtocol.JsonOptions);
     }
 
@@ -437,7 +448,7 @@ public sealed class WorkerBridge : IAsyncDisposable
         if (message.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Control message must be an object.");
         var operation = Required(message, "operation");
         _store.RequireLease(socketLease.Epoch, socketLease.ConnectionNonce);
-        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "submit" or "cancel" or "permission" or "stop-process";
+        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "submit" or "cancel" or "permission" or "stop-process";
         if (mutation)
         {
             var epoch = RequiredInt64(message, "epoch", 1);
@@ -453,6 +464,7 @@ public sealed class WorkerBridge : IAsyncDisposable
             "replay" => _store.Replay(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0)),
             "ack-events" => Run(() => _store.Acknowledge(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "sequence", 0))),
             "reconcile-replay-loss" => Run(() => _store.ReconcileReplayLoss(RequiredInt64(message, "workerGeneration", 1), RequiredInt64(message, "markerSequence", 1))),
+            "reconcile-replay-gap" => Run(() => _store.ReconcileReplayGap(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0), RequiredInt64(message, "firstRetainedSequence", 0), RequiredInt64(message, "lastSequence", 0))),
             "reconcile" => Reconcile(message),
             "stop-process" => await RunAsync(StopProcessAsync).ConfigureAwait(false),
             "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken).ConfigureAwait(false),
