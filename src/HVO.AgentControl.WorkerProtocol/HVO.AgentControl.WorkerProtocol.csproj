@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>HVO.AgentControl.WorkerProtocol</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="HVO.AgentControl.Worker" />
+    <InternalsVisibleTo Include="HVO.AgentControl" />
+    <InternalsVisibleTo Include="HVO.AgentControl.Tests" />
+  </ItemGroup>
+</Project>

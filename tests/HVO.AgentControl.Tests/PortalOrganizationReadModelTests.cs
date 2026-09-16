@@ -1,4 +1,5 @@
 using HVO.AgentControl.Organization;
+using HVO.AgentControl.RemoteWorker;
 using HVO.AgentControl.Runtime;
 using Xunit;
 
@@ -111,6 +112,25 @@ public sealed class PortalOrganizationReadModelTests
     }
 
     [Fact]
+    public void RemoteSnapshotClassifiesProvisioningAndExposesRemoteOwnershipWithoutTerminalClaim()
+    {
+        var overview = Overview(Employee(Orientation(OrientationStates.Comprehended, false, false), sessionId: "remote-session"));
+        var snapshot = new RemoteWorkerSnapshot("emp-test", "rtb-test", "wrk-test", "host-test", "planned", true, "disconnected", "unknown", "remote-session", 0, 0, false, false, false, [], null);
+        var portal = PortalOrganizationReadModel.Build(overview, null, Status() with { State = "faulted" }, new FakeRemoteProvider(snapshot));
+        var detail = Assert.Single(portal.Employees); Assert.Equal(EmployeeAvailabilityCategories.Provisioning, detail.Availability); Assert.True(detail.Runtime.RemoteOwned); Assert.Equal("host-test", detail.Runtime.RemoteHostId); Assert.False(detail.Terminal.Supported);
+    }
+
+    [Fact]
+    public void RemoteRecoveryAndInterruptedCategoriesAreStable()
+    {
+        var overview = Overview(Employee(Orientation(OrientationStates.Comprehended, false, false), sessionId: "remote-session"));
+        var held = new RemoteWorkerSnapshot("emp-test", "rtb-test", "wrk-test", "host-test", "enrolled", true, "held", "running", "remote-session", 2, 1, true, false, false, [], "replay-gap");
+        Assert.Equal(EmployeeAvailabilityCategories.ReconciliationRequired, Assert.Single(PortalOrganizationReadModel.Build(overview, null, Status(), new FakeRemoteProvider(held)).Employees).Availability);
+        var interrupted = held with { Held = false, ConnectionState = "authenticated", ProcessState = "exited", Detail = null };
+        Assert.Equal(EmployeeAvailabilityCategories.Interrupted, Assert.Single(PortalOrganizationReadModel.Build(overview, null, Status(), new FakeRemoteProvider(interrupted)).Employees).Availability);
+    }
+
+    [Fact]
     public void PortalSummaryHasHonestUnsupportedApprovalsAndFailureLink()
     {
         var failed = Employee(Orientation(OrientationStates.Stale, false, true, "instructions changed"));
@@ -160,6 +180,11 @@ public sealed class PortalOrganizationReadModelTests
         string? sessionId = "native-session") => new(
         "org-test", "org", "Organization", employeeId, "Operations / IT", bindingId, "secret-token",
         sessionId, "Session", false, false);
+
+    private sealed class FakeRemoteProvider(params RemoteWorkerSnapshot[] snapshots) : IRemoteWorkerStatusProvider
+    {
+        public IReadOnlyDictionary<string, RemoteWorkerSnapshot> Snapshot(OrganizationOverview overview) => snapshots.ToDictionary(x => x.EmployeeId, StringComparer.Ordinal);
+    }
 
     private static ControlStatus Status() => new()
     {

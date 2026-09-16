@@ -81,7 +81,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         ActivePromptContext? promptContext = null;
         try
         {
-            if (prompt) _store.SetActiveRequest(requestId);
+            if (prompt) { _store.BindSession(registered.SessionId); _store.SetActiveRequest(requestId); }
             correlationId = Interlocked.Increment(ref _nextAcpId);
             if (prompt)
             {
@@ -107,7 +107,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         {
             var current = _store.GetRequest(requestId);
             if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
-            throw new WorkerProtocolException("ACP request completion is uncertain.", exception);
+            throw new WorkerOperationUncertainException("ACP request completion is uncertain.", exception);
         }
         finally
         {
@@ -153,7 +153,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
         {
             _store.MarkCancellationUncertain(registered.CancellationId);
-            throw new WorkerProtocolException("Cancellation delivery is uncertain.", exception);
+            throw new WorkerOperationUncertainException("Cancellation delivery is uncertain.", exception);
         }
         finally { lock (_cancellationGate) _cancellations.TryRemove(registered.CancellationId, out _); }
     }
@@ -171,10 +171,10 @@ public sealed class WorkerRuntime : IAsyncDisposable
     {
         try
         {
-            if (!_permissionFrames.TryGetValue(deciding.DecisionId, out var frame)) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerProtocolException("Permission response transport requires reconciliation."); }
+            if (!_permissionFrames.TryGetValue(deciding.DecisionId, out var frame)) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerOperationUncertainException("Permission response transport requires reconciliation."); }
             var response = new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = frame.RequestId, ["result"] = new { outcome = new { outcome = "selected", optionId = deciding.Decision } } };
             try { await WriteAcpObjectAsync(response, _lifetime.Token).ConfigureAwait(false); }
-            catch (Exception exception) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerProtocolException("Permission response delivery is uncertain.", exception); }
+            catch (Exception exception) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerOperationUncertainException("Permission response delivery is uncertain.", exception); }
             _store.CompletePermissionDecision(deciding.DecisionId);
             _permissionFrames.TryRemove(deciding.DecisionId, out _);
             var decided = deciding with { State = "decided" };
@@ -354,6 +354,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         }
         finally { _writeLock.Release(); }
     }
+    internal bool IsTransportHealthy => Volatile.Read(ref _transportFailed) == 0;
     private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long OwnershipEpoch, long CorrelationId, string SessionId);
     public async ValueTask DisposeAsync() { _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
     public static FileStream OpenInheritedFd(int fd, FileAccess access) => new(new SafeFileHandle((IntPtr)fd, ownsHandle: false), access, 4096, isAsync: false);
@@ -365,10 +366,12 @@ public sealed class WorkerBridge : IAsyncDisposable
     private readonly Dictionary<string, long> _nonces = new(StringComparer.Ordinal); private readonly object _nonceLock = new(); private Socket? _listener;
     private readonly SemaphoreSlim _connections;
     private readonly SemaphoreSlim _authenticating;
+    private readonly SemaphoreSlim _viewer = new(1, 1);
+    private readonly IWorkerTerminalBackend _terminal;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<long, Task> _handlers = new();
     private long _nextHandler;
-    public WorkerBridge(WorkerOptions options, WorkerStore store, WorkerRuntime runtime, byte[] key, IWorkerClock? clock = null) { _options = options; _store = store; _runtime = runtime; _key = key; _clock = clock ?? new SystemWorkerClock(); _connections = new(options.MaxConnections, options.MaxConnections); _authenticating = new(options.MaxAuthenticatingConnections, options.MaxAuthenticatingConnections); }
+    public WorkerBridge(WorkerOptions options, WorkerStore store, WorkerRuntime runtime, byte[] key, IWorkerClock? clock = null, IWorkerTerminalBackend? terminal = null) { _options = options; _store = store; _runtime = runtime; _key = key; _clock = clock ?? new SystemWorkerClock(); _terminal = terminal ?? new UnavailableWorkerTerminalBackend(); _connections = new(options.MaxConnections, options.MaxConnections); _authenticating = new(options.MaxAuthenticatingConnections, options.MaxAuthenticatingConnections); }
 
     public async Task RunAsync(CancellationToken token)
     {
@@ -410,37 +413,203 @@ public sealed class WorkerBridge : IAsyncDisposable
                 VerifyPeer(socket);
                 using var authTimeout = CancellationTokenSource.CreateLinkedTokenSource(bridgeToken); authTimeout.CancelAfter(_options.ChallengeLifetime);
                 using var hello = await WorkerProtocol.ReadFrameAsync(stream, authTimeout.Token).ConfigureAwait(false) ?? throw new WorkerProtocolException("Authentication hello is required.");
-                var h = hello.RootElement; RequireExactFields(h, "type", "version", "role", "controllerId", "workerId", "keyId", "clientNonce");
+                var h = hello.RootElement;
                 if (Required(h, "type") != "hello") throw new WorkerProtocolException("Authentication hello is invalid.");
                 var version = Required(h, "version"); var role = Required(h, "role"); var controller = Required(h, "controllerId"); var worker = Required(h, "workerId"); var keyId = Required(h, "keyId"); var clientNonce = Required(h, "clientNonce");
+                if (role == WorkerProtocol.ControllerRole) RequireExactFields(h, "type", "version", "role", "controllerId", "workerId", "keyId", "clientNonce");
+                else if (role == WorkerProtocol.ViewerRole) RequireExactFields(h, "type", "version", "role", "controllerId", "workerId", "keyId", "clientNonce", "ownershipEpoch", "connectionNonce", "sessionId");
+                else throw new WorkerProtocolException("Authentication role is invalid.");
                 ValidateAuthIdentity(controller, worker, keyId, clientNonce);
-                if (version != WorkerProtocol.Version || role != "controller" || controller != _options.ControllerId || worker != _options.WorkerId || keyId != WorkerProtocol.KeyId(_key)) throw new WorkerProtocolException("Authentication identity mismatch.");
+                if (version != WorkerProtocol.Version || controller != _options.ControllerId || worker != _options.WorkerId || keyId != WorkerProtocol.KeyId(_key)) throw new WorkerProtocolException("Authentication identity mismatch.");
                 UseNonce(clientNonce);
                 var serverNonceBytes = RandomNumberGenerator.GetBytes(WorkerProtocol.NonceBytes);
                 try
                 {
                     var serverNonce = Convert.ToBase64String(serverNonceBytes); var issued = _clock.UtcNow.ToUnixTimeMilliseconds();
-                    var serverMac = WorkerProtocol.ComputeMac(_key, "server-proof", role, controller, worker, keyId, clientNonce, serverNonce, issued);
+                    var serverMac = role == WorkerProtocol.ViewerRole
+                        ? WorkerProtocol.ComputeViewerMac(_key, "server-proof", controller, worker, keyId, clientNonce, serverNonce, issued, RequiredInt64(h, "ownershipEpoch", 1), Required(h, "connectionNonce"), RequiredBounded(h, "sessionId"))
+                        : WorkerProtocol.ComputeMac(_key, "server-proof", role, controller, worker, keyId, clientNonce, serverNonce, issued);
                     await WorkerProtocol.WriteFrameAsync(stream, new { type = "challenge", version, role, controllerId = controller, workerId = worker, keyId, clientNonce, serverNonce, issuedUnixMilliseconds = issued, mac = serverMac }, authTimeout.Token);
                     using var proof = await WorkerProtocol.ReadFrameAsync(stream, authTimeout.Token).ConfigureAwait(false) ?? throw new WorkerProtocolException("Client proof is required.");
                     RequireExactFields(proof.RootElement, "type", "mac"); if (Required(proof.RootElement, "type") != "proof") throw new WorkerProtocolException("Client proof is invalid.");
-                    var expected = WorkerProtocol.ComputeMac(_key, "client-proof", role, controller, worker, keyId, clientNonce, serverNonce, issued);
+                    var expected = role == WorkerProtocol.ViewerRole
+                        ? WorkerProtocol.ComputeViewerMac(_key, "client-proof", controller, worker, keyId, clientNonce, serverNonce, issued, RequiredInt64(h, "ownershipEpoch", 1), Required(h, "connectionNonce"), RequiredBounded(h, "sessionId"))
+                        : WorkerProtocol.ComputeMac(_key, "client-proof", role, controller, worker, keyId, clientNonce, serverNonce, issued);
                     if (!IsProofFresh(_clock.UtcNow.ToUnixTimeMilliseconds(), issued, _options.ChallengeLifetime) || !WorkerProtocol.VerifyMac(expected, Required(proof.RootElement, "mac"))) throw new WorkerProtocolException("Client proof rejected.");
                 }
                 finally { CryptographicOperations.ZeroMemory(serverNonceBytes); }
-                var connectionNonceBytes = RandomNumberGenerator.GetBytes(WorkerProtocol.NonceBytes);
-                Lease lease;
-                try { lease = _store.AcquireLease(controller, Convert.ToBase64String(connectionNonceBytes)); }
-                finally { CryptographicOperations.ZeroMemory(connectionNonceBytes); }
-                await WorkerProtocol.WriteFrameAsync(stream, new { type = "authenticated", lease }, bridgeToken);
-                _authenticating.Release(); authOwned = false;
-                var reader = WorkerProtocol.CreateControlReader(stream);
-                while (true) { using var frame = await reader.ReadAsync(bridgeToken).ConfigureAwait(false); if (frame is null) break; await DispatchAsync(stream, frame.RootElement, lease, bridgeToken).ConfigureAwait(false); }
+                if (role == WorkerProtocol.ViewerRole)
+                {
+                    var epoch = RequiredInt64(h, "ownershipEpoch", 1); var connectionNonce = Required(h, "connectionNonce"); var sessionId = RequiredBounded(h, "sessionId");
+                    _store.RequireViewerLease(epoch, connectionNonce, sessionId);
+                    if (!_terminal.Available) throw new WorkerProtocolException("Worker terminal backend is unavailable.");
+                    if (!_viewer.Wait(0)) throw new WorkerProtocolException("A viewer is already attached.");
+                    _authenticating.Release(); authOwned = false;
+                    try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "authenticated", role = WorkerProtocol.ViewerRole, sessionId }, bridgeToken); await RunViewerAsync(stream, epoch, connectionNonce, sessionId, bridgeToken).ConfigureAwait(false); }
+                    catch (WorkerTerminalStopUncertainException)
+                    {
+                        // A viewer may still hold the session. Record it so the controller
+                        // sees an unavailable viewer instead of a clean detach; dispatch and
+                        // the ACP process are unaffected.
+                        _store.SetViewerHold("viewer-stop-uncertain");
+                        throw;
+                    }
+                    finally { _viewer.Release(); }
+                }
+                else
+                {
+                    var connectionNonceBytes = RandomNumberGenerator.GetBytes(WorkerProtocol.NonceBytes);
+                    Lease lease;
+                    try { lease = _store.AcquireLease(controller, Convert.ToBase64String(connectionNonceBytes)); }
+                    finally { CryptographicOperations.ZeroMemory(connectionNonceBytes); }
+                    await WorkerProtocol.WriteFrameAsync(stream, new { type = "authenticated", lease }, bridgeToken);
+                    _authenticating.Release(); authOwned = false;
+                    var reader = WorkerProtocol.CreateControlReader(stream);
+                    while (true)
+                    {
+                        // Framing failures remain outside the per-operation handler:
+                        // a malformed/partial frame destroys stream synchronization and
+                        // therefore closes the connection.
+                        using var frame = await reader.ReadAsync(bridgeToken).ConfigureAwait(false);
+                        if (frame is null) break;
+                        try
+                        {
+                            await DispatchAsync(stream, frame.RootElement, lease, bridgeToken).ConfigureAwait(false);
+                        }
+                        catch (WorkerOperationUncertainException)
+                        {
+                            // The durable mutation may already have reached ACP. Report only
+                            // the fixed category, then close so this owner session cannot be
+                            // reused as though the operation were a clean rejection.
+                            try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-operation-uncertain" }, bridgeToken).ConfigureAwait(false); } catch { }
+                            break;
+                        }
+                        catch (WorkerProtocolException)
+                        {
+                            // Pre-effect validation/replay/hold rejection is recoverable on
+                            // the same authenticated stream only while this socket still owns
+                            // the current live lease. Never disclose exception detail.
+                            await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-request-rejected" }, bridgeToken).ConfigureAwait(false);
+                            if (!_store.IsLeaseCurrent(lease.Epoch, lease.ConnectionNonce) || !_runtime.IsTransportHealthy) break;
+                        }
+                    }
+                }
             }
             catch (OperationCanceledException) { }
             catch (WorkerProtocolException) { try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-request-rejected" }, CancellationToken.None); } catch { } }
             catch (Exception) { try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-operation-failed" }, CancellationToken.None); } catch { } }
             finally { if (authOwned) _authenticating.Release(); }
+        }
+    }
+
+    /// <summary>
+    /// Runs one attached viewer session.
+    /// </summary>
+    /// <remarks>
+    /// Failure is always announced. Whichever pump fails first cancels the shared
+    /// lifetime and the session ends with an explicit typed <c>close</c> frame
+    /// carrying a fixed category, so the controller and the browser see a failed
+    /// viewer instead of a silently truncated stream that looks like an idle
+    /// terminal. Both pumps are observed before returning, so neither can outlive
+    /// the session or hide its failure.
+    /// </remarks>
+    private async Task RunViewerAsync(Stream stream, long epoch, string connectionNonce, string sessionId, CancellationToken token)
+    {
+        await using var terminal = await _terminal.AttachAsync(sessionId, token).ConfigureAwait(false);
+        // The attach succeeded, so no earlier viewer still holds the PTY: the
+        // supervisor refuses a second viewer while one is alive.
+        _store.ClearViewerHold();
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var closure = new ViewerClosure();
+        var output = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var chunk in terminal.ReadOutputAsync(lifetime.Token).ConfigureAwait(false))
+                {
+                    _store.RequireViewerLease(epoch, connectionNonce, sessionId);
+                    if (chunk.Data.Length > WorkerProtocol.MaxViewerOutputBytes) throw new WorkerProtocolException("Viewer output exceeds the fixed chunk limit.");
+                    await WorkerProtocol.WriteFrameAsync(stream, new { type = "output", sessionId, data = Convert.ToBase64String(chunk.Data) }, lifetime.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { throw; }
+            catch
+            {
+                // The output pump owns the socket writer, so it records the category and
+                // cancels the input side rather than writing a frame concurrently.
+                closure.Set("viewer-output-failed");
+                await lifetime.CancelAsync().ConfigureAwait(false);
+                throw;
+            }
+        }, CancellationToken.None);
+        try
+        {
+            var reader = WorkerProtocol.CreateControlReader(stream);
+            while (true)
+            {
+                using var frame = await reader.ReadAsync(lifetime.Token).ConfigureAwait(false); if (frame is null) break;
+                _store.RequireViewerLease(epoch, connectionNonce, sessionId);
+                var root = frame.RootElement; if (Required(root, "sessionId") != sessionId) throw new WorkerProtocolException("Viewer frame session changed.");
+                switch (Required(root, "type"))
+                {
+                    case "input":
+                        {
+                            var bytes = WorkerViewerProtocol.DecodeInput(Required(root, "data"));
+                            try { await terminal.WriteInputAsync(bytes, lifetime.Token).ConfigureAwait(false); }
+                            catch (WorkerTerminalWriteUncertainException uncertain)
+                            {
+                                // Part of the keystrokes may have reached the PTY. Never retry and
+                                // never pretend it succeeded: end the session with the exact
+                                // category and the byte count, and expose no input content.
+                                closure.Set("input-uncertain", uncertain.BytesWritten);
+                                throw;
+                            }
+                            finally { CryptographicOperations.ZeroMemory(bytes); }
+                            break;
+                        }
+                    case "resize": { var rows = checked((int)RequiredInt64(root, "rows", 1)); var columns = checked((int)RequiredInt64(root, "columns", 1)); if (rows > 500 || columns > 500) throw new WorkerProtocolException("Viewer dimensions exceed the fixed limit."); await terminal.ResizeAsync(rows, columns, lifetime.Token).ConfigureAwait(false); break; }
+                    case "detach": return;
+                    default: throw new WorkerProtocolException("Viewer operation is not permitted.");
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            closure.Set(exception is WorkerProtocolException ? "viewer-protocol-failed" : "viewer-input-failed");
+            throw;
+        }
+        finally
+        {
+            await lifetime.CancelAsync().ConfigureAwait(false);
+            try { await output.ConfigureAwait(false); } catch (OperationCanceledException) { } catch { }
+            await closure.SendAsync(stream, sessionId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Records the first viewer failure category and emits the single closing frame.</summary>
+    private sealed class ViewerClosure
+    {
+        private string? _category;
+        private int? _bytesWritten;
+        private int _sent;
+
+        public void Set(string category, int? bytesWritten = null)
+        {
+            if (Interlocked.CompareExchange(ref _category, category, null) is null) _bytesWritten = bytesWritten;
+        }
+
+        public async Task SendAsync(Stream stream, string sessionId)
+        {
+            if (_category is not { } category || Interlocked.Exchange(ref _sent, 1) != 0) return;
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                object frame = _bytesWritten is { } written
+                    ? new { type = "close", sessionId, category, bytesWritten = written }
+                    : new { type = "close", sessionId, category };
+                await WorkerProtocol.WriteFrameAsync(stream, frame, timeout.Token).ConfigureAwait(false);
+            }
+            catch { /* The peer is already gone; the controller still observes the closed stream. */ }
         }
     }
 
@@ -459,7 +628,7 @@ public sealed class WorkerBridge : IAsyncDisposable
         }
         object result = operation switch
         {
-            "status" => _store.Status(),
+            "status" => ViewerStatus(),
             "heartbeat" => Run(() => _store.Heartbeat(socketLease.Epoch, socketLease.ConnectionNonce)),
             "hold" => Run(() => _store.SetHold(RequiredBoolean(message, "held"), OptionalString(message, "reason", 128))),
             "replay" => _store.Replay(RequiredInt64(message, "workerGeneration", 0), RequiredInt64(message, "afterSequence", 0)),
@@ -486,6 +655,15 @@ public sealed class WorkerBridge : IAsyncDisposable
         await WorkerProtocol.WriteFrameAsync(stream, new { operation = "stop" }, timeout.Token).ConfigureAwait(false);
         using var response = await WorkerProtocol.ReadFrameAsync(stream, timeout.Token).ConfigureAwait(false);
         if (response is null || !response.RootElement.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.True) throw new WorkerProtocolException("The fixed supervisor stop result is uncertain.");
+    }
+
+    private WorkerStatus ViewerStatus()
+    {
+        var status = _store.Status();
+        // An unconfirmed previous teardown suppresses viewer availability until a
+        // fresh attach proves the slot is free.
+        var available = _terminal.Available && _store.ViewerSessionBound() && _store.ViewerHoldReason() is null;
+        return status with { ViewerSupported = _terminal.Available, ViewerAvailable = available };
     }
 
     private object Reconcile(JsonElement message)
@@ -539,5 +717,5 @@ public sealed class WorkerBridge : IAsyncDisposable
     private sealed class ZeroingBuffer(byte[] value) : IDisposable { public void Dispose() => CryptographicOperations.ZeroMemory(value); }
     [DllImport("libc")] private static extern int geteuid();
     [DllImport("libc", SetLastError = true)] private static extern int getsockopt(int socket, int level, int optionName, out UCred value, ref uint length);
-    public async ValueTask DisposeAsync() { _shutdown.Cancel(); _listener?.Dispose(); var handlers = _handlers.Values.ToArray(); if (handlers.Length > 0) try { await Task.WhenAll(handlers).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } CryptographicOperations.ZeroMemory(_key); await _runtime.DisposeAsync(); _store.Dispose(); _connections.Dispose(); _authenticating.Dispose(); _shutdown.Dispose(); try { SecureStaleSocket(); } catch { } }
+    public async ValueTask DisposeAsync() { _shutdown.Cancel(); _listener?.Dispose(); var handlers = _handlers.Values.ToArray(); if (handlers.Length > 0) try { await Task.WhenAll(handlers).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } CryptographicOperations.ZeroMemory(_key); await _runtime.DisposeAsync(); _store.Dispose(); _connections.Dispose(); _authenticating.Dispose(); _viewer.Dispose(); _shutdown.Dispose(); try { SecureStaleSocket(); } catch { } }
 }

@@ -180,7 +180,11 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          EXPECTED = 3
+          # 4 image/lifecycle cases plus the fixed container-command contract test
+          # (RealContainerCommandAppliesTheFixedIsolationBootstrapAndLabels), which
+          # runs the controller's own bootstrap and container-create construction
+          # against a real local daemon using only disposable local resources.
+          EXPECTED = 5
           files = glob.glob("artifacts/worker-image-results/*.trx")
           if len(files) != 1:
               sys.exit(f"expected exactly one worker-image TRX, found {len(files)}")
@@ -234,6 +238,8 @@ jobs:
       # runtime mutations are involved. Its artifacts go to artifacts/browser-ci.
       - name: Run hermetic browser smoke (disabled runtime)
         run: npm run ci --prefix tests/Browser
+      - name: Run terminal wire checks
+        run: npm run terminal-wire --prefix tests/Browser
       # ci-organization.mjs is the separate enabled-runtime suite: it starts the
       # app with Control__Enabled=true, a disposable owner password and the
       # checked-in fake ACP fixture (no inference/provider credentials), then

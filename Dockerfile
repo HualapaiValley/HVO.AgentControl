@@ -124,13 +124,13 @@ RUN ln -s /usr/local/lib/node_modules/opencode-ai/bin/opencode.exe /usr/local/bi
     && userdel ubuntu \
     && { groupdel ubuntu 2>/dev/null || true; } \
     && groupadd --gid 1101 bridge \
-    && useradd --uid 1101 --gid 1101 --home-dir /worker-control --shell /usr/sbin/nologin --no-create-home bridge \
+    && useradd --uid 1101 --gid 1101 --home-dir /control --shell /usr/sbin/nologin --no-create-home bridge \
     && groupadd --gid 1102 employee \
-    && useradd --uid 1102 --gid 1102 --home-dir /worker/home --shell /bin/bash --no-create-home employee \
-    && mkdir -p /app /worker-control /worker/home /worker/workspace /worker/session \
-    && chown 1101:1101 /worker-control \
-    && chown 1102:1102 /worker/home /worker/workspace /worker/session \
-    && chmod 0700 /worker-control /worker/home /worker/workspace /worker/session
+    && useradd --uid 1102 --gid 1102 --home-dir /home/worker --shell /bin/bash --no-create-home employee \
+    && mkdir -p /app /control /home/worker /workspace /session \
+    && chown 1101:1101 /control \
+    && chown 1102:1102 /home/worker /workspace /session \
+    && chmod 0700 /control /home/worker /workspace /session
 COPY --from=build /worker-app/ /app/
 COPY src/container/worker-supervisor.py /usr/local/bin/worker-supervisor
 RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + \

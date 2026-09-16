@@ -78,14 +78,14 @@ services:
       context: .
       target: worker
     environment:
-      WORKER_CONTROL_DIRECTORY: /worker-control
+      WORKER_CONTROL_DIRECTORY: /control
       WORKER_ID: worker-local
       WORKER_CONTROLLER_ID: controller-local
     volumes:
-      - worker-control:/worker-control
-      - worker-home:/worker/home
-      - worker-workspace:/worker/workspace
-      - worker-session:/worker/session
+      - worker-control:/control
+      - worker-home:/home/worker
+      - worker-workspace:/workspace
+      - worker-session:/session
     cap_drop:
       - ALL
     cap_add:
@@ -103,13 +103,10 @@ services:
     mem_limit: 2g
     cpus: 2.0
     restart: "no"
-    networks:
-      - worker-isolated
+    network_mode: none
 networks:
   agents:
     driver: bridge
-  worker-isolated:
-    internal: true
 volumes:
   control-data:
   control-private:

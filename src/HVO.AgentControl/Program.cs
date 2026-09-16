@@ -1,5 +1,6 @@
 using HVO.AgentControl.Components;
 using HVO.AgentControl.Runtime;
+using HVO.AgentControl.RemoteWorker;
 using HVO.AgentControl.Terminal;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
@@ -16,6 +17,7 @@ HVO.AgentControl.Organization.OrganizationStore.RestrictProcessFileCreation();
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents();
 builder.Services.AddAcpControlHost(builder.Configuration);
+builder.Services.AddRemoteWorkerControl(builder.Configuration);
 builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(45));
 
 // A binding failure is a client 400, never a 500. Without this, Development
@@ -24,9 +26,10 @@ builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = Tim
 builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = false);
 
 var controlEnabled = builder.Configuration.GetValue<bool>("Control:Enabled");
+var workerControlEnabled = builder.Configuration.GetValue<bool>("WorkerControl:Enabled");
 var ownerPassword = Program.ResolveOwnerPassword(
     builder.Configuration["Control:OwnerPasswordFile"],
-    controlEnabled);
+    controlEnabled || workerControlEnabled);
 var ownerAuthConfigured = ownerPassword is not null;
 
 // RFC 9457 ProblemDetails is the single error contract. Instance and traceId
@@ -181,12 +184,152 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     "HVO.AgentControl",
     2,
     "control-portal",
-    WorkerControlImplemented: false)))
+    WorkerControlImplemented: false,
+    WorkerControlCodeAvailable: true,
+    WorkerControlEnabled: workerControlEnabled,
+    WorkerControlOperationallyValidated: false)))
     .WithName("GetInfo")
     .WithTags("Control")
     .WithSummary("Describes the control-host baseline.")
     .Produces<InfoResponse>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
+
+app.MapGet("/api/execution-hosts", (AcpControlHost control, ExecutionHostRegistry registry) =>
+{
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(registry.List()); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("ListExecutionHosts").WithTags("Remote workers")
+    .WithSummary("Lists configured-reference execution-host registrations without credential bytes.");
+
+app.MapPost("/api/execution-hosts", (HttpContext context, AcpControlHost control, ExecutionHostRegistry registry, RegisterExecutionHostRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Execution-host registration") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(registry.Register(request)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("RegisterExecutionHost").WithTags("Remote workers")
+    .WithSummary("Registers one owner-configured allowlisted host reference; arbitrary endpoints and paths are not accepted.");
+
+app.MapPost("/api/execution-hosts/{id}/probe", async (HttpContext context, AcpControlHost control, ExecutionHostRegistry registry, string id, ProbeExecutionHostRequest request, CancellationToken cancellationToken) =>
+{
+    if (Program.RejectCrossOrigin(context, "Execution-host probing") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await registry.ProbeAsync(id, request.ExpectedRevision, cancellationToken)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("ProbeExecutionHost").WithTags("Remote workers")
+    .WithSummary("Runs the fixed approved-host capability probe only when WorkerControl is explicitly enabled.");
+
+app.MapPost("/api/execution-hosts/{id}/disable", (HttpContext context, AcpControlHost control, ExecutionHostRegistry registry, string id, DisableExecutionHostRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Execution-host disable") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(registry.Disable(id, request.ExpectedRevision)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("DisableExecutionHost").WithTags("Remote workers");
+
+app.MapGet("/api/workers/status", (AcpControlHost control) =>
+{
+    if (control.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(new { enrollments = store.ListWorkerEnrollments(), cursors = store.ListWorkerCursors(), pendingWorkerPermissions = store.ListWorkerPendingPermissions(), recovery = store.ListWorkerRecoveryObligations(activeOnly: true), recoveryAudit = store.ListWorkerRecoveryAudit(), eventRetention = store.ListWorkerEventRetention() }); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("GetRemoteWorkerStatus").WithTags("Remote workers");
+
+app.MapPost("/api/workers/enroll/plan", async (HttpContext context, AcpControlHost control, RemoteWorkerProvisioningCoordinator coordinator, WorkerEnrollPlanRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker enrollment planning") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("PlanRemoteWorkerEnrollment").WithTags("Remote workers");
+
+app.MapPost("/api/workers/{workerId}/enroll/apply", async (HttpContext context, AcpControlHost control, RemoteWorkerProvisioningCoordinator coordinator, string workerId) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker enrollment application") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.ApplyAllAsync(workerId, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("ApplyRemoteWorkerEnrollment").WithTags("Remote workers");
+
+app.MapPost("/api/workers/{workerId}/cleanup", async (HttpContext context, AcpControlHost control, RemoteWorkerProvisioningCoordinator coordinator, string workerId) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker cleanup") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { await coordinator.CleanupAsync(workerId, context.RequestAborted); return Results.Ok(); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("CleanupRemoteWorker").WithTags("Remote workers");
+
+app.MapPost("/api/workers/request", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, WorkerPromptRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker dispatch") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.DispatchAsync(new(request.EmployeeId, request.RuntimeBindingId, request.WorkerId, request.SessionRecordId, request.NativeSessionId, request.IdempotencyKey, request.Prompt), context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("DispatchRemoteWorkerRequest").WithTags("Remote workers");
+
+app.MapPost("/api/workers/request/{requestId}/cancel", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string requestId) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker cancellation") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.CancelAsync(new(requestId), context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("CancelRemoteWorkerRequest").WithTags("Remote workers");
+
+app.MapGet("/api/workers/{workerId}/permissions", (AcpControlHost control, string workerId) =>
+{
+    if (control.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        if (store.GetWorkerEnrollment(workerId) is null) return Results.Problem(statusCode: 404, title: "Worker not found.");
+        return Results.Ok(store.ListWorkerPendingPermissions(workerId));
+    }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("GetRemoteWorkerPermissions").WithTags("Remote workers");
+
+app.MapPost("/api/workers/{workerId}/permission/reject", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId, WorkerPermissionRejectRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker permission rejection") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { await manager.RejectPermissionAsync(new(workerId, request.DecisionId, request.Revision), context.RequestAborted); return Results.Ok(); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("RejectRemoteWorkerPermission").WithTags("Remote workers");
+
+app.MapPost("/api/workers/{workerId}/sync", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker synchronization") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.SynchronizeOnceAsync(workerId, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("SynchronizeRemoteWorker").WithTags("Remote workers");
+
+// Recovery invokes the exact worker-side reconciliation for the named obligation
+// and clears the controller row only after the worker accepted it, so an operator
+// action can never merely hide an unreconciled worker. Obligations whose real
+// outcome cannot be established remotely are refused with 409 rather than cleared.
+app.MapPost("/api/workers/{workerId}/recover", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId, WorkerRecoveryRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker recovery") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.RecoverAsync(workerId, request.ObligationId, request.ExpectedRevision, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("RecoverRemoteWorker").WithTags("Remote workers");
+
+// Marker-less controller obligations exist only when authoritative worker status
+// was unavailable. They can never be auto-reconciled: an authenticated owner must
+// attest external reconciliation with a fixed disposition and bounded SHA-256
+// evidence reference, which is retained in the recovery audit.
+app.MapPost("/api/workers/{workerId}/recover/{obligationId}/acknowledge", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId, string obligationId, WorkerRecoveryAcknowledgementRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker recovery acknowledgement") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.AcknowledgeRecoveryAsync(workerId, obligationId, request.ExpectedRevision, request.EvidenceHash, request.Disposition, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("AcknowledgeRemoteWorkerRecovery").WithTags("Remote workers");
 
 app.MapGet("/api/control", (AcpControlHost host) => Results.Ok(host.GetStatus()))
     .WithName("GetControlStatus")
@@ -222,7 +365,7 @@ app.MapGet("/api/organization", (AcpControlHost host) =>
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-app.MapGet("/api/organization/portal", (AcpControlHost host) =>
+app.MapGet("/api/organization/portal", (AcpControlHost host, HVO.AgentControl.RemoteWorker.IRemoteWorkerStatusProvider remoteWorkers) =>
 {
     var store = host.Organization;
     if (store is null)
@@ -238,7 +381,8 @@ app.MapGet("/api/organization/portal", (AcpControlHost host) =>
         var result = HVO.AgentControl.Organization.PortalOrganizationReadModel.Build(
             store.GetOverview(),
             host.OrganizationIdentity,
-            host.GetStatus());
+            host.GetStatus(),
+            remoteWorkers);
         return Results.Ok(result);
     }
     catch (HVO.AgentControl.Organization.OrganizationStoreException)
@@ -256,7 +400,7 @@ app.MapGet("/api/organization/portal", (AcpControlHost host) =>
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-app.MapGet("/api/employees/{id}", (AcpControlHost host, string id) =>
+app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvider remoteWorkers, string id) =>
 {
     if (!Program.IsValidEmployeeId(id))
     {
@@ -281,7 +425,8 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, string id) =>
             store.GetOverview(),
             host.OrganizationIdentity,
             host.GetStatus(),
-            id);
+            id,
+            remoteWorkers);
         return employee is null
             ? Results.Problem(
                 statusCode: StatusCodes.Status404NotFound,
@@ -868,7 +1013,7 @@ app.MapPost("/api/control/cancel", async (HttpContext context, AcpControlHost ho
     .ProducesProblem(StatusCodes.Status409Conflict)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-app.Map("/terminal", async (HttpContext context, AcpControlHost host) =>
+app.Map("/terminal", async (HttpContext context, AcpControlHost host, IRemoteWorkerStatusProvider remoteWorkers, IRemoteTerminalRouter remoteTerminal) =>
 {
     var employeeId = context.Request.Query["employeeId"].ToString();
     if (!Program.IsValidEmployeeId(employeeId))
@@ -896,28 +1041,35 @@ app.Map("/terminal", async (HttpContext context, AcpControlHost host) =>
         }
     }
 
-    var route = HVO.AgentControl.Organization.TerminalAttachmentResolver.Resolve(
+    IReadOnlyDictionary<string, RemoteWorkerSnapshot>? remote = null;
+    if (overview is not null)
+    {
+        try { remote = remoteWorkers.Snapshot(overview); }
+        catch (HVO.AgentControl.Organization.OrganizationStoreException) { context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable; return; }
+    }
+    var target = HVO.AgentControl.Organization.TerminalAttachmentResolver.Resolve(
         overview,
         identity,
         host.GetStatus(),
+        remote,
+        remoteTerminal.IsAvailable,
         employeeId);
-    if (route == HVO.AgentControl.Organization.TerminalAttachmentRoute.EmployeeNotFound)
+    if (target.Route == HVO.AgentControl.Organization.TerminalAttachmentRoute.EmployeeNotFound)
     {
         context.Response.StatusCode = StatusCodes.Status404NotFound;
         return;
     }
-
-    if (route != HVO.AgentControl.Organization.TerminalAttachmentRoute.Eligible)
+    if (target.Route is HVO.AgentControl.Organization.TerminalAttachmentRoute.Unavailable or HVO.AgentControl.Organization.TerminalAttachmentRoute.RemoteUnavailable)
     {
         context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
         return;
     }
-
-    await TerminalEndpoint.HandleAsync(
-        context,
-        Path.Combine(host.DataDirectory, "home"),
-        host.TmuxSessionName,
-        host.AgentLauncher);
+    if (target.Route == HVO.AgentControl.Organization.TerminalAttachmentRoute.RemoteEligible)
+    {
+        await remoteTerminal.ProxyAsync(context, target.Remote!, context.RequestAborted);
+        return;
+    }
+    await TerminalEndpoint.HandleAsync(context, Path.Combine(host.DataDirectory, "home"), host.TmuxSessionName, host.AgentLauncher);
 })
     .WithName("AttachTerminal")
     .WithTags("Terminal")
@@ -996,6 +1148,84 @@ public partial class Program
             title: "Cross-origin request rejected.",
             detail: $"{operation} must originate from the portal origin.");
     }
+
+    /// <summary>
+    /// True when <paramref name="exception"/> is one the remote-worker endpoints
+    /// translate into the single RFC 9457 error contract. Used as an exception
+    /// filter so unexpected failures still reach the sanitized 500 handler.
+    /// </summary>
+    public static bool IsRemoteWorkerFailure(Exception exception) =>
+        exception is HVO.AgentControl.Organization.OrganizationStoreException
+            or HVO.AgentControl.RemoteWorker.RemoteWorkerException
+            or KeyNotFoundException
+            or InvalidOperationException;
+
+    /// <summary>
+    /// Maps a typed remote-worker failure to the single RFC 9457 error contract.
+    /// </summary>
+    /// <remarks>
+    /// Each arm is a distinct operator meaning, so no caller has to guess intent
+    /// from a bare <see cref="InvalidOperationException"/>. A disabled or
+    /// misconfigured controller is 409; an unreachable host transport is 502 and a
+    /// reachable-but-unusable host is 503; an open recovery obligation is a 409
+    /// that names the obligation kind; a foreign resource is 409. The remaining
+    /// <see cref="InvalidOperationException"/> arm is a sanitized 500: reaching it
+    /// means an internal invariant failed rather than a caller or host condition,
+    /// and it must not be reported as a client-fixable conflict.
+    /// </remarks>
+    public static IResult RemoteWorkerProblem(Exception exception) => exception switch
+    {
+        HVO.AgentControl.Organization.OrganizationValidationException => Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Remote worker request is invalid."),
+        HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException recovery => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker recovery is required.",
+            detail: $"An operator must reconcile the open '{recovery.Kind}' obligation before this operation can proceed."),
+        HVO.AgentControl.RemoteWorker.ForeignResourceException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote resource is not owned by this controller.",
+            detail: "A resource with the expected name exists but does not carry this controller's exact labels."),
+        HVO.AgentControl.Organization.OrganizationConcurrencyException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker request conflicted.",
+            detail: "The referenced worker state changed. Reload and retry."),
+        HVO.AgentControl.Organization.OrganizationNotFoundException => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Remote worker record not found."),
+        KeyNotFoundException => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Remote worker record not found."),
+        HVO.AgentControl.RemoteWorker.WorkerControlDisabledException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker control is disabled.",
+            detail: "Worker control is switched off, so no host operation was executed."),
+        HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker configuration is invalid.",
+            detail: "Worker control is enabled but its configuration is not usable, so no host operation was executed."),
+        HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException unavailable => Results.Problem(
+            statusCode: unavailable.Transport ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable,
+            title: unavailable.Transport ? "Remote worker host is unreachable." : "Remote worker host is unavailable.",
+            detail: unavailable.Transport
+                ? "The fixed connector could not reach the approved host."
+                : "The approved host did not return a usable result."),
+        HVO.AgentControl.Organization.OrganizationStoreException => Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Worker store unavailable.",
+            detail: "The authoritative store could not be read or written."),
+        InvalidOperationException => Results.Problem(
+            statusCode: StatusCodes.Status500InternalServerError,
+            title: "Remote worker operation failed.",
+            detail: "An internal invariant failed. The operation was not completed."),
+        _ => throw exception,
+    };
+
+    /// <summary>The control runtime is disabled or its authoritative store is not open.</summary>
+    public static IResult WorkerStoreUnavailable() => Results.Problem(
+        statusCode: StatusCodes.Status503ServiceUnavailable,
+        title: "Worker store unavailable.",
+        detail: "The control runtime is disabled or the authoritative store has not opened.");
 
     /// <summary>
     /// Resolves the configured owner password for the startup auth gate.
@@ -1112,6 +1342,11 @@ public partial class Program
     }
 }
 
+public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId);
+public sealed record WorkerPromptRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt);
+public sealed record WorkerRecoveryRequest(string ObligationId, int ExpectedRevision);
+public sealed record WorkerRecoveryAcknowledgementRequest(int ExpectedRevision, string EvidenceHash, string Disposition);
+public sealed record WorkerPermissionRejectRequest(string DecisionId, int Revision);
 public sealed record ModelSelection(string? Model);
 
 public sealed record OrganizationUpdate(string? OrganizationId, string? DisplayName, int? Revision);
@@ -1120,7 +1355,7 @@ public sealed record RoleInstructionsUpdate(string? StandingInstructions, int? R
 public sealed record ManualHoldUpdate(bool Held, string? Detail);
 public sealed record GrantRevokeRequest(int ExpectedRevision);
 
-public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented);
+public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated);
 
 public sealed record ModelResponse(string Model);
 

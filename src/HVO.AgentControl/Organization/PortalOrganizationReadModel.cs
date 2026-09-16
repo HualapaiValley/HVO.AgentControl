@@ -1,3 +1,4 @@
+using HVO.AgentControl.RemoteWorker;
 using HVO.AgentControl.Runtime;
 
 namespace HVO.AgentControl.Organization;
@@ -11,6 +12,9 @@ public static class EmployeeAvailabilityCategories
     public const string OrientationFailed = "orientation-failed";
     public const string OrientationStale = "orientation-stale";
     public const string RuntimeUnavailable = "runtime-unavailable";
+    public const string Provisioning = "provisioning";
+    public const string ReconciliationRequired = "reconciliation-required";
+    public const string Interrupted = "interrupted";
 }
 
 public sealed record AvailabilityCount(string Category, int Count);
@@ -30,6 +34,8 @@ public sealed record EmployeeRuntimeDetail(
     string BindingId,
     string Placement,
     bool HostOwned,
+    bool RemoteOwned,
+    string? RemoteHostId,
     string? NativeSessionId,
     string? SessionTitle,
     string? ControlModel,
@@ -37,6 +43,8 @@ public sealed record EmployeeRuntimeDetail(
     string? SessionState,
     bool TerminalAvailable,
     string? SanitizedError);
+
+public sealed record WorkerPermissionsProjection(bool Supported, IReadOnlyList<WorkerPendingPermissionRecord> Items, string Reason);
 
 public sealed record PortalEmployeeDetail(
     string Id,
@@ -57,6 +65,7 @@ public sealed record PortalEmployeeDetail(
     EmployeeRuntimeDetail Runtime,
     OrientationStatus? Orientation,
     TerminalDescriptor Terminal,
+    WorkerPermissionsProjection PendingWorkerPermissions,
     UnsupportedFeature RecentLogs);
 
 public sealed record OwnerAttentionItem(
@@ -86,6 +95,7 @@ public sealed record PortalOrganizationOverview(
     IReadOnlyList<PortalEmployeeDetail> Employees,
     IReadOnlyList<AvailabilityCount> Availability,
     PendingApprovalsSummary PendingApprovals,
+    PendingApprovalsSummary PendingWorkerPermissions,
     IReadOnlyList<OwnerAttentionItem> FailuresNeedingAttention);
 
 /// <summary>Builds owner-facing diagnostics from one authoritative store read and one exact host snapshot.</summary>
@@ -94,7 +104,10 @@ public static class PortalOrganizationReadModel
     private static readonly string[] CategoryOrder =
     [
         EmployeeAvailabilityCategories.Ready,
+        EmployeeAvailabilityCategories.Provisioning,
         EmployeeAvailabilityCategories.Held,
+        EmployeeAvailabilityCategories.ReconciliationRequired,
+        EmployeeAvailabilityCategories.Interrupted,
         EmployeeAvailabilityCategories.ReloadRequired,
         EmployeeAvailabilityCategories.OrientationFailed,
         EmployeeAvailabilityCategories.OrientationStale,
@@ -104,13 +117,15 @@ public static class PortalOrganizationReadModel
     public static PortalOrganizationOverview Build(
         OrganizationOverview overview,
         OrganizationRuntimeIdentity? identity,
-        ControlStatus status)
+        ControlStatus status,
+        IRemoteWorkerStatusProvider? remoteProvider = null)
     {
         ArgumentNullException.ThrowIfNull(overview);
         ArgumentNullException.ThrowIfNull(status);
 
+        var remote = remoteProvider?.Snapshot(overview) ?? new Dictionary<string, RemoteWorkerSnapshot>(StringComparer.Ordinal);
         var employees = overview.Employees
-            .Select(employee => BuildEmployee(employee, identity, status))
+            .Select(employee => BuildEmployee(employee, identity, status, remote.GetValueOrDefault(employee.Id)))
             .ToArray();
         var departments = overview.Departments
             .Select(department => new PortalDepartmentSummary(
@@ -148,6 +163,11 @@ public static class PortalOrganizationReadModel
                 Count: 0,
                 Items: [],
                 Reason: "Owner approval workflow is not implemented; issue #219 is outside this baseline."),
+            new PendingApprovalsSummary(
+                Supported: employees.Any(x => x.PendingWorkerPermissions.Supported),
+                Count: employees.Sum(x => x.PendingWorkerPermissions.Items.Count),
+                Items: employees.SelectMany(x => x.PendingWorkerPermissions.Items).Cast<object>().Take(64).ToArray(),
+                Reason: "Remote worker permissions are a separate reject-only projection; raw payloads are never exposed."),
             failures);
     }
 
@@ -155,10 +175,13 @@ public static class PortalOrganizationReadModel
         OrganizationOverview overview,
         OrganizationRuntimeIdentity? identity,
         ControlStatus status,
-        string employeeId)
+        string employeeId,
+        IRemoteWorkerStatusProvider? remoteProvider = null)
     {
         var employee = overview.Employees.SingleOrDefault(item => item.Id == employeeId);
-        return employee is null ? null : BuildEmployee(employee, identity, status);
+        if (employee is null) return null;
+        var remote = remoteProvider?.Snapshot(overview).GetValueOrDefault(employeeId);
+        return BuildEmployee(employee, identity, status, remote);
     }
 
     public static string Classify(EmployeeSummary employee, bool hostOwned, ControlStatus status)
@@ -215,7 +238,8 @@ public static class PortalOrganizationReadModel
     private static PortalEmployeeDetail BuildEmployee(
         EmployeeSummary employee,
         OrganizationRuntimeIdentity? identity,
-        ControlStatus status)
+        ControlStatus status,
+        RemoteWorkerSnapshot? remote)
     {
         var hostOwned = identity is not null
             && string.Equals(employee.Id, identity.EmployeeId, StringComparison.Ordinal)
@@ -223,8 +247,11 @@ public static class PortalOrganizationReadModel
         var exactSession = hostOwned
             && !string.IsNullOrWhiteSpace(employee.SessionId)
             && string.Equals(employee.SessionId, status.SessionId, StringComparison.Ordinal);
-        var terminalAvailable = exactSession && status.CanControl && status.TerminalReady;
-        var terminalReason = !hostOwned
+        var remoteOwned = remote is not null;
+        var terminalAvailable = remoteOwned ? remote!.ViewerAvailable : exactSession && status.CanControl && status.TerminalReady;
+        var terminalReason = remoteOwned
+            ? remote!.ViewerSupported ? terminalAvailable ? "Exact remote worker terminal attachment is available." : "The remote worker session is not authenticated, running, and free of recovery holds." : "Remote viewer protocol code is present, but the production worker terminal backend is unavailable."
+            : !hostOwned
             ? "This employee is not owned by the current control host."
             : !exactSession
                 ? "The employee binding does not match the current native session."
@@ -233,7 +260,7 @@ public static class PortalOrganizationReadModel
                     : !status.TerminalReady
                         ? "Terminal attachment is disabled or not ready."
                         : "Exact host-owned terminal attachment is available.";
-        var availability = Classify(employee, hostOwned, status);
+        var availability = remoteOwned ? ClassifyRemote(remote!) : Classify(employee, hostOwned, status);
 
         return new PortalEmployeeDetail(
             employee.Id,
@@ -255,23 +282,39 @@ public static class PortalOrganizationReadModel
                 employee.RuntimeBindingId,
                 employee.Placement,
                 hostOwned,
+                remoteOwned,
+                remote?.HostId,
                 employee.SessionId,
                 employee.SessionTitle,
                 hostOwned ? status.Model : null,
-                hostOwned ? status.State : null,
-                hostOwned ? status.SessionState : null,
+                remoteOwned ? remote!.ConnectionState : hostOwned ? status.State : null,
+                remoteOwned ? remote!.ProcessState : hostOwned ? status.SessionState : null,
                 terminalAvailable,
-                hostOwned ? status.Error : null),
+                remoteOwned ? remote!.Detail : hostOwned ? status.Error : null),
             employee.Orientation,
             new TerminalDescriptor(
-                Supported: hostOwned,
+                Supported: remoteOwned ? remote!.ViewerSupported : hostOwned,
                 Available: terminalAvailable,
                 Reason: terminalReason,
                 Url: terminalAvailable ? $"/terminal?employeeId={Uri.EscapeDataString(employee.Id)}" : null),
+            new WorkerPermissionsProjection(
+                Supported: remoteOwned && remote!.LifecycleStatus == "enrolled",
+                Items: remoteOwned ? remote!.PendingWorkerPermissions : [],
+                Reason: remoteOwned ? "Reject-only worker permission decisions use the authoritative stored projection." : "Internal runtime pending approvals remain a separate unsupported feature."),
             new UnsupportedFeature(
                 Supported: false,
                 Reason: "Recent runtime logs are not exposed because a safe employee-scoped log contract is not implemented."));
     }
+
+    private static string ClassifyRemote(RemoteWorkerSnapshot remote) => remote.LifecycleStatus switch
+    {
+        "planned" or "provisioning" => EmployeeAvailabilityCategories.Provisioning,
+        "held" or "failed" => EmployeeAvailabilityCategories.ReconciliationRequired,
+        _ when remote.Held => EmployeeAvailabilityCategories.ReconciliationRequired,
+        _ when remote.ProcessState is "exited" or "protocol-failed" or "transport-uncertain" => EmployeeAvailabilityCategories.Interrupted,
+        "enrolled" when remote.ConnectionState == "authenticated" && remote.ProcessState == "running" => EmployeeAvailabilityCategories.Ready,
+        _ => EmployeeAvailabilityCategories.RuntimeUnavailable,
+    };
 
     private static IReadOnlyList<AvailabilityCount> Counts(IEnumerable<PortalEmployeeDetail> employees)
     {

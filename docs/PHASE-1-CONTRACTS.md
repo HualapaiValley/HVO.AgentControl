@@ -369,10 +369,28 @@ Design constraints:
   prompt, while a changed hash is rejected. Record forwarding intent before ACP
   write; a crash in the write/response gap is `Uncertain`, not retry-safe.
 - Events are ordered by persisted worker generation and sequence. The controller
-  acknowledges only after its own transaction commits the event/cursor. Replay
-  starts after that cursor; duplicates are ignored by generation/sequence. Bound
-  retained replay to 64 MiB and 10,000 events initially. An overflow or missing
-  cursor records an exact durable replay-gap obligation, holds dispatch and requires
+  acknowledges only after its own transaction commits the event/cursor, and each
+  page's exact ACK must converge before another page or generation is requested.
+  An uncertain ACK stops replay and newer-generation processing; reconnect retries
+  that exact ACK first, resumes the same generation after the committed controller
+  cursor, finishes its suffix, and only then advances. A failed retry keeps dispatch
+  held even though the authenticated connection may remain open. Initial status
+  `LastSequence` is the lower-bound current-generation target for one finite pass. A
+  cursor already above it before replay is divergence. Replay accepts, commits and ACKs
+  a whole valid page that crosses that target, completes without a recovery obligation,
+  and leaves later live appends for the next synchronization. If replay ends before the
+  target, authoritative exact replay gap/loss markers are persisted and preferred; an
+  unavailable status or validation/concurrency failure projecting it first attempts a
+  marker-less controller protocol obligation and then faults. Prior generations retain
+  the 10,000-event cap, while current generation permits only one 256-event crossing
+  page, with 10,001 pages
+  as the independent cap. Replay rejects null items, empty `hasMore` pages,
+  non-increasing/wrong-generation sequences, raw payloads over 64 KiB, mismatched UTF-8
+  byte counts and empty/overlong kinds before normalization. A malformed, store-invalid
+  or over-bound response records a marker-less controller replay-gap obligation before
+  the session is faulted. Duplicates are ignored by generation/sequence. Bound retained
+  replay to 64 MiB and 10,000 events initially. An overflow or missing cursor records
+  an exact durable replay-gap obligation, holds dispatch and requires
   ID-and-tuple reconciliation; distinct obligations use set semantics and a bounded
   overflow marker prevents unbounded growth. Observation journal infrastructure
   failure holds new dispatch but does not stop ACP or rewrite request, cancellation
@@ -414,8 +432,11 @@ Design constraints:
   the bridge protocol. Authorized owner keystrokes retain the TUI behavior below.
   After authentication the bridge asks its supervisor to launch only an
   employee-UID attach client for the bound TUI/session. It accepts bounded
-  input/resize frames, streams bytes to the authenticated same-origin WebSocket,
-  and enforces one viewer per session. Detach asks the supervisor to stop/reap
+  input/resize frames, streams output as explicit
+  `{ "type": "output", "encoding": "base64", "data": "..." }` frames to the
+  authenticated same-origin WebSocket, and enforces one viewer per session. The
+  local PTY bridge uses the same base64 byte contract; the browser accepts only
+  exact `base64` or legacy-explicit `text` encodings and rejects unknown values. Detach asks the supervisor to stop/reap
   only that viewer's lifecycle handle; the bound TUI and ACP remain unaffected.
   The connector never launches an arbitrary command, alternate session or
   fallback shell; this
@@ -631,7 +652,7 @@ These are open and must not be presented as decided or owner-accepted:
   with revisioned staged owner grants and complete matched-restriction audit IDs.
   General worker delivery/restart/bridge behavior remains unresolved.
 - **Implemented worker artifact (#213):** worker-image bridge/employee UID separation; private `0700` control/home/workspace/session trees; bootstrap-only stdin key creation with duplicate verification and symlink/hard-link refusal; no Docker socket, host checkout or controller secrets; fixed root PID1 supervision; ACP stdio ending at the unprivileged bridge; worker/process generations; and explicit bridge/container interruption behavior. **Still unresolved for #217:** key rotation interruption, compromise re-enrollment and remote custody/delivery.
-- **Implemented controller-role worker channel (#213):** bounded NDJSON, mutual role-labelled HMAC over independent nonces and exact identities/version/key ID, Linux peer credentials, nonce replay/expiry rejection, bridge-owned lease epochs/fencing, heartbeat expiry holds, durable request intent/uncertainty, ACP EOF/read-failure correlator reconciliation, retained multi-generation event replay with a lexicographic generation/sequence ACK cursor, explicit gaps/global bounds, bounded pending permission state, a crash-recoverable kernel-owned single-instance lock, and PID1 termination/reaping tests. Bridge startup transactionally increments worker generation, invalidates the lease, interrupts prior forwarding operations and converts a prior starting/running process slot to exited under a protected `process-exited` dispatch hold. The production supervisor does not cascade-stop the bridge when ACP exits; the bridge remains for reconciliation, but the process slot is terminal for that container and recovery is explicit container replacement (`restart: no`), not an in-container child restart claim. Status exposes `AcknowledgedWorkerGeneration` with `AcknowledgedSequence`, explicit replay-loss metadata, bounded exact replay-gap records/count, sanitized journal-failure recovery markers, truthful ACP protocol/transport failure states and ownership epoch on pending permission work. Viewer/TUI attach remains unimplemented and must later prove no ACP generation/lease mutation and reject stale viewer challenges.
+- **Implemented worker channel (#213) and hermetic controller foundation (#217 branch):** the worker retains the bounded NDJSON, mutual role-labelled HMAC, lease/epoch fencing, durable request/replay/permission and interruption behavior described above. The protocol framing, canonical hashing and HMAC code is now a storage-independent library referenced by both worker and controller. Control schema v4 adds exact stable remote host/enrollment/cursor/task/request/provisioning/resource/recovery/viewer and bounded pending-permission metadata after an exact released-v3 migration with verified create-once backup and hash. Owner APIs enroll only configured approved-host references; strict SSH vectors pin known_hosts and identity paths and forbid arbitrary command tokens. The disabled-by-default controller now has injectable authenticated synchronization, replay/ACK, request/cancellation/permission, heartbeat, typed provisioning and ownership-checked cleanup coordinators with intent-first durable transitions. No real host was accessed. The role-separated viewer protocol, fixed production PTY/TUI attach backend, exact process-session binding and store-only read model are implemented hermetically; key rotation and two-host operational evidence remain unimplemented and must not be inferred from this core. Owner keystrokes execute with employee authority and are not a sandbox.
 - Whether the existing authorized SSH/Docker credential can be used without new
   grants; secure key custody/rotation and measured host-adapter restrictions.
 - Implementation and adversarial validation of the specified bridge challenge,
@@ -660,8 +681,8 @@ These are open and must not be presented as decided or owner-accepted:
 
 ## 15. Non-goals
 
-No full role split, no finance workflows, no controller-side provisioning or
-remote worker integration, no container per internal role, no V1 migration, no
-release, and no change to the archive. #213 provides only the independent
-worker-owned bridge/runtime artifact; #217 remains responsible for SSH/Docker
-routing, two-host success and controller binding.
+No full role split, no finance workflows, no container per internal role, no V1
+migration, no release, and no change to the archive. #213 provides the independent
+worker-owned bridge/runtime artifact; #217 now provides the hermetic controller
+binding/routing/provisioning state machines, while viewer/read-model work and
+two-host operational success remain pending.

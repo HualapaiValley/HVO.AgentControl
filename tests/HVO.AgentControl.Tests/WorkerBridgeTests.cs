@@ -201,12 +201,12 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 3, eventBytes: 64));
         var one = store.AppendEvent("one", "{}"); var two = store.AppendEvent("two", "{}"); var three = store.AppendEvent("three", "{}");
         Assert.Throws<WorkerReplayLossException>(() => store.AppendEvent("four", "{}")); Assert.Throws<WorkerReplayLossException>(() => store.AppendEvent("five", "{}"));
-        var loss = store.Status().ReplayLoss!; Assert.Equal(3, loss.DroppedCount); Assert.Equal(6, loss.DroppedBytes); Assert.Contains(store.Replay(one.WorkerGeneration, loss.MarkerSequence - 1), item => item.Kind == "events-dropped"); Assert.True(store.Status().DispatchHeld);
+        var loss = store.Status().ReplayLoss!; Assert.Equal(3, loss.DroppedCount); Assert.Equal(6, loss.DroppedBytes); Assert.Contains(store.Replay(one.WorkerGeneration, loss.MarkerSequence - 1).Events, item => item.Kind == "events-dropped"); Assert.True(store.Status().DispatchHeld);
         store.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence); Assert.False(store.Status().DispatchHeld);
         Assert.Throws<WorkerReplayLossException>(() => store.AppendEvent("before-ack", "{}"));
         Assert.Equal(4, store.Status().ReplayLoss!.DroppedCount);
         store.Acknowledge(one.WorkerGeneration, loss.MarkerSequence); var after = store.AppendEvent("after", "{}");
-        Assert.Equal([after.Sequence], store.Replay(after.WorkerGeneration, loss.MarkerSequence).Select(x => x.Sequence));
+        Assert.Equal([after.Sequence], store.Replay(after.WorkerGeneration, loss.MarkerSequence).Events.Select(x => x.Sequence));
         Assert.Throws<WorkerProtocolException>(() => store.Replay(after.WorkerGeneration, after.Sequence + 1));
         Assert.Throws<WorkerProtocolException>(() => store.Replay(after.WorkerGeneration + 1, 0));
     }
@@ -227,12 +227,12 @@ public sealed class WorkerBridgeTests
 
         using var second = new WorkerStore(options);
         Assert.Equal(loss.WorkerGeneration + 1, second.WorkerGeneration);
-        Assert.Empty(second.Replay(second.WorkerGeneration, 0));
+        Assert.Empty(second.Replay(second.WorkerGeneration, 0).Events);
         second.Acknowledge(loss.WorkerGeneration, loss.MarkerSequence);
         second.Acknowledge(second.WorkerGeneration, 0);
         var exception = Record.Exception(() => second.AppendEvent("acp-response", "{}"));
         Assert.Null(exception);
-        Assert.Equal([1L], second.Replay(second.WorkerGeneration, 0).Select(item => item.Sequence));
+        Assert.Equal([1L], second.Replay(second.WorkerGeneration, 0).Events.Select(item => item.Sequence));
     }
 
     [Fact]
@@ -248,8 +248,8 @@ public sealed class WorkerBridgeTests
 
         using var second = new WorkerStore(options);
         Assert.Equal(one.WorkerGeneration + 1, second.WorkerGeneration);
-        Assert.Equal([1L, 2L], second.Replay(one.WorkerGeneration, 0).Select(x => x.Sequence));
-        Assert.Empty(second.Replay(second.WorkerGeneration, 0));
+        Assert.Equal([1L, 2L], second.Replay(one.WorkerGeneration, 0).Events.Select(x => x.Sequence));
+        Assert.Empty(second.Replay(second.WorkerGeneration, 0).Events);
         Assert.Equal(0, second.Status().AcknowledgedWorkerGeneration);
         var current = second.AppendEvent("current", "{}");
         Assert.Throws<WorkerReplayLossException>(() => second.AppendEvent("overflow", "{}"));
@@ -259,7 +259,7 @@ public sealed class WorkerBridgeTests
         var loss = second.Status().ReplayLoss!;
         second.ReconcileReplayLoss(loss.WorkerGeneration, loss.MarkerSequence);
         var appended = second.AppendEvent("after-ack", "{}");
-        Assert.Contains(second.Replay(current.WorkerGeneration, loss.MarkerSequence), item => item.Sequence == appended.Sequence);
+        Assert.Contains(second.Replay(current.WorkerGeneration, loss.MarkerSequence).Events, item => item.Sequence == appended.Sequence);
         Assert.Throws<WorkerProtocolException>(() => second.Acknowledge(one.WorkerGeneration, 1));
         Assert.Throws<WorkerProtocolException>(() => second.Replay(one.WorkerGeneration, 0));
         Assert.True(second.Status().DispatchHeld);
@@ -269,6 +269,14 @@ public sealed class WorkerBridgeTests
     public void ReplayRejectsSingleOversizedEventWithoutInsertion()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventBytes: 3)); Assert.Throws<WorkerReplayLossException>(() => store.AppendEvent("large", "1234")); Assert.Equal(0L, CountRows(System.IO.Path.Combine(temp.Path, "bridge.db"), "events"));
+    }
+
+    [Fact]
+    public void ReplayRejectsEventLargerThanControllerSanitizedEventLimit()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventBytes: 1024 * 1024));
+        Assert.Throws<WorkerReplayLossException>(() => store.AppendEvent("large", new string('x', 64 * 1024 + 1)));
+        Assert.Equal("events-dropped", Assert.Single(store.Replay(store.WorkerGeneration, 0).Events).Kind);
     }
 
     [Fact]
@@ -358,7 +366,7 @@ public sealed class WorkerBridgeTests
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         if (input is FailingGateStream failing) failing.Fail(new IOException("raw injected transport detail")); else ((GateStream)input).Complete();
-        var failure = await Assert.ThrowsAsync<WorkerProtocolException>(() => submit.WaitAsync(TimeSpan.FromSeconds(2)));
+        var failure = await Assert.ThrowsAsync<WorkerOperationUncertainException>(() => submit.WaitAsync(TimeSpan.FromSeconds(2)));
         Assert.DoesNotContain("raw injected", failure.Message, StringComparison.Ordinal);
         await Eventually(() => store.GetRequest("req")?.State == "uncertain" && store.Status().ActiveRequestId is null);
         Assert.Equal(throwOnRead ? "transport-uncertain" : "exited", store.Status().ProcessState); Assert.Equal(throwOnRead ? "acp-transport-uncertain" : "process-exited", store.Status().HoldReason);
@@ -433,7 +441,59 @@ public sealed class WorkerBridgeTests
         })).ToArray();
         await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(10));
         Assert.All(Enumerable.Range(0, 100), index => Assert.Equal("completed", store.GetRequest($"req-{index}")!.State));
-        Assert.Equal(100, store.Replay(store.WorkerGeneration, 0).Count);
+        Assert.Equal(100, store.Replay(store.WorkerGeneration, 0).Events.Count);
+    }
+
+    [Fact]
+    public void ReplayPagesTenThousandEventsWithinTheControlFrameBudget()
+    {
+        using var temp = new WorkerTemp();
+        var options = temp.Options(eventLimit: 10_000) with { ReplayPageEventLimit = 256, ReplayPageByteLimit = 256 * 1024 };
+        using var store = new WorkerStore(options);
+        for (var index = 0; index < 10_000; index++) store.AppendEvent("stress", "{}");
+
+        var cursor = 0L;
+        var delivered = 0;
+        var pages = 0;
+        do
+        {
+            var page = store.Replay(store.WorkerGeneration, cursor);
+            var serialized = JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = page }, WorkerProtocol.JsonOptions);
+            Assert.True(serialized.Length < WorkerProtocol.MaxControlFrameBytes);
+            Assert.True(serialized.Length < options.ReplayPageByteLimit);
+            Assert.InRange(page.Events.Count, 1, options.ReplayPageEventLimit);
+            Assert.True(page.NextAfterSequence > cursor);
+            delivered += page.Events.Count;
+            pages++;
+            cursor = page.NextAfterSequence;
+            if (!page.HasMore) break;
+        } while (pages < 100);
+
+        Assert.Equal(10_000, delivered);
+        Assert.Equal(10_000, cursor);
+        Assert.InRange(pages, 40, 100);
+    }
+
+    [Fact]
+    public void ReplaySizingKeepsLargeEventsBelowTheConfiguredPageBudget()
+    {
+        using var temp = new WorkerTemp();
+        var options = temp.Options(eventLimit: 10) with { ReplayPageEventLimit = 10, ReplayPageByteLimit = 64 * 1024 };
+        using var store = new WorkerStore(options);
+        store.AppendEvent("large", JsonSerializer.Serialize(new { text = new string('x', 45 * 1024) }, WorkerProtocol.JsonOptions));
+        store.AppendEvent("second", JsonSerializer.Serialize(new { text = new string('y', 20 * 1024) }, WorkerProtocol.JsonOptions));
+
+        var first = store.Replay(store.WorkerGeneration, 0);
+        var firstBytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = first }, WorkerProtocol.JsonOptions);
+        Assert.Single(first.Events);
+        Assert.True(first.HasMore);
+        Assert.True(firstBytes.Length < options.ReplayPageByteLimit);
+
+        var second = store.Replay(store.WorkerGeneration, first.NextAfterSequence);
+        var secondBytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = second }, WorkerProtocol.JsonOptions);
+        Assert.Single(second.Events);
+        Assert.False(second.HasMore);
+        Assert.True(secondBytes.Length < options.ReplayPageByteLimit);
     }
 
     [Fact]
@@ -512,7 +572,7 @@ public sealed class WorkerBridgeTests
         using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses\"}}");
-        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-failed", "target", cancellation.RootElement, CancellationToken.None));
+        await Assert.ThrowsAsync<WorkerOperationUncertainException>(() => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-failed", "target", cancellation.RootElement, CancellationToken.None));
         Assert.Equal("uncertain", store.GetCancellation("cancel-failed")!.State);
         Assert.Equal("acp-transport-uncertain", store.Status().HoldReason);
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "after-fault", prompt.RootElement, "turn-after", CancellationToken.None));
@@ -546,7 +606,7 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
-    public async Task RealUnixSocketHandshakeAuthenticatesAndFencesReconnectedOldSocket()
+    public async Task RealUnixSocketOperationRejectionSurvivesButFencedSocketCloses()
     {
         if (!OperatingSystem.IsLinux()) return;
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
@@ -555,10 +615,47 @@ public sealed class WorkerBridgeTests
         await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token);
         await Eventually(() => File.Exists(temp.Options().SocketPath));
         using var first = await AuthenticateAsync(temp.Options(), key, Nonce(10));
-        using var authenticatedOne = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); var leaseOne = authenticatedOne!.RootElement.GetProperty("lease");
+        using var authenticatedOne = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); var leaseOne = authenticatedOne!.RootElement.GetProperty("lease").Clone();
+
+        // A future replay cursor is rejected, but its exact durable gap can be read
+        // and reconciled on this same authenticated controller stream.
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "replay", workerGeneration = store.WorkerGeneration, afterSequence = 1L }, CancellationToken.None);
+        using (var rejected = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None))
+        {
+            Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString());
+            Assert.Equal("worker-request-rejected", rejected.RootElement.GetProperty("error").GetString());
+            Assert.Equal(2, rejected.RootElement.EnumerateObject().Count());
+        }
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None);
+        using var heldStatus = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        var gap = Assert.Single(heldStatus!.RootElement.GetProperty("result").GetProperty("replayGaps").EnumerateArray().ToArray());
+        Assert.Equal(1L, gap.GetProperty("afterSequence").GetInt64());
+        await WorkerProtocol.WriteFrameAsync(first, new
+        {
+            operation = "reconcile-replay-gap",
+            epoch = leaseOne.GetProperty("epoch").GetInt64(),
+            connectionNonce = leaseOne.GetProperty("connectionNonce").GetString(),
+            gapId = gap.GetProperty("id").GetString(),
+            workerGeneration = gap.GetProperty("workerGeneration").GetInt64(),
+            afterSequence = gap.GetProperty("afterSequence").GetInt64(),
+            firstRetainedSequence = gap.GetProperty("firstRetainedSequence").GetInt64(),
+            lastSequence = gap.GetProperty("lastSequence").GetInt64(),
+        }, CancellationToken.None);
+        using var reconciled = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        Assert.Equal("result", reconciled!.RootElement.GetProperty("type").GetString());
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None);
+        using var healthyStatus = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        Assert.Empty(healthyStatus!.RootElement.GetProperty("result").GetProperty("replayGaps").EnumerateArray());
+
         using var second = await AuthenticateAsync(temp.Options(), key, Nonce(11));
         using var authenticatedTwo = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); var leaseTwo = authenticatedTwo!.RootElement.GetProperty("lease");
-        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None); using var rejected = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString());
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None);
+        using var fenced = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        Assert.Equal("error", fenced!.RootElement.GetProperty("type").GetString());
+        try { await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None); } catch (IOException) { }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var closed = await Record.ExceptionAsync(async () => Assert.Null(await WorkerProtocol.ReadFrameAsync(first, timeout.Token)));
+        Assert.True(closed is null or IOException, closed?.ToString());
         await WorkerProtocol.WriteFrameAsync(second, new { operation = "status" }, CancellationToken.None); using var accepted = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); Assert.Equal("result", accepted!.RootElement.GetProperty("type").GetString());
         Assert.True(leaseTwo.GetProperty("epoch").GetInt64() > leaseOne.GetProperty("epoch").GetInt64());
         shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
@@ -585,6 +682,51 @@ public sealed class WorkerBridgeTests
         }
         using (var accepted = await AuthenticateAsync(temp.Options(), key, Nonce(22))) { using var authenticated = await WorkerProtocol.ReadFrameAsync(accepted, CancellationToken.None); Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString()); }
         using (var replay = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified)) { await replay.ConnectAsync(new UnixDomainSocketEndPoint(temp.Options().SocketPath)); using var stream = new NetworkStream(replay); await WorkerProtocol.WriteFrameAsync(stream, new { type = "hello", version = WorkerProtocol.Version, role = "controller", controllerId = "controller-test", workerId = "worker-test", keyId = WorkerProtocol.KeyId(key), clientNonce = Nonce(22) }, CancellationToken.None); using var rejected = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString()); }
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task ExitedProcessKeepsRecoveryAndStatusAvailableOnTheSameSession()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        Assert.Throws<WorkerProtocolException>(() => store.Replay(store.WorkerGeneration, 1));
+        var gap = Assert.Single(store.Status().ReplayGaps);
+        store.SetProcessFailure("exited", "process-exited");
+        await using var input = new GateStream(); await using var output = new CaptureStream(); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
+        using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(31));
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "reconcile-replay-gap", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), gapId = gap.Id + "-wrong", workerGeneration = gap.WorkerGeneration, afterSequence = gap.AfterSequence, firstRetainedSequence = gap.FirstRetainedSequence, lastSequence = gap.LastSequence }, CancellationToken.None);
+        using var rejected = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        Assert.Equal("worker-request-rejected", rejected!.RootElement.GetProperty("error").GetString());
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "status" }, CancellationToken.None);
+        using var status = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        Assert.Equal("exited", status!.RootElement.GetProperty("result").GetProperty("processState").GetString());
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "reconcile-replay-gap", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), gapId = gap.Id, workerGeneration = gap.WorkerGeneration, afterSequence = gap.AfterSequence, firstRetainedSequence = gap.FirstRetainedSequence, lastSequence = gap.LastSequence }, CancellationToken.None);
+        using var recovered = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        Assert.Equal("result", recovered!.RootElement.GetProperty("type").GetString());
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task SubmitWriteUncertaintyReturnsFixedCategoryThenClosesRealSocket()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new FailAfterNewlinesStream(0); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
+        using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(32));
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-uncertain", turnId = "turn-uncertain", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        using var uncertain = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        Assert.Equal("worker-operation-uncertain", uncertain!.RootElement.GetProperty("error").GetString());
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        Assert.Null(await WorkerProtocol.ReadFrameAsync(stream, timeout.Token));
+        Assert.Equal("uncertain", store.GetRequest("req-uncertain")!.State);
         shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
     }
 
@@ -757,7 +899,7 @@ public sealed class WorkerBridgeTests
         Assert.Null(store.Status().JournalFailure);
         Assert.False(store.Status().DispatchHeld);
 
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-next\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
@@ -795,7 +937,7 @@ public sealed class WorkerBridgeTests
         Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         Assert.IsType<WorkerReplayLossException>(Record.Exception(() => store.AppendEvent("another", "{}")));
         store.ReconcileReplayLoss(store.Status().ReplayLoss!.WorkerGeneration, store.Status().ReplayLoss!.MarkerSequence);
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-two\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-one\"}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-two", second.RootElement, "turn-two", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var secondId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
@@ -869,6 +1011,94 @@ public sealed class WorkerBridgeTests
         Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision(first.Epoch, pending.DecisionId, pending.ProcessGeneration, pending.RequestId, pending.TurnId, "reject_once"));
     }
 
+    /// <summary>
+    /// A partially delivered keystroke run must never be retried or silently
+    /// dropped: the session ends with the exact category and the byte count, and no
+    /// input content is ever echoed back.
+    /// </summary>
+    [Fact]
+    public async Task UncertainViewerInputEndsTheSessionWithAnExplicitCloseAndNoInputContent()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        store.BindSession("ses-viewer");
+        var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
+        var terminal = new FakeTerminalBackend { WriteFailure = new WorkerTerminalWriteUncertainException("injected partial write", 7) };
+        var key = new byte[32];
+        await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray(), terminal: terminal);
+        using var shutdown = new CancellationTokenSource();
+        var run = bridge.RunAsync(shutdown.Token);
+        await Eventually(() => File.Exists(temp.Options().SocketPath));
+
+        var lease = store.AcquireLease("controller-test", Nonce(40));
+        using var viewer = await AuthenticateViewerAsync(temp.Options(), key, Nonce(41), lease, "ses-viewer");
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(viewer, CancellationToken.None);
+        Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString());
+
+        const string secret = "do-not-echo-this-input";
+        await WorkerProtocol.WriteFrameAsync(viewer, new { type = "input", sessionId = "ses-viewer", data = Convert.ToBase64String(Encoding.UTF8.GetBytes(secret)) }, CancellationToken.None);
+
+        using var close = await ReadUntilAsync(viewer, "close");
+        Assert.Equal("input-uncertain", close!.RootElement.GetProperty("category").GetString());
+        Assert.Equal(7, close.RootElement.GetProperty("bytesWritten").GetInt32());
+        Assert.Equal("ses-viewer", close.RootElement.GetProperty("sessionId").GetString());
+        Assert.DoesNotContain(secret, close.RootElement.GetRawText(), StringComparison.Ordinal);
+        // The uncertain write is never repeated.
+        Assert.Equal(1, terminal.WriteAttempts);
+
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    /// <summary>
+    /// An output-pump failure is announced rather than appearing to the browser as
+    /// an idle terminal.
+    /// </summary>
+    [Fact]
+    public async Task FailedViewerOutputPumpSendsAnExplicitCloseCategoryBeforeTheStreamEnds()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        store.BindSession("ses-viewer");
+        var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
+        var terminal = new FakeTerminalBackend { OutputFailure = new IOException("injected output failure") };
+        var key = new byte[32];
+        await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray(), terminal: terminal);
+        using var shutdown = new CancellationTokenSource();
+        var run = bridge.RunAsync(shutdown.Token);
+        await Eventually(() => File.Exists(temp.Options().SocketPath));
+
+        var lease = store.AcquireLease("controller-test", Nonce(42));
+        using var viewer = await AuthenticateViewerAsync(temp.Options(), key, Nonce(43), lease, "ses-viewer");
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(viewer, CancellationToken.None);
+        Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString());
+
+        using var close = await ReadUntilAsync(viewer, "close");
+        Assert.Equal("viewer-output-failed", close!.RootElement.GetProperty("category").GetString());
+
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    /// <summary>
+    /// An unconfirmed viewer teardown suppresses viewer availability without
+    /// claiming the ACP process or dispatch is unsafe.
+    /// </summary>
+    [Fact]
+    public void UncertainViewerStopSuppressesViewerAvailabilityWithoutHoldingDispatch()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        store.BindSession("ses-viewer");
+        Assert.Null(store.ViewerHoldReason());
+
+        store.SetViewerHold("viewer-stop-uncertain");
+        Assert.Equal("viewer-stop-uncertain", store.ViewerHoldReason());
+        // An unconfirmed viewer teardown says nothing about prompt safety.
+        Assert.False(store.Status().DispatchHeld);
+        Assert.True(store.ViewerSessionBound());
+
+        store.ClearViewerHold();
+        Assert.Null(store.ViewerHoldReason());
+    }
+
     [Fact]
     public void ControlHostWorkerFlagRemainsFalseBySourceContract()
     {
@@ -884,6 +1114,71 @@ public sealed class WorkerBridgeTests
         await WorkerProtocol.WriteFrameAsync(stream, new { type = "proof", mac = WorkerProtocol.ComputeMac(key, "client-proof", "controller", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued) }, CancellationToken.None);
         return stream;
     }
+    private static async Task<NetworkStream> AuthenticateViewerAsync(WorkerOptions options, byte[] key, string clientNonce, Lease lease, string sessionId)
+    {
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await socket.ConnectAsync(new UnixDomainSocketEndPoint(options.SocketPath));
+        var stream = new NetworkStream(socket, ownsSocket: true);
+        var keyId = WorkerProtocol.KeyId(key);
+        await WorkerProtocol.WriteFrameAsync(stream, new { type = "hello", version = WorkerProtocol.Version, role = WorkerProtocol.ViewerRole, controllerId = options.ControllerId, workerId = options.WorkerId, keyId, clientNonce, ownershipEpoch = lease.Epoch, connectionNonce = lease.ConnectionNonce, sessionId }, CancellationToken.None);
+        using var challenge = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        var root = challenge!.RootElement;
+        Assert.True(root.TryGetProperty("serverNonce", out var serverNonceElement), root.GetRawText());
+        var serverNonce = serverNonceElement.GetString()!;
+        var issued = root.GetProperty("issuedUnixMilliseconds").GetInt64();
+        await WorkerProtocol.WriteFrameAsync(stream, new { type = "proof", mac = WorkerProtocol.ComputeViewerMac(key, "client-proof", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued, lease.Epoch, lease.ConnectionNonce, sessionId) }, CancellationToken.None);
+        return stream;
+    }
+
+    /// <summary>Reads viewer frames until the requested type arrives, ignoring output chunks.</summary>
+    private static async Task<JsonDocument?> ReadUntilAsync(Stream stream, string type)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (true)
+        {
+            var frame = await WorkerProtocol.ReadFrameAsync(stream, timeout.Token);
+            Assert.NotNull(frame);
+            if (frame!.RootElement.GetProperty("type").GetString() == type) return frame;
+            frame.Dispose();
+        }
+    }
+
+    /// <summary>A terminal backend whose failures are injected at exact points.</summary>
+    private sealed class FakeTerminalBackend : IWorkerTerminalBackend
+    {
+        public Exception? WriteFailure { get; set; }
+        public Exception? OutputFailure { get; set; }
+        public int WriteAttempts => _session?.WriteAttempts ?? 0;
+        private FakeTerminalSession? _session;
+
+        public bool Available => true;
+        public Task<IWorkerTerminalSession> AttachAsync(string sessionId, CancellationToken token)
+        {
+            _session = new FakeTerminalSession(WriteFailure, OutputFailure);
+            return Task.FromResult<IWorkerTerminalSession>(_session);
+        }
+
+        private sealed class FakeTerminalSession(Exception? writeFailure, Exception? outputFailure) : IWorkerTerminalSession
+        {
+            private int _writeAttempts;
+            public int WriteAttempts => _writeAttempts;
+
+            public Task WriteInputAsync(ReadOnlyMemory<byte> input, CancellationToken token)
+            {
+                Interlocked.Increment(ref _writeAttempts);
+                return writeFailure is null ? Task.CompletedTask : Task.FromException(writeFailure);
+            }
+            public Task ResizeAsync(int rows, int columns, CancellationToken token) => Task.CompletedTask;
+            public async IAsyncEnumerable<WorkerTerminalOutput> ReadOutputAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+            {
+                if (outputFailure is not null) { await Task.Yield(); throw outputFailure; }
+                await Task.Delay(Timeout.Infinite, token).ConfigureAwait(false);
+                yield break;
+            }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
     private static void Start(WorkerStore store) { store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); }
     private static string Nonce(byte value) => Convert.ToBase64String(Enumerable.Repeat(value, 32).ToArray());
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False"); connection.Open(); return connection; }

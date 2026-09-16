@@ -9,7 +9,7 @@ It speaks newline-delimited JSON with the .NET controller on stdin/stdout:
 
     stdin : {"type":"input","data":"..."}
             {"type":"resize","cols":N,"rows":N}
-    stdout: {"type":"output","data":"..."}
+    stdout: {"type":"output","encoding":"base64","data":"..."}
             {"type":"error","message":"..."}
 
 There is deliberately no fallback shell: if the tmux session is missing the
@@ -20,7 +20,7 @@ its own tmux attach client; the tmux server, TUI and ACP runtime keep running.
 
 from __future__ import annotations
 
-import codecs
+import base64
 import fcntl
 import json
 import os
@@ -110,7 +110,6 @@ class Bridge:
         self.target = target
         self.master_fd = None
         self.process = None
-        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.stdin_buffer = bytearray()
         self.write_buffer = bytearray()
         self._stdout = sys.stdout.buffer
@@ -157,15 +156,16 @@ class Bridge:
                 if self._child_exited():
                     break
         finally:
-            if not viewer_closed:
-                self._drain_master()
-                failure = attach_failure_message(self.process.poll() if self.process is not None else None)
-                if failure is not None:
-                    self._emit_error(failure)
-            tail = self.decoder.decode(b"", final=True)
-            if tail:
-                self._emit_output(tail)
-            self.cleanup()
+            try:
+                if not viewer_closed:
+                    try:
+                        self._drain_master()
+                    finally:
+                        failure = attach_failure_message(self.process.poll() if self.process is not None else None)
+                        if failure is not None:
+                            self._emit_error(failure)
+            finally:
+                self.cleanup()
 
     def cleanup(self):
         """Close the PTY and terminate/reap only this bridge's attach client."""
@@ -214,7 +214,7 @@ class Bridge:
             raise SystemExit(0)
 
     def _emit_output(self, data):
-        self._write_frame({"type": "output", "data": data})
+        self._write_frame({"type": "output", "encoding": "base64", "data": base64.b64encode(data).decode("ascii")})
 
     def _emit_error(self, message):
         self._write_frame({"type": "error", "message": message})
@@ -283,9 +283,7 @@ class Bridge:
             return False
         if not data:
             return False
-        text = self.decoder.decode(data)
-        if text:
-            self._emit_output(text)
+        self._emit_output(data)
         return True
 
     def _drain_master(self):
@@ -296,9 +294,7 @@ class Bridge:
                 break
             if not data:
                 break
-            text = self.decoder.decode(data)
-            if text:
-                self._emit_output(text)
+            self._emit_output(data)
 
     def _child_exited(self):
         return self.process is not None and self.process.poll() is not None

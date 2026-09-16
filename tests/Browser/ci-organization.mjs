@@ -245,8 +245,9 @@ try {
   );
   const availability = await readRows(page, '[data-org-availability]');
   const expectedAvailability = [
-    ['ready', '0'], ['held', '1'], ['reload required', '0'],
-    ['orientation failed', '0'], ['orientation stale', '0'], ['runtime unavailable', '0'],
+    ['ready', '0'], ['provisioning', '0'], ['held', '1'], ['reconciliation required', '0'],
+    ['interrupted', '0'], ['reload required', '0'], ['orientation failed', '0'],
+    ['orientation stale', '0'], ['runtime unavailable', '0'],
   ];
   record('portal renders authoritative availability counts for every supported category',
     JSON.stringify(availability) === JSON.stringify(expectedAvailability), { availability, expectedAvailability });

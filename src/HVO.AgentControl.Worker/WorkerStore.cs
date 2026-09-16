@@ -9,8 +9,8 @@ namespace HVO.AgentControl.Worker;
 
 public sealed class WorkerStore : IDisposable, IWorkerObservationSink
 {
-    public const int SchemaVersion = 7;
-    public const string SchemaSignature = "hvo-worker-bridge-v7-20260915";
+    public const int SchemaVersion = 8;
+    public const string SchemaSignature = "hvo-worker-bridge-v8-20260915";
     public const int ReplayGapLimit = 128;
     private static readonly string[] HoldNames = ["manual", "replay-gap", "replay-loss", "process", "permission", "ownership", "transport", "journal"];
     private const string ReplayLossMarker = "{\"loss\":\"events-dropped\"}";
@@ -129,7 +129,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             CREATE TABLE replay_gaps(id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('status','loss','overflow')), worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), after_sequence INTEGER NOT NULL CHECK(after_sequence>=0), first_retained INTEGER NOT NULL CHECK(first_retained>=0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0), loss_marker_generation INTEGER, loss_marker_sequence INTEGER, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), CHECK((kind='loss' AND loss_marker_generation IS NOT NULL AND loss_marker_sequence IS NOT NULL) OR (kind<>'loss' AND loss_marker_generation IS NULL AND loss_marker_sequence IS NULL)), UNIQUE(kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence));
             CREATE TABLE journal_failures(operation_id TEXT PRIMARY KEY, worker_generation INTEGER NOT NULL CHECK(worker_generation>0), error_category TEXT NOT NULL, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), created_utc TEXT NOT NULL);
             CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL);
-            CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL);
+            CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL);
             CREATE TABLE holds(name TEXT PRIMARY KEY, held INTEGER NOT NULL CHECK(held IN(0,1)), reason TEXT);
             CREATE INDEX ix_pending_permissions_state ON pending_permissions(state, created_utc);
             """, tx);
@@ -140,7 +140,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         InsertMeta("worker_generation", "0", tx);
         InsertMeta("process_generation", "0", tx);
         InsertMeta("next_event_sequence", "1", tx);
-        Execute("INSERT INTO lease VALUES(1,0,NULL,NULL,NULL,0); INSERT INTO replay VALUES(1,0,0); INSERT INTO process_slot VALUES(1,'stopped',NULL,NULL,NULL,$now); INSERT INTO holds VALUES('manual',0,NULL),('replay-gap',0,NULL),('replay-loss',0,NULL),('process',0,NULL),('permission',0,NULL),('ownership',0,NULL),('transport',0,NULL),('journal',0,NULL);", tx, ("$now", Now()));
+        Execute("INSERT INTO lease VALUES(1,0,NULL,NULL,NULL,0); INSERT INTO replay VALUES(1,0,0); INSERT INTO process_slot VALUES(1,'stopped',NULL,NULL,NULL,NULL,$now); INSERT INTO holds VALUES('manual',0,NULL),('replay-gap',0,NULL),('replay-loss',0,NULL),('process',0,NULL),('permission',0,NULL),('ownership',0,NULL),('transport',0,NULL),('journal',0,NULL);", tx, ("$now", Now()));
         tx.Commit();
     }
 
@@ -159,7 +159,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
                 ["table:lease"] = "CREATE TABLE lease(singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL CHECK(epoch>=0), controller_id TEXT, connection_nonce TEXT, observed_utc TEXT, active INTEGER NOT NULL CHECK(active IN(0,1)))",
                 ["table:meta"] = "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
                 ["table:pending_permissions"] = "CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL)",
-                ["table:process_slot"] = "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)",
+                ["table:process_slot"] = "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)",
                 ["table:replay"] = "CREATE TABLE replay(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ack_worker_generation INTEGER NOT NULL CHECK(ack_worker_generation>=0), ack_sequence INTEGER NOT NULL CHECK(ack_sequence>=0))",
                 ["table:replay_gaps"] = "CREATE TABLE replay_gaps(id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('status','loss','overflow')), worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), after_sequence INTEGER NOT NULL CHECK(after_sequence>=0), first_retained INTEGER NOT NULL CHECK(first_retained>=0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0), loss_marker_generation INTEGER, loss_marker_sequence INTEGER, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), CHECK((kind='loss' AND loss_marker_generation IS NOT NULL AND loss_marker_sequence IS NOT NULL) OR (kind<>'loss' AND loss_marker_generation IS NULL AND loss_marker_sequence IS NULL)), UNIQUE(kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence))",
                 ["table:replay_loss"] = "CREATE TABLE replay_loss(worker_generation INTEGER PRIMARY KEY CHECK(worker_generation>0), marker_sequence INTEGER NOT NULL CHECK(marker_sequence>0), dropped_count INTEGER NOT NULL CHECK(dropped_count>0), dropped_bytes INTEGER NOT NULL CHECK(dropped_bytes>=0), reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), FOREIGN KEY(worker_generation) REFERENCES event_generations(worker_generation))",
@@ -207,6 +207,31 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         lock (_databaseGate) RequireLeaseLocked(epoch, nonce);
     }
 
+    /// <summary>
+    /// Checks whether an authenticated controller socket still owns the live lease
+    /// without extending it or changing any hold state.
+    /// </summary>
+    public bool IsLeaseCurrent(long epoch, string nonce)
+    {
+        lock (_databaseGate)
+        {
+            if (epoch < 1) return false;
+            byte[] parsed;
+            try { parsed = WorkerProtocol.ParseNonce(nonce, "connection nonce"); }
+            catch (WorkerProtocolException) { return false; }
+            using var nonceBytes = new ZeroingBuffer(parsed);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT epoch,connection_nonce,active FROM lease WHERE singleton=1";
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return false;
+            return reader.GetInt64(0) == epoch
+                && !reader.IsDBNull(1)
+                && reader.GetString(1) == nonce
+                && reader.GetInt64(2) == 1
+                && _clock.MonotonicMilliseconds <= _leaseDeadline;
+        }
+    }
+
     private void RequireLeaseLocked(long epoch, string nonce)
     {
         if (epoch < 1) throw new WorkerProtocolException("Invalid ownership epoch.");
@@ -243,7 +268,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         using var tx = _connection.BeginTransaction();
         var state = Scalar("SELECT state FROM process_slot WHERE singleton=1", tx)?.ToString();
         if (state is "running" or "starting") throw new WorkerProtocolException("The worker process is already active.");
-        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='process_generation'; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE process_slot SET state='starting',lifecycle_handle=NULL,active_request_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1", tx, ("$u", Now()));
+        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='process_generation'; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE process_slot SET state='starting',lifecycle_handle=NULL,active_request_id=NULL,session_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1", tx, ("$u", Now()));
         var generation = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='process_generation'", tx), CultureInfo.InvariantCulture);
         tx.Commit(); return generation;
     }
@@ -330,6 +355,69 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         lock (_databaseGate) Execute("UPDATE process_slot SET state=$s,pid=$p,updated_utc=$u WHERE singleton=1", null, ("$s", state), ("$p", pid), ("$u", Now()));
     }
     public void SetActiveRequest(string? requestId) { lock (_databaseGate) Execute("UPDATE process_slot SET active_request_id=$r,updated_utc=$u WHERE singleton=1", null, ("$r", requestId), ("$u", Now())); }
+    public void BindSession(string sessionId)
+    {
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+        lock (_databaseGate)
+        {
+            using var tx = _connection.BeginTransaction();
+            var currentValue = Scalar("SELECT session_id FROM process_slot WHERE singleton=1", tx);
+            var current = currentValue is null or DBNull ? null : currentValue.ToString();
+            if (current is not null && current != sessionId) throw new WorkerProtocolException("The running process is already bound to a different session.");
+            Execute("UPDATE process_slot SET session_id=$s,updated_utc=$u WHERE singleton=1 AND state='running'", tx, ("$s", sessionId), ("$u", Now()));
+            if (Convert.ToInt64(Scalar("SELECT changes()", tx), CultureInfo.InvariantCulture) != 1) throw new WorkerProtocolException("A running process is required before binding its session.");
+            tx.Commit();
+        }
+    }
+    /// <summary>
+    /// Records that a viewer stop could not be confirmed, so a viewer may still be
+    /// attached to the session.
+    /// </summary>
+    /// <remarks>
+    /// This is deliberately not one of the fixed dispatch holds: an unconfirmed
+    /// viewer teardown says nothing about the ACP process or about prompt safety,
+    /// and blocking dispatch for it would be a false safety signal. It suppresses
+    /// only viewer availability, which is exactly the surface in doubt, and it is
+    /// cleared when a later attach succeeds, because the supervisor refuses a
+    /// second viewer while the previous one is alive.
+    /// </remarks>
+    public void SetViewerHold(string reason)
+    {
+        WorkerProtocol.ValidateIdentifier(reason, 64, "viewer hold reason");
+        lock (_databaseGate) Execute("INSERT INTO meta VALUES('viewer_hold',$r) ON CONFLICT(key) DO UPDATE SET value=$r", null, ("$r", reason));
+    }
+
+    public void ClearViewerHold()
+    {
+        lock (_databaseGate) Execute("DELETE FROM meta WHERE key='viewer_hold'");
+    }
+
+    public string? ViewerHoldReason()
+    {
+        lock (_databaseGate) return Scalar("SELECT value FROM meta WHERE key='viewer_hold'")?.ToString();
+    }
+
+    public bool ViewerSessionBound()
+    {
+        lock (_databaseGate)
+        {
+            using var q = _connection.CreateCommand();
+            q.CommandText = "SELECT COUNT(*) FROM process_slot WHERE singleton=1 AND state='running' AND session_id IS NOT NULL";
+            return Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+        }
+    }
+
+    public string RequireViewerLease(long epoch, string connectionNonce, string sessionId)
+    {
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, connectionNonce);
+            WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+            using var q = _connection.CreateCommand(); q.CommandText = "SELECT state,session_id FROM process_slot WHERE singleton=1"; using var r = q.ExecuteReader(); r.Read();
+            if (r.GetString(0) != "running" || r.IsDBNull(1) || r.GetString(1) != sessionId) throw new WorkerProtocolException("Viewer session does not match the running process binding.");
+            return sessionId;
+        }
+    }
 
     public StoredRequest RegisterGatedRequest(long epoch, string nonce, string id, JsonElement payload, string? turnId) =>
         RegisterAndBeginForwardingGated(epoch, nonce, id, payload, turnId);
@@ -430,7 +518,8 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         var count = Convert.ToInt64(Scalar("SELECT COUNT(*) FROM events", tx), CultureInfo.InvariantCulture);
         var total = Convert.ToInt64(Scalar("SELECT COALESCE(SUM(byte_count),0) FROM events", tx), CultureInfo.InvariantCulture);
         var sequence = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='next_event_sequence'", tx), CultureInfo.InvariantCulture);
-        if (bytes > _options.EventByteLimit || count + 1 > _options.EventLimit || total + bytes > _options.EventByteLimit)
+        var eventFitsReplayPage = bytes <= 64 * 1024 && FitsReplayPage(new WorkerEvent(generation, sequence, kind, payloadJson, bytes));
+        if (!eventFitsReplayPage || bytes > _options.EventByteLimit || count + 1 > _options.EventLimit || total + bytes > _options.EventByteLimit)
         {
             var loss = Scalar("SELECT marker_sequence FROM replay_loss WHERE worker_generation=$g", tx, ("$g", generation));
             if (loss is null)
@@ -472,12 +561,12 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         tx.Commit(); return new WorkerEvent(generation, sequence, kind, payloadJson, bytes);
     }
 
-    public IReadOnlyList<WorkerEvent> Replay(long generation, long afterSequence)
+    public WorkerReplayPage Replay(long generation, long afterSequence)
     {
         lock (_databaseGate) return ReplayLocked(generation, afterSequence);
     }
 
-    private IReadOnlyList<WorkerEvent> ReplayLocked(long generation, long afterSequence)
+    private WorkerReplayPage ReplayLocked(long generation, long afterSequence)
     {
         var lastObject = Scalar("SELECT last_sequence FROM event_generations WHERE worker_generation=$g", null, ("$g", generation));
         if (lastObject is null)
@@ -499,10 +588,33 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             }
             throw ReplayGap("cursor-before-retained-boundary", generation, afterSequence, first, last);
         }
-        using var command = _connection.CreateCommand(); command.CommandText = "SELECT sequence,kind,payload_json,byte_count FROM events WHERE worker_generation=$g AND sequence>$s ORDER BY sequence"; command.Parameters.AddWithValue("$g", generation); command.Parameters.AddWithValue("$s", afterSequence);
+        using var command = _connection.CreateCommand(); command.CommandText = "SELECT sequence,kind,payload_json,byte_count FROM events WHERE worker_generation=$g AND sequence>$s ORDER BY sequence LIMIT $limit"; command.Parameters.AddWithValue("$g", generation); command.Parameters.AddWithValue("$s", afterSequence); command.Parameters.AddWithValue("$limit", checked(_options.ReplayPageEventLimit + 1));
         using var reader = command.ExecuteReader(); var result = new List<WorkerEvent>();
-        while (reader.Read()) result.Add(new WorkerEvent(generation, reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
-        return result;
+        var hasMore = false;
+        var estimatedBytes = 128;
+        var pageLimit = Math.Min(_options.ReplayPageByteLimit, WorkerProtocol.MaxControlFrameBytes);
+        var itemBudget = pageLimit - 1024;
+        while (reader.Read())
+        {
+            var item = new WorkerEvent(generation, reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3));
+            var serializedItemBytes = JsonSerializer.SerializeToUtf8Bytes(item, WorkerProtocol.JsonOptions).Length;
+            if (result.Count >= _options.ReplayPageEventLimit || estimatedBytes + serializedItemBytes + 1 >= itemBudget) { hasMore = true; break; }
+            result.Add(item);
+            estimatedBytes += serializedItemBytes + 1;
+        }
+        var next = result.Count == 0 ? afterSequence : result[^1].Sequence;
+        if (hasMore && next <= afterSequence) throw new WorkerProtocolException("Replay page cannot make progress.");
+        var page = new WorkerReplayPage(result, hasMore, next);
+        if (JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = page }, WorkerProtocol.JsonOptions).Length >= pageLimit)
+            throw new WorkerProtocolException("Replay page exceeded the serialized response budget.");
+        return page;
+    }
+
+    private bool FitsReplayPage(WorkerEvent item)
+    {
+        var pageLimit = Math.Min(_options.ReplayPageByteLimit, WorkerProtocol.MaxControlFrameBytes);
+        var serializedItemBytes = JsonSerializer.SerializeToUtf8Bytes(item, WorkerProtocol.JsonOptions).Length;
+        return 128 + serializedItemBytes + 1 < pageLimit - 1024;
     }
 
     public void Acknowledge(long generation, long sequence)

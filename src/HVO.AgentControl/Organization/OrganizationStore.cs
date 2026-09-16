@@ -92,13 +92,11 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Build-local schema identifier. Schema 3 was never merged, released or
-    /// deployed; the authoritative released lineage ends at v2. Consequently a
-    /// schema-3 file is accepted only when its full normalized signature exactly
-    /// matches this build. Any other v3 shape is an unsupported disposable branch
-    /// artifact, not a migration source and not a backwards-compatibility promise.
+    /// Schema 4 extends the released schema-3 organization and policy store with
+    /// controller-owned remote-worker records. Migration accepts only the exact
+    /// released v3 signature and creates verified, immutable source evidence first.
     /// </summary>
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -108,6 +106,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV1BackupHashFileName = "control.schema-v1.sha256";
     public const string SchemaV2BackupFileName = "control.schema-v2.db";
     public const string SchemaV2BackupHashFileName = "control.schema-v2.sha256";
+    public const string SchemaV3BackupFileName = "control.schema-v3.db";
+    public const string SchemaV3BackupHashFileName = "control.schema-v3.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -483,8 +483,14 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV2 =
         BuildExpectedSchema(SchemaV2Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly string[] SchemaV4Statements =
+        [.. SchemaV3Statements, .. RemoteWorkerSchemaV4Statements];
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV4Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1417,6 +1423,17 @@ public sealed partial class OrganizationStore : IDisposable
             EnsureSchemaV2Backup(connection);
             AfterMigrationBackup?.Invoke();
             MigrateV2ToV3(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV3);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 3)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV3);
+            EnsureSchemaV3Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV3ToV4(connection);
         }
         else if (version != CurrentSchemaVersion)
         {
@@ -1764,6 +1781,21 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV3Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 3, SchemaV3BackupFileName, SchemaV3BackupHashFileName, ExpectedSchemaV3);
+
+    private void MigrateV3ToV4(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in RemoteWorkerSchemaV4Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 4 WHERE version = 3");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1775,7 +1807,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported build-local schema 3 signature. Schema 3 was never released; discard this branch artifact or restore an authoritative v1/v2 source. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore the verified schema-v3 backup or another authoritative source. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -1917,7 +1949,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV3Statements)
+        foreach (var statement in SchemaV4Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -2284,7 +2316,7 @@ public sealed partial class OrganizationStore : IDisposable
                 SELECT e.id, e.slug, e.display_name, e.purpose, e.instructions, e.rules, e.restrictions, e.organization_id,
                         d.id, d.slug, d.display_name,
                        r.id, r.slug, r.display_name,
-                       b.id, b.placement, s.native_session_id, s.title
+                       b.id, b.placement, s.id, s.native_session_id, s.title
                 FROM employees e
                 JOIN departments d ON d.id = e.department_id
                 JOIN roles r ON r.id = e.role_id
@@ -2315,7 +2347,8 @@ public sealed partial class OrganizationStore : IDisposable
                     reader.GetString(14),
                     reader.GetString(15),
                     reader.IsDBNull(16) ? null : reader.GetString(16),
-                    reader.IsDBNull(17) ? null : reader.GetString(17)));
+                    reader.IsDBNull(17) ? null : reader.GetString(17),
+                    reader.IsDBNull(18) ? null : reader.GetString(18)));
             }
         }
 

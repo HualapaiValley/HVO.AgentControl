@@ -9,7 +9,8 @@
 // Wire protocol (JSON text frames):
 //   client -> server  { "type": "input",  "data": "..." }
 //                     { "type": "resize", "cols": <n>, "rows": <n> }
-//   server -> client  { "type": "output", "data": "..." }
+//   server -> client  { "type": "output", "encoding": "base64", "data": "..." }
+//                     { "type": "output", "encoding": "text",   "data": "..." }
 //                     { "type": "error",  "message": "..." }
 //
 // Output is written straight into xterm's own bounded scrollback. No duplicate
@@ -148,6 +149,7 @@ class TerminalPortal {
         this.term = null;
         this.fit = null;
         this.socket = null;
+        this.outputDecoder = null;
         this.resizeObserver = null;
 
         this.running = false;
@@ -491,6 +493,7 @@ class TerminalPortal {
         this.manualDetach = false;
         this.notifiedDetachedInput = false;
         this.attachedThisAttempt = false;
+        this.outputDecoder = null;
         this.renderConnection("connecting", true);
         this.setOverlay("Attaching to session\u2026");
 
@@ -540,6 +543,9 @@ class TerminalPortal {
                 return;
             }
             this.socket = null;
+            const decoder = this.outputDecoder;
+            this.outputDecoder = null;
+            if (decoder && this.term) this.term.write(decoder.decode());
             this.handleAttachmentClosed();
         };
 
@@ -614,6 +620,7 @@ class TerminalPortal {
     closeSocket(code, reason) {
         const socket = this.socket;
         this.socket = null;
+        this.outputDecoder = null;
         if (socket) {
             try {
                 socket.close(code, reason);
@@ -645,9 +652,23 @@ class TerminalPortal {
             return;
         }
         if (message.type === "output" && typeof message.data === "string") {
-            if (this.term) {
+            if (!this.term) return;
+            if (message.encoding === "text") {
                 this.term.write(message.data);
+                return;
             }
+            if (message.encoding === "base64") {
+                try {
+                    const binary = atob(message.data);
+                    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+                    this.outputDecoder ??= new TextDecoder("utf-8", { fatal: false });
+                    this.term.write(this.outputDecoder.decode(bytes, { stream: true }));
+                } catch {
+                    this.writeNotice("transport error: invalid terminal output encoding");
+                }
+                return;
+            }
+            this.writeNotice("transport error: unsupported terminal output encoding");
             return;
         }
         if (message.type === "error") {

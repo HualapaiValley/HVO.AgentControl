@@ -9,12 +9,14 @@ Status reflects the active code, not the standalone POC.
    portal, owner Basic auth, embedded terminal, one owned OpenCode ACP runtime,
    loopback native HTTP, and an authoritative SQLite organization/session store
    at `/control-data/control.db` (with `runtime.json` retained as evidence).
-3. **Durable controller — partial:** organization/session identity persists in
-   the authoritative store and a failed load faults instead of being replaced.
-   A member/task journal, one active writer per session, uncertain-delivery
-   reconciliation and explicit resume decisions are not implemented.
+3. **Durable controller — partial:** schema v4 preserves organization/session
+   and #213 policy identity and adds remote host/enrollment, cursor, task/request,
+   provisioning/resource and recovery-obligation records with exact-signature
+   migration and verified v3 backup. The schema also has a sanitized deduplicated
+    controller event inbox, conditional request/cancellation/provisioning transitions,
+    exact recovery markers and restart reconciliation. Operational two-host evidence is still pending.
 4. **Self-contained worker lifecycle — worker artifact implemented (#213), provisioning pending:** the distinct worker image has persistent private control/home/workspace/session volumes, fixed PID1 supervision, ACP start/stop/status, process generations and disconnect survival. ACP exit leaves the bridge alive for reconciliation but is terminal for that container; recovery is explicit container replacement with automatic restart disabled. Devcontainer creation, fresh transport/process restart orchestration, host readiness/provisioning and checkpoint policy remain #217+.
-5. **Private authenticated communication — worker side implemented (#213), controller/remote side pending (#217):** the worker bridge implements bounded NDJSON, mutual role-bound HMAC, local peer credentials, leases/epoch fencing, durable idempotency/replay/holds and pending permission state. The control host has no connector binding, SSH routing or two-host success path and continues to report `WorkerControlImplemented=false`.
+5. **Private authenticated communication — hermetic controller slice implemented, operational path pending (#217):** worker and controller share the storage-independent NDJSON/canonical-hash/HMAC library. The controller has race-resistant private-file opening, exact mutual authentication and result parsing, configured-reference host APIs, local exact known_hosts fingerprinting, deterministic quoted SSH/Docker commands and a transparent no-key worker pipe. The process adapter and hosted manager are disabled by default; the hermetic connection/dispatch/provisioning coordinators are implemented, but no remote host was contacted, the viewer protocol, store-only read model and fixed production worker PTY backend are implemented hermetically, while key rotation and two-host success remain unproven. `WorkerControlImplemented=false` remains truthful.
 6. **Owner visibility — partial:** organization navigation, department counts,
    host-computed employee availability, exact safe employee diagnostics and an
    employee-ID-bound same-origin terminal are live for the single owned control

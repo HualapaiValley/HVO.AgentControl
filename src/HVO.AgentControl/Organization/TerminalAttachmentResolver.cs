@@ -1,80 +1,63 @@
+using HVO.AgentControl.RemoteWorker;
 using HVO.AgentControl.Runtime;
 
 namespace HVO.AgentControl.Organization;
 
-/// <summary>Host-side classification for a validated <c>/terminal</c> request.</summary>
 public enum TerminalAttachmentRoute
 {
-    /// <summary>
-    /// The employee, authoritative runtime binding, persisted native session and
-    /// current host status all match exactly and both control and terminal
-    /// readiness are true. Only this route attaches the host-owned TUI in the
-    /// host data directory.
-    /// </summary>
-    Eligible,
-
-    /// <summary>No employee with the requested stable id exists in the overview.</summary>
+    LocalEligible,
+    RemoteEligible,
+    RemoteUnavailable,
     EmployeeNotFound,
-
-    /// <summary>
-    /// The store, identity or status snapshot is missing, or the employee is not
-    /// the exact host-owned binding/session or control/terminal is not ready.
-    /// </summary>
     Unavailable,
 }
 
-/// <summary>
-/// Pure routing for <c>/terminal</c>. It joins one authoritative store snapshot
-/// with the exact host identity and status and never falls back to a different
-/// employee, binding or session.
-/// </summary>
+public sealed record TerminalTarget(TerminalAttachmentRoute Route, EmployeeSummary? Employee, RemoteWorkerSnapshot? Remote);
+
+/// <summary>Exact local/remote routing for /terminal with no fallback between ownership domains.</summary>
 public static class TerminalAttachmentResolver
 {
-    /// <summary>
-    /// Classifies one already-validated employee id. Unknown ids are only
-    /// reported as <see cref="TerminalAttachmentRoute.EmployeeNotFound"/> when
-    /// the store and host identity are available; a missing store/identity/status
-    /// fails closed as <see cref="TerminalAttachmentRoute.Unavailable"/> so an
-    /// unknown id can never mask an unavailable host.
-    /// </summary>
-    public static TerminalAttachmentRoute Resolve(
+    public static TerminalTarget Resolve(
         OrganizationOverview? overview,
         OrganizationRuntimeIdentity? identity,
         ControlStatus? status,
+        IReadOnlyDictionary<string, RemoteWorkerSnapshot>? remote,
+        bool remoteBackendAvailable,
         string? employeeId)
     {
-        if (overview is null || identity is null || status is null)
-        {
-            return TerminalAttachmentRoute.Unavailable;
-        }
-
+        if (overview is null || status is null) return new(TerminalAttachmentRoute.Unavailable, null, null);
         var employee = overview.Employees.SingleOrDefault(item => item.Id == employeeId);
-        if (employee is null)
-        {
-            return TerminalAttachmentRoute.EmployeeNotFound;
-        }
+        if (employee is null) return new(TerminalAttachmentRoute.EmployeeNotFound, null, null);
 
-        return IsExactHostOwnedSession(employee, identity, status)
-            ? TerminalAttachmentRoute.Eligible
-            : TerminalAttachmentRoute.Unavailable;
+        if (employee.Placement == RuntimePlacements.InternalSharedContainer)
+            return new(IsExactHostOwnedSession(employee, identity, status) ? TerminalAttachmentRoute.LocalEligible : TerminalAttachmentRoute.Unavailable, employee, null);
+
+        if (employee.Placement != RuntimePlacements.DeveloperContainer || remote is null || !remote.TryGetValue(employee.Id, out var target))
+            return new(TerminalAttachmentRoute.RemoteUnavailable, employee, null);
+
+        var exact = target.RuntimeBindingId == employee.RuntimeBindingId
+            && target.SessionRecordId is not null
+            && target.SessionRecordId == employee.SessionRecordId
+            && target.NativeSessionId is not null
+            && target.NativeSessionId == employee.NativeSessionId
+            && target.EnrollmentEnabled
+            && target.LifecycleStatus == "enrolled"
+            && target.ConnectionState == "authenticated"
+            && target.ProcessState == "running"
+            && target.OwnershipEpoch > 0
+            && !target.Held
+            && target.ViewerSupported
+            && target.ViewerAvailable
+            && remoteBackendAvailable;
+        return new(exact ? TerminalAttachmentRoute.RemoteEligible : TerminalAttachmentRoute.RemoteUnavailable, employee, target);
     }
 
-    /// <summary>
-    /// True only when the employee identity, authoritative binding, persisted
-    /// native session and current host status all match and both control and
-    /// terminal attachment are ready. No field is optional and there is no
-    /// fallback candidate.
-    /// </summary>
-    public static bool IsExactHostOwnedSession(
-        EmployeeSummary employee,
-        OrganizationRuntimeIdentity identity,
-        ControlStatus status)
+    public static bool IsExactHostOwnedSession(EmployeeSummary employee, OrganizationRuntimeIdentity? identity, ControlStatus status)
     {
         ArgumentNullException.ThrowIfNull(employee);
-        ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(status);
-
-        return string.Equals(employee.Id, identity.EmployeeId, StringComparison.Ordinal)
+        return identity is not null
+            && string.Equals(employee.Id, identity.EmployeeId, StringComparison.Ordinal)
             && string.Equals(employee.RuntimeBindingId, identity.RuntimeBindingId, StringComparison.Ordinal)
             && !string.IsNullOrWhiteSpace(employee.SessionId)
             && string.Equals(employee.SessionId, status.SessionId, StringComparison.Ordinal)

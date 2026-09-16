@@ -7,6 +7,9 @@
     <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="../HVO.AgentControl.WorkerProtocol/HVO.AgentControl.WorkerProtocol.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="HVO.AgentControl.Tests" />
   </ItemGroup>
 </Project>

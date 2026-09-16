@@ -89,14 +89,28 @@ public sealed class TestFixtureHygieneTests
 
         if (!OperatingSystem.IsWindows())
         {
-            foreach (var name in expected)
+            // Only fixtures that are executed as programs need the execute bit. Data
+            // fixtures (captured command output replayed by a parser) are read, never
+            // run, and marking them executable would be misleading rather than safe.
+            foreach (var name in expected.Where(IsExecutableFixture))
             {
                 Assert.True(
                     File.GetUnixFileMode(Path.Combine(copied, name!)).HasFlag(UnixFileMode.UserExecute),
                     $"Fixture '{name}' lost its execute bit when it was copied to the output directory.");
             }
+
+            foreach (var name in expected.Where(candidate => !IsExecutableFixture(candidate)))
+            {
+                Assert.False(
+                    File.GetUnixFileMode(Path.Combine(copied, name!)).HasFlag(UnixFileMode.UserExecute),
+                    $"Data fixture '{name}' is executable; only fixtures that are run as programs may be.");
+            }
         }
     }
+
+    /// <summary>A fixture that is launched as a program rather than read as data.</summary>
+    private static bool IsExecutableFixture(string? name) =>
+        name is not null && (name.EndsWith(".sh", StringComparison.Ordinal) || name.EndsWith(".py", StringComparison.Ordinal));
 
     /// <summary>
     /// Every test source except this one, which necessarily names the patterns

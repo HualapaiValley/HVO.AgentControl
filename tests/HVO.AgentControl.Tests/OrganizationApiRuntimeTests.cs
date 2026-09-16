@@ -320,19 +320,20 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
 /// controller-private database. The owner password is a disposable file; no
 /// provider credentials or model inference are involved.
 /// </summary>
-public sealed class EnabledRuntimeFactory : WebApplicationFactory<Program>, IDisposable
+public class EnabledRuntimeFactory : WebApplicationFactory<Program>, IDisposable
 {
     public const string OwnerPassword = "enabled-runtime-owner-password-000000";
 
     private readonly string _root;
     private readonly string _passwordPath;
+    private readonly bool _workerControlEnabled;
 
     public EnabledRuntimeFactory()
         : this("prompt_fast")
     {
     }
 
-    internal EnabledRuntimeFactory(string scenario)
+    internal EnabledRuntimeFactory(string scenario, bool workerControlEnabled = false)
     {
         _root = Path.Combine(Path.GetTempPath(), "agentcontrol-enabled-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(DataDirectory);
@@ -340,6 +341,7 @@ public sealed class EnabledRuntimeFactory : WebApplicationFactory<Program>, IDis
         File.WriteAllText(_passwordPath, OwnerPassword);
         OpenCodeExecutable = AcpFakeServer.CreateExecutable(scenario);
         NativePort = GetFreePort();
+        _workerControlEnabled = workerControlEnabled;
     }
 
     public string OpenCodeExecutable { get; }
@@ -389,6 +391,14 @@ public sealed class EnabledRuntimeFactory : WebApplicationFactory<Program>, IDis
         builder.UseSetting("Control:EnableTerminal", "false");
         builder.UseSetting("Control:StartupTimeoutSeconds", "20");
         builder.UseSetting("Control:PromptTimeoutSeconds", "20");
+
+        // Enabled but deliberately invalid WorkerControl configuration: no
+        // ControllerId, image digest, or approved hosts. Startup does not
+        // validate those options, so the endpoint contract owns the 409.
+        if (_workerControlEnabled)
+        {
+            builder.UseSetting("WorkerControl:Enabled", "true");
+        }
     }
 
     protected override void Dispose(bool disposing)

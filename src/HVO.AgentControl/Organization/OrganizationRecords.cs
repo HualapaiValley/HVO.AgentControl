@@ -58,6 +58,7 @@ public static class OrganizationIds
 public static class RuntimePlacements
 {
     public const string InternalSharedContainer = "InternalSharedContainer";
+    public const string DeveloperContainer = "DeveloperContainer";
 }
 
 /// <summary>Identifies the single combined Operations/IT seed role and its employee in Operations.</summary>
@@ -248,9 +249,18 @@ public sealed record EmployeeSummary(
     string RoleDisplayName,
     string RuntimeBindingId,
     string Placement,
-    string? SessionId,
+    string? SessionRecordId,
+    string? NativeSessionId,
     string? SessionTitle,
-    OrientationStatus? Orientation = null);
+    OrientationStatus? Orientation = null)
+{
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, OrientationStatus? orientation = null)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, orientation) { }
+
+    // Backward-compatible API alias. SessionId has always meant the ACP-native
+    // identity on the wire; database relationships must use SessionRecordId.
+    public string? SessionId => NativeSessionId;
+}
 
 /// <summary>An adoption audit record: who adopted what, under which authorization.</summary>
 public sealed record AdoptionAuditSummary(
