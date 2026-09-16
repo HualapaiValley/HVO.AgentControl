@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using HVO.AgentControl.Organization;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Data.Sqlite;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -233,17 +235,52 @@ public sealed class RemoteWorkerApiWorkerDisabledTests : IClassFixture<EnabledRu
     }
 
     [Fact]
-    public async Task WorkerStatusExposesHashOnlyRecoveryAuditCollection()
+    public async Task WorkerStatusExposesExactHashOnlyRecoveryAuditRow()
     {
         using var client = await AuthorizedClientAsync();
+        var store = _factory.Host.Organization!;
+        var overview = store.GetOverview();
+        var binding = overview.Employees.Single(x => x.RuntimeBindingId is not null).RuntimeBindingId!;
+        var databasePath = Path.Combine(_factory.DataDirectory, OrganizationStore.DatabaseFileName);
+        const string workerId = "wrk-audit-api";
+        using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO execution_hosts(id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,os,capability_status,enabled,enrolled,status,created_at,updated_at,revision)
+                VALUES('host-audit-api','host-audit-api','Audit API host','ssh-docker','worker.example',22,'docker','/known','linux','valid',1,1,'ready',$now,$now,1);
+                UPDATE runtime_bindings SET placement='DeveloperContainer',container_ref='audit-container' WHERE id=$binding;
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
+            command.Parameters.AddWithValue("$binding", binding);
+            command.ExecuteNonQuery();
+        }
+        store.CreateWorkerEnrollment(binding, "host-audit-api", "controller-a", "sha256:" + new string('a', 64), "linux/amd64", "/tmp/audit-api.key", "sha256:" + new string('b', 64), workerId);
+        store.RecordControllerRecovery(workerId, "replay-gap", "markerless-audit-api");
+        var obligation = Assert.Single(store.ListWorkerRecoveryObligations(workerId, true));
+        const string evidenceHash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        store.AcknowledgeControllerRecovery(workerId, obligation.Id, obligation.Revision, evidenceHash, "acknowledged-after-external-reconciliation");
+        var expected = Assert.Single(store.ListWorkerRecoveryAudit(workerId));
+
         using var response = await client.GetAsync("/api/workers/status");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var raw = await response.Content.ReadAsStringAsync();
         using var document = JsonDocument.Parse(raw);
-        Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("recoveryAudit").ValueKind);
-        Assert.DoesNotContain("note", raw, StringComparison.OrdinalIgnoreCase);
+        var audit = Assert.Single(document.RootElement.GetProperty("recoveryAudit").EnumerateArray());
+        Assert.Equal(["id", "obligationId", "workerId", "kind", "markerHash", "evidenceHash", "disposition", "recordedAt"], audit.EnumerateObject().Select(x => x.Name).ToArray());
+        Assert.Equal(expected.Id, audit.GetProperty("id").GetString());
+        Assert.Equal(obligation.Id, audit.GetProperty("obligationId").GetString());
+        Assert.Equal(workerId, audit.GetProperty("workerId").GetString());
+        Assert.Equal("replay-gap", audit.GetProperty("kind").GetString());
+        Assert.Equal(obligation.MarkerHash, audit.GetProperty("markerHash").GetString());
+        Assert.Equal(evidenceHash, audit.GetProperty("evidenceHash").GetString());
+        Assert.Equal("acknowledged-after-external-reconciliation", audit.GetProperty("disposition").GetString());
+        Assert.Equal(expected.RecordedAt, audit.GetProperty("recordedAt").GetDateTimeOffset());
         Assert.DoesNotContain("markerJson", raw, StringComparison.Ordinal);
+        Assert.DoesNotContain("detail", audit.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("note", audit.GetRawText(), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

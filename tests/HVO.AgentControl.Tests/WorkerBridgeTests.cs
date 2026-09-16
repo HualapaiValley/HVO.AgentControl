@@ -475,6 +475,28 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
+    public void ReplaySizingKeepsLargeEventsBelowTheConfiguredPageBudget()
+    {
+        using var temp = new WorkerTemp();
+        var options = temp.Options(eventLimit: 10) with { ReplayPageEventLimit = 10, ReplayPageByteLimit = 64 * 1024 };
+        using var store = new WorkerStore(options);
+        store.AppendEvent("large", JsonSerializer.Serialize(new { text = new string('x', 45 * 1024) }, WorkerProtocol.JsonOptions));
+        store.AppendEvent("second", JsonSerializer.Serialize(new { text = new string('y', 20 * 1024) }, WorkerProtocol.JsonOptions));
+
+        var first = store.Replay(store.WorkerGeneration, 0);
+        var firstBytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = first }, WorkerProtocol.JsonOptions);
+        Assert.Single(first.Events);
+        Assert.True(first.HasMore);
+        Assert.True(firstBytes.Length < options.ReplayPageByteLimit);
+
+        var second = store.Replay(store.WorkerGeneration, first.NextAfterSequence);
+        var secondBytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = second }, WorkerProtocol.JsonOptions);
+        Assert.Single(second.Events);
+        Assert.False(second.HasMore);
+        Assert.True(secondBytes.Length < options.ReplayPageByteLimit);
+    }
+
+    [Fact]
     public void OldConnectionIsFencedAfterSameControllerReconnect()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); var first = store.AcquireLease("controller-test", Nonce(1)); var second = store.AcquireLease("controller-test", Nonce(2)); Assert.Throws<WorkerProtocolException>(() => store.Heartbeat(first.Epoch, first.ConnectionNonce)); store.Heartbeat(second.Epoch, second.ConnectionNonce);

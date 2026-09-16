@@ -102,10 +102,19 @@ remain replayable; status exposes both the current generation and ACK generation
 Pruning applies only behind that ACK cursor across the global 10,000-event/64-MiB
 bounds and removes reconciled loss rows before their referenced generation rows.
 Replay is paged in sequence order, with at most 256 events and a conservative
-256-KiB serialized response budget per page. The controller commits and ACKs each
-page's exact generation/last sequence before requesting the next page, rejects a
-non-progressing cursor, and never builds a control response near the 1-MiB framing
-limit. An individual event that cannot fit a replay page is treated as replay loss
+256-KiB serialized response budget per page. The controller rejects null pages,
+null event items, empty `hasMore` pages, sequences beyond the reported status and
+responses exceeding the 10,000-event/10,001-page contract. It commits and ACKs each
+page's exact generation/last sequence before requesting the next page. An uncertain
+page ACK creates an exact durable obligation and stops both that generation and every
+newer generation. On reconnect, the exact ACK must converge first; replay then resumes
+the same generation from the already-committed controller cursor, finishes its suffix,
+and only then advances to newer generations. A failed pending-ACK retry leaves the
+connection held and permits no replay, request reconciliation or dispatch. The worker
+queries at most one look-ahead event, serializes each candidate once for conservative
+O(n) page sizing, and serializes the completed response once for the final bound check,
+so it never builds a control response near the 1-MiB framing limit. An individual
+event that cannot fit a replay page is treated as replay loss
 at append time rather than becoming an unreplayable retained row. The authenticated
 controller connection processes multiple operation frames. A well-framed pre-effect
 operation rejection returns only the fixed `worker-request-rejected` category and

@@ -591,23 +591,30 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         using var command = _connection.CreateCommand(); command.CommandText = "SELECT sequence,kind,payload_json,byte_count FROM events WHERE worker_generation=$g AND sequence>$s ORDER BY sequence LIMIT $limit"; command.Parameters.AddWithValue("$g", generation); command.Parameters.AddWithValue("$s", afterSequence); command.Parameters.AddWithValue("$limit", checked(_options.ReplayPageEventLimit + 1));
         using var reader = command.ExecuteReader(); var result = new List<WorkerEvent>();
         var hasMore = false;
+        var estimatedBytes = 128;
+        var pageLimit = Math.Min(_options.ReplayPageByteLimit, WorkerProtocol.MaxControlFrameBytes);
+        var itemBudget = pageLimit - 1024;
         while (reader.Read())
         {
             var item = new WorkerEvent(generation, reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3));
-            if (result.Count >= _options.ReplayPageEventLimit || !FitsReplayPage(result.Append(item))) { hasMore = true; break; }
+            var serializedItemBytes = JsonSerializer.SerializeToUtf8Bytes(item, WorkerProtocol.JsonOptions).Length;
+            if (result.Count >= _options.ReplayPageEventLimit || estimatedBytes + serializedItemBytes + 1 >= itemBudget) { hasMore = true; break; }
             result.Add(item);
+            estimatedBytes += serializedItemBytes + 1;
         }
         var next = result.Count == 0 ? afterSequence : result[^1].Sequence;
         if (hasMore && next <= afterSequence) throw new WorkerProtocolException("Replay page cannot make progress.");
-        return new WorkerReplayPage(result, hasMore, next);
+        var page = new WorkerReplayPage(result, hasMore, next);
+        if (JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = page }, WorkerProtocol.JsonOptions).Length >= pageLimit)
+            throw new WorkerProtocolException("Replay page exceeded the serialized response budget.");
+        return page;
     }
 
-    private bool FitsReplayPage(WorkerEvent item) => FitsReplayPage([item]);
-    private bool FitsReplayPage(IEnumerable<WorkerEvent> events)
+    private bool FitsReplayPage(WorkerEvent item)
     {
-        var items = events.ToArray();
-        var page = new WorkerReplayPage(items, true, items.LastOrDefault()?.Sequence ?? 0);
-        return JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = page }, WorkerProtocol.JsonOptions).Length < Math.Min(_options.ReplayPageByteLimit, WorkerProtocol.MaxControlFrameBytes);
+        var pageLimit = Math.Min(_options.ReplayPageByteLimit, WorkerProtocol.MaxControlFrameBytes);
+        var serializedItemBytes = JsonSerializer.SerializeToUtf8Bytes(item, WorkerProtocol.JsonOptions).Length;
+        return 128 + serializedItemBytes + 1 < pageLimit - 1024;
     }
 
     public void Acknowledge(long generation, long sequence)

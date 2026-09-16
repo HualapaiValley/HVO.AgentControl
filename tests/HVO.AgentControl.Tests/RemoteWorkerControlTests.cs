@@ -1130,7 +1130,7 @@ public sealed class RemoteWorkerControlTests
         public WorkerEnrollmentRecord CreateEnrolled() { var e = CreateEnrollment(); e = Store.UpdateEnrollmentLifecycle(e.WorkerId, e.Revision, "planned", "provisioning"); return Store.UpdateEnrollmentLifecycle(e.WorkerId, e.Revision, "provisioning", "enrolled"); }
         public WorkerEnrollmentRecord CreateEnrolledAndReady() { var e = CreateEnrolled(); using (var c = Open(DatabasePath)) { c.Execute($"UPDATE orientation_assignments SET state='Stale' WHERE runtime_binding_id='{BindingId}'; INSERT INTO orientation_assignments(id,employee_id,runtime_binding_id,session_id,policy_id,orientation_version,artifact_file_name,artifact_bytes,state,assigned_at,delivered_at,acknowledged_at,comprehended_at,evidence_hash,evidence_summary,evidence_source,required_runtime_generation,loaded_runtime_generation,last_error,revision) SELECT 'ori-remote','{EmployeeId}','{BindingId}','{SessionId}',id,'remote-v1','orientation.md',1,'Comprehended','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00','sha256:{new string('1', 64)}','ready','owner-submitted',NULL,NULL,NULL,1 FROM permission_policies LIMIT 1"); c.Execute($"UPDATE dispatch_holds SET active=0 WHERE runtime_binding_id='{BindingId}'"); } Store.RecordWorkerStatusAndEvents(e.WorkerId, Status(), []); return Store.GetWorkerEnrollment(e.WorkerId)!; }
         public ControllerWorkerStatus Status() => new(1, 1, "running", null, null, 1, false, [], 0, 0);
-        public BridgeWorkerStatus BridgeStatus(long processGeneration = 1) => new(1, processGeneration, "running", "life", 42, null, null, 1, true, false, null, [], 0, 0, 0, 0, null, null, 0, [], true, true);
+        public BridgeWorkerStatus BridgeStatus(long processGeneration = 1, long workerGeneration = 1, long lastSequence = 0) => new(workerGeneration, processGeneration, "running", "life", 42, null, null, 1, true, false, null, [], 0, lastSequence, 0, 0, null, null, 0, [], true, true);
         public WorkerConnectionManager CreateManager(IWorkerBridgeSessionFactory factory) => new(Control(), factory, Microsoft.Extensions.Options.Options.Create(new WorkerControlOptions
         {
             Enabled = true,
@@ -1255,7 +1255,7 @@ public sealed class RemoteWorkerControlTests
         fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { WorkerGeneration = 2 }, [new(2, 7, "acp-event", "{}", 2)]);
         Assert.Equal((2L, 7L), (fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedWorkerGeneration, fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedSequence));
 
-        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 4));
         session.ReplayBatches[(1, 0)] = [new(1, 3, "acp-event", "{}", 2), new(1, 4, "acp-event", "{}", 2)];
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
 
@@ -1274,7 +1274,7 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
-        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 3));
         session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)], true, 2);
         session.ReplayPages[(1, 2)] = new BridgeReplayPage([new(1, 3, "acp-event", "{}", 2)], false, 3);
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
@@ -1291,8 +1291,36 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
-        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
         session.ReplayPages[(1, 0)] = new BridgeReplayPage([], true, 0);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NullReplayEventsAndItemsAreRejectedAsWorkerProtocolFailures()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var nullEvents = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        nullEvents.ReplayPages[(1, 0)] = new BridgeReplayPage(null, false, 0);
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(nullEvents)))
+            await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        var nullItem = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        nullItem.ReplayPages[(1, 0)] = new BridgeReplayPage([null], false, 0);
+        await using var second = fixture.CreateManager(new FakeBridgeSessionFactory(nullItem));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => second.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReplayEventBeyondReportedLastSequenceIsRejected()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 2, "acp-event", "{}", 2)], false, 2);
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
 
         await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
@@ -1309,7 +1337,7 @@ public sealed class RemoteWorkerControlTests
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
 
-        var failing = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { FailAcknowledgment = true };
+        var failing = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 2)) { FailAcknowledgment = true };
         failing.ReplayBatches[(1, 0)] = [new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)];
         await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(failing)))
         {
@@ -1328,6 +1356,59 @@ public sealed class RemoteWorkerControlTests
 
         Assert.Contains(recovering.Acknowledgments, x => x.Generation == 1 && x.Sequence == 2);
         Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-ack-uncertain");
+    }
+
+    [Fact]
+    public async Task FailedPageAcknowledgmentBlocksNewerGenerationUntilReconnectFinishesTheSuffix()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), [new(1, 1, "acp-event", "{}", 2)]);
+        var failing = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(workerGeneration: 2, lastSequence: 1))
+        {
+            FailAcknowledgmentAt = (1, 2),
+        };
+        failing.ReplayPages[(1, 1)] = new BridgeReplayPage([new(1, 2, "acp-event", "{}", 2)], true, 2);
+        failing.ReplayPages[(1, 2)] = new BridgeReplayPage([new(1, 3, "acp-event", "{}", 2)], false, 3);
+        failing.ReplayPages[(2, 0)] = new BridgeReplayPage([new(2, 1, "acp-event", "{}", 2)], false, 1);
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(failing)))
+            await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.DoesNotContain(failing.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"workerGeneration\":2", StringComparison.Ordinal));
+        Assert.Equal([(1L, 1L), (1L, 2L)], fixture.Store.ListWorkerEvents(enrollment.WorkerId).Select(x => (x.WorkerGeneration, x.Sequence)).ToArray());
+        Assert.Equal((1L, 2L), (fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedWorkerGeneration, fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedSequence));
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+
+        var recovering = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(workerGeneration: 2, lastSequence: 1));
+        recovering.ReplayPages[(1, 2)] = new BridgeReplayPage([new(1, 3, "acp-event", "{}", 2)], false, 3);
+        recovering.ReplayPages[(2, 0)] = new BridgeReplayPage([new(2, 1, "acp-event", "{}", 2)], false, 1);
+        await using var second = fixture.CreateManager(new FakeBridgeSessionFactory(recovering));
+        await second.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal([(1L, 2L), (1L, 3L), (2L, 1L)], recovering.Acknowledgments);
+        var replayInvocations = recovering.Invocations.Where(x => x.Operation == "replay").ToArray();
+        Assert.Contains("\"workerGeneration\":1", replayInvocations[0].Payload, StringComparison.Ordinal);
+        Assert.Contains("\"afterSequence\":2", replayInvocations[0].Payload, StringComparison.Ordinal);
+        Assert.Contains("\"workerGeneration\":2", replayInvocations[1].Payload, StringComparison.Ordinal);
+        Assert.Equal([(1L, 1L), (1L, 2L), (1L, 3L), (2L, 1L)], fixture.Store.ListWorkerEvents(enrollment.WorkerId).Select(x => (x.WorkerGeneration, x.Sequence)).ToArray());
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-ack-uncertain");
+    }
+
+    [Fact]
+    public async Task FailedPendingAcknowledgmentKeepsDispatchHeldAndSkipsAllReplay()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "replay-ack-uncertain", "1:2", WorkerConnectionManager.AckMarker(1, 2));
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(workerGeneration: 2, lastSequence: 1)) { FailAcknowledgment = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.True(lease.Status.DispatchHeld);
+        Assert.Contains("replay-ack-uncertain", lease.Status.HoldReasons);
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "replay");
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
     }
 
     /// <summary>
@@ -1602,6 +1683,7 @@ public sealed class RemoteWorkerControlTests
         public List<(long Generation, long Sequence)> Acknowledgments { get; } = [];
         public List<(string Operation, string Payload)> Invocations { get; } = [];
         public bool FailAcknowledgment { get; set; }
+        public (long Generation, long Sequence)? FailAcknowledgmentAt { get; set; }
         public bool FailSubmitAsWriteUncertain { get; set; }
         public bool FailSubmitAsRemoteUncertain { get; set; }
         public bool RejectReplay { get; set; }
@@ -1648,7 +1730,7 @@ public sealed class RemoteWorkerControlTests
             {
                 var generation = root.GetProperty("workerGeneration").GetInt64();
                 var sequence = root.GetProperty("sequence").GetInt64();
-                if (FailAcknowledgment) throw new WorkerWriteUncertainException("injected uncertain acknowledgment");
+                if (FailAcknowledgment || FailAcknowledgmentAt == (generation, sequence)) throw new WorkerWriteUncertainException("injected uncertain acknowledgment");
                 Acknowledgments.Add((generation, sequence));
             }
 

@@ -369,8 +369,14 @@ Design constraints:
   prompt, while a changed hash is rejected. Record forwarding intent before ACP
   write; a crash in the write/response gap is `Uncertain`, not retry-safe.
 - Events are ordered by persisted worker generation and sequence. The controller
-  acknowledges only after its own transaction commits the event/cursor. Replay
-  starts after that cursor; duplicates are ignored by generation/sequence. Bound
+  acknowledges only after its own transaction commits the event/cursor, and each
+  page's exact ACK must converge before another page or generation is requested.
+  An uncertain ACK stops replay and newer-generation processing; reconnect retries
+  that exact ACK first, resumes the same generation after the committed controller
+  cursor, finishes its suffix, and only then advances. A failed retry keeps dispatch
+  held even though the authenticated connection may remain open. Replay rejects null
+  items, empty `hasMore` pages, out-of-status sequences and responses beyond the
+  10,000-event/10,001-page bound. Duplicates are ignored by generation/sequence. Bound
   retained replay to 64 MiB and 10,000 events initially. An overflow or missing
   cursor records an exact durable replay-gap obligation, holds dispatch and requires
   ID-and-tuple reconciliation; distinct obligations use set semantics and a bounded
