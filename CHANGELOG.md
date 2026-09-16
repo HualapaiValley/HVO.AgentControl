@@ -328,6 +328,12 @@ Changes after the first portal release are collected here.
 
 ### Fixed
 
+- Strict worker replay now treats the current-generation status sequence as a
+  lower-bound pass target: a valid crossing page is committed and ACKed without a
+  false recovery hold, while a controller cursor already beyond the target before
+  replay remains divergence. If replay ends early, authoritative exact worker
+  gap/loss markers are preferred; unavailable status or conflicting/invalid status
+  projection attempts a durable marker-less protocol obligation before faulting.
 - First adoption of `control.db` is now atomic and can never leave an empty or
   header-only authoritative file. A fresh store is seeded in a uniquely named
   controller-private temporary, `wal_checkpoint(TRUNCATE)`-ed, closed, cleared

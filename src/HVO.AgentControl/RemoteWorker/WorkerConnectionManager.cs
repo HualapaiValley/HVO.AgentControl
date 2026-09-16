@@ -466,29 +466,41 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 return new(WithReplayAckHold(status), ReplaySequenceResult.HeldIncomplete);
             if (targetSequence is not null)
             {
-                if (page.NextAfterSequence == targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
-                if (page.NextAfterSequence > targetSequence.Value)
-                {
-                    var held = RecordReplayProtocolFailure(store, enrollment, status, generation, page.NextAfterSequence);
-                    return new(held, ReplaySequenceResult.HeldIncomplete);
-                }
+                // The snapshot is a lower bound for this finite pass. A live worker
+                // may append while producing the page, so commit and ACK the whole
+                // valid page and stop once its cursor reaches or crosses the target.
+                if (page.NextAfterSequence >= targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
             }
             if (!page.HasMore)
             {
                 if (targetSequence is not null)
                 {
-                    var authoritative = await StatusAsync(session, token).ConfigureAwait(false);
+                    BridgeWorkerStatus authoritative;
+                    try
+                    {
+                        authoritative = await StatusAsync(session, token).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (exception is WorkerProtocolException or JsonException or IOException or ObjectDisposedException)
+                    {
+                        TryRecordReplayProtocolFailure(store, enrollment, status, generation, page.NextAfterSequence);
+                        throw new WorkerProtocolException("Worker status was unavailable after replay ended before the snapshot target.", exception);
+                    }
                     if (HasReplayRecovery(authoritative))
                     {
-                        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(authoritative), []);
+                        try
+                        {
+                            store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(authoritative), []);
+                        }
+                        catch (Exception exception) when (exception is OrganizationConcurrencyException or OrganizationValidationException)
+                        {
+                            TryRecordReplayProtocolFailure(store, enrollment, authoritative, generation, page.NextAfterSequence);
+                            throw new WorkerProtocolException("Authoritative worker recovery status conflicted with durable controller metadata.", exception);
+                        }
                         return new(authoritative, ReplaySequenceResult.HeldIncomplete);
                     }
-                    if (authoritative.WorkerGeneration != generation || authoritative.LastSequence <= page.NextAfterSequence)
-                    {
-                        RecordReplayProtocolFailure(store, enrollment, authoritative, generation, page.NextAfterSequence);
-                        throw new WorkerProtocolException("Worker status diverged from the replay snapshot target.");
-                    }
                     RecordReplayProtocolFailure(store, enrollment, authoritative, generation, page.NextAfterSequence);
+                    if (authoritative.WorkerGeneration != generation || authoritative.LastSequence <= page.NextAfterSequence)
+                        throw new WorkerProtocolException("Worker status diverged from the replay snapshot target.");
                     throw new WorkerProtocolException("Worker replay ended before the status snapshot target.");
                 }
                 return new(status, ReplaySequenceResult.Complete);
@@ -511,6 +523,12 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         var held = status with { DispatchHeld = true, HoldReasons = reasons };
         store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(held), []);
         return held;
+    }
+
+    private static void TryRecordReplayProtocolFailure(OrganizationStore store, WorkerEnrollmentRecord enrollment, BridgeWorkerStatus status, long generation, long cursor)
+    {
+        try { RecordReplayProtocolFailure(store, enrollment, status, generation, cursor); }
+        catch (Exception exception) when (exception is OrganizationConcurrencyException or OrganizationValidationException) { }
     }
 
     private static BridgeWorkerStatus WithReplayAckHold(BridgeWorkerStatus status) =>

@@ -1444,6 +1444,57 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
+    public async Task ReplayEndingBeforeSnapshotWithUnavailableStatusCreatesControllerMarkerAndThrows()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 2))
+        {
+            FailStatusAfterReplay = true,
+        };
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([], false, 0);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var failure = await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.IsType<WorkerReadUncertainException>(failure.InnerException);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap" && item.MarkerJson is null);
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ReplayEndingBeforeSnapshotWithExactStatusStoreConflictCreatesControllerMarkerAndThrows()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var hash = "sha256:" + new string('c', 64);
+        var existing = new ControllerPendingPermission(1, 1, "request-a", "turn", "decision", hash, ["allow"], "pending");
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = hash, PendingPermission = existing }, []);
+        var initial = fixture.BridgeStatus(lastSequence: 2);
+        var gap = new BridgeReplayGap("gap:conflicting-projection", "loss", 1, 0, 3, 2, 1, 2);
+        var authoritative = initial with
+        {
+            DispatchHeld = true,
+            HoldReason = "replay-gap-unreconciled",
+            HoldReasons = ["replay-gap-unreconciled"],
+            ReplayGapCount = 1,
+            ReplayGaps = [gap],
+            PendingPermission = new BridgePendingPermission(1, 1, "request-b", "turn", "decision", hash, ["allow"], "pending", null),
+        };
+        var session = new FakeBridgeSession(enrollment.ControllerId, initial, authoritative);
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([], false, 0);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var failure = await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.IsType<OrganizationConcurrencyException>(failure.InnerException);
+        var active = fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true);
+        Assert.Contains(active, item => item.Source == "controller" && item.Kind == "replay-gap" && item.MarkerJson is null);
+        Assert.DoesNotContain(active, item => item.Source == "worker" && item.Kind == "replay-gap");
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
     public async Task ZeroRetentionWorkerReplayLossIsProjectedExactlyWithoutMarkerlessReplacement()
     {
         using var fixture = new RemoteStoreFixture();
@@ -1485,23 +1536,31 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public async Task ReplayPageCrossingCurrentGenerationSnapshotCreatesControllerReplayGapAndHolds()
+    public async Task ReplayPageCrossingCurrentGenerationSnapshotCommitsAndAcksWithoutRecoveryThenNextSyncGetsSuffix()
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
         var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
         session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)], true, 2);
-        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session)))
+        {
+            var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
 
-        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+            Assert.Equal([(1L, 2L)], session.Acknowledgments);
+            Assert.False(lease.Status.DispatchHeld);
+            Assert.DoesNotContain(session.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":2", StringComparison.Ordinal));
+            Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Kind == "replay-gap");
+        }
 
-        Assert.Equal([(1L, 2L)], session.Acknowledgments);
-        Assert.True(lease.Status.DispatchHeld);
-        Assert.Contains("replay-gap", lease.Status.HoldReasons);
-        Assert.DoesNotContain(session.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":2", StringComparison.Ordinal));
-        Assert.Equal([(1L, 1L), (1L, 2L)], fixture.Store.ListWorkerEvents(enrollment.WorkerId).Select(x => (x.WorkerGeneration, x.Sequence)).ToArray());
-        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap" && item.MarkerJson is null);
-        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        var next = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 3));
+        next.ReplayPages[(1, 2)] = new BridgeReplayPage([new(1, 3, "acp-event", "{}", 2)], false, 3);
+        await using var second = fixture.CreateManager(new FakeBridgeSessionFactory(next));
+        await second.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal([(1L, 3L)], next.Acknowledgments);
+        Assert.Contains(next.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":2", StringComparison.Ordinal));
+        Assert.Equal([(1L, 1L), (1L, 2L), (1L, 3L)], fixture.Store.ListWorkerEvents(enrollment.WorkerId).Select(x => (x.WorkerGeneration, x.Sequence)).ToArray());
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Kind == "replay-gap");
     }
 
     [Fact]
@@ -1971,8 +2030,10 @@ public sealed class RemoteWorkerControlTests
         public bool FailSubmitAsRemoteUncertain { get; set; }
         public bool RejectReplay { get; set; }
         public bool FailStatusAfterRejectedReplay { get; set; }
+        public bool FailStatusAfterReplay { get; set; }
         public bool RejectRecovery { get; set; }
         private bool _replayRejected;
+        private bool _replayInvoked;
 
         /// <summary>Models a worker that stops reporting its gaps once it accepts the reconciliation.</summary>
         public bool ClearGapsAfterReconcile { get; set; }
@@ -1991,14 +2052,16 @@ public sealed class RemoteWorkerControlTests
             var root = requestDocument.RootElement;
 
             if (operation == "reconcile") throw new WorkerRemoteException("worker-request-rejected");
+            if (operation == "replay") _replayInvoked = true;
             if (operation == "replay" && RejectReplay)
             {
                 _replayRejected = true;
                 throw new WorkerRemoteException("worker-request-rejected");
             }
-            if (operation == "status" && FailStatusAfterRejectedReplay && _replayRejected)
+            if (operation == "status" && ((FailStatusAfterRejectedReplay && _replayRejected) || (FailStatusAfterReplay && _replayInvoked)))
             {
                 FailStatusAfterRejectedReplay = false;
+                FailStatusAfterReplay = false;
                 throw new WorkerReadUncertainException("injected unavailable status");
             }
             if (operation == "submit" && FailSubmitAsWriteUncertain) throw new WorkerWriteUncertainException("injected uncertain submit");

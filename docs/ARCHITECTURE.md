@@ -141,12 +141,14 @@ explicitly acknowledges the exact loss marker through `reconcile-replay-loss`.
 A cursor-before-boundary gap tied to that unreconciled marker clears in the same
 exact transition. Unknown-generation, future-cursor and other gaps require
 `reconcile-replay-gap` with the exact gap ID, attempted generation/cursor and
-reported first-retained/last sequence values. The initial status `LastSequence` is the
-current-generation target for one replay pass. A page may contain newly appended
-sequences beyond that snapshot; the controller
-commits and ACKs the whole page, then stops the pass once its cursor reaches or crosses
-the target. An already-satisfied or zero target requires no replay, leaving later
-appends unacknowledged for the next synchronization rather than chasing a live suffix.
+reported first-retained/last sequence values. The initial status `LastSequence` is a
+lower-bound current-generation target for one replay pass: a controller cursor already
+above it is divergence because the controller was ahead before replay began. A valid
+page may contain newly appended sequences beyond that snapshot; the controller commits
+and ACKs the whole page, then successfully completes the pass once its cursor reaches or
+crosses the target, without creating a recovery obligation. An already-satisfied or zero
+target requires no replay, leaving later appends unacknowledged for the next
+synchronization rather than chasing a live suffix.
 Prior generations retain the independent 10,000-event bound; the current generation
 allows at most one 256-event crossing page beyond that bound. Replay is also bounded
 to 10,001 pages; every non-final page must contain at least one event, so the page cap
@@ -154,9 +156,13 @@ cannot be reached by a conforming retained journal. When a replay request is rej
 immediately reads status on that authenticated session and persists the worker-reported
 gap and loss markers; it never fabricates an exact tuple from the rejected request.
 A malformed replay page or exceeded controller replay bound closes the session after
-persisting a marker-less controller replay-gap obligation. If status after a worker
-rejection is unavailable, recovery likewise remains held by a marker-less controller
-obligation and later healthy status never auto-clears it.
+persisting a marker-less controller replay-gap obligation. If replay ends before the
+snapshot target, the controller reads authoritative status: exact replay gap/loss holds
+are preferred and persisted, while an unavailable status or a validation/concurrency
+conflict projecting that exact status triggers a best-effort marker-less protocol
+obligation before the session faults. If status after a worker rejection is unavailable,
+recovery likewise remains held by a marker-less controller obligation and later healthy
+status never auto-clears it.
 Because no exact worker marker exists, automatic worker reconciliation is impossible:
 only the same-origin owner API may acknowledge the obligation after external
 reconciliation, using the fixed `acknowledged-after-external-reconciliation`

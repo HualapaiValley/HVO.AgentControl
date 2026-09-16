@@ -375,10 +375,15 @@ Design constraints:
   that exact ACK first, resumes the same generation after the committed controller
   cursor, finishes its suffix, and only then advances. A failed retry keeps dispatch
   held even though the authenticated connection may remain open. Initial status
-  `LastSequence` is the current-generation target for one finite pass. Replay accepts,
-  commits and ACKs a whole page that crosses that target, then stops; later live appends
-  remain for the next synchronization. Prior generations retain the 10,000-event cap,
-  while current generation permits only one 256-event crossing page, with 10,001 pages
+  `LastSequence` is the lower-bound current-generation target for one finite pass. A
+  cursor already above it before replay is divergence. Replay accepts, commits and ACKs
+  a whole valid page that crosses that target, completes without a recovery obligation,
+  and leaves later live appends for the next synchronization. If replay ends before the
+  target, authoritative exact replay gap/loss markers are persisted and preferred; an
+  unavailable status or validation/concurrency failure projecting it first attempts a
+  marker-less controller protocol obligation and then faults. Prior generations retain
+  the 10,000-event cap, while current generation permits only one 256-event crossing
+  page, with 10,001 pages
   as the independent cap. Replay rejects null items, empty `hasMore` pages,
   non-increasing/wrong-generation sequences, raw payloads over 64 KiB, mismatched UTF-8
   byte counts and empty/overlong kinds before normalization. A malformed, store-invalid
