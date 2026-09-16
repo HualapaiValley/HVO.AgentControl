@@ -74,7 +74,7 @@ public sealed class WorkerImageContractTests
             Assert.True(bootstrap.ExitCode == 0, bootstrap.Output);
             var start = Run(["run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL", "--security-opt", "no-new-privileges", "-v", volume + ":/control", "-e", "WORKER_ID=test-worker", "-e", "WORKER_CONTROLLER_ID=test-controller", Image]);
             Assert.True(start.ExitCode == 0, start.Output);
-            Thread.Sleep(1000);
+            _ = WaitForAcpListeners(name) ?? throw new Xunit.Sdk.XunitException("the fixed ACP process and its loopback:4096 listener did not appear within the bound.");
             var pid = Run(["inspect", "-f", "{{.State.Pid}}", name]);
             Assert.True(pid.ExitCode == 0, pid.Output);
             var process = Run(["exec", name, "sh", "-c", "set -e; test $(cat /proc/1/comm) = python3; test $(ps -eo stat= | awk '$1 ~ /^Z/ {n++} END {print n+0}') = 0; p=$(pgrep -f '^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_USERNAME=opencode$'; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_PASSWORD='; ! runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^WORKER_CONTROLLER_ID='; runuser -u employee -- sh -c '! test -r /run/worker-supervisor.sock; ! test -w /run/worker-supervisor.sock'"]);
@@ -100,8 +100,8 @@ public sealed class WorkerImageContractTests
             Assert.True(bootstrap.ExitCode == 0, bootstrap.Output);
             var start = Run(["run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL", "--security-opt", "no-new-privileges", "-v", volume + ":/control", "-e", "WORKER_ID=test-worker", "-e", "WORKER_CONTROLLER_ID=test-controller", Image]);
             Assert.True(start.ExitCode == 0, start.Output);
-            Thread.Sleep(1000);
-            var contract = Run(["exec", name, "sh", "-c", "set -e; p=$(pgrep -f '^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; grep -Eq '0100007F:1000 .* 0A ' /proc/$p/net/tcp; /usr/local/bin/opencode attach --help >/dev/null"]);
+            _ = WaitForAcpListeners(name) ?? throw new Xunit.Sdk.XunitException("the fixed ACP process and its loopback:4096 listener did not appear within the bound.");
+            var contract = Run(["exec", name, "sh", "-c", "set -e; /usr/local/bin/opencode attach --help >/dev/null"]);
             Assert.True(contract.ExitCode == 0, contract.Output);
         }
         finally { _ = Run(["rm", "-f", name]); _ = Run(["volume", "rm", "-f", volume]); }
