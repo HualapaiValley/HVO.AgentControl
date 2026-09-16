@@ -235,7 +235,7 @@ app.MapPost("/api/execution-hosts/{id}/disable", (HttpContext context, AcpContro
 app.MapGet("/api/workers/status", (AcpControlHost control) =>
 {
     if (control.Organization is not { } store) return Program.WorkerStoreUnavailable();
-    try { return Results.Ok(new { enrollments = store.ListWorkerEnrollments(), cursors = store.ListWorkerCursors(), pendingWorkerPermissions = store.ListWorkerPendingPermissions(), recovery = store.ListWorkerRecoveryObligations(activeOnly: true), eventRetention = store.ListWorkerEventRetention() }); }
+    try { return Results.Ok(new { enrollments = store.ListWorkerEnrollments(), cursors = store.ListWorkerCursors(), pendingWorkerPermissions = store.ListWorkerPendingPermissions(), recovery = store.ListWorkerRecoveryObligations(activeOnly: true), recoveryAudit = store.ListWorkerRecoveryAudit(), eventRetention = store.ListWorkerEventRetention() }); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 })
     .WithName("GetRemoteWorkerStatus").WithTags("Remote workers");

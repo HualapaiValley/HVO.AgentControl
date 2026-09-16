@@ -11,7 +11,8 @@ public sealed class SystemWorkerClock : IWorkerClock
 public sealed record WorkerOptions(string ControlDirectory, string WorkerId, string ControllerId, string SocketPath,
     TimeSpan ChallengeLifetime, TimeSpan HeartbeatInterval, TimeSpan LeaseLifetime, int EventLimit = 10_000,
     long EventByteLimit = 64L * 1024 * 1024, int NonceCacheLimit = 4096, int ExpectedBridgeUid = -1,
-    int PendingPermissionLimit = 64, long PendingPermissionByteLimit = 256 * 1024, int MaxConnections = 32, int MaxAuthenticatingConnections = 8)
+    int PendingPermissionLimit = 64, long PendingPermissionByteLimit = 256 * 1024, int MaxConnections = 32, int MaxAuthenticatingConnections = 8,
+    int ReplayPageEventLimit = 256, int ReplayPageByteLimit = 256 * 1024)
 {
     public static WorkerOptions Production(string controlDirectory, string workerId, string controllerId) => new(
         controlDirectory, workerId, controllerId, Path.Combine(controlDirectory, "bridge.sock"), TimeSpan.FromSeconds(10),
@@ -37,6 +38,7 @@ public sealed record StoredRequest(string RequestId, string PayloadHash, string 
 public sealed record StoredCancellation(string CancellationId, string TargetRequestId, string PayloadHash,
     string State, long ProcessGeneration, long OwnershipEpoch);
 public sealed record WorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
+public sealed record WorkerReplayPage(IReadOnlyList<WorkerEvent> Events, bool HasMore, long NextAfterSequence);
 public sealed record ReplayLoss(long WorkerGeneration, long MarkerSequence, long DroppedCount, long DroppedBytes);
 public sealed record JournalFailure(string OperationId, long WorkerGeneration, string ErrorCategory);
 public sealed record ReplayGap(string Id, string Kind, long WorkerGeneration, long AfterSequence, long FirstRetainedSequence,

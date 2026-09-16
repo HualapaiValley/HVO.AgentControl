@@ -107,7 +107,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         {
             var current = _store.GetRequest(requestId);
             if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
-            throw new WorkerProtocolException("ACP request completion is uncertain.", exception);
+            throw new WorkerOperationUncertainException("ACP request completion is uncertain.", exception);
         }
         finally
         {
@@ -153,7 +153,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
         {
             _store.MarkCancellationUncertain(registered.CancellationId);
-            throw new WorkerProtocolException("Cancellation delivery is uncertain.", exception);
+            throw new WorkerOperationUncertainException("Cancellation delivery is uncertain.", exception);
         }
         finally { lock (_cancellationGate) _cancellations.TryRemove(registered.CancellationId, out _); }
     }
@@ -171,10 +171,10 @@ public sealed class WorkerRuntime : IAsyncDisposable
     {
         try
         {
-            if (!_permissionFrames.TryGetValue(deciding.DecisionId, out var frame)) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerProtocolException("Permission response transport requires reconciliation."); }
+            if (!_permissionFrames.TryGetValue(deciding.DecisionId, out var frame)) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerOperationUncertainException("Permission response transport requires reconciliation."); }
             var response = new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = frame.RequestId, ["result"] = new { outcome = new { outcome = "selected", optionId = deciding.Decision } } };
             try { await WriteAcpObjectAsync(response, _lifetime.Token).ConfigureAwait(false); }
-            catch (Exception exception) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerProtocolException("Permission response delivery is uncertain.", exception); }
+            catch (Exception exception) { _store.MarkPermissionUncertain(deciding.DecisionId); throw new WorkerOperationUncertainException("Permission response delivery is uncertain.", exception); }
             _store.CompletePermissionDecision(deciding.DecisionId);
             _permissionFrames.TryRemove(deciding.DecisionId, out _);
             var decided = deciding with { State = "decided" };
@@ -354,7 +354,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         }
         finally { _writeLock.Release(); }
     }
-    internal bool IsTransportHealthy => Volatile.Read(ref _transportFailed) == 0 && _store.Status().ProcessState == "running";
+    internal bool IsTransportHealthy => Volatile.Read(ref _transportFailed) == 0;
     private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long OwnershipEpoch, long CorrelationId, string SessionId);
     public async ValueTask DisposeAsync() { _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
     public static FileStream OpenInheritedFd(int fd, FileAccess access) => new(new SafeFileHandle((IntPtr)fd, ownsHandle: false), access, 4096, isAsync: false);
@@ -476,9 +476,17 @@ public sealed class WorkerBridge : IAsyncDisposable
                         {
                             await DispatchAsync(stream, frame.RootElement, lease, bridgeToken).ConfigureAwait(false);
                         }
+                        catch (WorkerOperationUncertainException)
+                        {
+                            // The durable mutation may already have reached ACP. Report only
+                            // the fixed category, then close so this owner session cannot be
+                            // reused as though the operation were a clean rejection.
+                            try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-operation-uncertain" }, bridgeToken).ConfigureAwait(false); } catch { }
+                            break;
+                        }
                         catch (WorkerProtocolException)
                         {
-                            // Operation validation/replay/hold rejection is recoverable on
+                            // Pre-effect validation/replay/hold rejection is recoverable on
                             // the same authenticated stream only while this socket still owns
                             // the current live lease. Never disclose exception detail.
                             await WorkerProtocol.WriteFrameAsync(stream, new { type = "error", error = "worker-request-rejected" }, bridgeToken).ConfigureAwait(false);

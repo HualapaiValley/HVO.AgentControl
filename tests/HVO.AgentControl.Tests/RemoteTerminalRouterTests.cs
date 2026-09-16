@@ -225,7 +225,7 @@ public sealed class RemoteTerminalRouterTests
                 object value = operation switch
                 {
                     "status" => new BridgeWorkerStatus(1, 1, "running", "life", 1, null, null, 1, true, false, null, [], 0, 0, 0, 0, null, null, 0, [], true, true),
-                    "replay" => Array.Empty<BridgeWorkerEvent>(),
+                    "replay" => new BridgeReplayPage([], false, 0),
                     _ => new { ok = true },
                 };
                 using var document = JsonDocument.Parse(JsonSerializer.Serialize(value, WorkerProtocol.JsonOptions));

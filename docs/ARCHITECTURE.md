@@ -101,11 +101,20 @@ events and the lexicographic generation/sequence ACK survive bridge restart and
 remain replayable; status exposes both the current generation and ACK generation.
 Pruning applies only behind that ACK cursor across the global 10,000-event/64-MiB
 bounds and removes reconciled loss rows before their referenced generation rows.
-The authenticated controller connection processes multiple operation frames. A
-well-framed operation rejection returns only the fixed `worker-request-rejected`
-category and leaves the stream usable while its lease is still current; malformed
-framing, authentication failure, transport failure, or a stale/fenced lease closes
-the connection. Each missing generation/cursor creates or reuses an exact durable replay-gap
+Replay is paged in sequence order, with at most 256 events and a conservative
+256-KiB serialized response budget per page. The controller commits and ACKs each
+page's exact generation/last sequence before requesting the next page, rejects a
+non-progressing cursor, and never builds a control response near the 1-MiB framing
+limit. An individual event that cannot fit a replay page is treated as replay loss
+at append time rather than becoming an unreplayable retained row. The authenticated
+controller connection processes multiple operation frames. A well-framed pre-effect
+operation rejection returns only the fixed `worker-request-rejected` category and
+leaves the stream usable while its lease is still current. If ACP delivery or
+completion becomes ambiguous after durable mutation registration, the bridge returns
+`worker-operation-uncertain` if possible and then closes the owner connection; the
+controller records the request/cancellation/permission uncertain and discards the
+session. Malformed framing, authentication failure, transport failure, or a
+stale/fenced lease also closes the connection. Each missing generation/cursor creates or reuses an exact durable replay-gap
 obligation identified by a stable hash; status exposes up to 128 obligations and
 their total count. Distinct gaps cannot overwrite each other, reconciliation names
 the exact ID and tuple, and a loss reconciliation clears only gaps linked to that
@@ -130,6 +139,10 @@ only the same-origin owner API may acknowledge the obligation after external
 reconciliation, using the fixed `acknowledged-after-external-reconciliation`
 disposition and a SHA-256 evidence reference. The obligation clear and a hash-only
 `worker_recovery_audit` row commit atomically; no free-form notes are retained.
+Acknowledgment never synthesizes readiness: when it clears the final obligation,
+the cursor becomes `disconnected`, clears its hold summary, and suppresses viewer
+availability until a subsequent authenticated worker status is recorded. The
+owner-authenticated `/api/workers/status` response exposes the hash-only audit rows.
 Marker-less acknowledgment is limited to controller `replay-gap` and
 `ownership-changed` obligations. For ownership changes with active work, the owner
 must first externally confirm the outcome or choose a reconciled stop/restart; the
@@ -156,7 +169,10 @@ before a bridge-lifetime write; reconnect with pending permission work installs 
 `permission-decision-uncertain`, and no blind resend or new-epoch adoption occurs;
 `stop-process` is the safe fixed recovery that terminates ACP and lets observed EOF
 atomically invalidate old permissions, clear ownership/permission holds and retain a
-`process-exited` hold. Cancellation likewise requires an explicit cancellation ID, target request,
+`process-exited` hold. ACP process exit is not itself a bridge transport failure:
+status, replay, hold and exact recovery operations remain available on the same
+healthy owner connection, while submit/cancel/permission continue to enforce their
+own running-process and hold gates. Cancellation likewise requires an explicit cancellation ID, target request,
 epoch/nonce and bounded `session/cancel` envelope. Its canonical intent is persisted
 before the bridge-lifetime write; same ID/hash is idempotent, changed reuse rejects,
 forwarded receipt is not target completion, and ambiguous writes reconcile as

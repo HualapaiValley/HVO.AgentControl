@@ -145,6 +145,7 @@ public sealed class NdjsonFrameReader
 }
 
 public class WorkerProtocolException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class WorkerOperationUncertainException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
 public sealed class WorkerReplayLossException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
 public sealed class AcpProtocolException(string message, Exception? inner = null) : Exception(message, inner);
 public sealed class WorkerStoreException(string message, Exception? inner = null) : Exception(message, inner);

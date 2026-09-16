@@ -233,6 +233,20 @@ public sealed class RemoteWorkerApiWorkerDisabledTests : IClassFixture<EnabledRu
     }
 
     [Fact]
+    public async Task WorkerStatusExposesHashOnlyRecoveryAuditCollection()
+    {
+        using var client = await AuthorizedClientAsync();
+        using var response = await client.GetAsync("/api/workers/status");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var raw = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(raw);
+        Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("recoveryAudit").ValueKind);
+        Assert.DoesNotContain("note", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("markerJson", raw, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UnknownWorkerPermissionsAre404ProblemDetails()
     {
         using var client = await AuthorizedClientAsync();

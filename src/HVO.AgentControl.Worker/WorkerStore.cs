@@ -518,7 +518,8 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         var count = Convert.ToInt64(Scalar("SELECT COUNT(*) FROM events", tx), CultureInfo.InvariantCulture);
         var total = Convert.ToInt64(Scalar("SELECT COALESCE(SUM(byte_count),0) FROM events", tx), CultureInfo.InvariantCulture);
         var sequence = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='next_event_sequence'", tx), CultureInfo.InvariantCulture);
-        if (bytes > _options.EventByteLimit || count + 1 > _options.EventLimit || total + bytes > _options.EventByteLimit)
+        var eventFitsReplayPage = bytes <= 64 * 1024 && FitsReplayPage(new WorkerEvent(generation, sequence, kind, payloadJson, bytes));
+        if (!eventFitsReplayPage || bytes > _options.EventByteLimit || count + 1 > _options.EventLimit || total + bytes > _options.EventByteLimit)
         {
             var loss = Scalar("SELECT marker_sequence FROM replay_loss WHERE worker_generation=$g", tx, ("$g", generation));
             if (loss is null)
@@ -560,12 +561,12 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         tx.Commit(); return new WorkerEvent(generation, sequence, kind, payloadJson, bytes);
     }
 
-    public IReadOnlyList<WorkerEvent> Replay(long generation, long afterSequence)
+    public WorkerReplayPage Replay(long generation, long afterSequence)
     {
         lock (_databaseGate) return ReplayLocked(generation, afterSequence);
     }
 
-    private IReadOnlyList<WorkerEvent> ReplayLocked(long generation, long afterSequence)
+    private WorkerReplayPage ReplayLocked(long generation, long afterSequence)
     {
         var lastObject = Scalar("SELECT last_sequence FROM event_generations WHERE worker_generation=$g", null, ("$g", generation));
         if (lastObject is null)
@@ -587,10 +588,26 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             }
             throw ReplayGap("cursor-before-retained-boundary", generation, afterSequence, first, last);
         }
-        using var command = _connection.CreateCommand(); command.CommandText = "SELECT sequence,kind,payload_json,byte_count FROM events WHERE worker_generation=$g AND sequence>$s ORDER BY sequence"; command.Parameters.AddWithValue("$g", generation); command.Parameters.AddWithValue("$s", afterSequence);
+        using var command = _connection.CreateCommand(); command.CommandText = "SELECT sequence,kind,payload_json,byte_count FROM events WHERE worker_generation=$g AND sequence>$s ORDER BY sequence LIMIT $limit"; command.Parameters.AddWithValue("$g", generation); command.Parameters.AddWithValue("$s", afterSequence); command.Parameters.AddWithValue("$limit", checked(_options.ReplayPageEventLimit + 1));
         using var reader = command.ExecuteReader(); var result = new List<WorkerEvent>();
-        while (reader.Read()) result.Add(new WorkerEvent(generation, reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
-        return result;
+        var hasMore = false;
+        while (reader.Read())
+        {
+            var item = new WorkerEvent(generation, reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3));
+            if (result.Count >= _options.ReplayPageEventLimit || !FitsReplayPage(result.Append(item))) { hasMore = true; break; }
+            result.Add(item);
+        }
+        var next = result.Count == 0 ? afterSequence : result[^1].Sequence;
+        if (hasMore && next <= afterSequence) throw new WorkerProtocolException("Replay page cannot make progress.");
+        return new WorkerReplayPage(result, hasMore, next);
+    }
+
+    private bool FitsReplayPage(WorkerEvent item) => FitsReplayPage([item]);
+    private bool FitsReplayPage(IEnumerable<WorkerEvent> events)
+    {
+        var items = events.ToArray();
+        var page = new WorkerReplayPage(items, true, items.LastOrDefault()?.Sequence ?? 0);
+        return JsonSerializer.SerializeToUtf8Bytes(new { type = "result", operation = "replay", result = page }, WorkerProtocol.JsonOptions).Length < Math.Min(_options.ReplayPageByteLimit, WorkerProtocol.MaxControlFrameBytes);
     }
 
     public void Acknowledge(long generation, long sequence)

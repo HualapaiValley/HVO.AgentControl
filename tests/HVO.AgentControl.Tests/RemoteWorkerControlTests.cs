@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HVO.AgentControl.Organization;
 using HVO.AgentControl.RemoteWorker;
+using HVO.AgentControl.Worker;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -1268,6 +1269,35 @@ public sealed class RemoteWorkerControlTests
         Assert.DoesNotContain(session.Acknowledgments, x => x.Generation == 2);
     }
 
+    [Fact]
+    public async Task ReplayPagesAreCommittedAndAcknowledgedOnePageAtATime()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)], true, 2);
+        session.ReplayPages[(1, 2)] = new BridgeReplayPage([new(1, 3, "acp-event", "{}", 2)], false, 3);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal([(1L, 2L), (1L, 3L)], session.Acknowledgments);
+        Assert.Contains(session.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":2", StringComparison.Ordinal));
+        Assert.Equal((1L, 3L), (fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedWorkerGeneration, fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedSequence));
+    }
+
+    [Fact]
+    public async Task ReplayPageThatCannotProgressIsRejected()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([], true, 0);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+    }
+
     /// <summary>
     /// A failed acknowledgment is a real data-loss risk, so it becomes a durable
     /// obligation whose hold survives a later healthy status and is discharged only
@@ -1340,6 +1370,21 @@ public sealed class RemoteWorkerControlTests
         Assert.Equal("Uncertain", request.State);
         Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
         Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "request-uncertain");
+    }
+
+    [Fact]
+    public async Task RemoteUncertainCategoryFaultsTheSessionAndRecordsRequestUncertainty()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { FailSubmitAsRemoteUncertain = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var request = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "idem-remote-uncertain", "hello"), CancellationToken.None);
+
+        Assert.Equal("Uncertain", request.State);
+        Assert.Equal("worker-operation-uncertain", request.OutcomeCategory);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
     }
 
     [Fact]
@@ -1419,6 +1464,11 @@ public sealed class RemoteWorkerControlTests
         Assert.Equal(obligation.MarkerHash, audit.MarkerHash);
         Assert.Equal("sha256:" + new string('a', 64), audit.EvidenceHash);
         Assert.Equal("acknowledged-after-external-reconciliation", audit.Disposition);
+        var acknowledgedCursor = fixture.Store.GetWorkerCursor(enrollment.WorkerId)!;
+        Assert.Equal("disconnected", acknowledgedCursor.ConnectionState);
+        Assert.Null(acknowledgedCursor.HoldSummary);
+        Assert.False(acknowledgedCursor.ViewerAvailable);
+        fixture.Store.RecordWorkerConnectionState(enrollment.WorkerId, "authenticated", acknowledgedCursor.ObservedOwnershipEpoch);
         Assert.Equal("authenticated", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
         Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('b', 64), "acknowledged-after-external-reconciliation"));
     }
@@ -1548,10 +1598,12 @@ public sealed class RemoteWorkerControlTests
 
         /// <summary>Replay results keyed by the exact (generation, afterSequence) request.</summary>
         public Dictionary<(long Generation, long After), BridgeWorkerEvent[]> ReplayBatches { get; } = [];
+        public Dictionary<(long Generation, long After), BridgeReplayPage> ReplayPages { get; } = [];
         public List<(long Generation, long Sequence)> Acknowledgments { get; } = [];
         public List<(string Operation, string Payload)> Invocations { get; } = [];
         public bool FailAcknowledgment { get; set; }
         public bool FailSubmitAsWriteUncertain { get; set; }
+        public bool FailSubmitAsRemoteUncertain { get; set; }
         public bool RejectReplay { get; set; }
         public bool FailStatusAfterRejectedReplay { get; set; }
         public bool RejectRecovery { get; set; }
@@ -1585,6 +1637,7 @@ public sealed class RemoteWorkerControlTests
                 throw new WorkerReadUncertainException("injected unavailable status");
             }
             if (operation == "submit" && FailSubmitAsWriteUncertain) throw new WorkerWriteUncertainException("injected uncertain submit");
+            if (operation == "submit" && FailSubmitAsRemoteUncertain) throw new WorkerRemoteException("worker-operation-uncertain");
             if (operation.StartsWith("reconcile-", StringComparison.Ordinal))
             {
                 if (RejectRecovery) throw new WorkerRemoteException("worker-operation-failed");
@@ -1602,11 +1655,20 @@ public sealed class RemoteWorkerControlTests
             object value = operation switch
             {
                 "status" => Status(),
-                "replay" => ReplayBatches.TryGetValue((root.GetProperty("workerGeneration").GetInt64(), root.GetProperty("afterSequence").GetInt64()), out var batch) ? batch : Array.Empty<BridgeWorkerEvent>(),
+                "replay" => ReplayResult(root),
                 _ => new { ok = true },
             };
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(value, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions));
             return Task.FromResult(new WorkerSessionResult(operation, document.RootElement.Clone(), mutation));
+        }
+
+        private BridgeReplayPage ReplayResult(JsonElement root)
+        {
+            var key = (root.GetProperty("workerGeneration").GetInt64(), root.GetProperty("afterSequence").GetInt64());
+            if (ReplayPages.TryGetValue(key, out var page)) return page;
+            return ReplayBatches.TryGetValue(key, out var batch)
+                ? new BridgeReplayPage(batch, false, batch.LastOrDefault()?.Sequence ?? key.Item2)
+                : new BridgeReplayPage([], false, key.Item2);
         }
 
         private BridgeWorkerStatus Status()

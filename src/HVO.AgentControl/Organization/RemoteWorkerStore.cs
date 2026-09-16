@@ -293,7 +293,7 @@ public sealed partial class OrganizationStore
                 if (Convert.ToInt64(remaining.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
                 {
                     using var release = c.CreateCommand(); release.Transaction = tx;
-                    release.CommandText = "UPDATE worker_cursors SET connection_state=CASE WHEN observed_at IS NULL THEN 'disconnected' ELSE 'authenticated' END,hold_summary=NULL,updated_at=$now,revision=revision+1 WHERE worker_id=$w AND connection_state='held'";
+                    release.CommandText = "UPDATE worker_cursors SET connection_state='disconnected',hold_summary=NULL,viewer_available=0,updated_at=$now,revision=revision+1 WHERE worker_id=$w AND connection_state='held'";
                     Add(release, ("$now", now), ("$w", workerId)); release.ExecuteNonQuery();
                 }
             }

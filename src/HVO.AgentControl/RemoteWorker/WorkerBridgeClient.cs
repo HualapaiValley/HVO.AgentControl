@@ -23,7 +23,7 @@ public sealed class WorkerRemoteException(string code) : WorkerProtocolException
 
 public sealed class WorkerBridgeClient : IAsyncDisposable
 {
-    private static readonly HashSet<string> FixedErrors = ["worker-request-rejected", "worker-operation-failed"];
+    private static readonly HashSet<string> FixedErrors = ["worker-request-rejected", "worker-operation-failed", "worker-operation-uncertain"];
     private readonly Stream _stream;
     private readonly byte[] _key;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -124,6 +124,7 @@ public sealed class WorkerBridgeClient : IAsyncDisposable
                     RequireExactFields(root, "type", "error");
                     var code = RequiredString(root, "error");
                     if (!FixedErrors.Contains(code)) throw new WorkerProtocolException("Worker returned an unknown error category.");
+                    if (code == "worker-operation-uncertain") Fault();
                     throw new WorkerRemoteException(code);
                 }
                 RequireExactFields(root, "type", "operation", "result");

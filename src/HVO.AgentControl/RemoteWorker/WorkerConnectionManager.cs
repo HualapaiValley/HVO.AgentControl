@@ -15,6 +15,7 @@ public sealed record BridgeJournalFailure(string OperationId, long WorkerGenerat
 public sealed record BridgeReplayGap(string Id, string Kind, long WorkerGeneration, long AfterSequence, long FirstRetainedSequence, long LastSequence, long? LossMarkerGeneration, long? LossMarkerSequence);
 public sealed record BridgeWorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle, long? ObservedPid, string? ActiveRequestId, BridgePendingPermission? PendingPermission, long OwnershipEpoch, bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, BridgeReplayLoss? ReplayLoss, BridgeJournalFailure? JournalFailure, int ReplayGapCount, IReadOnlyList<BridgeReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false);
 public sealed record BridgeWorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
+public sealed record BridgeReplayPage(IReadOnlyList<BridgeWorkerEvent> Events, bool HasMore, long NextAfterSequence);
 public sealed record BridgeStoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson, long ProcessGeneration, long OwnershipEpoch, string TurnId, string SessionId);
 public sealed record WorkerSessionResult(string Operation, JsonElement Result, bool WriteAttempted);
 public interface IWorkerBridgeSession : IAsyncDisposable
@@ -131,6 +132,11 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 var remote = JsonSerializer.Deserialize<BridgeStoredRequest>(result.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? throw new WorkerProtocolException("Worker submit result is invalid.");
                 return ApplyRemoteRequest(store, request, remote);
             }
+            catch (WorkerRemoteException ex) when (ex.Code == "worker-operation-uncertain")
+            {
+                await LoseSessionLockedAsync(command.WorkerId, entry).ConfigureAwait(false);
+                return store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain", ex.Code);
+            }
             catch (WorkerRemoteException ex) { return store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Failed", ex.Code); }
             catch (Exception ex) when (IsSessionLoss(ex))
             {
@@ -166,6 +172,11 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 Touch(lease);
                 return store.TransitionWorkerCancellation(cancellation.Id, cancellation.Revision, "Intent", "Forwarded");
             }
+            catch (WorkerRemoteException ex) when (ex.Code == "worker-operation-uncertain")
+            {
+                await LoseSessionLockedAsync(request.WorkerId, entry).ConfigureAwait(false);
+                return store.TransitionWorkerCancellation(cancellation.Id, cancellation.Revision, "Intent", "Uncertain");
+            }
             catch (Exception ex) when (IsSessionLoss(ex))
             {
                 await LoseSessionLockedAsync(request.WorkerId, entry).ConfigureAwait(false);
@@ -197,6 +208,12 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 await lease.Session.InvokeAsync("permission", lease.Session.Mutation("permission", new Dictionary<string, object?> { ["decisionId"] = authoritative.DecisionId, ["processGeneration"] = authoritative.ProcessGeneration, ["requestId"] = authoritative.RequestId, ["turnId"] = authoritative.TurnId, ["decision"] = choice }), true, token).ConfigureAwait(false);
                 Touch(lease);
                 store.TransitionWorkerPendingPermission(authoritative.WorkerId, authoritative.DecisionId, authoritative.Revision, "pending", "decided");
+            }
+            catch (WorkerRemoteException ex) when (ex.Code == "worker-operation-uncertain")
+            {
+                store.TransitionWorkerPendingPermission(authoritative.WorkerId, authoritative.DecisionId, authoritative.Revision, "pending", "uncertain");
+                await LoseSessionLockedAsync(command.WorkerId, entry).ConfigureAwait(false);
+                throw;
             }
             catch (Exception ex) when (IsSessionLoss(ex))
             {
@@ -333,39 +350,42 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     /// </remarks>
     private static async Task<BridgeWorkerStatus> ReplayAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long after, CancellationToken token)
     {
-        WorkerSessionResult replay;
-        try { replay = await session.InvokeAsync("replay", new { operation = "replay", workerGeneration = generation, afterSequence = after }, false, token).ConfigureAwait(false); }
-        catch (WorkerRemoteException)
+        var cursor = after;
+        while (true)
         {
-            try
+            WorkerSessionResult replay;
+            try { replay = await session.InvokeAsync("replay", new { operation = "replay", workerGeneration = generation, afterSequence = cursor }, false, token).ConfigureAwait(false); }
+            catch (WorkerRemoteException)
             {
-                var authoritative = await StatusAsync(session, token).ConfigureAwait(false);
-                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(authoritative), []);
-                return authoritative;
+                try
+                {
+                    var authoritative = await StatusAsync(session, token).ConfigureAwait(false);
+                    store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(authoritative), []);
+                    return authoritative;
+                }
+                catch (Exception statusException) when (statusException is WorkerProtocolException or JsonException or IOException or ObjectDisposedException)
+                {
+                    // The replay rejection proves that recovery is required, but without
+                    // the worker's status there is no safe exact tuple to invent. Keep an
+                    // operator-only controller obligation with no marker; a later healthy
+                    // status will project the worker's exact gap/loss markers.
+                    store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"{generation}:{cursor}");
+                    store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] }, []);
+                    return status with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] };
+                }
             }
-            catch (Exception statusException) when (statusException is WorkerProtocolException or JsonException or IOException or ObjectDisposedException)
-            {
-                // The replay rejection proves that recovery is required, but without
-                // the worker's status there is no safe exact tuple to invent. Keep an
-                // operator-only controller obligation with no marker; a later healthy
-                // status will project the worker's exact gap/loss markers.
-                store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"{generation}:{after}");
-                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] }, []);
-                return status with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] };
-            }
+            var page = JsonSerializer.Deserialize<BridgeReplayPage>(replay.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? throw new WorkerProtocolException("Worker replay page is invalid.");
+            var sanitized = page.Events.Select(x => { var json = SanitizeJson(x.PayloadJson); return new ControllerWorkerEvent(x.WorkerGeneration, x.Sequence, SanitizeKind(x.Kind), json, Encoding.UTF8.GetByteCount(json)); }).ToArray();
+            if (sanitized.Any(x => x.WorkerGeneration != generation || x.Sequence <= cursor) || page.NextAfterSequence < cursor || (sanitized.Length > 0 && page.NextAfterSequence != sanitized[^1].Sequence) || (page.HasMore && page.NextAfterSequence <= cursor))
+                throw new WorkerProtocolException("Worker replay page did not make valid progress.");
+            store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
+            if (sanitized.Length > 0 && !await AcknowledgeAsync(store, enrollment, session, status, generation, page.NextAfterSequence, token).ConfigureAwait(false)) return status;
+            if (!page.HasMore) return status;
+            cursor = page.NextAfterSequence;
         }
-        var events = JsonSerializer.Deserialize<BridgeWorkerEvent[]>(replay.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? [];
-        var sanitized = events.Select(x => { var json = SanitizeJson(x.PayloadJson); return new ControllerWorkerEvent(x.WorkerGeneration, x.Sequence, SanitizeKind(x.Kind), json, Encoding.UTF8.GetByteCount(json)); }).ToArray();
-        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
-        if (sanitized.Length == 0) return status;
-
-        var ackGeneration = sanitized.Max(x => x.WorkerGeneration);
-        var ackSequence = sanitized.Where(x => x.WorkerGeneration == ackGeneration).Max(x => x.Sequence);
-        await AcknowledgeAsync(store, enrollment, session, status, ackGeneration, ackSequence, token).ConfigureAwait(false);
-        return status;
     }
 
-    private static async Task AcknowledgeAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long sequence, CancellationToken token)
+    private static async Task<bool> AcknowledgeAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long sequence, CancellationToken token)
     {
         var marker = AckMarker(generation, sequence);
         try
@@ -376,12 +396,13 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         {
             store.RecordControllerRecovery(enrollment.WorkerId, "replay-ack-uncertain", $"{generation}:{sequence}", marker);
             store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-ack-uncertain"] }, []);
-            return;
+            return false;
         }
         // The worker accepted the exact marker, so any retained obligation for it is
         // now genuinely discharged.
         var obligation = store.ListWorkerRecoveryObligations(enrollment.WorkerId, activeOnly: true).FirstOrDefault(x => x.Kind == "replay-ack-uncertain" && x.MarkerJson == marker);
         if (obligation is not null) store.ResolveRecoveryObligationById(obligation.Id, obligation.Revision);
+        return true;
     }
 
     private static async Task RetryPendingAcknowledgmentsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, CancellationToken token)
