@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -102,6 +104,143 @@ public sealed class WorkerImageContractTests
             Assert.True(contract.ExitCode == 0, contract.Output);
         }
         finally { _ = Run(["rm", "-f", name]); _ = Run(["volume", "rm", "-f", volume]); }
+    }
+
+    /// <summary>
+    /// Runs the controller's own fixed command construction against a real local
+    /// Docker daemon: the ephemeral bootstrap with controller-encoded key bytes,
+    /// then the long-lived container. It proves the constructed argv, environment,
+    /// capabilities, labels, network and mounts are exactly what the controller
+    /// intends, which no hermetic string assertion can establish.
+    /// </summary>
+    /// <remarks>
+    /// Everything is disposable and local: no SSH, no approved-host configuration,
+    /// no registry, no provider credentials and no inference. The container is
+    /// created and inspected, then removed with its volumes.
+    /// </remarks>
+    [Fact]
+    public void RealContainerCommandAppliesTheFixedIsolationBootstrapAndLabels()
+    {
+        if (!Available.Value) return;
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var container = "agentcontrol-worker-contract-" + suffix;
+        var volumes = new[] { "agentcontrol-control-contract-" + suffix, "agentcontrol-home-contract-" + suffix, "agentcontrol-workspace-contract-" + suffix, "agentcontrol-session-contract-" + suffix };
+        try
+        {
+            var digest = ImageDigest();
+            var identity = new HVO.AgentControl.RemoteWorker.WorkerResourceIdentity("org-contract", "controller-contract", "host-contract", "worker-contract", "binding-contract", "operation-contract");
+            var options = new HVO.AgentControl.RemoteWorker.WorkerControlOptions { ControllerId = "controller-contract", ApprovedImageDigest = digest, ApprovedImagePlatform = Platform() };
+
+            foreach (var volume in volumes) Assert.True(Run(["volume", "create", volume]).ExitCode == 0);
+
+            // The controller's own encoder produces the bytes the worker parses.
+            var key = Enumerable.Range(0, 32).Select(x => (byte)(x * 3 % 251)).ToArray();
+            var encoded = HVO.AgentControl.RemoteWorker.WorkerBootstrapEncoding.Encode(key);
+            var bootstrapArguments = LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildBootstrap(
+                LocalHost(), options, new HVO.AgentControl.RemoteWorker.BootstrapSpec(volumes[0], digest, options.ApprovedImagePlatform, identity), encoded));
+            var bootstrap = RunWithInput(bootstrapArguments, Encoding.UTF8.GetString(encoded));
+            Assert.True(bootstrap.ExitCode == 0, bootstrap.Output);
+            Assert.Contains(HVO.AgentControl.Worker.WorkerProtocol.KeyId(key), bootstrap.Output, StringComparison.Ordinal);
+
+            // The key is enrolled before the long-lived container is ever created.
+            Assert.NotEqual(0, Run(["container", "inspect", "-f", "{{.Id}}", container]).ExitCode);
+
+            var mounts = new[]
+            {
+                new HVO.AgentControl.RemoteWorker.NamedVolumeMount(volumes[0], "/control"),
+                new HVO.AgentControl.RemoteWorker.NamedVolumeMount(volumes[1], "/home/worker"),
+                new HVO.AgentControl.RemoteWorker.NamedVolumeMount(volumes[2], "/workspace"),
+                new HVO.AgentControl.RemoteWorker.NamedVolumeMount(volumes[3], "/session"),
+            };
+            var createArguments = LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildContainerCreate(
+                LocalHost(), options, new HVO.AgentControl.RemoteWorker.ContainerCreateSpec(container, digest, options.ApprovedImagePlatform, identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit)));
+            var create = Run(createArguments);
+            Assert.True(create.ExitCode == 0, create.Output);
+
+            var inspected = Run(["container", "inspect", "-f",
+                "{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Memory}}|{{.HostConfig.PidsLimit}}|{{json .HostConfig.CapDrop}}|{{json .HostConfig.CapAdd}}|{{json .HostConfig.SecurityOpt}}|{{json .Config.Env}}|{{json .Config.Labels}}|{{json .HostConfig.PortBindings}}|{{json .Mounts}}",
+                container]);
+            Assert.True(inspected.ExitCode == 0, inspected.Output);
+            var fields = inspected.Output.Trim().Split('|');
+
+            Assert.Equal("none", fields[0]);
+            Assert.Equal("true", fields[1]);
+            Assert.Equal(options.MemoryBytes.ToString(System.Globalization.CultureInfo.InvariantCulture), fields[2]);
+            Assert.Equal(options.PidsLimit.ToString(System.Globalization.CultureInfo.InvariantCulture), fields[3]);
+            Assert.Contains("ALL", fields[4], StringComparison.Ordinal);
+            foreach (var capability in new[] { "CHOWN", "SETUID", "SETGID", "KILL" }) Assert.Contains(capability, fields[5], StringComparison.Ordinal);
+            Assert.Contains("no-new-privileges", fields[6], StringComparison.Ordinal);
+
+            var environment = JsonSerializer.Deserialize<string[]>(fields[7])!;
+            Assert.Contains("WORKER_CONTROL_DIRECTORY=/control", environment);
+            Assert.Contains("WORKER_ID=worker-contract", environment);
+            Assert.Contains("WORKER_CONTROLLER_ID=controller-contract", environment);
+
+            var labels = JsonSerializer.Deserialize<Dictionary<string, string>>(fields[8])!;
+            foreach (var expected in identity.Labels) Assert.Equal(expected.Value, labels[expected.Key]);
+            HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.RequireOwnedLabels(
+                labels.Where(x => x.Key.StartsWith("agentcontrol.", StringComparison.Ordinal)).ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal), identity);
+
+            Assert.True(fields[9] is "{}" or "null", "the worker container must publish no ports: " + fields[9]);
+
+            var mounted = JsonSerializer.Deserialize<JsonElement>(fields[10]);
+            var destinations = mounted.EnumerateArray().Select(x => x.GetProperty("Destination").GetString() ?? string.Empty).Order(StringComparer.Ordinal).ToArray();
+            Assert.Equal(new[] { "/control", "/home/worker", "/session", "/workspace" }, destinations);
+            Assert.All(mounted.EnumerateArray(), mount => Assert.Equal("volume", mount.GetProperty("Type").GetString()));
+        }
+        finally
+        {
+            _ = Run(["rm", "-f", container]);
+            foreach (var volume in volumes) _ = Run(["volume", "rm", "-f", volume]);
+        }
+    }
+
+    /// <summary>An approved-host stand-in whose SSH prefix is stripped for local execution.</summary>
+    private static HVO.AgentControl.RemoteWorker.ApprovedExecutionHost LocalHost() => new()
+    {
+        Id = "host-contract",
+        Hostname = "worker.invalid",
+        Port = 22,
+        Username = "docker",
+        KnownHostsPath = "/dev/null",
+        IdentityFilePath = "/dev/zero",
+    };
+
+    /// <summary>
+    /// Takes the exact remote command the controller built and runs it against the
+    /// local daemon, so the asserted argv is the controller's own construction.
+    /// </summary>
+    private static string[] LocalArguments(HVO.AgentControl.RemoteWorker.RemoteCommand command)
+    {
+        var remote = command.Arguments[^1];
+        Assert.StartsWith("docker ", remote, StringComparison.Ordinal);
+        var arguments = new List<string>();
+        var current = new StringBuilder();
+        var quoted = false;
+        foreach (var character in remote["docker ".Length..])
+        {
+            if (character == '\'') { quoted = !quoted; continue; }
+            if (character == ' ' && !quoted) { if (current.Length > 0) { arguments.Add(current.ToString()); current.Clear(); } continue; }
+            current.Append(character);
+        }
+        if (current.Length > 0) arguments.Add(current.ToString());
+        return [.. arguments];
+    }
+
+    private static string ImageDigest()
+    {
+        var result = Run(["image", "inspect", "-f", "{{.Id}}", Image]);
+        Assert.True(result.ExitCode == 0, result.Output);
+        var digest = result.Output.Trim();
+        Assert.Matches("^sha256:[0-9a-f]{64}$", digest);
+        return digest;
+    }
+
+    private static string Platform()
+    {
+        var result = Run(["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"]);
+        Assert.True(result.ExitCode == 0, result.Output);
+        return result.Output.Trim();
     }
 
     private static bool Build()

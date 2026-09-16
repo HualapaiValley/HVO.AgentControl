@@ -9,8 +9,6 @@ public sealed class WorkerSupervisorTests
     public void FixedSupervisorViewerOperationUsesExactAttachCredentialAndDescriptorContract()
     {
         if (!OperatingSystem.IsLinux()) return;
-        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
-        var supervisor = Path.Combine(root, "src/container/worker-supervisor.py");
         var harness = """
 import importlib.util, json, os, socket, struct, sys
 spec=importlib.util.spec_from_file_location('worker_supervisor', sys.argv[1])
@@ -54,6 +52,71 @@ try:
 finally:
  left.close(); right.close(); s.close_viewer()
 """;
+        RunHarness(harness);
+    }
+
+    /// <summary>
+    /// The supervisor can no longer observe the PTY master once it is transferred
+    /// to the bridge, but it still owns the viewer child and can report whether it
+    /// is alive. That is what lets an unconfirmed stop be resolved as either
+    /// genuinely reclaimed or genuinely uncertain, instead of being swallowed.
+    /// </summary>
+    [Fact]
+    public void FixedSupervisorReportsExactViewerProcessStateForAnUncertainStop()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var harness = """
+import importlib.util, json, os, socket, struct, sys
+spec=importlib.util.spec_from_file_location('worker_supervisor', sys.argv[1])
+s=importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
+class Child:
+ def __init__(self, command, **kwargs):
+  self.command=command; self.kwargs=kwargs; self.pid=4321; self.state=None
+ def poll(self): return self.state
+ def terminate(self): self.state=0
+ def kill(self): self.state=-9
+ def wait(self, timeout=None): return self.state
+s.children={'acp':Child([])}
+captured=[]
+def popen(command, **kwargs):
+ child=Child(command, **kwargs); captured.append(child); return child
+s.subprocess.Popen=popen
+s.peer_uid=lambda _: s.BRIDGE_UID
+
+def ask(request):
+ left,right=socket.socketpair()
+ try:
+  right.sendall(json.dumps(request).encode()+b'\n'); s.handle(left); return json.loads(right.recv(4096))
+ finally:
+  left.close(); right.close()
+
+left,right=socket.socketpair()
+try:
+ right.sendall(b'{"operation":"viewer-start","sessionId":"ses-status"}\n')
+ s.handle(left)
+ data, anc, flags, address=right.recvmsg(4096, socket.CMSG_SPACE(4))
+ handle=json.loads(data)['viewerHandle']
+ fd=struct.unpack('i', anc[0][2][:4])[0]; os.close(fd)
+ assert s.viewer['master_fd'] is None
+ alive=ask({'operation':'viewer-status','viewerHandle':handle})
+ assert alive=={'ok': True, 'state': 'running'}, alive
+ assert ask({'operation':'viewer-status','viewerHandle':'other'})=={'ok': True, 'state': 'absent'}
+ assert ask({'operation':'viewer-status'})['error']=='invalid-request'
+ captured[0].state=0
+ gone=ask({'operation':'viewer-status','viewerHandle':handle})
+ assert gone=={'ok': True, 'state': 'absent'}, gone
+ assert s.viewer is None
+ assert s.children['acp'].poll() is None
+finally:
+ left.close(); right.close(); s.close_viewer()
+""";
+        RunHarness(harness);
+    }
+
+    private static void RunHarness(string harness)
+    {
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
+        var supervisor = Path.Combine(root, "src/container/worker-supervisor.py");
         var temporary = Path.Combine(Path.GetTempPath(), "worker-supervisor-test-" + Guid.NewGuid().ToString("N") + ".py");
         File.WriteAllText(temporary, harness);
         try

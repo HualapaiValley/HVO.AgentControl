@@ -29,7 +29,7 @@ public sealed class RemoteWorkerControlTests
         Assert.Contains("UserKnownHostsFile=/control/known_hosts", command.Arguments);
         Assert.Contains("IdentitiesOnly=yes", command.Arguments);
         Assert.DoesNotContain("StrictHostKeyChecking=no", command.Arguments);
-        Assert.Throws<InvalidOperationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ContainerInspect, ["x;id"]));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ContainerInspect, ["x;id"]));
     }
 
     [Fact]
@@ -38,7 +38,7 @@ public sealed class RemoteWorkerControlTests
         var identity = new WorkerResourceIdentity("org-a", "controller-a", "host-a", "worker-a", "binding-a", "operation-a");
         RemoteWorkerCommandBuilder.RequireOwnedLabels(identity.Labels, identity);
         var changed = identity.Labels.ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal); changed["agentcontrol.worker"] = "other";
-        Assert.Throws<InvalidOperationException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(changed, identity));
+        Assert.Throws<ForeignResourceException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(changed, identity));
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
         Assert.Equal(4L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
-        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "remote_terminal_viewers" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
+        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "remote_terminal_viewers", "worker_event_retention" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
     }
 
@@ -59,7 +59,7 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var table in new[] { "remote_terminal_viewers", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
+            foreach (var table in new[] { "worker_event_retention", "remote_terminal_viewers", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
             connection.Execute("UPDATE schema_version SET version=3");
         }
         var policyBefore = Raw(path, "SELECT version || ':' || revision || ':' || summary FROM permission_policies");
@@ -89,15 +89,151 @@ public sealed class RemoteWorkerControlTests
         Assert.False(snapshot.ViewerAvailable);
     }
 
+    /// <summary>
+    /// The probe parser is exercised against the real captured output of Docker
+    /// Engine 29 rather than a hand-written shape, so a field this controller
+    /// invented would fail here instead of passing on a synthetic fixture.
+    /// </summary>
     [Fact]
-    public void HostProbeFailsClosedForMacSharedOrWrongPlatform()
+    public void HostProbeParsesRealDockerOutputAndDerivesPlatformFromVersionNotUname()
     {
-        using var temp = new TempDirectory(); var known = Path.Combine(temp.Path, "known_hosts"); File.WriteAllText(known, "worker ssh-ed25519 " + Convert.ToBase64String(Enumerable.Range(0, 32).Select(x => (byte)x).ToArray()) + "\n");
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(known, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        var host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker", Username = "docker", KnownHostsPath = known, IdentityFilePath = "/not/read/in-parser" };
-        var json = JsonSerializer.Serialize(new { OSType = "linux", Architecture = "amd64", SharedStorage = false, MemTotal = 2L * 1024 * 1024 * 1024, NCPU = 2, VolumeFreeBytes = 2L * 1024 * 1024 * 1024, LimitsSupported = true, HostKeyAlgorithm = "ssh-ed25519", HostKeyFingerprint = "SHA256:abc", ServerVersion = "28.0", ApiVersion = "1.48", Driver = "overlay2", BackingFilesystem = "ext4" });
-        Assert.Equal("valid", ExecutionHostRegistry.ParseProbe(json, host, "linux/amd64").CapabilityStatus);
-        Assert.Equal("invalid", ExecutionHostRegistry.ParseProbe(json.Replace("linux", "darwin", StringComparison.Ordinal), host, "linux/amd64").CapabilityStatus);
+        using var fixture = new ProbeFixture();
+        var probe = HostProbeParser.Parse(fixture.Payload(), fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid);
+
+        Assert.Equal("valid", probe.CapabilityStatus);
+        Assert.Equal("29.8.0", probe.DockerVersion);
+        Assert.Equal("1.56", probe.DockerApiVersion);
+        // docker info reports the uname machine ("x86_64"); the image platform must
+        // come from docker version ("amd64"), or the digest would never match.
+        Assert.Equal("amd64", probe.Architecture);
+        Assert.Equal("linux/amd64", probe.ImagePlatform);
+        Assert.Equal("overlayfs", probe.StorageDriver);
+        Assert.False(probe.SharedStorage);
+        Assert.True(probe.LimitsSupported);
+        Assert.Equal(810_025_492_480L, probe.FreeBytes);
+        Assert.Equal(12, probe.CpuCount);
+        // The containerd snapshotter reports no backing filesystem; an absent
+        // optional value is recorded, not treated as a capability failure.
+        Assert.Equal("unknown", probe.BackingFilesystem);
+    }
+
+    [Fact]
+    public void HostProbeFailsClosedForANonLinuxOrMismatchedPlatform()
+    {
+        using var fixture = new ProbeFixture();
+        var darwin = fixture.VersionJson.Replace("\"Os\":\"linux\"", "\"Os\":\"darwin\"", StringComparison.Ordinal);
+        Assert.Equal("invalid", HostProbeParser.Parse(fixture.Payload(versionJson: darwin), fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid).CapabilityStatus);
+        // The host is healthy but is not the platform this controller's approved
+        // image digest was built for.
+        Assert.Equal("invalid", HostProbeParser.Parse(fixture.Payload(), fixture.Host, "linux/arm64", ControllerPrivateFile.EffectiveUid).CapabilityStatus);
+    }
+
+    [Theory]
+    [InlineData("\"MemoryLimit\":true", "\"MemoryLimit\":false")]                        // no memory limit
+    [InlineData("\"CpuCfsQuota\":true", "\"CpuCfsQuota\":false")]                        // no cpu quota
+    [InlineData("\"PidsLimit\":true", "\"PidsLimit\":false")]                            // no pids limit
+    [InlineData("\"Volume\":[\"local\"]", "\"Volume\":[\"local\",\"nfs-cluster\"]")]     // shared volume plugin
+    [InlineData("\"Driver\":\"overlayfs\"", "\"Driver\":\"some-cluster-fs\"")]           // unknown storage driver
+    [InlineData("\"MemTotal\":50443812864", "\"MemTotal\":1024")]                        // too little memory
+    public void HostProbeFailsClosedForEachMissingMandatoryCapability(string original, string replacement)
+    {
+        using var fixture = new ProbeFixture();
+        var payload = fixture.Payload(infoJson: fixture.InfoJson.Replace(original, replacement, StringComparison.Ordinal));
+        Assert.Equal("invalid", HostProbeParser.Parse(payload, fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid).CapabilityStatus);
+    }
+
+    [Fact]
+    public void HostProbeTreatsMissingMandatoryFieldAsInvalidAndUnparsableOutputAsUnavailable()
+    {
+        using var fixture = new ProbeFixture();
+        // Present but unprovable capability is a truthful host observation.
+        var withoutPlugins = fixture.InfoJson.Replace("\"Volume\":[\"local\"]", "\"Volume\":null", StringComparison.Ordinal);
+        Assert.Equal("invalid", HostProbeParser.Parse(fixture.Payload(infoJson: withoutPlugins), fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid).CapabilityStatus);
+        // A version document without the mandatory fields is parsed but proves
+        // nothing, so it is invalid rather than an error.
+        var withoutVersionFields = HostProbeParser.Parse(fixture.Payload(versionJson: "{}"), fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid);
+        Assert.Equal("invalid", withoutVersionFields.CapabilityStatus);
+        Assert.Equal("unknown", withoutVersionFields.DockerApiVersion);
+        // Output the controller cannot parse at all means it learned nothing.
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.Parse(fixture.Payload(infoJson: "not-json"), fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid));
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.Parse(fixture.Payload(versionJson: "[1,2]"), fixture.Host, "linux/amd64", ControllerPrivateFile.EffectiveUid));
+    }
+
+    [Fact]
+    public void HostProbeReadsRealDockerRootDirectoryAndRejectsAnUnsafeOne()
+    {
+        using var fixture = new ProbeFixture();
+        Assert.Equal("/var/lib/docker", HostProbeParser.ReadDockerRootDirectory(fixture.InfoJson));
+        var unsafeRoot = fixture.InfoJson.Replace("\"DockerRootDir\":\"/var/lib/docker\"", "\"DockerRootDir\":\"/var/lib/docker; rm -rf /\"", StringComparison.Ordinal);
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.ReadDockerRootDirectory(unsafeRoot));
+        var relativeRoot = fixture.InfoJson.Replace("\"DockerRootDir\":\"/var/lib/docker\"", "\"DockerRootDir\":\"var/lib/docker\"", StringComparison.Ordinal);
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.ReadDockerRootDirectory(relativeRoot));
+    }
+
+    /// <summary>The exact two-line output of <c>df -B1 --output=avail</c>.</summary>
+    [Fact]
+    public void StorageFreeParsesTheExactDfOutputAndRejectsAnythingElse()
+    {
+        Assert.Equal(810_025_492_480L, HostProbeParser.ParseAvailableBytes("     Avail\n810025492480\n"));
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.ParseAvailableBytes("810025492480\n"));
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.ParseAvailableBytes("Avail\n-1\n"));
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.ParseAvailableBytes("Avail\n12\n34\n"));
+        Assert.Throws<RemoteWorkerUnavailableException>(() => HostProbeParser.ParseAvailableBytes(string.Empty));
+    }
+
+    [Fact]
+    public void ProbeCommandsAreTheFixedTypedDockerAndDfInvocations()
+    {
+        var host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Username = "docker", KnownHostsPath = "/control/known_hosts", IdentityFilePath = "/control/id" };
+        var options = new WorkerControlOptions { ControllerId = "controller-a", ApprovedImageDigest = "sha256:" + new string('a', 64) };
+        Assert.Equal("docker system info --format '{{json .}}'", RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.Probe, []).Arguments[^1]);
+        Assert.Equal("docker version --format '{{json .Server}}'", RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.VersionProbe, []).Arguments[^1]);
+        Assert.Equal("df -B1 --output=avail -- '/var/lib/docker'", RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.StorageFree, ["/var/lib/docker"]).Arguments[^1]);
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.StorageFree, ["/var/lib/docker; id"]));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.StorageFree, ["/var/lib/../etc"]));
+    }
+
+    /// <summary>
+    /// The exact stderr Docker Engine 29 prints for a missing resource, captured
+    /// from the real CLI, must classify as absent for its own kind only.
+    /// </summary>
+    [Theory]
+    [InlineData(RemoteDockerOperation.VolumeInspect, "Error response from daemon: get nosuchvolume-xyz: no such volume", "not-found")]
+    [InlineData(RemoteDockerOperation.ContainerInspect, "Error response from daemon: No such container: nosuchcontainer-xyz", "not-found")]
+    [InlineData(RemoteDockerOperation.ImageInspect, "Error response from daemon: No such image: sha256:0000", "not-found")]
+    [InlineData(RemoteDockerOperation.VolumeInspect, "Error response from daemon: No such container: other", "remote-command-failed")]
+    [InlineData(RemoteDockerOperation.ContainerInspect, "Error response from daemon: no such volume", "remote-command-failed")]
+    [InlineData(RemoteDockerOperation.ContainerRemove, "Error response from daemon: No such container: x", "remote-command-failed")]
+    public void AbsenceIsConcludedOnlyFromTheExactDockerMessageForThatKind(RemoteDockerOperation operation, string stderr, string expected)
+    {
+        Assert.Equal(expected, ProcessRemoteWorkerOperations.ClassifyError(operation, 1, stderr));
+        // Case differs between Docker messages ("no such volume" vs "No such container"),
+        // so matching is case-insensitive but still kind-specific.
+        Assert.Equal(expected, ProcessRemoteWorkerOperations.ClassifyError(operation, 1, stderr.ToUpperInvariant()));
+        // A non-1 exit code never proves absence, whatever the message says.
+        Assert.Equal("remote-command-failed", ProcessRemoteWorkerOperations.ClassifyError(operation, 125, stderr));
+        Assert.Equal("transport", ProcessRemoteWorkerOperations.ClassifyError(operation, 255, stderr));
+    }
+
+    private sealed class ProbeFixture : IDisposable
+    {
+        private readonly TempDirectory _temp = new();
+        public ProbeFixture()
+        {
+            var known = Path.Combine(_temp.Path, "known_hosts");
+            File.WriteAllText(known, "worker ssh-ed25519 " + Convert.ToBase64String(Enumerable.Range(0, 32).Select(x => (byte)x).ToArray()) + "\n");
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(known, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            Host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker", Username = "docker", KnownHostsPath = known, IdentityFilePath = "/not/read/in-parser" };
+            var fixtures = Path.Combine(AppContext.BaseDirectory, "Fixtures");
+            InfoJson = File.ReadAllText(Path.Combine(fixtures, "docker-info-29.json"));
+            VersionJson = File.ReadAllText(Path.Combine(fixtures, "docker-version-29.json"));
+        }
+        public ApprovedExecutionHost Host { get; }
+        public string InfoJson { get; }
+        public string VersionJson { get; }
+        public HostProbePayload Payload(string? infoJson = null, string? versionJson = null, long freeBytes = 810_025_492_480L) =>
+            new(infoJson ?? InfoJson, versionJson ?? VersionJson, "/var/lib/docker", freeBytes);
+        public void Dispose() => _temp.Dispose();
     }
 
     [Fact]
@@ -146,8 +282,8 @@ public sealed class RemoteWorkerControlTests
     public void RemoteShellTokensAreSingleQuotedAndRejectQuoteOrControl()
     {
         Assert.Equal("'safe-token'", RemoteWorkerCommandBuilder.QuoteShell("safe-token"));
-        Assert.Throws<InvalidOperationException>(() => RemoteWorkerCommandBuilder.QuoteShell("bad'quote"));
-        Assert.Throws<InvalidOperationException>(() => RemoteWorkerCommandBuilder.QuoteShell("bad\nline"));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.QuoteShell("bad'quote"));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.QuoteShell("bad\nline"));
     }
 
     [Fact]
@@ -556,6 +692,39 @@ public sealed class RemoteWorkerControlTests
         Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.TransitionRemoteTerminalViewer(viewer.Id, viewer.Revision - 1, "connected", "detached"));
     }
 
+    /// <summary>
+    /// The statx binding must match the kernel structure exactly. A wrong size or
+    /// a swapped rdev/dev pair silently compares the wrong device and would defeat
+    /// the inode re-check that protects every controller-private read.
+    /// </summary>
+    [Fact]
+    public void StatxLayoutMatchesTheKernelStructureAndReportsTheRealDevice()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        Assert.Equal(256, System.Runtime.InteropServices.Marshal.SizeOf<ControllerPrivateFile.Statx>());
+
+        // /dev/null is a character device: its rdev is non-zero while its dev is the
+        // devtmpfs it lives on. Reading the pair the other way round inverts both.
+        var deviceNode = ControllerPrivateFile.StatForTests("/dev/null");
+        Assert.Equal(1u, deviceNode.RDeviceMajor);
+        Assert.Equal(3u, deviceNode.RDeviceMinor);
+        Assert.True(deviceNode.DeviceMajor != 1 || deviceNode.DeviceMinor != 3, "dev and rdev were read from the same offsets.");
+        Assert.Equal(0x2000, deviceNode.Mode & 0xF000);
+
+        // A regular file has no rdev at all, which is exactly why a swapped pair
+        // would compare two constant zeroes and always "match".
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "regular");
+        File.WriteAllBytes(path, new byte[8]);
+        var regular = ControllerPrivateFile.StatForTests(path);
+        Assert.Equal(0u, regular.RDeviceMajor);
+        Assert.Equal(0u, regular.RDeviceMinor);
+        Assert.True(regular.DeviceMajor != 0 || regular.DeviceMinor != 0, "the regular file reported no filesystem device.");
+        Assert.Equal(8ul, regular.Size);
+        Assert.Equal(1u, regular.Links);
+        Assert.True(regular.Inode > 0);
+    }
+
     [Fact]
     public void SecurePrivateDirectoryAndUnlinkRejectHardlinks()
     {
@@ -571,7 +740,7 @@ public sealed class RemoteWorkerControlTests
         Assert.True(container.Exists); Assert.Equal("running", container.State); Assert.Equal("worker-a", container.Labels["agentcontrol.worker"]);
         var volume = await adapter.InspectVolumeAsync(host, "volume", CancellationToken.None);
         Assert.True(volume.Exists); Assert.Equal("volume-a", volume.Labels["agentcontrol.worker"]);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => adapter.InspectContainerAsync(host, "transport", CancellationToken.None));
+        await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => adapter.InspectContainerAsync(host, "transport", CancellationToken.None));
         Assert.False((await adapter.InspectContainerAsync(host, "absent", CancellationToken.None)).Exists);
     }
 
@@ -600,6 +769,295 @@ public sealed class RemoteWorkerControlTests
         Assert.Equal(1, factory.ConnectCount);
         Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(abandoned.Id)!.State);
         Assert.Same(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None), await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// The bootstrap key is encoded exactly the way the worker entry point parses
+    /// it, and the encoded buffer never survives the call.
+    /// </summary>
+    [Fact]
+    public void ControllerBootstrapEncodingIsExactBase64WithOneNewlineAndZeroesItsBuffer()
+    {
+        var key = Enumerable.Range(0, 32).Select(x => (byte)x).ToArray();
+        var encoded = WorkerBootstrapEncoding.Encode(key);
+        Assert.Equal(45, encoded.Length);
+        Assert.Equal((byte)'\n', encoded[^1]);
+        Assert.Equal(Convert.ToBase64String(key), System.Text.Encoding.ASCII.GetString(encoded, 0, 44));
+        Assert.Single(encoded, b => b == (byte)'\n');
+        Assert.Throws<WorkerControlConfigurationException>(() => WorkerBootstrapEncoding.Encode(new byte[31]));
+    }
+
+    /// <summary>
+    /// Contract test: the exact controller-produced bytes are fed to the worker's
+    /// own bootstrap, so an encoding change on either side fails here rather than
+    /// at enrollment time on a real host.
+    /// </summary>
+    [Fact]
+    public void ControllerEncodedKeyIsAcceptedByTheWorkerBootstrapUnchanged()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new TempDirectory();
+        var control = Path.Combine(temp.Path, "control");
+        // The worker requires a bridge-private 0700 control directory; the production
+        // helper creates and verifies exactly that.
+        ControllerPrivateFile.EnsurePrivateDirectory(control, ControllerPrivateFile.EffectiveUid);
+
+        var key = Enumerable.Range(0, 32).Select(x => (byte)(x * 7 % 251)).ToArray();
+        var encoded = WorkerBootstrapEncoding.Encode(key);
+        var transmitted = System.Text.Encoding.UTF8.GetString(encoded);
+
+        var keyId = HVO.AgentControl.Worker.WorkerKeyBootstrap.Bootstrap(control, transmitted);
+        Assert.Equal(HVO.AgentControl.Worker.WorkerProtocol.KeyId(key), keyId);
+        // An exact repeat is a verified no-op, which is what makes bootstrap
+        // reconciliation safe to retry.
+        Assert.Equal(keyId, HVO.AgentControl.Worker.WorkerKeyBootstrap.Bootstrap(control, transmitted));
+        Assert.Equal(key, HVO.AgentControl.Worker.WorkerKeyBootstrap.ReadKey(control));
+    }
+
+    /// <summary>
+    /// The bootstrap runs as its own ephemeral container against the control
+    /// volume only, before any long-lived container exists.
+    /// </summary>
+    [Fact]
+    public void BootstrapIsAnEphemeralRunAgainstTheControlVolumeOnly()
+    {
+        var host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Username = "docker", KnownHostsPath = "/control/known_hosts", IdentityFilePath = "/control/id" };
+        var digest = "sha256:" + new string('a', 64);
+        var options = new WorkerControlOptions { ControllerId = "controller-a", ApprovedImageDigest = digest };
+        var identity = new WorkerResourceIdentity("org-a", "controller-a", "host-a", "worker-a", "binding-a", "operation-a");
+        var remote = RemoteWorkerCommandBuilder.BuildBootstrap(host, options, new BootstrapSpec("agentcontrol-control-a", digest, "linux/amd64", identity), [1, 2, 3]).Arguments[^1];
+
+        Assert.StartsWith("docker run --rm -i", remote, StringComparison.Ordinal);
+        Assert.Contains("--user '1101:1101'", remote, StringComparison.Ordinal);
+        Assert.Contains("--network 'none'", remote, StringComparison.Ordinal);
+        Assert.Contains("--read-only", remote, StringComparison.Ordinal);
+        Assert.Contains("--cap-drop 'ALL'", remote, StringComparison.Ordinal);
+        Assert.Contains("--security-opt 'no-new-privileges'", remote, StringComparison.Ordinal);
+        Assert.Contains("'type=volume,src=agentcontrol-control-a,dst=/control'", remote, StringComparison.Ordinal);
+        Assert.Contains("'--worker-bootstrap-key'", remote, StringComparison.Ordinal);
+        Assert.Contains("'" + digest + "'", remote, StringComparison.Ordinal);
+        // Only the control volume is mounted, and no long-lived container is touched.
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(remote, "--mount"));
+        Assert.DoesNotContain("container exec", remote, StringComparison.Ordinal);
+        Assert.DoesNotContain("/home/worker", remote, StringComparison.Ordinal);
+        Assert.DoesNotContain("--cap-add", remote, StringComparison.Ordinal);
+        // The key material itself only ever travels on standard input; the single
+        // occurrence of "key" in the command line is the fixed mode flag.
+        Assert.Contains("'--worker-bootstrap-key'", remote, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(remote, "key", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildBootstrap(host, options, new BootstrapSpec("agentcontrol-control-a", "sha256:" + new string('b', 64), "linux/amd64", identity), null));
+    }
+
+    /// <summary>
+    /// Provisioning applies the control volume and the key bootstrap before the
+    /// long-lived container is created or started.
+    /// </summary>
+    [Fact]
+    public async Task ProvisioningBootstrapsTheKeyBeforeTheLongLivedContainerExists()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+        await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+
+        var order = remote.Effects;
+        var bootstrap = order.IndexOf("bootstrap:" + enrollment.ControlVolumeName);
+        var controlVolume = order.IndexOf("volume:" + enrollment.ControlVolumeName);
+        var containerCreate = order.IndexOf("container:" + enrollment.ContainerName);
+        var start = order.IndexOf("start:" + enrollment.ContainerName);
+
+        Assert.True(controlVolume >= 0 && bootstrap > controlVolume, string.Join(",", order));
+        Assert.True(containerCreate > bootstrap, string.Join(",", order));
+        Assert.True(start > containerCreate, string.Join(",", order));
+        Assert.Equal(4, order.Count(x => x.StartsWith("volume:", StringComparison.Ordinal)));
+    }
+
+    /// <summary>A repeated bootstrap with the identical key is a verified no-op.</summary>
+    [Fact]
+    public async Task UncertainBootstrapReconcilesByRepeatingTheIdenticalKeyWithoutOverwriting()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var remote = new RecordingProvisioner { FailBootstrapOnce = true };
+        var coordinator = fixture.CreateCoordinator(remote);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+
+        await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.Equal("Uncertain", fixture.Store.ListProvisioningOperations(enrollment.WorkerId).Single(x => x.Kind == "bootstrap").State);
+
+        await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var bootstrap = fixture.Store.ListProvisioningOperations(enrollment.WorkerId).Single(x => x.Kind == "bootstrap");
+        Assert.Equal("Applied", bootstrap.State);
+        Assert.Equal(2, remote.Effects.Count(x => x.StartsWith("bootstrap:", StringComparison.Ordinal)));
+        Assert.All(remote.BootstrapKeyIds, id => Assert.Equal(remote.BootstrapKeyIds[0], id));
+    }
+
+    /// <summary>
+    /// When reconciliation itself cannot reach the host, the step is held rather
+    /// than left pending, so repeated application cannot loop forever.
+    /// </summary>
+    [Fact]
+    public async Task UnreachableReconciliationHoldsTheStepInsteadOfLoopingForever()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var remote = new RecordingProvisioner { FailBootstrapOnce = true, FailBootstrapAlways = true };
+        var coordinator = fixture.CreateCoordinator(remote);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+
+        await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None));
+        await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.Equal("Held", fixture.Store.ListProvisioningOperations(enrollment.WorkerId).Single(x => x.Kind == "bootstrap").State);
+
+        // A held plan is reported as recovery-required, never retried into a loop.
+        var failure = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.Equal("reconciliation-unavailable", failure.Kind);
+    }
+
+    /// <summary>
+    /// Cleanup must not delete the enrolled key or claim absence when the host is
+    /// simply unreachable.
+    /// </summary>
+    [Fact]
+    public async Task CleanupHoldsResourcesUncertainAndKeepsTheKeyWhenTheTransportIsAbsent()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+        await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+
+        remote.FailInspect = true;
+        await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => coordinator.CleanupAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.Contains(fixture.Store.ListWorkerResources(enrollment.WorkerId), x => x.State == "uncertain");
+        Assert.True(File.Exists(enrollment.KeyFilePath), "An unreachable host must never cause the enrolled key to be deleted.");
+        Assert.DoesNotContain(remote.Effects, x => x.StartsWith("remove", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Cleanup uses the organization persisted on the enrollment, so the labels it
+    /// requires cannot drift with the controller's current organization.
+    /// </summary>
+    [Fact]
+    public async Task CleanupMatchesLabelsFromThePersistedEnrollmentOrganization()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+        await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal(fixture.Store.GetOverview().Id, enrollment.OrganizationId);
+        // A resource labelled for a different organization is foreign, so cleanup
+        // refuses it instead of destroying someone else's resource.
+        remote.OwnerOverride = "other-organization/controller-a";
+        await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => coordinator.CleanupAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.Contains(fixture.Store.ListWorkerResources(enrollment.WorkerId), x => x.State == "foreign");
+        Assert.DoesNotContain(remote.Effects, x => x.StartsWith("remove", StringComparison.Ordinal));
+        Assert.True(File.Exists(enrollment.KeyFilePath));
+    }
+
+    /// <summary>
+    /// Re-observing an unchanged pending permission refreshes the observation but
+    /// must not bump the revision an operator is holding as a decision token.
+    /// </summary>
+    [Fact]
+    public void UnchangedPendingPermissionProjectionDoesNotInvalidateTheOperatorDecisionToken()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["reject_once"], "pending");
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []);
+        var first = Assert.Single(fixture.Store.ListWorkerPendingPermissions(enrollment.WorkerId));
+
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []);
+        var refreshed = Assert.Single(fixture.Store.ListWorkerPendingPermissions(enrollment.WorkerId));
+
+        Assert.Equal(first.Revision, refreshed.Revision);
+        Assert.True(refreshed.ObservedAt >= first.ObservedAt);
+        // The revision read before the refreshes still decides the permission.
+        Assert.Equal("decided", fixture.Store.TransitionWorkerPendingPermission(first.WorkerId, first.DecisionId, first.Revision, "pending", "decided").State);
+    }
+
+    /// <summary>
+    /// A permission whose decision delivery was uncertain must stay uncertain even
+    /// if the worker keeps reporting it pending: the decision may have applied.
+    /// </summary>
+    [Fact]
+    public void UncertainPermissionStaysUncertainOnReconnectWithoutRejectingTheSnapshot()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["reject_once"], "pending");
+        var status = fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending };
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, status, []);
+        var item = Assert.Single(fixture.Store.ListWorkerPendingPermissions(enrollment.WorkerId));
+        fixture.Store.TransitionWorkerPendingPermission(item.WorkerId, item.DecisionId, item.Revision, "pending", "uncertain");
+
+        // Reconnect: the worker still reports the identical pending tuple.
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, status, []);
+
+        var after = Assert.Single(fixture.Store.ListWorkerPendingPermissions(enrollment.WorkerId));
+        Assert.Equal("uncertain", after.State);
+        // Rejecting again is refused, because the earlier decision may have applied.
+        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.TransitionWorkerPendingPermission(after.WorkerId, after.DecisionId, after.Revision, "pending", "decided"));
+    }
+
+    /// <summary>
+    /// Acknowledged events are pruned to the configured bounds, and what was
+    /// dropped stays visible as diagnostics.
+    /// </summary>
+    [Fact]
+    public void AcknowledgedEventsArePrunedToTheBoundWithARetainedDiagnosticsRow()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        var payload = "{\"safe\":true}";
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(payload);
+        var events = Enumerable.Range(1, OrganizationStore.ControllerEventLimit + 50)
+            .Select(index => new ControllerWorkerEvent(1, index, "acp-event", payload, bytes))
+            .ToArray();
+
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), events);
+
+        var retained = fixture.Store.ListWorkerEvents(enrollment.WorkerId);
+        Assert.True(retained.Count <= OrganizationStore.ControllerEventLimit, $"retained {retained.Count}");
+        // The cursor is committed in the same transaction as the prune, so nothing
+        // is ever dropped that the controller has not durably accepted.
+        var cursor = fixture.Store.GetWorkerCursor(enrollment.WorkerId)!;
+        Assert.Equal(events[^1].Sequence, cursor.AcknowledgedSequence);
+        Assert.Equal(events[^1].Sequence, retained[^1].Sequence);
+
+        var diagnostics = Assert.Single(fixture.Store.ListWorkerEventRetention(enrollment.WorkerId));
+        Assert.Equal(50, diagnostics.DroppedCount);
+        Assert.Equal(50L * bytes, diagnostics.DroppedBytes);
+        Assert.Equal(retained[0].Sequence, diagnostics.FirstRetainedSequence);
+    }
+
+    [Fact]
+    public void UnacknowledgedEventsAreNeverPruned()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        // One event committed with a cursor that stays behind it: nothing may drop.
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), [new(1, 1, "acp-event", "{}", 2)]);
+        Assert.Single(fixture.Store.ListWorkerEvents(enrollment.WorkerId));
+        Assert.Empty(fixture.Store.ListWorkerEventRetention(enrollment.WorkerId));
+    }
+
+    /// <summary>
+    /// A duplicate employee for one runtime binding makes worker ownership
+    /// ambiguous, so the snapshot fails closed instead of picking one.
+    /// </summary>
+    [Fact]
+    public void AmbiguousEmployeeBindingFailsTheStatusSnapshotClosed()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var overview = fixture.Store.GetOverview();
+        var employee = overview.Employees.Single(x => x.RuntimeBindingId == enrollment.RuntimeBindingId);
+        var duplicated = overview with { Employees = [.. overview.Employees, employee with { Id = employee.Id + "-duplicate" }] };
+
+        var provider = new RemoteWorkerStatusProvider(fixture.ControlHost());
+        Assert.Single(provider.Snapshot(overview));
+        Assert.Throws<OrganizationStoreCorruptException>(() => provider.Snapshot(duplicated));
     }
 
     [Fact]
@@ -631,7 +1089,8 @@ public sealed class RemoteWorkerControlTests
         }
         public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<Stream> StartWorkerPipeAsync(ApprovedExecutionHost host, string containerName, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     private sealed class RemoteStoreFixture : IDisposable
@@ -670,13 +1129,274 @@ public sealed class RemoteWorkerControlTests
         }), new SystemControllerClock(), new SystemWorkerDelay());
         private HVO.AgentControl.Runtime.AcpControlHost Control()
         {
-            var control = new HVO.AgentControl.Runtime.AcpControlHost(Microsoft.Extensions.Options.Options.Create(new HVO.AgentControl.Runtime.ControlOptions()), Microsoft.Extensions.Logging.Abstractions.NullLogger<HVO.AgentControl.Runtime.AcpControlHost>.Instance);
+            var options = new HVO.AgentControl.Runtime.ControlOptions { DataDirectory = _temp.Path, PrivateDataDirectory = Path.Combine(_temp.Path, "private") };
+            var control = new HVO.AgentControl.Runtime.AcpControlHost(Microsoft.Extensions.Options.Options.Create(options), Microsoft.Extensions.Logging.Abstractions.NullLogger<HVO.AgentControl.Runtime.AcpControlHost>.Instance);
             typeof(HVO.AgentControl.Runtime.AcpControlHost).GetField("_organization", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(control, Store);
             return control;
         }
         public WorkerRequestRecord BeginRequest(string payload) => Store.BeginWorkerRequest(new(EmployeeId, BindingId, "wrk-a", SessionId, NativeSessionId, "idem-a", payload, "sha256:" + new string('f', 64), 1, 1, "turn-test"));
         public WorkerRequestRecord CreateEligibleRequest() { CreateEnrolledAndReady(); return BeginRequest("sha256:" + new string('d', 64)); }
+
+        public HVO.AgentControl.Runtime.AcpControlHost ControlHost() => Control();
+
+        public WorkerControlOptions Options() => new()
+        {
+            Enabled = true,
+            ControllerId = "controller-a",
+            ApprovedImageDigest = Digest,
+            ApprovedHosts = [new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Port = 22, Username = "docker", KnownHostsPath = KnownHostsPath, IdentityFilePath = IdentityPath }],
+            ExpectedControllerUid = ControllerPrivateFile.EffectiveUid,
+        };
+
+        public RemoteWorkerProvisioningCoordinator CreateCoordinator(IRemoteWorkerProvisioner remote) =>
+            new(Control(), remote, Microsoft.Extensions.Options.Options.Create(Options()), new StubVerificationFactory(this));
+
+        private sealed class StubVerificationFactory(RemoteStoreFixture fixture) : IWorkerBridgeSessionFactory
+        {
+            // Stands in for the post-provisioning verification probe only; it makes
+            // no durable claim about the worker.
+            public Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken) =>
+                Task.FromResult<IWorkerBridgeSession>(new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()));
+        }
+
         public void Dispose() { Store.Dispose(); _temp.Dispose(); }
+    }
+
+    /// <summary>
+    /// Records the exact provisioning effects in the order they were applied, so a
+    /// test can assert ordering rather than only the end state.
+    /// </summary>
+    private sealed class RecordingProvisioner : IRemoteWorkerProvisioner
+    {
+        private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _labels = new(StringComparer.Ordinal);
+        private int _bootstrapAttempts;
+
+        public List<string> Effects { get; } = [];
+        public List<string> BootstrapKeyIds { get; } = [];
+        public bool FailBootstrapOnce { get; set; }
+        public bool FailBootstrapAlways { get; set; }
+        public bool FailInspect { get; set; }
+        public string? OwnerOverride { get; set; }
+
+        public Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token) => throw new NotSupportedException();
+
+        public Task<string> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec spec, CancellationToken token)
+        {
+            Effects.Add("volume:" + spec.Name);
+            _labels[spec.Name] = spec.Identity.Labels;
+            return Task.FromResult("volume-ref-" + spec.Name);
+        }
+
+        public Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token)
+        {
+            Effects.Add("container:" + spec.Name);
+            _labels[spec.Name] = spec.Identity.Labels;
+            return Task.FromResult("container-ref-" + spec.Name);
+        }
+
+        public Task BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec spec, byte[] key, CancellationToken token)
+        {
+            try
+            {
+                Effects.Add("bootstrap:" + spec.ControlVolumeName);
+                BootstrapKeyIds.Add(HVO.AgentControl.Worker.WorkerProtocol.KeyId(key));
+                if (FailBootstrapAlways || (FailBootstrapOnce && Interlocked.Increment(ref _bootstrapAttempts) == 1)) throw new RemoteWorkerUnavailableException("injected bootstrap failure", transport: true);
+                return Task.CompletedTask;
+            }
+            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(key); }
+        }
+
+        public Task StartAsync(ApprovedExecutionHost host, string container, CancellationToken token) { Effects.Add("start:" + container); return Task.CompletedTask; }
+        public Task StopAsync(ApprovedExecutionHost host, string container, CancellationToken token) { Effects.Add("stop:" + container); return Task.CompletedTask; }
+        public Task RemoveContainerAsync(ApprovedExecutionHost host, string container, CancellationToken token) { Effects.Add("remove-container:" + container); _labels.Remove(container); return Task.CompletedTask; }
+        public Task RemoveVolumeAsync(ApprovedExecutionHost host, string volume, CancellationToken token) { Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
+
+        public Task<RemoteResourceInspection> InspectVolumeAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(name, "present");
+        public Task<RemoteResourceInspection> InspectContainerAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(name, "running");
+
+        private Task<RemoteResourceInspection> Inspect(string name, string state)
+        {
+            if (FailInspect) throw new RemoteWorkerUnavailableException("injected inspect failure", transport: true);
+            if (!_labels.TryGetValue(name, out var labels)) return Task.FromResult(new RemoteResourceInspection(false, null, new Dictionary<string, string>(), "absent"));
+            var effective = new Dictionary<string, string>(labels, StringComparer.Ordinal);
+            if (OwnerOverride is not null) effective["agentcontrol.owner"] = OwnerOverride;
+            return Task.FromResult(new RemoteResourceInspection(true, "ref-" + name, effective, state));
+        }
+    }
+
+    /// <summary>
+    /// The acknowledgment must describe the batch that was actually replayed, not
+    /// the controller's global cursor, or the worker would prune events in a
+    /// generation the controller never received.
+    /// </summary>
+    [Fact]
+    public async Task ReplayAcknowledgesTheExactBatchGenerationAndSequenceNotTheGlobalCursor()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        // The controller's global cursor is already at generation 2, sequence 7,
+        // while the worker now reports generation 1 (its journal was rebuilt from an
+        // older control volume). The cursor therefore cannot advance for anything the
+        // generation-1 replay delivers.
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { WorkerGeneration = 2 }, [new(2, 7, "acp-event", "{}", 2)]);
+        Assert.Equal((2L, 7L), (fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedWorkerGeneration, fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.AcknowledgedSequence));
+
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        session.ReplayBatches[(1, 0)] = [new(1, 3, "acp-event", "{}", 2), new(1, 4, "acp-event", "{}", 2)];
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        // The acknowledgment describes the batch that was actually delivered.
+        var acknowledgment = Assert.Single(session.Acknowledgments);
+        Assert.Equal((1L, 4L), acknowledgment);
+        // Acknowledging the global cursor here would have told the worker the
+        // controller holds generation 2 through sequence 7 on a generation-1 batch.
+        Assert.DoesNotContain(session.Acknowledgments, x => x.Generation == 2);
+    }
+
+    /// <summary>
+    /// A failed acknowledgment is a real data-loss risk, so it becomes a durable
+    /// obligation whose hold survives a later healthy status and is discharged only
+    /// when the worker accepts the exact marker.
+    /// </summary>
+    [Fact]
+    public async Task FailedAcknowledgmentHoldsUntilTheExactMarkerIsAcceptedOnReconnect()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+
+        var failing = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { FailAcknowledgment = true };
+        failing.ReplayBatches[(1, 0)] = [new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)];
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(failing)))
+        {
+            await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+        }
+
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-ack-uncertain");
+        Assert.Equal(WorkerConnectionManager.AckMarker(1, 2), obligation.MarkerJson);
+        // The hold survives the healthy final status of the same connect.
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+
+        // Reconnect: the exact marker is re-sent before replay and then discharged.
+        var recovering = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        await using var second = fixture.CreateManager(new FakeBridgeSessionFactory(recovering));
+        await second.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Contains(recovering.Acknowledgments, x => x.Generation == 1 && x.Sequence == 2);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-ack-uncertain");
+    }
+
+    /// <summary>
+    /// Caller cancellation before any byte is written leaves no remote effect, so
+    /// it must not fault the owner session other callers share.
+    /// </summary>
+    [Fact]
+    public async Task CallerCancellationBeforeTheWriteDoesNotFaultTheSharedOwnerSession()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        using var canceled = new CancellationTokenSource();
+        await canceled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.HeartbeatAsync(enrollment.WorkerId, TimeSpan.FromSeconds(10), canceled.Token));
+
+        // The cached lease is still the same live session, and the store was not
+        // told the connection was lost.
+        Assert.Same(lease, await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.NotEqual("disconnected", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    /// <summary>
+    /// Once a mutation write has been attempted the outcome is unknown, so the
+    /// session is faulted and the request is recorded uncertain rather than retried.
+    /// </summary>
+    [Fact]
+    public async Task UncertainWriteAfterTheAttemptFaultsTheSessionAndRecordsUncertainty()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { FailSubmitAsWriteUncertain = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var request = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "idem-uncertain", "hello"), CancellationToken.None);
+
+        Assert.Equal("Uncertain", request.State);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "request-uncertain");
+    }
+
+    /// <summary>
+    /// Owner-triggered recovery must invoke the exact worker reconciliation and
+    /// clear the controller obligation only after the worker accepted it.
+    /// </summary>
+    [Fact]
+    public async Task OwnerRecoveryInvokesTheExactWorkerReconciliationBeforeClearing()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var gap = new BridgeReplayGap("gap:test", "status", 1, 5, 1, 4, null, null);
+        var gapMarker = JsonSerializer.Serialize(gap, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = ["replay-gap-unreconciled"], ReplayGapMarkers = [gapMarker] }, []);
+        // The hold reason and the gap marker both project a replay-gap obligation;
+        // only the marker-bearing one can address the exact worker-side gap.
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-gap" && x.MarkerJson is not null);
+
+        // The worker still reports the gap while the owner acts on it, and stops
+        // reporting it once it accepts the reconciliation.
+        var held = fixture.BridgeStatus() with { DispatchHeld = true, HoldReasons = ["replay-gap-unreconciled"], ReplayGaps = [gap], ReplayGapCount = 1 };
+        var session = new FakeBridgeSession(enrollment.ControllerId, held) { ClearGapsAfterReconcile = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.RecoverAsync(enrollment.WorkerId, obligation.Id, obligation.Revision, CancellationToken.None);
+
+        // The worker was actually told to reconcile the exact gap, before anything
+        // was cleared on the controller side.
+        var invoked = Assert.Single(session.Invocations, x => x.Operation == "reconcile-replay-gap");
+        Assert.Contains("gap:test", invoked.Payload, StringComparison.Ordinal);
+        Assert.True(session.Invocations.FindIndex(x => x.Operation == "reconcile-replay-gap") >= 0);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Id == obligation.Id);
+    }
+
+    [Fact]
+    public async Task OwnerRecoveryRefusesWhenTheWorkerRejectsAndLeavesTheObligationOpen()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var gap = new BridgeReplayGap("gap:test", "status", 1, 5, 1, 4, null, null);
+        var gapMarker = JsonSerializer.Serialize(gap, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = ["replay-gap-unreconciled"], ReplayGapMarkers = [gapMarker] }, []);
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-gap" && x.MarkerJson is not null);
+
+        var held = fixture.BridgeStatus() with { DispatchHeld = true, HoldReasons = ["replay-gap-unreconciled"], ReplayGaps = [gap], ReplayGapCount = 1 };
+        var session = new FakeBridgeSession(enrollment.ControllerId, held) { RejectRecovery = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerRemoteException>(() => manager.RecoverAsync(enrollment.WorkerId, obligation.Id, obligation.Revision, CancellationToken.None));
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Id == obligation.Id);
+    }
+
+    /// <summary>
+    /// An uncertain request has no remote reconciliation that can establish its
+    /// real outcome, so recovery refuses it rather than clearing the obligation.
+    /// </summary>
+    [Fact]
+    public async Task OwnerRecoveryRefusesKindsWithNoRemoteReconciliation()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+
+        var session = new FakeBridgeSession("controller-a", fixture.BridgeStatus());
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => manager.RecoverAsync(request.WorkerId, obligation.Id, obligation.Revision, CancellationToken.None));
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Id == obligation.Id);
     }
 
     private sealed class FakeBridgeSessionFactory(FakeBridgeSession session, Action? beforeConnect = null) : IWorkerBridgeSessionFactory
@@ -699,20 +1419,62 @@ public sealed class RemoteWorkerControlTests
             Lease = new WorkerBridgeLease(1, controllerId, Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
             _statuses = new Queue<BridgeWorkerStatus>(statuses);
         }
+
         public WorkerBridgeLease Lease { get; }
+
+        /// <summary>Replay results keyed by the exact (generation, afterSequence) request.</summary>
+        public Dictionary<(long Generation, long After), BridgeWorkerEvent[]> ReplayBatches { get; } = [];
+        public List<(long Generation, long Sequence)> Acknowledgments { get; } = [];
+        public List<(string Operation, string Payload)> Invocations { get; } = [];
+        public bool FailAcknowledgment { get; set; }
+        public bool FailSubmitAsWriteUncertain { get; set; }
+        public bool RejectRecovery { get; set; }
+
+        /// <summary>Models a worker that stops reporting its gaps once it accepts the reconciliation.</summary>
+        public bool ClearGapsAfterReconcile { get; set; }
+        private bool _reconciled;
+
         public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => new Dictionary<string, object?>(fields) { ["operation"] = operation };
+
         public Task<WorkerSessionResult> InvokeAsync(string operation, object request, bool mutation, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            var payload = JsonSerializer.Serialize(request, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions);
+            Invocations.Add((operation, payload));
+            using var requestDocument = JsonDocument.Parse(payload);
+            var root = requestDocument.RootElement;
+
             if (operation == "reconcile") throw new WorkerRemoteException("worker-request-rejected");
+            if (operation == "submit" && FailSubmitAsWriteUncertain) throw new WorkerWriteUncertainException("injected uncertain submit");
+            if (operation.StartsWith("reconcile-", StringComparison.Ordinal))
+            {
+                if (RejectRecovery) throw new WorkerRemoteException("worker-operation-failed");
+                _reconciled = true;
+            }
+            if (operation == "ack-events")
+            {
+                var generation = root.GetProperty("workerGeneration").GetInt64();
+                var sequence = root.GetProperty("sequence").GetInt64();
+                if (FailAcknowledgment) throw new WorkerWriteUncertainException("injected uncertain acknowledgment");
+                Acknowledgments.Add((generation, sequence));
+            }
+
             object value = operation switch
             {
-                "status" => _statuses.Count > 1 ? _statuses.Dequeue() : _statuses.Peek(),
-                "replay" => Array.Empty<BridgeWorkerEvent>(),
+                "status" => Status(),
+                "replay" => ReplayBatches.TryGetValue((root.GetProperty("workerGeneration").GetInt64(), root.GetProperty("afterSequence").GetInt64()), out var batch) ? batch : Array.Empty<BridgeWorkerEvent>(),
                 _ => new { ok = true },
             };
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(value, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions));
             return Task.FromResult(new WorkerSessionResult(operation, document.RootElement.Clone(), mutation));
         }
+
+        private BridgeWorkerStatus Status()
+        {
+            var status = _statuses.Count > 1 ? _statuses.Dequeue() : _statuses.Peek();
+            return ClearGapsAfterReconcile && _reconciled ? status with { DispatchHeld = false, HoldReasons = [], ReplayGaps = [], ReplayGapCount = 0 } : status;
+        }
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

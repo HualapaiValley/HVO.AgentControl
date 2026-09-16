@@ -12,6 +12,13 @@ public sealed record WorkerInvocationResult(string Operation, JsonElement Result
 
 public sealed class WorkerWriteUncertainException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
 public sealed class WorkerReadUncertainException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
+
+/// <summary>
+/// The caller's own cancellation arrived before anything was written to the
+/// worker, so no remote effect can exist. This is a clean caller abort, not a
+/// session loss, and must not fault the shared owner session.
+/// </summary>
+public sealed class WorkerCallerCanceledException(string message, Exception? inner = null) : OperationCanceledException(message, inner);
 public sealed class WorkerRemoteException(string code) : WorkerProtocolException("The worker rejected the operation with a fixed error category.") { public string Code { get; } = code; }
 
 public sealed class WorkerBridgeClient : IAsyncDisposable
@@ -78,13 +85,28 @@ public sealed class WorkerBridgeClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Invokes one worker operation on the shared owner session.
+    /// </summary>
+    /// <remarks>
+    /// Caller cancellation is separated from session loss on purpose. Until the
+    /// first byte is written no remote effect can exist, so a caller that cancels
+    /// there gets a plain cancellation and the session stays usable for everyone
+    /// else. Once a write has been attempted the outcome is genuinely unknown, so
+    /// cancellation becomes an uncertain write (or an unavailable read) and the
+    /// session is faulted rather than silently reused.
+    /// </remarks>
     public async Task<WorkerInvocationResult> InvokeAsync(string operation, object request, bool mutation, CancellationToken cancellationToken)
     {
         WorkerProtocol.ValidateIdentifier(operation, 64, "operation");
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { await _gate.WaitAsync(cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException exception) { throw new WorkerCallerCanceledException("The caller canceled before the worker request was written.", exception); }
         try
         {
             if (_faulted != 0) throw new ObjectDisposedException(nameof(WorkerBridgeClient));
+            // Nothing has been written yet, so a caller that has already canceled
+            // leaves no remote effect and must not fault the shared session.
+            if (cancellationToken.IsCancellationRequested) throw new WorkerCallerCanceledException("The caller canceled before the worker request was written.");
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(_operationTimeout);
             var token = timeout.Token;

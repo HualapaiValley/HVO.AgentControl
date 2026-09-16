@@ -1237,6 +1237,7 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TABLE worker_event_retention;
             DROP TABLE remote_terminal_viewers;
             DROP TABLE worker_pending_permissions;
             DROP TABLE worker_events;

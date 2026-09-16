@@ -15,6 +15,13 @@ public sealed class WorkerTerminalWriteUncertainException(string message, int by
     public int BytesWritten { get; } = bytesWritten;
 }
 
+/// <summary>
+/// The viewer stop could not be confirmed, so a viewer process may still be
+/// attached to the session. The bridge holds the viewer surface rather than
+/// reporting a clean detach.
+/// </summary>
+public sealed class WorkerTerminalStopUncertainException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
+
 public interface IWorkerTerminalSession : IAsyncDisposable
 {
     Task WriteInputAsync(ReadOnlyMemory<byte> input, CancellationToken token);
@@ -258,27 +265,65 @@ public sealed partial class SupervisorWorkerTerminalBackend(string socketPath = 
             }
         }
 
+        /// <summary>
+        /// Stops the viewer child and releases the PTY.
+        /// </summary>
+        /// <remarks>
+        /// The stop is attempted on up to <see cref="StopAttempts"/> fresh supervisor
+        /// connections. If none succeed, the supervisor is queried for the exact
+        /// handle's process state: an absent or exited process means the viewer is
+        /// genuinely gone (closing the master sends SIGHUP to the session leader, so
+        /// this is the normal outcome), while a still-running process is a real
+        /// uncertainty. That uncertainty is raised as
+        /// <see cref="WorkerTerminalStopUncertainException"/> rather than swallowed,
+        /// so the bridge can hold the viewer surface instead of silently reporting a
+        /// clean detach.
+        /// </remarks>
+        private const int StopAttempts = 3;
+
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            Exception? failure = null;
             try
             {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-                await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), timeout.Token).ConfigureAwait(false);
-                using var stream = new NetworkStream(socket);
-                await WorkerProtocol.WriteFrameAsync(stream, new { operation = "viewer-stop", viewerHandle = _handle }, timeout.Token).ConfigureAwait(false);
-                using var response = await WorkerProtocol.ReadFrameAsync(stream, timeout.Token).ConfigureAwait(false);
-                if (response is null || response.RootElement.ValueKind != JsonValueKind.Object ||
-                    !response.RootElement.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.True)
-                    throw new WorkerProtocolException("The fixed supervisor viewer stop result is uncertain.");
-            }
-            catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or WorkerProtocolException)
-            {
-                // The descriptor is already closed. Supervisor PID1 independently reaps an exited viewer
-                // and terminates any surviving viewer when the container stops.
+                for (var attempt = 1; attempt <= StopAttempts; attempt++)
+                {
+                    try { await RequestAsync(new { operation = "viewer-stop", viewerHandle = _handle }, requireOk: true).ConfigureAwait(false); return; }
+                    catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or WorkerProtocolException) { failure = exception; }
+                }
             }
             finally { _fileHandle.Dispose(); }
+
+            // The master is closed now, so the viewer should have received SIGHUP.
+            // Confirm that with the supervisor before deciding anything.
+            string? state = null;
+            try
+            {
+                using var status = await RequestAsync(new { operation = "viewer-status", viewerHandle = _handle }, requireOk: true).ConfigureAwait(false);
+                state = status.RootElement.TryGetProperty("state", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+            }
+            catch (Exception exception) when (exception is IOException or SocketException or OperationCanceledException or WorkerProtocolException) { failure = exception; }
+
+            if (state is "absent" or "exited") return;
+            throw new WorkerTerminalStopUncertainException("The worker viewer stop outcome is uncertain and the viewer may still hold the session.", failure);
+        }
+
+        private async Task<JsonDocument> RequestAsync(object request, bool requireOk)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_socketPath), timeout.Token).ConfigureAwait(false);
+            using var stream = new NetworkStream(socket);
+            await WorkerProtocol.WriteFrameAsync(stream, request, timeout.Token).ConfigureAwait(false);
+            var response = await WorkerProtocol.ReadFrameAsync(stream, timeout.Token).ConfigureAwait(false);
+            if (response is null) throw new WorkerProtocolException("The fixed supervisor viewer result is uncertain.");
+            if (requireOk && (response.RootElement.ValueKind != JsonValueKind.Object || !response.RootElement.TryGetProperty("ok", out var ok) || ok.ValueKind != JsonValueKind.True))
+            {
+                response.Dispose();
+                throw new WorkerProtocolException("The fixed supervisor viewer result is uncertain.");
+            }
+            return response;
         }
 
         private const short PollIn = 0x001;

@@ -344,6 +344,34 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             tx.Commit();
         }
     }
+    /// <summary>
+    /// Records that a viewer stop could not be confirmed, so a viewer may still be
+    /// attached to the session.
+    /// </summary>
+    /// <remarks>
+    /// This is deliberately not one of the fixed dispatch holds: an unconfirmed
+    /// viewer teardown says nothing about the ACP process or about prompt safety,
+    /// and blocking dispatch for it would be a false safety signal. It suppresses
+    /// only viewer availability, which is exactly the surface in doubt, and it is
+    /// cleared when a later attach succeeds, because the supervisor refuses a
+    /// second viewer while the previous one is alive.
+    /// </remarks>
+    public void SetViewerHold(string reason)
+    {
+        WorkerProtocol.ValidateIdentifier(reason, 64, "viewer hold reason");
+        lock (_databaseGate) Execute("INSERT INTO meta VALUES('viewer_hold',$r) ON CONFLICT(key) DO UPDATE SET value=$r", null, ("$r", reason));
+    }
+
+    public void ClearViewerHold()
+    {
+        lock (_databaseGate) Execute("DELETE FROM meta WHERE key='viewer_hold'");
+    }
+
+    public string? ViewerHoldReason()
+    {
+        lock (_databaseGate) return Scalar("SELECT value FROM meta WHERE key='viewer_hold'")?.ToString();
+    }
+
     public bool ViewerSessionBound()
     {
         lock (_databaseGate)

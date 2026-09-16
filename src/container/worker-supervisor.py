@@ -178,6 +178,19 @@ def close_viewer():
     viewer = None
 
 
+def viewer_status(handle):
+    """Report whether the exact viewer handle still has a live process.
+
+    The supervisor hands the PTY master to the bridge and keeps no copy, so it
+    cannot observe the transferred descriptor. It can still observe its own
+    child, which is what a controller needs to decide whether an uncertain stop
+    left a viewer running.
+    """
+    if viewer is None or viewer["handle"] != handle:
+        return {"ok": True, "state": "absent"}
+    return {"ok": True, "state": "running" if viewer["process"].poll() is None else "exited"}
+
+
 def stop_viewer(handle):
     if viewer is None or viewer["handle"] != handle:
         return {"ok": False, "error": "viewer-not-found"}
@@ -301,6 +314,12 @@ def handle(conn):
             send(conn, {"ok": False, "error": "invalid-request"})
             return
         send(conn, stop_viewer(request["viewerHandle"]))
+    elif operation == "viewer-status":
+        if set(request) != {"operation", "viewerHandle"} or not isinstance(request["viewerHandle"], str) or not SESSION_PATTERN.fullmatch(request["viewerHandle"]):
+            send(conn, {"ok": False, "error": "invalid-request"})
+            return
+        reap()
+        send(conn, viewer_status(request["viewerHandle"]))
     elif operation == "status" and set(request) == {"operation"}:
         child = children.get("acp")
         running = child is not None and child.poll() is None

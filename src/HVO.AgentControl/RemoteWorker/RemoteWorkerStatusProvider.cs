@@ -26,7 +26,14 @@ public sealed class RemoteWorkerStatusProvider(AcpControlHost control) : IRemote
         var cursors = store.ListWorkerCursors().ToDictionary(x => x.WorkerId, StringComparer.Ordinal);
         var recoveries = store.ListWorkerRecoveryObligations(activeOnly: true).GroupBy(x => x.WorkerId).ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.Ordinal);
         var permissions = store.ListWorkerPendingPermissions().Where(x => x.State is "pending" or "uncertain").GroupBy(x => x.WorkerId).ToDictionary(x => x.Key, x => x.Take(16).ToArray(), StringComparer.Ordinal);
-        var employees = overview.Employees.ToDictionary(x => x.RuntimeBindingId, StringComparer.Ordinal);
+        // One runtime binding must map to exactly one employee. A duplicate means the
+        // store no longer identifies who owns a worker, so the snapshot fails closed
+        // rather than silently choosing one of them.
+        var employees = new Dictionary<string, EmployeeSummary>(StringComparer.Ordinal);
+        foreach (var employee in overview.Employees)
+            if (!employees.TryAdd(employee.RuntimeBindingId, employee))
+                throw new OrganizationStoreCorruptException("Multiple employees resolved to the same runtime binding.");
+
         var result = new Dictionary<string, RemoteWorkerSnapshot>(StringComparer.Ordinal);
         foreach (var enrollment in store.ListWorkerEnrollments())
         {

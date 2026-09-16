@@ -869,6 +869,94 @@ public sealed class WorkerBridgeTests
         Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision(first.Epoch, pending.DecisionId, pending.ProcessGeneration, pending.RequestId, pending.TurnId, "reject_once"));
     }
 
+    /// <summary>
+    /// A partially delivered keystroke run must never be retried or silently
+    /// dropped: the session ends with the exact category and the byte count, and no
+    /// input content is ever echoed back.
+    /// </summary>
+    [Fact]
+    public async Task UncertainViewerInputEndsTheSessionWithAnExplicitCloseAndNoInputContent()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        store.BindSession("ses-viewer");
+        var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
+        var terminal = new FakeTerminalBackend { WriteFailure = new WorkerTerminalWriteUncertainException("injected partial write", 7) };
+        var key = new byte[32];
+        await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray(), terminal: terminal);
+        using var shutdown = new CancellationTokenSource();
+        var run = bridge.RunAsync(shutdown.Token);
+        await Eventually(() => File.Exists(temp.Options().SocketPath));
+
+        var lease = store.AcquireLease("controller-test", Nonce(40));
+        using var viewer = await AuthenticateViewerAsync(temp.Options(), key, Nonce(41), lease, "ses-viewer");
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(viewer, CancellationToken.None);
+        Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString());
+
+        const string secret = "do-not-echo-this-input";
+        await WorkerProtocol.WriteFrameAsync(viewer, new { type = "input", sessionId = "ses-viewer", data = Convert.ToBase64String(Encoding.UTF8.GetBytes(secret)) }, CancellationToken.None);
+
+        using var close = await ReadUntilAsync(viewer, "close");
+        Assert.Equal("input-uncertain", close!.RootElement.GetProperty("category").GetString());
+        Assert.Equal(7, close.RootElement.GetProperty("bytesWritten").GetInt32());
+        Assert.Equal("ses-viewer", close.RootElement.GetProperty("sessionId").GetString());
+        Assert.DoesNotContain(secret, close.RootElement.GetRawText(), StringComparison.Ordinal);
+        // The uncertain write is never repeated.
+        Assert.Equal(1, terminal.WriteAttempts);
+
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    /// <summary>
+    /// An output-pump failure is announced rather than appearing to the browser as
+    /// an idle terminal.
+    /// </summary>
+    [Fact]
+    public async Task FailedViewerOutputPumpSendsAnExplicitCloseCategoryBeforeTheStreamEnds()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        store.BindSession("ses-viewer");
+        var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
+        var terminal = new FakeTerminalBackend { OutputFailure = new IOException("injected output failure") };
+        var key = new byte[32];
+        await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray(), terminal: terminal);
+        using var shutdown = new CancellationTokenSource();
+        var run = bridge.RunAsync(shutdown.Token);
+        await Eventually(() => File.Exists(temp.Options().SocketPath));
+
+        var lease = store.AcquireLease("controller-test", Nonce(42));
+        using var viewer = await AuthenticateViewerAsync(temp.Options(), key, Nonce(43), lease, "ses-viewer");
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(viewer, CancellationToken.None);
+        Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString());
+
+        using var close = await ReadUntilAsync(viewer, "close");
+        Assert.Equal("viewer-output-failed", close!.RootElement.GetProperty("category").GetString());
+
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    /// <summary>
+    /// An unconfirmed viewer teardown suppresses viewer availability without
+    /// claiming the ACP process or dispatch is unsafe.
+    /// </summary>
+    [Fact]
+    public void UncertainViewerStopSuppressesViewerAvailabilityWithoutHoldingDispatch()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        store.BindSession("ses-viewer");
+        Assert.Null(store.ViewerHoldReason());
+
+        store.SetViewerHold("viewer-stop-uncertain");
+        Assert.Equal("viewer-stop-uncertain", store.ViewerHoldReason());
+        // An unconfirmed viewer teardown says nothing about prompt safety.
+        Assert.False(store.Status().DispatchHeld);
+        Assert.True(store.ViewerSessionBound());
+
+        store.ClearViewerHold();
+        Assert.Null(store.ViewerHoldReason());
+    }
+
     [Fact]
     public void ControlHostWorkerFlagRemainsFalseBySourceContract()
     {
@@ -884,6 +972,71 @@ public sealed class WorkerBridgeTests
         await WorkerProtocol.WriteFrameAsync(stream, new { type = "proof", mac = WorkerProtocol.ComputeMac(key, "client-proof", "controller", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued) }, CancellationToken.None);
         return stream;
     }
+    private static async Task<NetworkStream> AuthenticateViewerAsync(WorkerOptions options, byte[] key, string clientNonce, Lease lease, string sessionId)
+    {
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await socket.ConnectAsync(new UnixDomainSocketEndPoint(options.SocketPath));
+        var stream = new NetworkStream(socket, ownsSocket: true);
+        var keyId = WorkerProtocol.KeyId(key);
+        await WorkerProtocol.WriteFrameAsync(stream, new { type = "hello", version = WorkerProtocol.Version, role = WorkerProtocol.ViewerRole, controllerId = options.ControllerId, workerId = options.WorkerId, keyId, clientNonce, ownershipEpoch = lease.Epoch, connectionNonce = lease.ConnectionNonce, sessionId }, CancellationToken.None);
+        using var challenge = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        var root = challenge!.RootElement;
+        Assert.True(root.TryGetProperty("serverNonce", out var serverNonceElement), root.GetRawText());
+        var serverNonce = serverNonceElement.GetString()!;
+        var issued = root.GetProperty("issuedUnixMilliseconds").GetInt64();
+        await WorkerProtocol.WriteFrameAsync(stream, new { type = "proof", mac = WorkerProtocol.ComputeViewerMac(key, "client-proof", options.ControllerId, options.WorkerId, keyId, clientNonce, serverNonce, issued, lease.Epoch, lease.ConnectionNonce, sessionId) }, CancellationToken.None);
+        return stream;
+    }
+
+    /// <summary>Reads viewer frames until the requested type arrives, ignoring output chunks.</summary>
+    private static async Task<JsonDocument?> ReadUntilAsync(Stream stream, string type)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (true)
+        {
+            var frame = await WorkerProtocol.ReadFrameAsync(stream, timeout.Token);
+            Assert.NotNull(frame);
+            if (frame!.RootElement.GetProperty("type").GetString() == type) return frame;
+            frame.Dispose();
+        }
+    }
+
+    /// <summary>A terminal backend whose failures are injected at exact points.</summary>
+    private sealed class FakeTerminalBackend : IWorkerTerminalBackend
+    {
+        public Exception? WriteFailure { get; set; }
+        public Exception? OutputFailure { get; set; }
+        public int WriteAttempts => _session?.WriteAttempts ?? 0;
+        private FakeTerminalSession? _session;
+
+        public bool Available => true;
+        public Task<IWorkerTerminalSession> AttachAsync(string sessionId, CancellationToken token)
+        {
+            _session = new FakeTerminalSession(WriteFailure, OutputFailure);
+            return Task.FromResult<IWorkerTerminalSession>(_session);
+        }
+
+        private sealed class FakeTerminalSession(Exception? writeFailure, Exception? outputFailure) : IWorkerTerminalSession
+        {
+            private int _writeAttempts;
+            public int WriteAttempts => _writeAttempts;
+
+            public Task WriteInputAsync(ReadOnlyMemory<byte> input, CancellationToken token)
+            {
+                Interlocked.Increment(ref _writeAttempts);
+                return writeFailure is null ? Task.CompletedTask : Task.FromException(writeFailure);
+            }
+            public Task ResizeAsync(int rows, int columns, CancellationToken token) => Task.CompletedTask;
+            public async IAsyncEnumerable<WorkerTerminalOutput> ReadOutputAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+            {
+                if (outputFailure is not null) { await Task.Yield(); throw outputFailure; }
+                await Task.Delay(Timeout.Infinite, token).ConfigureAwait(false);
+                yield break;
+            }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
     private static void Start(WorkerStore store) { store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); }
     private static string Nonce(byte value) => Convert.ToBase64String(Enumerable.Repeat(value, 32).ToArray());
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False"); connection.Open(); return connection; }

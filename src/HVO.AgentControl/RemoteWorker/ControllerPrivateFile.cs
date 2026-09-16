@@ -19,6 +19,7 @@ public static class ControllerPrivateFile
     private const int O_CLOEXEC = 0x80000;
     private const int O_NOFOLLOW = 0x20000;
     private const int O_DIRECTORY = 0x10000;
+    private const int AT_FDCWD = -100;
     private const int AT_SYMLINK_NOFOLLOW = 0x100;
     private const int AT_EMPTY_PATH = 0x1000;
     private const uint STATX_BASIC_STATS = 0x7ff;
@@ -183,16 +184,33 @@ public static class ControllerPrivateFile
     private static Exception Failure(string message) => new InvalidOperationException(message, new Win32Exception(Marshal.GetLastPInvokeError()));
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct StatxTimestamp { public long Seconds; public uint Nanoseconds; public int Reserved; }
+    internal struct StatxTimestamp { public long Seconds; public uint Nanoseconds; public int Reserved; }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Statx
+    /// <summary>
+    /// The exact kernel <c>struct statx</c> (256 bytes, linux/stat.h). The field
+    /// order matters: <c>stx_rdev_*</c> precedes <c>stx_dev_*</c>, and reading them
+    /// the other way round would silently compare the device of a regular file
+    /// (always zero) instead of the filesystem it lives on. The trailing reserved
+    /// words are explicit fields rather than a marshalled array so the struct stays
+    /// blittable and needs no per-call marshalling.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, Size = 256)]
+    internal struct Statx
     {
         public uint Mask; public uint BlockSize; public ulong Attributes; public uint Links; public uint Uid; public uint Gid; public ushort Mode; public ushort Spare0;
         public ulong Inode; public ulong Size; public ulong Blocks; public ulong AttributesMask;
         public StatxTimestamp Access; public StatxTimestamp Birth; public StatxTimestamp Change; public StatxTimestamp Modification;
-        public uint DeviceMajor; public uint DeviceMinor; public uint RDeviceMajor; public uint RDeviceMinor;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 14)] public ulong[] Spare2;
+        public uint RDeviceMajor; public uint RDeviceMinor; public uint DeviceMajor; public uint DeviceMinor;
+        public ulong MountId; public uint DirectIoMemoryAlign; public uint DirectIoOffsetAlign;
+        public ulong Spare1; public ulong Spare2; public ulong Spare3; public ulong Spare4; public ulong Spare5; public ulong Spare6;
+        public ulong Spare7; public ulong Spare8; public ulong Spare9; public ulong Spare10; public ulong Spare11; public ulong Spare12;
+    }
+
+    /// <summary>Test hook: the exact kernel-reported metadata for one path, with no policy applied.</summary>
+    internal static Statx StatForTests(string path)
+    {
+        if (statx(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, out var value) != 0) throw Failure("statx failed.");
+        return value;
     }
 
     [DllImport("libc", SetLastError = true)] private static extern int open(string path, int flags);

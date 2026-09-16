@@ -48,13 +48,29 @@ public sealed class WorkerTerminalBackendTests
             var backend = new SupervisorWorkerTerminalBackend(path);
             await using (var session = await backend.AttachAsync("ses-eof", CancellationToken.None))
             {
-                await using var output = session.ReadOutputAsync(CancellationToken.None).GetAsyncEnumerator();
-                var pending = output.MoveNextAsync().AsTask();
-                closeSlave.SetResult();
-                Assert.False(await pending.WaitAsync(TimeSpan.FromSeconds(2)));
+                // The enumerator is cancellable so a failed wait disposes cleanly. An
+                // enumerator disposed while its MoveNextAsync is still pending throws
+                // NotSupportedException, which would replace the real failure with a
+                // misleading one.
+                using var enumeration = new CancellationTokenSource();
+                var output = session.ReadOutputAsync(enumeration.Token).GetAsyncEnumerator();
+                try
+                {
+                    var pending = output.MoveNextAsync().AsTask();
+                    closeSlave.SetResult();
+                    // The PTY poll loop is 100 ms; the bound is generous because this
+                    // suite also runs under parallel load, where a tight bound measures
+                    // the machine rather than the EOF behaviour under test.
+                    Assert.False(await pending.WaitAsync(TimeSpan.FromSeconds(30)));
+                }
+                finally
+                {
+                    await enumeration.CancelAsync();
+                    try { await output.DisposeAsync(); } catch (OperationCanceledException) { }
+                }
             }
-            Assert.Equal("view-eof", await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2)));
-            await server.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal("view-eof", await stopped.Task.WaitAsync(TimeSpan.FromSeconds(30)));
+            await server.WaitAsync(TimeSpan.FromSeconds(30));
         }
         finally { directory.Delete(true); }
     }
@@ -132,6 +148,105 @@ public sealed class WorkerTerminalBackendTests
             }
             Assert.Equal("view-fixed", await stopped.Task.WaitAsync(TimeSpan.FromSeconds(2)));
             await server.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally { directory.Delete(true); }
+    }
+
+    /// <summary>
+    /// A stop that never succeeds must not be reported as a clean teardown when the
+    /// supervisor still sees the viewer process alive.
+    /// </summary>
+    [Fact]
+    public async Task UnconfirmedStopWithASurvivingViewerIsRaisedAsUncertainAfterBoundedRetries()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var directory = Directory.CreateTempSubdirectory("worker-terminal-stop-uncertain-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "supervisor.sock");
+            using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            listener.Bind(new UnixDomainSocketEndPoint(path));
+            listener.Listen(8);
+            var stopAttempts = 0;
+            var statusRequested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var server = Task.Run(async () =>
+            {
+                using (var start = await listener.AcceptAsync())
+                {
+                    using var startStream = new NetworkStream(start, ownsSocket: false);
+                    using var request = await WorkerProtocol.ReadFrameAsync(startStream, CancellationToken.None);
+                    Assert.Equal("viewer-start", request!.RootElement.GetProperty("operation").GetString());
+                    Assert.Equal(0, openpty(out var master, out var slave, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero));
+                    SendDescriptor(start, Encoding.UTF8.GetBytes("{\"ok\":true,\"viewerHandle\":\"view-stuck\"}\n"), master);
+                    close(master);
+                    close(slave);
+                }
+                while (true)
+                {
+                    using var next = await listener.AcceptAsync();
+                    using var stream = new NetworkStream(next, ownsSocket: false);
+                    using var frame = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+                    var operation = frame!.RootElement.GetProperty("operation").GetString();
+                    if (operation == "viewer-stop") { stopAttempts++; await WorkerProtocol.WriteFrameAsync(stream, new { ok = false, error = "viewer-not-found" }, CancellationToken.None); continue; }
+                    // The supervisor can still see its own child, and it is alive.
+                    statusRequested.TrySetResult();
+                    await WorkerProtocol.WriteFrameAsync(stream, new { ok = true, state = "running" }, CancellationToken.None);
+                    return;
+                }
+            });
+
+            var backend = new SupervisorWorkerTerminalBackend(path);
+            var session = await backend.AttachAsync("ses-stuck", CancellationToken.None);
+            await Assert.ThrowsAsync<WorkerTerminalStopUncertainException>(async () => await session.DisposeAsync());
+
+            await statusRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(3, stopAttempts);
+        }
+        finally { directory.Delete(true); }
+    }
+
+    /// <summary>
+    /// Closing the PTY master hangs up the viewer's session leader, so a supervisor
+    /// that reports the process gone means the stop really did take effect.
+    /// </summary>
+    [Fact]
+    public async Task UnconfirmedStopWithAnExitedViewerIsACleanTeardown()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var directory = Directory.CreateTempSubdirectory("worker-terminal-stop-exited-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "supervisor.sock");
+            using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            listener.Bind(new UnixDomainSocketEndPoint(path));
+            listener.Listen(8);
+            var server = Task.Run(async () =>
+            {
+                using (var start = await listener.AcceptAsync())
+                {
+                    using var startStream = new NetworkStream(start, ownsSocket: false);
+                    using var request = await WorkerProtocol.ReadFrameAsync(startStream, CancellationToken.None);
+                    Assert.Equal(0, openpty(out var master, out var slave, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero));
+                    SendDescriptor(start, Encoding.UTF8.GetBytes("{\"ok\":true,\"viewerHandle\":\"view-gone\"}\n"), master);
+                    close(master);
+                    close(slave);
+                }
+                while (true)
+                {
+                    using var next = await listener.AcceptAsync();
+                    using var stream = new NetworkStream(next, ownsSocket: false);
+                    using var frame = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+                    if (frame!.RootElement.GetProperty("operation").GetString() == "viewer-stop") { await WorkerProtocol.WriteFrameAsync(stream, new { ok = false, error = "viewer-not-found" }, CancellationToken.None); continue; }
+                    await WorkerProtocol.WriteFrameAsync(stream, new { ok = true, state = "exited" }, CancellationToken.None);
+                    return;
+                }
+            });
+
+            var backend = new SupervisorWorkerTerminalBackend(path);
+            var session = await backend.AttachAsync("ses-gone", CancellationToken.None);
+            await session.DisposeAsync();
+            await server.WaitAsync(TimeSpan.FromSeconds(5));
         }
         finally { directory.Delete(true); }
     }

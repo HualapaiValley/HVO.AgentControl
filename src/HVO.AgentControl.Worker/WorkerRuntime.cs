@@ -445,6 +445,14 @@ public sealed class WorkerBridge : IAsyncDisposable
                     if (!_viewer.Wait(0)) throw new WorkerProtocolException("A viewer is already attached.");
                     _authenticating.Release(); authOwned = false;
                     try { await WorkerProtocol.WriteFrameAsync(stream, new { type = "authenticated", role = WorkerProtocol.ViewerRole, sessionId }, bridgeToken); await RunViewerAsync(stream, epoch, connectionNonce, sessionId, bridgeToken).ConfigureAwait(false); }
+                    catch (WorkerTerminalStopUncertainException)
+                    {
+                        // A viewer may still hold the session. Record it so the controller
+                        // sees an unavailable viewer instead of a clean detach; dispatch and
+                        // the ACP process are unaffected.
+                        _store.SetViewerHold("viewer-stop-uncertain");
+                        throw;
+                    }
                     finally { _viewer.Release(); }
                 }
                 else
@@ -466,17 +474,44 @@ public sealed class WorkerBridge : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Runs one attached viewer session.
+    /// </summary>
+    /// <remarks>
+    /// Failure is always announced. Whichever pump fails first cancels the shared
+    /// lifetime and the session ends with an explicit typed <c>close</c> frame
+    /// carrying a fixed category, so the controller and the browser see a failed
+    /// viewer instead of a silently truncated stream that looks like an idle
+    /// terminal. Both pumps are observed before returning, so neither can outlive
+    /// the session or hide its failure.
+    /// </remarks>
     private async Task RunViewerAsync(Stream stream, long epoch, string connectionNonce, string sessionId, CancellationToken token)
     {
         await using var terminal = await _terminal.AttachAsync(sessionId, token).ConfigureAwait(false);
+        // The attach succeeded, so no earlier viewer still holds the PTY: the
+        // supervisor refuses a second viewer while one is alive.
+        _store.ClearViewerHold();
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var closure = new ViewerClosure();
         var output = Task.Run(async () =>
         {
-            await foreach (var chunk in terminal.ReadOutputAsync(lifetime.Token).ConfigureAwait(false))
+            try
             {
-                _store.RequireViewerLease(epoch, connectionNonce, sessionId);
-                if (chunk.Data.Length > WorkerProtocol.MaxViewerOutputBytes) throw new WorkerProtocolException("Viewer output exceeds the fixed chunk limit.");
-                await WorkerProtocol.WriteFrameAsync(stream, new { type = "output", sessionId, data = Convert.ToBase64String(chunk.Data) }, lifetime.Token).ConfigureAwait(false);
+                await foreach (var chunk in terminal.ReadOutputAsync(lifetime.Token).ConfigureAwait(false))
+                {
+                    _store.RequireViewerLease(epoch, connectionNonce, sessionId);
+                    if (chunk.Data.Length > WorkerProtocol.MaxViewerOutputBytes) throw new WorkerProtocolException("Viewer output exceeds the fixed chunk limit.");
+                    await WorkerProtocol.WriteFrameAsync(stream, new { type = "output", sessionId, data = Convert.ToBase64String(chunk.Data) }, lifetime.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { throw; }
+            catch
+            {
+                // The output pump owns the socket writer, so it records the category and
+                // cancels the input side rather than writing a frame concurrently.
+                closure.Set("viewer-output-failed");
+                await lifetime.CancelAsync().ConfigureAwait(false);
+                throw;
             }
         }, CancellationToken.None);
         try
@@ -489,14 +524,65 @@ public sealed class WorkerBridge : IAsyncDisposable
                 var root = frame.RootElement; if (Required(root, "sessionId") != sessionId) throw new WorkerProtocolException("Viewer frame session changed.");
                 switch (Required(root, "type"))
                 {
-                    case "input": { var bytes = WorkerViewerProtocol.DecodeInput(Required(root, "data")); try { await terminal.WriteInputAsync(bytes, lifetime.Token).ConfigureAwait(false); } finally { CryptographicOperations.ZeroMemory(bytes); } break; }
+                    case "input":
+                        {
+                            var bytes = WorkerViewerProtocol.DecodeInput(Required(root, "data"));
+                            try { await terminal.WriteInputAsync(bytes, lifetime.Token).ConfigureAwait(false); }
+                            catch (WorkerTerminalWriteUncertainException uncertain)
+                            {
+                                // Part of the keystrokes may have reached the PTY. Never retry and
+                                // never pretend it succeeded: end the session with the exact
+                                // category and the byte count, and expose no input content.
+                                closure.Set("input-uncertain", uncertain.BytesWritten);
+                                throw;
+                            }
+                            finally { CryptographicOperations.ZeroMemory(bytes); }
+                            break;
+                        }
                     case "resize": { var rows = checked((int)RequiredInt64(root, "rows", 1)); var columns = checked((int)RequiredInt64(root, "columns", 1)); if (rows > 500 || columns > 500) throw new WorkerProtocolException("Viewer dimensions exceed the fixed limit."); await terminal.ResizeAsync(rows, columns, lifetime.Token).ConfigureAwait(false); break; }
                     case "detach": return;
                     default: throw new WorkerProtocolException("Viewer operation is not permitted.");
                 }
             }
         }
-        finally { await lifetime.CancelAsync().ConfigureAwait(false); try { await output.ConfigureAwait(false); } catch (OperationCanceledException) { } }
+        catch (Exception exception)
+        {
+            closure.Set(exception is WorkerProtocolException ? "viewer-protocol-failed" : "viewer-input-failed");
+            throw;
+        }
+        finally
+        {
+            await lifetime.CancelAsync().ConfigureAwait(false);
+            try { await output.ConfigureAwait(false); } catch (OperationCanceledException) { } catch { }
+            await closure.SendAsync(stream, sessionId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Records the first viewer failure category and emits the single closing frame.</summary>
+    private sealed class ViewerClosure
+    {
+        private string? _category;
+        private int? _bytesWritten;
+        private int _sent;
+
+        public void Set(string category, int? bytesWritten = null)
+        {
+            if (Interlocked.CompareExchange(ref _category, category, null) is null) _bytesWritten = bytesWritten;
+        }
+
+        public async Task SendAsync(Stream stream, string sessionId)
+        {
+            if (_category is not { } category || Interlocked.Exchange(ref _sent, 1) != 0) return;
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                object frame = _bytesWritten is { } written
+                    ? new { type = "close", sessionId, category, bytesWritten = written }
+                    : new { type = "close", sessionId, category };
+                await WorkerProtocol.WriteFrameAsync(stream, frame, timeout.Token).ConfigureAwait(false);
+            }
+            catch { /* The peer is already gone; the controller still observes the closed stream. */ }
+        }
     }
 
     internal async Task DispatchAsync(Stream stream, JsonElement message, Lease socketLease, CancellationToken connectionToken)
@@ -546,7 +632,9 @@ public sealed class WorkerBridge : IAsyncDisposable
     private WorkerStatus ViewerStatus()
     {
         var status = _store.Status();
-        var available = _terminal.Available && _store.ViewerSessionBound();
+        // An unconfirmed previous teardown suppresses viewer availability until a
+        // fresh attach proves the slot is free.
+        var available = _terminal.Available && _store.ViewerSessionBound() && _store.ViewerHoldReason() is null;
         return status with { ViewerSupported = _terminal.Available, ViewerAvailable = available };
     }
 

@@ -235,7 +235,7 @@ app.MapPost("/api/execution-hosts/{id}/disable", (HttpContext context, AcpContro
 app.MapGet("/api/workers/status", (AcpControlHost control) =>
 {
     if (control.Organization is not { } store) return Program.WorkerStoreUnavailable();
-    try { return Results.Ok(new { enrollments = store.ListWorkerEnrollments(), cursors = store.ListWorkerCursors(), pendingWorkerPermissions = store.ListWorkerPendingPermissions(), recovery = store.ListWorkerRecoveryObligations(activeOnly: true) }); }
+    try { return Results.Ok(new { enrollments = store.ListWorkerEnrollments(), cursors = store.ListWorkerCursors(), pendingWorkerPermissions = store.ListWorkerPendingPermissions(), recovery = store.ListWorkerRecoveryObligations(activeOnly: true), eventRetention = store.ListWorkerEventRetention() }); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 })
     .WithName("GetRemoteWorkerStatus").WithTags("Remote workers");
@@ -307,11 +307,15 @@ app.MapPost("/api/workers/{workerId}/sync", async (HttpContext context, AcpContr
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("SynchronizeRemoteWorker").WithTags("Remote workers");
 
-app.MapPost("/api/workers/{workerId}/recover", (HttpContext context, AcpControlHost control, string workerId, WorkerRecoveryRequest request) =>
+// Recovery invokes the exact worker-side reconciliation for the named obligation
+// and clears the controller row only after the worker accepted it, so an operator
+// action can never merely hide an unreconciled worker. Obligations whose real
+// outcome cannot be established remotely are refused with 409 rather than cleared.
+app.MapPost("/api/workers/{workerId}/recover", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId, WorkerRecoveryRequest request) =>
 {
     if (Program.RejectCrossOrigin(context, "Worker recovery") is { } rejection) return rejection;
-    if (control.Organization is not { } store) return Program.WorkerStoreUnavailable();
-    try { store.ResolveRecoveryObligation(workerId, request.Kind, request.MarkerHash); return Results.Ok(); }
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.RecoverAsync(workerId, request.ObligationId, request.ExpectedRevision, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("RecoverRemoteWorker").WithTags("Remote workers");
 
@@ -1140,22 +1144,36 @@ public partial class Program
     /// </summary>
     public static bool IsRemoteWorkerFailure(Exception exception) =>
         exception is HVO.AgentControl.Organization.OrganizationStoreException
+            or HVO.AgentControl.RemoteWorker.RemoteWorkerException
             or KeyNotFoundException
             or InvalidOperationException;
 
     /// <summary>
-    /// Maps a remote-worker store, configuration, or referenced-record failure to
-    /// the single RFC 9457 error contract. Sealed store validation and
-    /// optimistic-concurrency failures are matched before the base store fault; a
-    /// missing referenced record is 404; a disabled or invalid worker
-    /// configuration is 409; every other store failure is a sanitized 503. The
-    /// exception message is never surfaced.
+    /// Maps a typed remote-worker failure to the single RFC 9457 error contract.
     /// </summary>
+    /// <remarks>
+    /// Each arm is a distinct operator meaning, so no caller has to guess intent
+    /// from a bare <see cref="InvalidOperationException"/>. A disabled or
+    /// misconfigured controller is 409; an unreachable host transport is 502 and a
+    /// reachable-but-unusable host is 503; an open recovery obligation is a 409
+    /// that names the obligation kind; a foreign resource is 409. The remaining
+    /// <see cref="InvalidOperationException"/> arm is a sanitized 500: reaching it
+    /// means an internal invariant failed rather than a caller or host condition,
+    /// and it must not be reported as a client-fixable conflict.
+    /// </remarks>
     public static IResult RemoteWorkerProblem(Exception exception) => exception switch
     {
         HVO.AgentControl.Organization.OrganizationValidationException => Results.Problem(
             statusCode: StatusCodes.Status400BadRequest,
             title: "Remote worker request is invalid."),
+        HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException recovery => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker recovery is required.",
+            detail: $"An operator must reconcile the open '{recovery.Kind}' obligation before this operation can proceed."),
+        HVO.AgentControl.RemoteWorker.ForeignResourceException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote resource is not owned by this controller.",
+            detail: "A resource with the expected name exists but does not carry this controller's exact labels."),
         HVO.AgentControl.Organization.OrganizationConcurrencyException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
             title: "Remote worker request conflicted.",
@@ -1166,14 +1184,28 @@ public partial class Program
         KeyNotFoundException => Results.Problem(
             statusCode: StatusCodes.Status404NotFound,
             title: "Remote worker record not found."),
-        InvalidOperationException => Results.Problem(
+        HVO.AgentControl.RemoteWorker.WorkerControlDisabledException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
-            title: "Remote worker control unavailable.",
-            detail: "Worker control is disabled or its configuration is invalid."),
+            title: "Remote worker control is disabled.",
+            detail: "Worker control is switched off, so no host operation was executed."),
+        HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker configuration is invalid.",
+            detail: "Worker control is enabled but its configuration is not usable, so no host operation was executed."),
+        HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException unavailable => Results.Problem(
+            statusCode: unavailable.Transport ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable,
+            title: unavailable.Transport ? "Remote worker host is unreachable." : "Remote worker host is unavailable.",
+            detail: unavailable.Transport
+                ? "The fixed connector could not reach the approved host."
+                : "The approved host did not return a usable result."),
         HVO.AgentControl.Organization.OrganizationStoreException => Results.Problem(
             statusCode: StatusCodes.Status503ServiceUnavailable,
             title: "Worker store unavailable.",
             detail: "The authoritative store could not be read or written."),
+        InvalidOperationException => Results.Problem(
+            statusCode: StatusCodes.Status500InternalServerError,
+            title: "Remote worker operation failed.",
+            detail: "An internal invariant failed. The operation was not completed."),
         _ => throw exception,
     };
 
@@ -1300,7 +1332,7 @@ public partial class Program
 
 public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId);
 public sealed record WorkerPromptRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt);
-public sealed record WorkerRecoveryRequest(string Kind, string MarkerHash);
+public sealed record WorkerRecoveryRequest(string ObligationId, int ExpectedRevision);
 public sealed record WorkerPermissionRejectRequest(string DecisionId, int Revision);
 public sealed record ModelSelection(string? Model);
 

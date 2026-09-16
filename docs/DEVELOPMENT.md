@@ -123,9 +123,39 @@ and request transitions, event deduplication/cursor commit, recovery sets,
 intent-first cancellation/provisioning, command-injection rejection, pinned SSH
 flags, resource-label ownership and bounded Linux capability parsing. The bridge,
 connection and provisioning services expose injectable interfaces for deterministic
-fakes. These checks do not access SSH credentials, Docker daemons or remote hosts. The viewer protocol tests use both hermetic fakes and a local Unix `SCM_RIGHTS` PTY contract for the production backend; owner viewer input can execute employee code and its framing limits are not a sandbox. Real two-host portal terminal evidence remains pending.
+fakes. These checks do not access SSH credentials or remote hosts.
 `WorkerControl` and its hosted manager are disabled by default; live adapter
 execution and enrollment require separate owner authorization.
+
+The approved-host capability probe is parsed from the real captured output of
+`docker system info`, `docker version` and one `df -B1 --output=avail` of the
+daemon's own `DockerRootDir` (checked in under `tests/.../Fixtures/`), not from
+controller-invented fields. A host that answers but cannot prove a mandatory
+capability is recorded `invalid`; only an unreachable or unparsable host is an
+error. Storage locality fails closed: it is accepted only for a known local
+storage driver with no non-local volume plugin installed.
+
+#### Viewer and PTY scope
+
+The viewer protocol is covered by hermetic fakes plus a local Unix
+`SCM_RIGHTS` PTY descriptor contract for the production backend, a real
+loopback WebSocket check of the browser-facing close handshake, and a Python
+harness against the real supervisor source. Owner viewer input can execute
+employee code, and its framing limits are not a sandbox.
+
+These are descriptor and protocol primitives, not an attached live session:
+the real OpenCode `attach` TUI is only exercised as a CLI contract inside the
+worker image. **Real two-host portal terminal evidence and a real attached
+viewer session remain pending operational validation and are not authorized
+here.**
+
+Viewer teardown is never silently assumed. An unconfirmed `viewer-stop` is
+retried on bounded fresh supervisor connections, then resolved against the
+supervisor's `viewer-status` for the exact handle; a still-running viewer
+raises `WorkerTerminalStopUncertainException` and suppresses viewer
+availability until a later attach proves the slot is free. It does not hold
+dispatch, because an unconfirmed viewer teardown says nothing about prompt
+safety.
 
 ### Worker bridge checks
 
@@ -151,10 +181,22 @@ pruning across generations, recoverable injected observation-store failures and
 exact journal-failure reconciliation, reconnect fencing and terminal container
 process-slot behavior. They require no provider credentials or inference. `WorkerImageContractTests`
 build and run the real image with alternate UIDs and validate private path/socket
-access, empty bridge capabilities/setuid inventory and PID1 signal/reaping. The
-local connector mode reads its key from the first stdin line; never put a worker
-key in argv or environment. Rotation and remote SSH delivery are not development
-helpers in #213.
+access, empty bridge capabilities/setuid inventory and PID1 signal/reaping. They
+also run the controller's own fixed command construction against a real local
+daemon: the ephemeral key bootstrap with controller-encoded bytes, then the
+long-lived container, asserting the resulting argv, environment, capabilities,
+labels, absent port bindings, `none` network and the four named-volume mounts.
+Everything there is local and disposable (no SSH, no registry, no provider
+credentials and no inference), and the CI step asserts the exact suite count.
+
+The worker key is written into the control volume by that ephemeral bootstrap
+container **before** the long-lived container is created, so no supervisor can
+start without an enrolled key. The controller transmits it as
+`base64(key) + "\n"` on standard input only; never put a worker key in argv or
+environment. A repeated bootstrap with the identical key is a verified no-op,
+which is what makes bootstrap reconciliation safe to retry; a different key
+fails closed rather than overwriting. Rotation and remote SSH delivery are not
+development helpers in #213.
 
 ### Container
 

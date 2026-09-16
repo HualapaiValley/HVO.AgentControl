@@ -4,6 +4,7 @@ using System.Text.Json;
 using HVO.AgentControl.Organization;
 using HVO.AgentControl.Runtime;
 using HVO.AgentControl.Terminal;
+using HVO.AgentControl.Worker;
 using Microsoft.Extensions.Options;
 
 namespace HVO.AgentControl.RemoteWorker;
@@ -27,6 +28,9 @@ public sealed class RemoteTerminalRouter(
     // availability come from the persisted status snapshot and are checked below.
     public bool IsAvailable => _options.Enabled;
 
+    /// <summary>Test-visible detail of the most recent unclassified viewer failure.</summary>
+    internal Exception? LastFailure { get; private set; }
+
     public async Task ProxyAsync(HttpContext context, RemoteWorkerSnapshot target, CancellationToken token)
     {
         if (!IsAvailable || !target.ViewerSupported || !target.ViewerAvailable || !context.WebSockets.IsWebSocketRequest || !TerminalProtocol.IsSameOrigin(context.Request.Headers.Origin.ToString(), context.Request.Scheme, context.Request.Host.Value))
@@ -41,7 +45,12 @@ public sealed class RemoteTerminalRouter(
         if (enrollment is null) { context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable; return; }
         WorkerConnectionLease? lease;
         try { lease = await manager.GetCachedLeaseAsync(target.WorkerId, token, refresh: true).ConfigureAwait(false); }
-        catch (Exception exception) when (exception is OrganizationStoreException or InvalidOperationException) { context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable; return; }
+        catch (Exception exception) when (exception is OrganizationStoreException or RemoteWorkerException or InvalidOperationException)
+        {
+            // Nothing is upgraded yet, so a status code is still the right answer.
+            context.Response.StatusCode = exception is RemoteWorkerUnavailableException { Transport: true } ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable;
+            return;
+        }
         if (lease is null || target.SessionRecordId is null || target.NativeSessionId is null || lease.Ownership.Epoch != target.OwnershipEpoch || lease.Status.ProcessGeneration != target.ProcessGeneration)
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
@@ -56,26 +65,107 @@ public sealed class RemoteTerminalRouter(
             remote = await RemoteTerminalSession.ConnectAsync(connector, enrollment, lease, target.NativeSessionId, TimeSpan.FromSeconds(_options.AuthenticationTimeoutSeconds), token).ConfigureAwait(false);
             viewer = store.TransitionRemoteTerminalViewer(viewer.Id, viewer.Revision, "requested", "connected");
             browser = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
-            var input = ForwardInputAsync(browser, remote, store, viewer.Id, lease, target.WorkerId, linked.Token);
-            var output = ForwardOutputAsync(browser, remote, store, viewer.Id, lease, target.WorkerId, linked.Token);
+        }
+        catch (Exception exception)
+        {
+            // Nothing was upgraded yet when the failure came from the connect leg, so
+            // a status code is still the correct answer; once the socket is accepted
+            // the catch below owns the close handshake instead.
+            Fail(store, target.WorkerId, viewer.Id);
+            if (remote is not null) await remote.DisposeAsync().ConfigureAwait(false);
+            browser?.Dispose();
+            if (browser is not null) throw;
+            if (exception is OperationCanceledException) throw;
+            context.Response.StatusCode = exception is WorkerProtocolException or RemoteWorkerUnavailableException ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable;
+            return;
+        }
+
+        // From here the response is an accepted WebSocket. A failure must be closed
+        // on the socket with a bounded reason and must not be rethrown into the
+        // middleware pipeline, which can no longer write a status code.
+        var closeStatus = WebSocketCloseStatus.NormalClosure;
+        var closeReason = "session ended";
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var input = ForwardInputAsync(browser, remote, store, viewer.Id, lease, target.WorkerId, linked.Token);
+        var output = ForwardOutputAsync(browser, remote, store, viewer.Id, lease, target.WorkerId, linked.Token);
+        try
+        {
             await Task.WhenAny(input, output).ConfigureAwait(false);
-            await linked.CancelAsync().ConfigureAwait(false);
-            await ObserveAsync(input).ConfigureAwait(false);
-            await ObserveAsync(output).ConfigureAwait(false);
+
+            // Both pumps can fail from one underlying event: the worker announces a
+            // category on the output side while the input side merely observes the
+            // dead stream. The worker's explicit announcement is the truthful reason,
+            // so the output side is inspected first and wins regardless of which task
+            // the scheduler happened to complete first. Only an already-finished pump
+            // is observed here: the input pump stays blocked on the browser until the
+            // close below, so awaiting it now would deadlock the close handshake.
+            var failure = await ObserveCompletedAsync(output).ConfigureAwait(false)
+                ?? await ObserveCompletedAsync(input).ConfigureAwait(false);
+            if (failure is not null) throw failure;
             var current = store.ListRemoteTerminalViewers(target.WorkerId).Single(x => x.Id == viewer.Id);
             if (current.State == "connected") viewer = store.TransitionRemoteTerminalViewer(current.Id, current.Revision, "connected", "detached");
         }
-        catch
+        catch (OperationCanceledException)
         {
-            var current = store.ListRemoteTerminalViewers(target.WorkerId).Single(x => x.Id == viewer.Id);
-            if (current.State is "requested" or "connected") store.TransitionRemoteTerminalViewer(current.Id, current.Revision, current.State, "failed");
-            throw;
+            closeStatus = WebSocketCloseStatus.EndpointUnavailable;
+            closeReason = "viewer canceled";
+            Fail(store, target.WorkerId, viewer.Id);
+        }
+        catch (RemoteViewerClosedException closed)
+        {
+            // The worker announced the exact failure category. Pass it through so the
+            // browser shows a failed viewer rather than a frozen terminal.
+            closeStatus = WebSocketCloseStatus.EndpointUnavailable;
+            closeReason = closed.BytesWritten is { } written ? $"{closed.Category}:{written}" : closed.Category;
+            Fail(store, target.WorkerId, viewer.Id);
+        }
+        catch (Exception exception)
+        {
+            closeStatus = exception is WorkerProtocolException or OrganizationConcurrencyException ? WebSocketCloseStatus.PolicyViolation : WebSocketCloseStatus.InternalServerError;
+            closeReason = exception is OrganizationConcurrencyException ? "owner lease changed" : "viewer failed";
+            LastFailure = exception;
+            Fail(store, target.WorkerId, viewer.Id);
         }
         finally
         {
+            // Close before cancelling: cancelling a pending WebSocket receive aborts
+            // the connection, which would destroy the close frame the browser needs to
+            // learn why the viewer ended. The close itself unblocks the input pump.
+            await CloseAsync(browser, closeStatus, closeReason).ConfigureAwait(false);
+            await linked.CancelAsync().ConfigureAwait(false);
+            // Both pumps are always observed, so neither can fail silently or outlive
+            // the request.
+            await ObserveAsync(input).ConfigureAwait(false);
+            await ObserveAsync(output).ConfigureAwait(false);
             if (remote is not null) await remote.DisposeAsync().ConfigureAwait(false);
-            browser?.Dispose();
+            browser.Dispose();
+        }
+    }
+
+    private static void Fail(OrganizationStore store, string workerId, string viewerId)
+    {
+        try
+        {
+            var current = store.ListRemoteTerminalViewers(workerId).SingleOrDefault(x => x.Id == viewerId);
+            if (current is not null && current.State is "requested" or "connected") store.TransitionRemoteTerminalViewer(current.Id, current.Revision, current.State, "failed");
+        }
+        catch (OrganizationStoreException) { /* The failure is already terminal; store unavailability must not mask it. */ }
+    }
+
+    /// <summary>Closes the socket with a reason bounded to the 123-byte protocol limit.</summary>
+    private static async Task CloseAsync(WebSocket browser, WebSocketCloseStatus status, string reason)
+    {
+        if (browser.State is not (WebSocketState.Open or WebSocketState.CloseReceived)) return;
+        var bounded = reason;
+        while (Encoding.UTF8.GetByteCount(bounded) > 123) bounded = bounded[..^1];
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await browser.CloseAsync(status, bounded, timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is WebSocketException or OperationCanceledException or ObjectDisposedException or IOException)
+        {
+            // The peer is already gone; the cleanup above has already recorded state.
         }
     }
 
@@ -115,11 +205,21 @@ public sealed class RemoteTerminalRouter(
         }
     }
 
-    private static async Task ObserveAsync(Task task)
+    /// <summary>Observes one pump and returns its failure, treating cancellation as a clean stop.</summary>
+    private static async Task<Exception?> ObserveAsync(Task task)
     {
-        try { await task.ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
+        try { await task.ConfigureAwait(false); return null; }
+        catch (OperationCanceledException) { return null; }
+        catch (Exception exception) { return exception; }
     }
+
+    /// <summary>
+    /// Returns the failure of a pump that has already finished, without waiting for
+    /// one that has not: the input pump stays blocked on the browser until the
+    /// socket is closed, so awaiting it here would deadlock the close handshake.
+    /// </summary>
+    private static Task<Exception?> ObserveCompletedAsync(Task task) =>
+        task.IsCompleted ? ObserveAsync(task) : Task.FromResult<Exception?>(null);
 
     private static void RequireCurrentLease(OrganizationStore store, WorkerConnectionLease lease, string workerId)
     {

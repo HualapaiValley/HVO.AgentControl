@@ -21,7 +21,15 @@ public sealed record WorkerRequestRecord(string Id, string TaskId, string Sessio
 public sealed record WorkerCancellationRecord(string Id, string RequestId, string PayloadHash, string State, long OwnershipEpoch, long ProcessGeneration, int Revision);
 public sealed record ProvisioningOperationRecord(string Id, string WorkerId, string HostId, string RuntimeBindingId, string Kind, string IntentHash, string State, string? ReceiptHash, string? ErrorCategory, int Revision);
 public sealed record ResourceRecord(string Id, string OperationId, string HostId, string WorkerId, string ResourceKind, string ResourceName, string? ResourceRef, string LabelsHash, bool Disposable, string State, int Revision);
-public sealed record WorkerRecoveryObligationRecord(string Id, string WorkerId, string Source, string Kind, string MarkerHash, long WorkerGeneration, long Sequence, bool Active, string? DetailHash, int Revision);
+/// <summary>
+/// One durable recovery obligation. <see cref="MarkerJson"/> carries the exact
+/// bounded, sanitized identifiers and counters an operator-triggered recovery
+/// must send back to the worker; it never contains payload text or secrets.
+/// </summary>
+public sealed record WorkerRecoveryObligationRecord(string Id, string WorkerId, string Source, string Kind, string MarkerHash, long WorkerGeneration, long Sequence, bool Active, string? DetailHash, int Revision, string? MarkerJson = null);
+
+/// <summary>Diagnostics for events pruned after the controller committed their cursor.</summary>
+public sealed record WorkerEventRetentionRecord(string WorkerId, long DroppedCount, long DroppedBytes, long FirstRetainedGeneration, long FirstRetainedSequence, int Revision);
 public sealed record RemoteTerminalViewerRecord(string Id, string WorkerId, string SessionRecordId, long OwnershipEpoch, string State, long InputBytes, long OutputBytes, int? Rows, int? Columns, int Revision);
 public sealed record ControllerWorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
 public sealed record ControllerPendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId, string PayloadHash, IReadOnlyList<string> OptionIds, string State);
@@ -30,6 +38,12 @@ public sealed record BeginWorkerRequest(string EmployeeId, string RuntimeBinding
 
 public sealed partial class OrganizationStore
 {
+    /// <summary>Retained sanitized worker-event rows per worker after cursor commit.</summary>
+    public const int ControllerEventLimit = 2048;
+
+    /// <summary>Retained sanitized worker-event bytes per worker after cursor commit.</summary>
+    public const long ControllerEventByteLimit = 16L * 1024 * 1024;
+
     private static string[] RemoteWorkerSchemaV4Statements =>
     [
         """CREATE TABLE execution_hosts (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, transport_kind TEXT NOT NULL CHECK(transport_kind='ssh-docker'), endpoint_host TEXT NOT NULL, endpoint_port INTEGER NOT NULL CHECK(endpoint_port BETWEEN 1 AND 65535), endpoint_user TEXT NOT NULL, known_hosts_path TEXT NOT NULL, host_key_algorithm TEXT, host_key_fingerprint TEXT, known_hosts_hash TEXT, docker_version TEXT, docker_api_version TEXT, os TEXT NOT NULL CHECK(os='linux'), architecture TEXT, storage_driver TEXT, backing_filesystem TEXT, shared_storage INTEGER CHECK(shared_storage IN(0,1)), free_bytes INTEGER CHECK(free_bytes>=0), memory_bytes INTEGER CHECK(memory_bytes>=0), cpu_count INTEGER CHECK(cpu_count>0), limits_supported INTEGER CHECK(limits_supported IN(0,1)), image_platform TEXT, capability_status TEXT NOT NULL CHECK(capability_status IN('unprobed','valid','invalid','unavailable')), last_probe_utc TEXT, enabled INTEGER NOT NULL CHECK(enabled IN(0,1)), enrolled INTEGER NOT NULL CHECK(enrolled IN(0,1)), status TEXT NOT NULL CHECK(status IN('registered','ready','disabled','held')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL)""",
@@ -42,8 +56,9 @@ public sealed partial class OrganizationStore
         """CREATE TABLE worker_cancellations (id TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES worker_requests(id) ON DELETE RESTRICT, payload_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('Intent','Forwarded','Observed','Uncertain','Failed')), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>=0), process_generation INTEGER NOT NULL CHECK(process_generation>=0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL)""",
         """CREATE TABLE provisioning_operations (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, host_id TEXT NOT NULL REFERENCES execution_hosts(id) ON DELETE RESTRICT, runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('enroll-key','volume-create','container-create','bootstrap','start','stop','remove','cleanup')), intent_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('Intent','Applying','Applied','Uncertain','Failed','Held')), receipt_hash TEXT, error_category TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL, UNIQUE(worker_id,kind,intent_hash))""",
         """CREATE TABLE resource_records (id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES provisioning_operations(id) ON DELETE RESTRICT, host_id TEXT NOT NULL REFERENCES execution_hosts(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, resource_kind TEXT NOT NULL CHECK(resource_kind IN('container','volume')), resource_name TEXT NOT NULL, resource_ref TEXT, labels_hash TEXT NOT NULL, disposable INTEGER NOT NULL CHECK(disposable IN(0,1)), state TEXT NOT NULL CHECK(state IN('planned','present','absent','uncertain','foreign')), inspected_at TEXT, updated_at TEXT NOT NULL, revision INTEGER NOT NULL, UNIQUE(host_id,resource_kind,resource_name))""",
-        """CREATE TABLE worker_recovery_obligations (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, source TEXT NOT NULL CHECK(source IN('controller','worker')), kind TEXT NOT NULL CHECK(kind IN('replay-gap','replay-loss','journal-failure','request-uncertain','permission-pending','process-interrupted','ownership-changed')), marker_hash TEXT NOT NULL, worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0), active INTEGER NOT NULL CHECK(active IN(0,1)), detail_hash TEXT, created_at TEXT NOT NULL, cleared_at TEXT, revision INTEGER NOT NULL, UNIQUE(worker_id,kind,marker_hash))""",
+        """CREATE TABLE worker_recovery_obligations (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, source TEXT NOT NULL CHECK(source IN('controller','worker')), kind TEXT NOT NULL CHECK(kind IN('replay-gap','replay-loss','replay-ack-uncertain','journal-failure','request-uncertain','permission-pending','process-interrupted','ownership-changed')), marker_hash TEXT NOT NULL, worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0), active INTEGER NOT NULL CHECK(active IN(0,1)), detail_hash TEXT, marker_json TEXT CHECK(marker_json IS NULL OR length(marker_json)<=8192), created_at TEXT NOT NULL, cleared_at TEXT, revision INTEGER NOT NULL, UNIQUE(worker_id,kind,marker_hash))""",
         """CREATE TABLE remote_terminal_viewers (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, session_id TEXT NOT NULL REFERENCES acp_sessions(id) ON DELETE RESTRICT, ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>=0), state TEXT NOT NULL CHECK(state IN('requested','connected','detached','unavailable','failed')), input_bytes INTEGER NOT NULL CHECK(input_bytes>=0), output_bytes INTEGER NOT NULL CHECK(output_bytes>=0), rows INTEGER CHECK(rows BETWEEN 1 AND 500), columns INTEGER CHECK(columns BETWEEN 1 AND 500), connected_at TEXT, detached_at TEXT, updated_at TEXT NOT NULL, revision INTEGER NOT NULL)""",
+        """CREATE TABLE worker_event_retention (worker_id TEXT PRIMARY KEY REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, dropped_count INTEGER NOT NULL CHECK(dropped_count>=0), dropped_bytes INTEGER NOT NULL CHECK(dropped_bytes>=0), first_retained_generation INTEGER NOT NULL CHECK(first_retained_generation>=0), first_retained_sequence INTEGER NOT NULL CHECK(first_retained_sequence>=0), updated_at TEXT NOT NULL, revision INTEGER NOT NULL)""",
     ];
 
     public IReadOnlyList<ExecutionHostRecord> ListExecutionHosts() => Query("SELECT id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,host_key_algorithm,host_key_fingerprint,known_hosts_hash,docker_version,docker_api_version,os,architecture,storage_driver,backing_filesystem,shared_storage,free_bytes,memory_bytes,cpu_count,limits_supported,image_platform,capability_status,last_probe_utc,enabled,enrolled,status,revision FROM execution_hosts ORDER BY slug COLLATE BINARY", ReadHost);
@@ -64,7 +79,9 @@ public sealed partial class OrganizationStore
     public IReadOnlyList<ProvisioningOperationRecord> ListProvisioningOperations(string? workerId = null) => Query<ProvisioningOperationRecord>("SELECT id,worker_id,host_id,runtime_binding_id,kind,intent_hash,state,receipt_hash,error_category,revision FROM provisioning_operations" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY created_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), N(r, 7), N(r, 8), r.GetInt32(9)), workerId);
     public ProvisioningOperationRecord? GetProvisioningOperation(string id) => ListProvisioningOperations().SingleOrDefault(x => x.Id == id);
     public IReadOnlyList<ResourceRecord> ListWorkerResources(string? workerId = null) => Query<ResourceRecord>("SELECT id,operation_id,host_id,worker_id,resource_kind,resource_name,resource_ref,labels_hash,disposable,state,revision FROM resource_records" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY resource_kind,resource_name", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), N(r, 6), r.GetString(7), r.GetBoolean(8), r.GetString(9), r.GetInt32(10)), workerId);
-    public IReadOnlyList<WorkerRecoveryObligationRecord> ListWorkerRecoveryObligations(string? workerId = null, bool activeOnly = false) => Query<WorkerRecoveryObligationRecord>("SELECT id,worker_id,source,kind,marker_hash,worker_generation,sequence,active,detail_hash,revision FROM worker_recovery_obligations WHERE 1=1" + (workerId is null ? "" : " AND worker_id=$id") + (activeOnly ? " AND active=1" : "") + " ORDER BY created_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetInt64(5), r.GetInt64(6), r.GetBoolean(7), N(r, 8), r.GetInt32(9)), workerId);
+    public IReadOnlyList<WorkerRecoveryObligationRecord> ListWorkerRecoveryObligations(string? workerId = null, bool activeOnly = false) => Query<WorkerRecoveryObligationRecord>("SELECT id,worker_id,source,kind,marker_hash,worker_generation,sequence,active,detail_hash,revision,marker_json FROM worker_recovery_obligations WHERE 1=1" + (workerId is null ? "" : " AND worker_id=$id") + (activeOnly ? " AND active=1" : "") + " ORDER BY created_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetInt64(5), r.GetInt64(6), r.GetBoolean(7), N(r, 8), r.GetInt32(9), N(r, 10)), workerId);
+    public WorkerRecoveryObligationRecord? GetWorkerRecoveryObligation(string id) => ListWorkerRecoveryObligations().SingleOrDefault(x => x.Id == id);
+    public IReadOnlyList<WorkerEventRetentionRecord> ListWorkerEventRetention(string? workerId = null) => Query<WorkerEventRetentionRecord>("SELECT worker_id,dropped_count,dropped_bytes,first_retained_generation,first_retained_sequence,revision FROM worker_event_retention" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY worker_id", r => new(r.GetString(0), r.GetInt64(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4), r.GetInt32(5)), workerId);
     public IReadOnlyList<RemoteTerminalViewerRecord> ListRemoteTerminalViewers(string? workerId = null) => Query<RemoteTerminalViewerRecord>("SELECT id,worker_id,session_id,ownership_epoch,state,input_bytes,output_bytes,rows,columns,revision FROM remote_terminal_viewers" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY updated_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetInt64(3), r.GetString(4), r.GetInt64(5), r.GetInt64(6), I(r, 7), I(r, 8), r.GetInt32(9)), workerId);
 
     public ExecutionHostRecord RegisterExecutionHost(string configuredId, string hostname, int port, string username, string knownHostsPath, ExecutionHostRegistration registration)
@@ -144,7 +161,7 @@ public sealed partial class OrganizationStore
             ProjectPendingPermission(c, tx, workerId, status, now);
             ReconcileGeneratedRecoveries(c, tx, workerId, status);
             ApplyActiveRecoveryHold(c, tx, workerId, status.HoldReasons);
-            PruneAcknowledgedWorkerEvents(c, tx, workerId, cg, cs, 2048);
+            PruneAcknowledgedWorkerEvents(c, tx, workerId, cg, cs, ControllerEventLimit, ControllerEventByteLimit);
             tx.Commit();
         }
     }
@@ -201,8 +218,26 @@ public sealed partial class OrganizationStore
         lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "UPDATE remote_terminal_viewers SET input_bytes=input_bytes+$input,output_bytes=output_bytes+$output,rows=COALESCE($rows,rows),columns=COALESCE($columns,columns),updated_at=$now,revision=revision+1 WHERE id=$id AND state='connected'"; Add(q, ("$input", inputBytes), ("$output", outputBytes), ("$rows", rows), ("$columns", columns), ("$now", Now()), ("$id", id)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Viewer is no longer connected."); return ListRemoteTerminalViewers().Single(x => x.Id == id); }
     }
 
-    public void RecordControllerRecovery(string workerId, string kind, string marker) { if (kind is not ("replay-gap" or "request-uncertain" or "ownership-changed")) throw new OrganizationValidationException("Controller recovery kind is invalid."); lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); AddRecovery(c, tx, workerId, "controller", kind, Hash(marker), 0, 0, Hash(marker)); ApplyActiveRecoveryHold(c, tx, workerId, [kind]); tx.Commit(); } }
+    /// <summary>
+    /// Records one controller-side recovery obligation. <paramref name="markerJson"/>
+    /// is the bounded sanitized detail an operator-triggered recovery needs to
+    /// address the worker again; it is identifiers and counters only.
+    /// </summary>
+    public void RecordControllerRecovery(string workerId, string kind, string marker, string? markerJson = null)
+    {
+        if (kind is not ("replay-gap" or "replay-ack-uncertain" or "request-uncertain" or "ownership-changed")) throw new OrganizationValidationException("Controller recovery kind is invalid.");
+        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); AddRecovery(c, tx, workerId, "controller", kind, Hash(marker), 0, 0, Hash(marker), markerJson); ApplyActiveRecoveryHold(c, tx, workerId, [kind]); tx.Commit(); }
+    }
     public void ResolveRecoveryObligation(string workerId, string kind, string markerHash) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "UPDATE worker_recovery_obligations SET active=0,cleared_at=$now,revision=revision+1 WHERE worker_id=$w AND kind=$k AND marker_hash=$m AND active=1"; Add(q, ("$now", Now()), ("$w", workerId), ("$k", kind), ("$m", markerHash)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The exact active recovery marker was not found."); } }
+
+    /// <summary>
+    /// Resolves one obligation by its durable id and revision, so an operator
+    /// action applies to exactly the obligation that was read and displayed.
+    /// </summary>
+    public void ResolveRecoveryObligationById(string id, int expectedRevision)
+    {
+        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "UPDATE worker_recovery_obligations SET active=0,cleared_at=$now,revision=revision+1 WHERE id=$id AND revision=$r AND active=1"; Add(q, ("$now", Now()), ("$id", id), ("$r", expectedRevision)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The exact active recovery obligation was not found."); }
+    }
     public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
 
     public ExecutionHostRecord DisableExecutionHost(string id, int expectedRevision, bool reconciledStop = false) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var active = c.CreateCommand()) { active.Transaction = tx; active.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE host_id=$id AND enabled=1 AND lifecycle_status NOT IN('stopped','failed')"; active.Parameters.AddWithValue("$id", id); if (Convert.ToInt64(active.ExecuteScalar(), CultureInfo.InvariantCulture) != 0 && !reconciledStop) throw new OrganizationConcurrencyException("Execution host has active enrollments and requires an explicit reconciled stop."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET enabled=0,status='disabled',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r"; Add(q, ("$id", id), ("$r", expectedRevision), ("$now", Now())); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host revision is stale."); tx.Commit(); return GetExecutionHost(id)!; } }
@@ -238,23 +273,40 @@ public sealed partial class OrganizationStore
         foreach (var option in pending.OptionIds) ValidateIdentifier(option, "permission option id");
         var optionsJson = JsonSerializer.Serialize(pending.OptionIds);
         if (Encoding.UTF8.GetByteCount(optionsJson) > 4096) throw new OrganizationValidationException("Pending worker permission options are too large.");
+
+        // Re-observing the identical pending tuple refreshes only observed_at. The
+        // revision is the reject-decision concurrency token an operator already
+        // holds, so a projection that changed nothing must not invalidate it.
+        //
+        // An item already recorded 'uncertain' stays uncertain even when the worker
+        // still reports it pending: the earlier decision may have been applied, and
+        // only explicit recovery may resolve that. Re-reporting is therefore an
+        // observation refresh, never a silent return to a decidable state.
         using var upsert = c.CreateCommand(); upsert.Transaction = tx;
-        upsert.CommandText = "INSERT INTO worker_pending_permissions VALUES($w,$d,$p,$e,$r,$t,$h,$o,'pending',$now,$now,1) ON CONFLICT(worker_id,decision_id) DO UPDATE SET observed_at=$now,updated_at=$now,revision=revision+1 WHERE process_generation=$p AND ownership_epoch=$e AND request_id=$r AND turn_id=$t AND payload_hash=$h AND options_json=$o AND state='pending'";
+        upsert.CommandText = "INSERT INTO worker_pending_permissions VALUES($w,$d,$p,$e,$r,$t,$h,$o,'pending',$now,$now,1) ON CONFLICT(worker_id,decision_id) DO UPDATE SET observed_at=$now WHERE process_generation=$p AND ownership_epoch=$e AND request_id=$r AND turn_id=$t AND payload_hash=$h AND options_json=$o AND state IN('pending','uncertain')";
         Add(upsert, ("$w", worker), ("$d", pending.DecisionId), ("$p", pending.ProcessGeneration), ("$e", pending.OwnershipEpoch), ("$r", pending.RequestId), ("$t", pending.TurnId), ("$h", pending.PayloadHash), ("$o", optionsJson), ("$now", now));
         if (upsert.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Pending worker permission identity changed.");
     }
+    /// <summary>
+    /// Projects the worker's own reported markers into durable obligations. The
+    /// sanitized marker JSON is retained alongside the hash so an owner-triggered
+    /// recovery can address the exact worker-side item rather than only prove that
+    /// something was outstanding.
+    /// </summary>
     private static void ReconcileGeneratedRecoveries(SqliteConnection c, SqliteTransaction tx, string worker, ControllerWorkerStatus status)
     {
-        var current = new HashSet<(string Kind, string Marker)>(StringTupleComparer.Ordinal);
-        foreach (var reason in status.HoldReasons) current.Add((RecoveryKind(reason), Hash(reason)));
-        foreach (var gap in status.ReplayGapMarkers ?? []) current.Add(("replay-gap", Hash(gap)));
-        if (status.ReplayLossMarker is { } loss) current.Add(("replay-loss", Hash(loss)));
-        if (status.JournalFailureMarker is { } journal) current.Add(("journal-failure", Hash(journal)));
-        if (status.PendingPermissionHash is { } permission) current.Add(("permission-pending", permission));
-        if (status.ProcessState is "exited" or "protocol-failed" or "transport-uncertain") current.Add(("process-interrupted", Hash(status.ProcessState + ":" + status.ProcessGeneration)));
+        var current = new Dictionary<(string Kind, string Marker), string?>(StringTupleComparer.Ordinal);
+        foreach (var reason in status.HoldReasons) current[(RecoveryKind(reason), Hash(reason))] = null;
+        foreach (var gap in status.ReplayGapMarkers ?? []) current[("replay-gap", Hash(gap))] = Bounded(gap);
+        if (status.ReplayLossMarker is { } loss) current[("replay-loss", Hash(loss))] = Bounded(loss);
+        if (status.JournalFailureMarker is { } journal) current[("journal-failure", Hash(journal))] = Bounded(journal);
+        if (status.PendingPermissionHash is { } permission) current[("permission-pending", permission)] = null;
+        if (status.ProcessState is "exited" or "protocol-failed" or "transport-uncertain") current[("process-interrupted", Hash(status.ProcessState + ":" + status.ProcessGeneration))] = null;
         using (var clear = c.CreateCommand()) { clear.Transaction = tx; clear.CommandText = "UPDATE worker_recovery_obligations SET active=0,cleared_at=$now,revision=revision+1 WHERE worker_id=$w AND source='worker' AND active=1 AND kind IN('replay-gap','replay-loss','journal-failure','permission-pending','process-interrupted')"; Add(clear, ("$now", Now()), ("$w", worker)); clear.ExecuteNonQuery(); }
-        foreach (var marker in current) AddRecovery(c, tx, worker, "worker", marker.Kind, marker.Marker, status.WorkerGeneration, 0, marker.Marker);
+        foreach (var marker in current) AddRecovery(c, tx, worker, "worker", marker.Key.Kind, marker.Key.Marker, status.WorkerGeneration, 0, marker.Key.Marker, marker.Value);
     }
+
+    private static string? Bounded(string markerJson) => markerJson.Length <= 8192 ? markerJson : null;
     private static void ApplyActiveRecoveryHold(SqliteConnection c, SqliteTransaction tx, string worker, IReadOnlyList<string> workerReasons)
     {
         using var count = c.CreateCommand(); count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_recovery_obligations WHERE worker_id=$w AND active=1"; count.Parameters.AddWithValue("$w", worker);
@@ -262,9 +314,64 @@ public sealed partial class OrganizationStore
         var reasons = workerReasons.Count == 0 ? "active-recovery" : string.Join('\n', workerReasons.Order(StringComparer.Ordinal));
         using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE worker_cursors SET connection_state='held',hold_summary=COALESCE(hold_summary,$holds),updated_at=$now,revision=revision+1 WHERE worker_id=$w"; Add(q, ("$holds", Hash(reasons)), ("$now", Now()), ("$w", worker)); q.ExecuteNonQuery();
     }
-    private static void PruneAcknowledgedWorkerEvents(SqliteConnection c, SqliteTransaction tx, string worker, long generation, long sequence, int limit)
+    /// <summary>
+    /// Prunes acknowledged events for one worker down to the configured count and
+    /// byte bounds, newest first.
+    /// </summary>
+    /// <remarks>
+    /// This runs inside the same transaction that commits the cursor, so an event
+    /// is only ever dropped once the controller has durably accepted it and the
+    /// commit is atomic with the drop. Recovery needs no dropped event: the
+    /// controller retains only sanitized hashes and the worker remains the
+    /// authority for replay. What was dropped is still visible as a bounded
+    /// diagnostics row rather than silently disappearing.
+    /// </remarks>
+    private static void PruneAcknowledgedWorkerEvents(SqliteConnection c, SqliteTransaction tx, string worker, long generation, long sequence, int countLimit, long byteLimit)
     {
-        using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "DELETE FROM worker_events WHERE worker_id=$w AND (worker_generation<$g OR (worker_generation=$g AND sequence<=$s)) AND rowid NOT IN (SELECT rowid FROM worker_events WHERE worker_id=$w ORDER BY worker_generation DESC,sequence DESC LIMIT $limit)"; Add(q, ("$w", worker), ("$g", generation), ("$s", sequence), ("$limit", limit)); q.ExecuteNonQuery();
+        var droppedCount = 0L;
+        var droppedBytes = 0L;
+        while (true)
+        {
+            long count, bytes;
+            using (var totals = c.CreateCommand())
+            {
+                totals.Transaction = tx;
+                totals.CommandText = "SELECT COUNT(*),COALESCE(SUM(payload_bytes),0) FROM worker_events WHERE worker_id=$w";
+                totals.Parameters.AddWithValue("$w", worker);
+                using var reader = totals.ExecuteReader();
+                reader.Read();
+                count = reader.GetInt64(0);
+                bytes = reader.GetInt64(1);
+            }
+            if (count <= countLimit && bytes <= byteLimit) break;
+
+            // Only an acknowledged event may be dropped, and the newest acknowledged
+            // event is always retained so the retained window is never empty.
+            using var delete = c.CreateCommand();
+            delete.Transaction = tx;
+            delete.CommandText = "DELETE FROM worker_events WHERE rowid=(SELECT rowid FROM worker_events WHERE worker_id=$w AND (worker_generation<$g OR (worker_generation=$g AND sequence<$s)) ORDER BY worker_generation,sequence LIMIT 1) RETURNING payload_bytes";
+            Add(delete, ("$w", worker), ("$g", generation), ("$s", sequence));
+            var removed = delete.ExecuteScalar();
+            if (removed is null or DBNull) break;
+            droppedCount++;
+            droppedBytes += Convert.ToInt64(removed, CultureInfo.InvariantCulture);
+        }
+        if (droppedCount == 0) return;
+
+        long firstGeneration = generation, firstSequence = sequence;
+        using (var first = c.CreateCommand())
+        {
+            first.Transaction = tx;
+            first.CommandText = "SELECT worker_generation,sequence FROM worker_events WHERE worker_id=$w ORDER BY worker_generation,sequence LIMIT 1";
+            first.Parameters.AddWithValue("$w", worker);
+            using var reader = first.ExecuteReader();
+            if (reader.Read()) { firstGeneration = reader.GetInt64(0); firstSequence = reader.GetInt64(1); }
+        }
+        using var retention = c.CreateCommand();
+        retention.Transaction = tx;
+        retention.CommandText = "INSERT INTO worker_event_retention VALUES($w,$c,$b,$fg,$fs,$now,1) ON CONFLICT(worker_id) DO UPDATE SET dropped_count=dropped_count+$c,dropped_bytes=dropped_bytes+$b,first_retained_generation=$fg,first_retained_sequence=$fs,updated_at=$now,revision=revision+1";
+        Add(retention, ("$w", worker), ("$c", droppedCount), ("$b", droppedBytes), ("$fg", firstGeneration), ("$fs", firstSequence), ("$now", Now()));
+        retention.ExecuteNonQuery();
     }
     private sealed class StringTupleComparer : IEqualityComparer<(string Kind, string Marker)>
     {
@@ -272,7 +379,14 @@ public sealed partial class OrganizationStore
         public bool Equals((string Kind, string Marker) x, (string Kind, string Marker) y) => string.Equals(x.Kind, y.Kind, StringComparison.Ordinal) && string.Equals(x.Marker, y.Marker, StringComparison.Ordinal);
         public int GetHashCode((string Kind, string Marker) value) => HashCode.Combine(StringComparer.Ordinal.GetHashCode(value.Kind), StringComparer.Ordinal.GetHashCode(value.Marker));
     }
-    private static void AddRecovery(SqliteConnection c, SqliteTransaction tx, string worker, string source, string kind, string marker, long generation, long sequence, string? detail) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "INSERT INTO worker_recovery_obligations VALUES($id,$w,$source,$k,$m,$g,$s,1,$d,$now,NULL,1) ON CONFLICT(worker_id,kind,marker_hash) DO UPDATE SET source=$source,active=1,cleared_at=NULL,revision=revision+1"; Add(q, ("$id", "rec-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant()), ("$w", worker), ("$source", source), ("$k", kind), ("$m", marker), ("$g", generation), ("$s", sequence), ("$d", (object?)detail ?? DBNull.Value), ("$now", Now())); q.ExecuteNonQuery(); }
+    private static void AddRecovery(SqliteConnection c, SqliteTransaction tx, string worker, string source, string kind, string marker, long generation, long sequence, string? detail, string? markerJson = null)
+    {
+        if (markerJson is { Length: > 8192 }) throw new OrganizationValidationException("Recovery marker detail is too large.");
+        using var q = c.CreateCommand(); q.Transaction = tx;
+        q.CommandText = "INSERT INTO worker_recovery_obligations VALUES($id,$w,$source,$k,$m,$g,$s,1,$d,$json,$now,NULL,1) ON CONFLICT(worker_id,kind,marker_hash) DO UPDATE SET source=$source,active=1,cleared_at=NULL,marker_json=COALESCE($json,marker_json),revision=revision+1";
+        Add(q, ("$id", "rec-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant()), ("$w", worker), ("$source", source), ("$k", kind), ("$m", marker), ("$g", generation), ("$s", sequence), ("$d", (object?)detail ?? DBNull.Value), ("$json", (object?)markerJson ?? DBNull.Value), ("$now", Now()));
+        q.ExecuteNonQuery();
+    }
     private static void ClearRecovery(SqliteConnection c, SqliteTransaction tx, string worker, string kind, string marker) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE worker_recovery_obligations SET active=0,cleared_at=$now,revision=revision+1 WHERE worker_id=$w AND kind=$k AND marker_hash=$m AND active=1"; Add(q, ("$now", Now()), ("$w", worker), ("$k", kind), ("$m", marker)); q.ExecuteNonQuery(); }
     private static string RecoveryKind(string reason) => reason.Contains("replay-loss", StringComparison.Ordinal) ? "replay-loss" : reason.Contains("replay", StringComparison.Ordinal) ? "replay-gap" : reason.Contains("journal", StringComparison.Ordinal) ? "journal-failure" : reason.Contains("permission", StringComparison.Ordinal) ? "permission-pending" : "process-interrupted";
     private static (long, long) CursorAfter(WorkerCursorRecord? cursor, IReadOnlyList<ControllerWorkerEvent> events) { var current = (Generation: cursor?.AcknowledgedWorkerGeneration ?? 0, Sequence: cursor?.AcknowledgedSequence ?? 0); foreach (var item in events) if (item.WorkerGeneration > current.Generation || item.WorkerGeneration == current.Generation && item.Sequence > current.Sequence) current = (item.WorkerGeneration, item.Sequence); return current; }

@@ -46,7 +46,7 @@ public sealed class WorkerBridgeSessionFactory(IWorkerConnector connector, IOpti
     private readonly WorkerControlOptions _options = configured.Value;
     public async Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken)
     {
-        if (!_options.Enabled) throw new InvalidOperationException("Remote worker execution is disabled.");
+        if (!_options.Enabled) throw new WorkerControlDisabledException();
         var client = await WorkerBridgeClient.ConnectAsync(connector, enrollment.WorkerId, enrollment.ControllerId, enrollment.KeyFilePath, TimeSpan.FromSeconds(_options.AuthenticationTimeoutSeconds), cancellationToken, expectedControllerUid: _options.ExpectedControllerUid, operationTimeout: TimeSpan.FromSeconds(_options.OperationTimeoutSeconds)).ConfigureAwait(false);
         return new WorkerBridgeSessionAdapter(client);
     }
@@ -304,6 +304,11 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
 
     private static async Task ReplayKnownGenerationsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, WorkerCursorRecord? cursor, CancellationToken token)
     {
+        // A previous acknowledgment whose delivery was uncertain is retried first.
+        // The worker's acknowledgment is idempotent for an already-committed cursor,
+        // so re-sending the exact marker converges instead of leaving a permanent hold.
+        await RetryPendingAcknowledgmentsAsync(store, enrollment, session, token).ConfigureAwait(false);
+
         var requestedGeneration = cursor?.AcknowledgedWorkerGeneration ?? 0;
         var requestedSequence = cursor?.AcknowledgedSequence ?? 0;
         var generations = new List<(long Generation, long After)>();
@@ -313,17 +318,83 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         foreach (var item in generations) await ReplayAsync(store, enrollment, session, status, item.Generation, item.After, token).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Replays one generation and acknowledges exactly what that batch delivered.
+    /// </summary>
+    /// <remarks>
+    /// The acknowledgment carries this batch's own generation and maximum sequence,
+    /// not the controller's global cursor. Acknowledging the global cursor would
+    /// tell the worker the controller is further ahead in this generation than the
+    /// batch actually proved, which lets the worker prune events the controller
+    /// never received. If the acknowledgment itself fails, the exact marker is
+    /// persisted as a recovery obligation and the hold survives the later healthy
+    /// status, because an unacknowledged batch is a real data-loss risk.
+    /// </remarks>
     private static async Task ReplayAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long after, CancellationToken token)
     {
         WorkerSessionResult replay;
         try { replay = await session.InvokeAsync("replay", new { operation = "replay", workerGeneration = generation, afterSequence = after }, false, token).ConfigureAwait(false); }
-        catch (WorkerRemoteException) { store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"{generation}:{after}"); store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] }, []); return; }
+        catch (WorkerRemoteException)
+        {
+            store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"{generation}:{after}", ReplayGapMarker(generation, after));
+            store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] }, []);
+            return;
+        }
         var events = JsonSerializer.Deserialize<BridgeWorkerEvent[]>(replay.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? [];
         var sanitized = events.Select(x => { var json = SanitizeJson(x.PayloadJson); return new ControllerWorkerEvent(x.WorkerGeneration, x.Sequence, SanitizeKind(x.Kind), json, Encoding.UTF8.GetByteCount(json)); }).ToArray();
         store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
         if (sanitized.Length == 0) return;
-        var ack = store.GetWorkerCursor(enrollment.WorkerId)!;
-        await session.InvokeAsync("ack-events", session.Mutation("ack-events", new Dictionary<string, object?> { ["workerGeneration"] = ack.AcknowledgedWorkerGeneration, ["sequence"] = ack.AcknowledgedSequence }), true, token).ConfigureAwait(false);
+
+        var ackGeneration = sanitized.Max(x => x.WorkerGeneration);
+        var ackSequence = sanitized.Where(x => x.WorkerGeneration == ackGeneration).Max(x => x.Sequence);
+        await AcknowledgeAsync(store, enrollment, session, status, ackGeneration, ackSequence, token).ConfigureAwait(false);
+    }
+
+    private static async Task AcknowledgeAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long sequence, CancellationToken token)
+    {
+        var marker = AckMarker(generation, sequence);
+        try
+        {
+            await session.InvokeAsync("ack-events", session.Mutation("ack-events", new Dictionary<string, object?> { ["workerGeneration"] = generation, ["sequence"] = sequence }), true, token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is WorkerWriteUncertainException or WorkerReadUncertainException or WorkerRemoteException or IOException or ObjectDisposedException)
+        {
+            store.RecordControllerRecovery(enrollment.WorkerId, "replay-ack-uncertain", $"{generation}:{sequence}", marker);
+            store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-ack-uncertain"] }, []);
+            return;
+        }
+        // The worker accepted the exact marker, so any retained obligation for it is
+        // now genuinely discharged.
+        var obligation = store.ListWorkerRecoveryObligations(enrollment.WorkerId, activeOnly: true).FirstOrDefault(x => x.Kind == "replay-ack-uncertain" && x.MarkerJson == marker);
+        if (obligation is not null) store.ResolveRecoveryObligationById(obligation.Id, obligation.Revision);
+    }
+
+    private static async Task RetryPendingAcknowledgmentsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, CancellationToken token)
+    {
+        foreach (var obligation in store.ListWorkerRecoveryObligations(enrollment.WorkerId, activeOnly: true).Where(x => x.Kind == "replay-ack-uncertain").ToArray())
+        {
+            if (TryReadAckMarker(obligation.MarkerJson) is not { } marker) continue;
+            try { await session.InvokeAsync("ack-events", session.Mutation("ack-events", new Dictionary<string, object?> { ["workerGeneration"] = marker.Generation, ["sequence"] = marker.Sequence }), true, token).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is WorkerWriteUncertainException or WorkerReadUncertainException or WorkerRemoteException or IOException or ObjectDisposedException) { continue; }
+            store.ResolveRecoveryObligationById(obligation.Id, obligation.Revision);
+        }
+    }
+
+    internal static string AckMarker(long generation, long sequence) => JsonSerializer.Serialize(new { kind = "replay-ack-uncertain", workerGeneration = generation, sequence }, WorkerProtocol.JsonOptions);
+    internal static string ReplayGapMarker(long generation, long after) => JsonSerializer.Serialize(new { kind = "replay-gap", workerGeneration = generation, afterSequence = after }, WorkerProtocol.JsonOptions);
+
+    internal static (long Generation, long Sequence)? TryReadAckMarker(string? markerJson)
+    {
+        if (markerJson is null) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(markerJson, new JsonDocumentOptions { MaxDepth = 8 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("workerGeneration", out var generation) || !root.TryGetProperty("sequence", out var sequence)) return null;
+            if (!generation.TryGetInt64(out var g) || !sequence.TryGetInt64(out var s) || g < 0 || s < 0) return null;
+            return (g, s);
+        }
+        catch (JsonException) { return null; }
     }
 
     private static async Task ReconcileRequestsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, CancellationToken token)
@@ -337,7 +408,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             }
             if (request.OwnershipEpoch != session.Lease.Epoch || request.ProcessGeneration != status.ProcessGeneration)
             {
-                store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id);
+                store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id, RequestMarker(request.Id));
                 store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "request-recovery-required"] }, []);
                 continue;
             }
@@ -349,11 +420,84 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             }
             catch (WorkerRemoteException)
             {
-                store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id);
+                store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id, RequestMarker(request.Id));
                 store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "request-recovery-required"] }, []);
             }
         }
     }
+
+    /// <summary>
+    /// Performs the owner-triggered recovery for one exact obligation.
+    /// </summary>
+    /// <remarks>
+    /// The obligation is only cleared after the worker accepted the matching
+    /// reconciliation, so clearing the controller row can never be mistaken for a
+    /// reconciled worker. Kinds whose real outcome cannot be established remotely
+    /// (an uncertain request, a changed ownership epoch) are not auto-resolved
+    /// here: they need an operator decision, and the API rejects them rather than
+    /// pretending the effect is known.
+    /// </remarks>
+    public async Task<WorkerRecoveryObligationRecord> RecoverAsync(string workerId, string obligationId, int expectedRevision, CancellationToken token)
+    {
+        RequireEnabled();
+        await EnsureStartupReconciledAsync(token).ConfigureAwait(false);
+        var store = Store();
+        var obligation = store.GetWorkerRecoveryObligation(obligationId) ?? throw new KeyNotFoundException("Recovery obligation not found.");
+        if (obligation.WorkerId != workerId || obligation.Revision != expectedRevision || !obligation.Active) throw new OrganizationConcurrencyException("The recovery obligation changed.");
+        if (obligation.MarkerJson is null) throw new WorkerRecoveryRequiredException("This obligation carries no exact worker marker and must be reconciled by an operator.", obligation.Kind);
+
+        var entry = Entry(workerId);
+        await entry.Gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var lease = await EnsureConnectedAndSynchronizedLockedAsync(workerId, entry, token).ConfigureAwait(false);
+
+            // Connecting re-projects the worker's own status, which refreshes
+            // worker-sourced obligations and bumps their revision. Re-read the exact
+            // row and require that its identity and marker are unchanged, so the
+            // operator's decision still applies to the same obligation without
+            // depending on a revision the reconnect legitimately moved.
+            var current = store.GetWorkerRecoveryObligation(obligation.Id);
+            if (current is null || !current.Active || current.Kind != obligation.Kind || current.MarkerHash != obligation.MarkerHash || current.MarkerJson != obligation.MarkerJson)
+                throw new OrganizationConcurrencyException("The recovery obligation changed while the worker was contacted.");
+
+            using var marker = JsonDocument.Parse(current.MarkerJson!, new JsonDocumentOptions { MaxDepth = 8 });
+            var request = BuildRecoveryRequest(lease, current.Kind, marker.RootElement);
+            await lease.Session.InvokeAsync(request.Operation, request.Payload, true, token).ConfigureAwait(false);
+            Touch(lease);
+            store.ResolveRecoveryObligationById(current.Id, current.Revision);
+            await RefreshStatusLockedAsync(workerId, entry, lease, token).ConfigureAwait(false);
+            return store.GetWorkerRecoveryObligation(current.Id)!;
+        }
+        catch (Exception ex) when (IsSessionLoss(ex))
+        {
+            await LoseSessionLockedAsync(workerId, entry).ConfigureAwait(false);
+            throw;
+        }
+        finally { entry.Gate.Release(); }
+    }
+
+    /// <summary>
+    /// Builds the exact worker reconciliation for one retained marker. The marker
+    /// field names are the worker's own status shapes (<c>ReplayGap</c>,
+    /// <c>ReplayLoss</c>, <c>JournalFailure</c>), so an incomplete marker is
+    /// refused rather than reconstructed from assumptions.
+    /// </summary>
+    private static (string Operation, object Payload) BuildRecoveryRequest(WorkerConnectionLease lease, string kind, JsonElement marker)
+    {
+        long Number(string name, long minimum) => marker.TryGetProperty(name, out var value) && value.TryGetInt64(out var number) && number >= minimum ? number : throw new WorkerRecoveryRequiredException("The retained recovery marker is incomplete.", kind);
+        string Text(string name) => marker.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && value.GetString() is { Length: > 0 and <= 128 } text ? text : throw new WorkerRecoveryRequiredException("The retained recovery marker is incomplete.", kind);
+        return kind switch
+        {
+            "replay-ack-uncertain" => ("ack-events", lease.Session.Mutation("ack-events", new Dictionary<string, object?> { ["workerGeneration"] = Number("workerGeneration", 0), ["sequence"] = Number("sequence", 0) })),
+            "replay-loss" => ("reconcile-replay-loss", lease.Session.Mutation("reconcile-replay-loss", new Dictionary<string, object?> { ["workerGeneration"] = Number("workerGeneration", 1), ["markerSequence"] = Number("markerSequence", 1) })),
+            "replay-gap" => ("reconcile-replay-gap", lease.Session.Mutation("reconcile-replay-gap", new Dictionary<string, object?> { ["gapId"] = Text("id"), ["workerGeneration"] = Number("workerGeneration", 0), ["afterSequence"] = Number("afterSequence", 0), ["firstRetainedSequence"] = Number("firstRetainedSequence", 0), ["lastSequence"] = Number("lastSequence", 0) })),
+            "journal-failure" => ("reconcile-journal", lease.Session.Mutation("reconcile-journal", new Dictionary<string, object?> { ["operationId"] = Text("operationId"), ["workerGeneration"] = Number("workerGeneration", 1) })),
+            _ => throw new WorkerRecoveryRequiredException("This obligation kind has no automatic worker reconciliation and must be resolved by an operator.", kind),
+        };
+    }
+
+    internal static string RequestMarker(string requestId) => JsonSerializer.Serialize(new { kind = "request-uncertain", requestId }, WorkerProtocol.JsonOptions);
 
     internal async Task<WorkerConnectionLease?> GetCachedLeaseAsync(string workerId, CancellationToken token, bool refresh = false)
     {
@@ -410,13 +554,21 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     private static string SanitizeKind(string kind) { var value = new string(kind.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_').Take(64).ToArray()); return value.Length > 0 ? value : "event"; }
     private static string SanitizeJson(string json) { using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 }); return JsonSerializer.Serialize(document.RootElement, WorkerProtocol.JsonOptions); }
     private static string Hash(string value) => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
-    private static bool IsSessionLoss(Exception ex) => ex is WorkerWriteUncertainException or WorkerReadUncertainException or IOException or ObjectDisposedException or OperationCanceledException;
+    /// <summary>
+    /// True when <paramref name="ex"/> means the owner session itself is no longer
+    /// trustworthy. A bare <see cref="OperationCanceledException"/> is deliberately
+    /// excluded: the bridge client raises it only before any byte was written, so
+    /// the caller's cancellation leaves no remote effect and must not tear down a
+    /// session that other callers are still using. An internal operation timeout
+    /// surfaces as an uncertain write or read instead and is covered here.
+    /// </summary>
+    private static bool IsSessionLoss(Exception ex) => ex is WorkerWriteUncertainException or WorkerReadUncertainException or IOException or ObjectDisposedException;
     private void Touch(WorkerConnectionLease lease) { lease.LastContactUtc = _clock.UtcNow; }
     private WorkerEntry Entry(string workerId) => _workers.GetOrAdd(workerId, static _ => new WorkerEntry());
     private void RequireEnabled()
     {
-        if (!_options.Enabled) throw new InvalidOperationException("Remote worker control is disabled.");
-        if (_options.Validate().Count != 0) throw new InvalidOperationException("Remote worker configuration is invalid.");
+        if (!_options.Enabled) throw new WorkerControlDisabledException();
+        if (_options.Validate().Count != 0) throw new WorkerControlConfigurationException("Remote worker configuration is invalid.");
     }
     private OrganizationStore Store() => _control.Organization ?? throw new OrganizationStoreException("Organization store unavailable.");
 

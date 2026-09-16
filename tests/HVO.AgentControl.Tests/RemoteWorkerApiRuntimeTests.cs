@@ -3,7 +3,9 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace HVO.AgentControl.Tests;
@@ -31,7 +33,7 @@ public static class RemoteWorkerApi
         { "/api/workers/request/req-missing/cancel", null },
         { "/api/workers/wrk-missing/permission/reject", "{\"decisionId\":\"perm-x\",\"revision\":1}" },
         { "/api/workers/wrk-missing/sync", null },
-        { "/api/workers/wrk-missing/recover", "{\"kind\":\"replay-gap\",\"markerHash\":\"sha256:0000\"}" },
+        { "/api/workers/wrk-missing/recover", "{\"obligationId\":\"rec-missing\",\"expectedRevision\":1}" },
     };
 
     public static HttpRequestMessage Mutation(string path, string? body, string origin, string? password)
@@ -55,6 +57,30 @@ public static class RemoteWorkerApi
         new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{password}")));
 
     /// <summary>
+    /// Every typed remote-worker failure and the exact status and title it owns.
+    /// Distinct meanings must not collapse into one generic conflict.
+    /// </summary>
+    public static TheoryData<Exception, int, string> TypedFailures => new()
+    {
+        { new HVO.AgentControl.RemoteWorker.WorkerControlDisabledException(SecretDetail), 409, "Remote worker control is disabled." },
+        { new HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException(SecretDetail), 409, "Remote worker configuration is invalid." },
+        { new HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException(SecretDetail, transport: true), 502, "Remote worker host is unreachable." },
+        { new HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException(SecretDetail), 503, "Remote worker host is unavailable." },
+        { new HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException(SecretDetail, "replay-gap"), 409, "Remote worker recovery is required." },
+        { new HVO.AgentControl.RemoteWorker.ForeignResourceException(SecretDetail), 409, "Remote resource is not owned by this controller." },
+        { new HVO.AgentControl.Organization.OrganizationValidationException(SecretDetail), 400, "Remote worker request is invalid." },
+        { new HVO.AgentControl.Organization.OrganizationConcurrencyException(SecretDetail), 409, "Remote worker request conflicted." },
+        { new HVO.AgentControl.Organization.OrganizationNotFoundException(SecretDetail), 404, "Remote worker record not found." },
+        { new KeyNotFoundException(SecretDetail), 404, "Remote worker record not found." },
+        { new HVO.AgentControl.Organization.OrganizationStoreException(SecretDetail), 503, "Worker store unavailable." },
+        // An internal invariant failure is a sanitized 500, never a client-fixable conflict.
+        { new InvalidOperationException(SecretDetail), 500, "Remote worker operation failed." },
+    };
+
+    /// <summary>A distinctive message that must never appear in any mapped response.</summary>
+    public const string SecretDetail = "raw-internal-detail-/control-data/control.db";
+
+    /// <summary>
     /// Asserts the RFC 9457 ProblemDetails content type and the absence of any raw
     /// exception, stack trace or store detail before returning the parsed body.
     /// </summary>
@@ -69,6 +95,53 @@ public static class RemoteWorkerApi
         using var document = JsonDocument.Parse(raw);
         return document.RootElement.Clone();
     }
+}
+
+/// <summary>
+/// The typed remote-worker failures each map to their own RFC 9457 contract, so
+/// no caller has to infer intent from a generic conflict.
+/// </summary>
+public sealed class RemoteWorkerProblemMappingTests
+{
+    [Theory]
+    [MemberData(nameof(RemoteWorkerApi.TypedFailures), MemberType = typeof(RemoteWorkerApi))]
+    public async Task EachTypedFailureOwnsItsExactStatusAndTitle(Exception exception, int expectedStatus, string expectedTitle)
+    {
+        Assert.True(Program.IsRemoteWorkerFailure(exception), $"{exception.GetType().Name} is not routed to the remote-worker contract.");
+
+        var problem = await ExecuteAsync(Program.RemoteWorkerProblem(exception));
+
+        Assert.Equal(expectedStatus, problem.GetProperty("status").GetInt32());
+        Assert.Equal(expectedTitle, problem.GetProperty("title").GetString());
+        // The raw exception message is never surfaced.
+        Assert.DoesNotContain(exception.Message, problem.GetRawText(), StringComparison.Ordinal);
+    }
+
+    /// <summary>The recovery problem names the obligation kind an operator must act on.</summary>
+    [Fact]
+    public async Task RecoveryRequiredProblemNamesTheObligationKind()
+    {
+        var problem = await ExecuteAsync(Program.RemoteWorkerProblem(new HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException("held", "replay-ack-uncertain")));
+        Assert.Contains("replay-ack-uncertain", problem.GetProperty("detail").GetString()!, StringComparison.Ordinal);
+    }
+
+    private static async Task<JsonElement> ExecuteAsync(IResult result)
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext
+        {
+            RequestServices = new Microsoft.Extensions.DependencyInjection.ServiceCollection()
+                .AddLogging()
+                .AddProblemDetails()
+                .BuildServiceProvider(),
+        };
+        using var body = new MemoryStream();
+        context.Response.Body = body;
+        await result.ExecuteAsync(context);
+        body.Position = 0;
+        using var document = await JsonDocument.ParseAsync(body);
+        return document.RootElement.Clone();
+    }
+
 }
 
 /// <summary>
