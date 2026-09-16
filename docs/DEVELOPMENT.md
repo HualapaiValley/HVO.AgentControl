@@ -185,9 +185,25 @@ access, empty bridge capabilities/setuid inventory and PID1 signal/reaping. They
 also run the controller's own fixed command construction against a real local
 daemon: the ephemeral key bootstrap with controller-encoded bytes, then the
 long-lived container, asserting the resulting argv, environment, capabilities,
-labels, absent port bindings, `none` network and the four named-volume mounts.
-Everything there is local and disposable (no SSH, no registry, no provider
-credentials and no inference), and the CI step asserts the exact suite count.
+labels, absent port bindings, the fixed default `bridge` network and the four
+named-volume mounts. The container contract test then starts that container and
+waits a bounded interval for the fixed ACP process (`/usr/local/bin/opencode
+acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure`). It proves
+`/sys/class/net/eth0` exists, that the namespace's IPv4 table
+(`/proc/<pid>/net/tcp`) has its only `LISTEN` (:4096) entry on `127.0.0.1`, and
+that the IPv6 table (`/proc/<pid>/net/tcp6`) has no `LISTEN` entry on :4096, so
+ACP is never on `0.0.0.0`, the container's bridge address, or an IPv6 wildcard.
+A controller-provisioned worker is genuinely on Docker's default `bridge`, which
+grants unrestricted outbound egress (the public Internet, the Docker host's
+bridge gateway/host services and co-attached containers); the test proves no
+published ingress and loopback-only ACP, not network isolation or egress
+restriction. A per-worker dedicated network or a host firewall/NAT policy that
+limits egress to the approved provider is future work.
+The suite uses disposable resources — no SSH, no registry and no provider
+credentials. The container is attached to Docker's default bridge and can egress,
+but this test submits no prompt and its assertions do not depend on Internet or
+DNS reachability once the image is built; CI already requires network access for
+npm and NuGet. The CI step asserts the exact suite count.
 
 The worker key is written into the control volume by that ephemeral bootstrap
 container **before** the long-lived container is created, so no supervisor can

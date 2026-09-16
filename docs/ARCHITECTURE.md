@@ -226,7 +226,16 @@ SQLite transitions. Schema-v4 also projects bounded pending worker permissions w
 hiring, and two-host provisioning/success. Consequently control-host
 `/api/info WorkerControlImplemented` remains false. The optional Compose worker profile is disabled by default, has
 no published port or Docker socket, is read-only outside named volumes/tmpfs,
-has process/CPU/memory limits and disables automatic restart. ACP exit does not
+has process/CPU/memory limits and disables automatic restart. That hermetic
+Compose profile keeps `network_mode: none`. A controller-provisioned worker
+instead attaches to Docker's shared default `bridge`, which grants unrestricted
+outbound egress: the public Internet through the daemon's NAT, the Docker host's
+bridge gateway and any host services listening there, and any other container
+co-attached to the same bridge. The fixed create contract still publishes no
+ingress (no `-p`, `--publish` or `--expose`, empty port bindings), the ACP/TUI
+listener binds container loopback only, and the supervisor socket is a
+container-private path. That is an ingress/exposure guarantee, not isolation or
+egress restriction. ACP exit does not
 cascade-kill the bridge: the bridge remains available for bounded reconciliation,
 but the process slot is terminal for that container because inherited ACP
 transports cannot be safely reused. Recovery is explicit container replacement;
@@ -575,6 +584,16 @@ controller can therefore execute code as the agent identity — which it already
   inspect that environment and disrupt its own TUI; the credential protects only
   the loopback HTTP endpoint from unrelated identities and is not a controller
   secret or sandbox boundary.
+- **Worker network egress and lateral reachability.** A controller-provisioned
+  worker attaches to Docker's shared default `bridge`, which grants unrestricted
+  outbound egress: the public Internet through the daemon's NAT, the Docker
+  host's bridge gateway and any host services listening there, and any other
+  container co-attached to the same default bridge. The fixed contract guarantees
+  only that no ingress is published (no `-p`, `--publish` or `--expose`, empty
+  port bindings) and that the ACP/TUI listener and supervisor socket stay
+  container-private; it is not a network-isolation or egress-restriction
+  boundary. A per-worker dedicated network, or a host firewall/NAT policy that
+  restricts egress to the approved provider, is possible future work.
 Real alternate-UID tests live in
 `tests/HVO.AgentControl.Tests/AgentIsolationContainerTests.cs`, including the
 planted-symlink escalation attempts, the capability bounding set, the `/bin/sh`
