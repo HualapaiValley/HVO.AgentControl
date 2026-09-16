@@ -377,6 +377,9 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         var cursor = after;
         var pageCount = 0;
         var eventCount = 0;
+        var targetSequence = generation == status.WorkerGeneration ? status.LastSequence : (long?)null;
+        var maxEventCount = targetSequence is null ? MaxReplayEvents : MaxReplayEvents + 256;
+        if (targetSequence is not null && cursor >= targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
         while (true)
         {
             if (++pageCount > MaxReplayPages)
@@ -413,13 +416,18 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 if (page.Events is null || page.Events.Any(x => x is null || x.Kind is null || x.PayloadJson is null)) throw new WorkerProtocolException("Worker replay events are invalid.");
                 var replayEvents = page.Events.Cast<BridgeWorkerEvent>().ToArray();
                 eventCount = checked(eventCount + replayEvents.Length);
-                if (replayEvents.Length > 256 || eventCount > MaxReplayEvents || (page.HasMore && replayEvents.Length == 0)) throw new WorkerProtocolException("Worker replay page exceeded the bounded event contract.");
+                if (replayEvents.Length > 256 || eventCount > maxEventCount || (page.HasMore && replayEvents.Length == 0)) throw new WorkerProtocolException("Worker replay page exceeded the bounded event contract.");
                 if (replayEvents.Any(x => x.WorkerGeneration != generation || x.Sequence <= cursor)
                     || replayEvents.Zip(replayEvents.Skip(1), (left, right) => right.Sequence <= left.Sequence).Any(invalid => invalid)
                     || page.NextAfterSequence < cursor
                     || (replayEvents.Length > 0 && page.NextAfterSequence != replayEvents[^1].Sequence)
                     || (replayEvents.Length == 0 && page.NextAfterSequence != cursor))
                     throw new WorkerProtocolException("Worker replay page did not make valid progress.");
+                if (replayEvents.Any(x => x.ByteCount < 0
+                    || x.ByteCount > 64 * 1024
+                    || Encoding.UTF8.GetByteCount(x.PayloadJson) != x.ByteCount
+                    || x.Kind.Length is < 1 or > 64))
+                    throw new WorkerProtocolException("Worker replay event metadata is invalid.");
             }
             catch (Exception exception) when (exception is WorkerProtocolException or JsonException or OverflowException)
             {
@@ -437,10 +445,27 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
                 throw new WorkerProtocolException("Worker replay event payload is invalid.", exception);
             }
-            store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
+            try
+            {
+                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
+            }
+            catch (OrganizationValidationException)
+            {
+                RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                throw;
+            }
             if (sanitized.Length > 0 && !await AcknowledgeAsync(store, enrollment, session, status, generation, page.NextAfterSequence, token).ConfigureAwait(false))
                 return new(WithReplayAckHold(status), ReplaySequenceResult.HeldIncomplete);
-            if (!page.HasMore) return new(status, ReplaySequenceResult.Complete);
+            if (targetSequence is not null && page.NextAfterSequence >= targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
+            if (!page.HasMore)
+            {
+                if (targetSequence is not null)
+                {
+                    RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                    throw new WorkerProtocolException("Worker replay ended before the status snapshot target.");
+                }
+                return new(status, ReplaySequenceResult.Complete);
+            }
             cursor = page.NextAfterSequence;
         }
     }

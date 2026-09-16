@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Organization;
 using HVO.AgentControl.RemoteWorker;
@@ -1321,7 +1322,7 @@ public sealed class RemoteWorkerControlTests
         await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
 
         Assert.Equal(WorkerConnectionManager.MaxReplayEvents, session.Acknowledgments.Count);
-        Assert.Equal(WorkerConnectionManager.MaxReplayPages, session.Invocations.Count(x => x.Operation == "replay"));
+        Assert.Equal(WorkerConnectionManager.MaxReplayEvents, session.Invocations.Count(x => x.Operation == "replay"));
     }
 
     [Fact]
@@ -1329,10 +1330,9 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
-        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: WorkerConnectionManager.MaxReplayEvents));
-        session.ReplayPageFactory = (generation, after) => after < WorkerConnectionManager.MaxReplayEvents
-            ? new BridgeReplayPage([new(generation, after + 1, "acp-event", "{}", 2)], true, after + 1)
-            : new BridgeReplayPage([], true, after);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), [new(1, 1, "acp-event", "{}", 2)]);
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(workerGeneration: 2));
+        session.ReplayPageFactory = (generation, after) => new BridgeReplayPage([new(generation, after + 1, "acp-event", "{}", 2)], true, after + 1);
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
 
         await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
@@ -1373,18 +1373,18 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public async Task ReplayAcceptsEventsAppendedAfterTheInitialStatusSnapshot()
+    public async Task ReplayAcceptsAPagePastTheInitialStatusSnapshotThenDefersItsSuffix()
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
         var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
-        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp-event", "{}", 2)], true, 1);
-        session.ReplayPages[(1, 1)] = new BridgeReplayPage([new(1, 2, "acp-event", "{}", 2)], false, 2);
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)], true, 2);
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
 
         await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
 
-        Assert.Equal([(1L, 1L), (1L, 2L)], session.Acknowledgments);
+        Assert.Equal([(1L, 2L)], session.Acknowledgments);
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":2", StringComparison.Ordinal));
         Assert.Equal([(1L, 1L), (1L, 2L)], fixture.Store.ListWorkerEvents(enrollment.WorkerId).Select(x => (x.WorkerGeneration, x.Sequence)).ToArray());
     }
 
@@ -1414,7 +1414,82 @@ public sealed class RemoteWorkerControlTests
 
         await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
 
-        Assert.Equal([(1L, 1L), (1L, 2L)], session.Acknowledgments);
+        Assert.Equal([(1L, 1L)], session.Acknowledgments);
+        Assert.Single(fixture.Store.ListWorkerEvents(enrollment.WorkerId));
+    }
+
+    [Fact]
+    public async Task ReplayStopsAtTheCurrentGenerationSnapshotWhileTheWorkerContinuouslyAppends()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        const long target = WorkerConnectionManager.MaxReplayEvents;
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: target));
+        session.ReplayPageFactory = (generation, after) =>
+        {
+            var events = Enumerable.Range(1, 256).Select(offset => new BridgeWorkerEvent(generation, after + offset, "acp-event", "{}", 2)).ToArray();
+            return new BridgeReplayPage(events, true, after + events.Length);
+        };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal(40, session.Acknowledgments.Count);
+        Assert.Equal(10_240, session.Acknowledgments[^1].Sequence);
+        Assert.Equal(40, session.Invocations.Count(x => x.Operation == "replay"));
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":10240", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(-1, "{}", "acp-event")]
+    [InlineData(65_537, "{}", "acp-event")]
+    [InlineData(1, "é", "acp-event")]
+    [InlineData(2, "{}", "")]
+    public async Task InvalidRawReplayEventMetadataIsRejectedBeforeSanitization(int byteCount, string payload, string kind)
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, kind, payload, byteCount)], false, 1);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.Empty(fixture.Store.ListWorkerEvents(enrollment.WorkerId));
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-gap" && x.Source == "controller");
+    }
+
+    [Fact]
+    public async Task OversizedRawReplayPayloadAndKindAreRejectedBeforeSanitization()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var payload = JsonSerializer.Serialize(new { value = new string('x', 64 * 1024) });
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, new string('k', 65), payload, Encoding.UTF8.GetByteCount(payload))], false, 1);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.Empty(fixture.Store.ListWorkerEvents(enrollment.WorkerId));
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "replay-gap" && x.Source == "controller");
+    }
+
+    [Fact]
+    public async Task ReplayValidatesRawBytesThenStoresSanitizedMetadata()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        const string payload = "{ \"value\": 1 }";
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp event!", payload, Encoding.UTF8.GetByteCount(payload))], false, 1);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        var stored = Assert.Single(fixture.Store.ListWorkerEvents(enrollment.WorkerId));
+        Assert.Equal("acpevent", stored.Kind);
+        Assert.Equal(11, stored.PayloadBytes);
     }
 
     /// <summary>
@@ -1564,7 +1639,7 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
-        var initial = fixture.BridgeStatus();
+        var initial = fixture.BridgeStatus(lastSequence: 1);
         var gap = new BridgeReplayGap("gap:rejected-replay", "future-cursor", 1, 9, 2, 8, 1, 7);
         var loss = new BridgeReplayLoss(1, 7, 3, 128);
         var held = initial with
@@ -1610,7 +1685,7 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
-        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus())
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1))
         {
             RejectReplay = true,
             FailStatusAfterRejectedReplay = true,

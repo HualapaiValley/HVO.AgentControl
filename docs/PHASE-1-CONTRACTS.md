@@ -375,10 +375,14 @@ Design constraints:
   that exact ACK first, resumes the same generation after the committed controller
   cursor, finishes its suffix, and only then advances. A failed retry keeps dispatch
   held even though the authenticated connection may remain open. Initial status
-  `LastSequence` is a lower bound because the worker may append while paging. Replay
-  rejects null items, empty `hasMore` pages, non-increasing/wrong-generation sequences
-  and responses beyond independent 10,000-event/10,001-page bounds. A malformed or
-  over-bound response records a marker-less controller replay-gap obligation before
+  `LastSequence` is the current-generation target for one finite pass. Replay accepts,
+  commits and ACKs a whole page that crosses that target, then stops; later live appends
+  remain for the next synchronization. Prior generations retain the 10,000-event cap,
+  while current generation permits only one 256-event crossing page, with 10,001 pages
+  as the independent cap. Replay rejects null items, empty `hasMore` pages,
+  non-increasing/wrong-generation sequences, raw payloads over 64 KiB, mismatched UTF-8
+  byte counts and empty/overlong kinds before normalization. A malformed, store-invalid
+  or over-bound response records a marker-less controller replay-gap obligation before
   the session is faulted. Duplicates are ignored by generation/sequence. Bound retained
   replay to 64 MiB and 10,000 events initially. An overflow or missing cursor records
   an exact durable replay-gap obligation, holds dispatch and requires
