@@ -13,7 +13,7 @@ public sealed record BridgePendingPermission(long ProcessGeneration, long Owners
 public sealed record BridgeReplayLoss(long WorkerGeneration, long MarkerSequence, long DroppedCount, long DroppedBytes);
 public sealed record BridgeJournalFailure(string OperationId, long WorkerGeneration, string ErrorCategory);
 public sealed record BridgeReplayGap(string Id, string Kind, long WorkerGeneration, long AfterSequence, long FirstRetainedSequence, long LastSequence, long? LossMarkerGeneration, long? LossMarkerSequence);
-public sealed record BridgeWorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle, long? ObservedPid, string? ActiveRequestId, BridgePendingPermission? PendingPermission, long OwnershipEpoch, bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, BridgeReplayLoss? ReplayLoss, BridgeJournalFailure? JournalFailure, int ReplayGapCount, IReadOnlyList<BridgeReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false);
+public sealed record BridgeWorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle, long? ObservedPid, string? ActiveRequestId, BridgePendingPermission? PendingPermission, long OwnershipEpoch, bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, BridgeReplayLoss? ReplayLoss, BridgeJournalFailure? JournalFailure, int ReplayGapCount, IReadOnlyList<BridgeReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false, bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null);
 public sealed record BridgeWorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
 public sealed record BridgeReplayPage(BridgeWorkerEvent?[]? Events, bool HasMore, long NextAfterSequence);
 public sealed record BridgeStoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson, long ProcessGeneration, long OwnershipEpoch, string TurnId, string SessionId);
@@ -123,6 +123,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         {
             var lease = await EnsureConnectedAndSynchronizedLockedAsync(command.WorkerId, entry, cancellationToken).ConfigureAwait(false);
             await RefreshStatusLockedAsync(command.WorkerId, entry, lease, cancellationToken).ConfigureAwait(false);
+            EnsureSessionReadyForWork(Store(), command.WorkerId, command.NativeSessionId, lease.Status);
             var envelope = new { method = "session/prompt", @params = new { sessionId = command.SessionId, prompt = command.Prompt } };
             var payload = Hash(JsonSerializer.Serialize(envelope, WorkerProtocol.JsonOptions));
             var turnId = "turn-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
@@ -168,6 +169,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             var lease = await EnsureConnectedAndSynchronizedLockedAsync(request.WorkerId, entry, token).ConfigureAwait(false);
             await RefreshStatusLockedAsync(request.WorkerId, entry, lease, token).ConfigureAwait(false);
             request = store.GetWorkerRequest(command.RequestId) ?? throw new KeyNotFoundException("Request not found.");
+            EnsureCancellationReady(store, request, lease);
             var cancellation = store.BeginWorkerCancellation(request.Id, Hash("session/cancel:" + request.Id));
             if (cancellation.State != "Intent") return cancellation;
             if (request.OwnershipEpoch != lease.Ownership.Epoch || request.ProcessGeneration != lease.Status.ProcessGeneration)
@@ -208,9 +210,11 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             await RefreshStatusLockedAsync(command.WorkerId, entry, lease, token).ConfigureAwait(false);
             var authoritative = store.GetWorkerPendingPermission(command.WorkerId, command.DecisionId) ?? throw new KeyNotFoundException("Pending worker permission not found.");
             if (authoritative.Revision != command.Revision || authoritative.State != "pending") throw new OrganizationConcurrencyException("Pending worker permission changed.");
+            var request = store.GetWorkerRequest(authoritative.RequestId) ?? throw new OrganizationConcurrencyException("Pending worker permission is not backed by a controller-tracked request.");
+            var binding = store.GetRemoteBindingSession(request.RuntimeBindingId);
             var choice = authoritative.OptionIds.Contains("reject_once", StringComparer.Ordinal) ? "reject_once" : authoritative.OptionIds.Contains("reject_always", StringComparer.Ordinal) ? "reject_always" : throw new OrganizationConcurrencyException("No reject permission option is available.");
-            if (lease.Ownership.Epoch != authoritative.OwnershipEpoch || lease.Status.OwnershipEpoch != authoritative.OwnershipEpoch || lease.Status.ProcessGeneration != authoritative.ProcessGeneration || lease.Status.PendingPermission?.DecisionId != authoritative.DecisionId)
-                throw new OrganizationConcurrencyException("Permission decision does not match the exact cached worker lease and prompt turn.");
+            if (request.WorkerId != authoritative.WorkerId || request.TurnId != authoritative.TurnId || request.OwnershipEpoch != authoritative.OwnershipEpoch || request.ProcessGeneration != authoritative.ProcessGeneration || binding.EmployeeId != request.EmployeeId || binding.Placement != "DeveloperContainer" || binding.SessionRecordId != request.SessionRecordId || binding.NativeSessionId != request.NativeSessionId || lease.Status.SessionId != request.NativeSessionId || lease.Ownership.Epoch != authoritative.OwnershipEpoch || lease.Status.OwnershipEpoch != authoritative.OwnershipEpoch || lease.Status.ProcessGeneration != authoritative.ProcessGeneration || lease.Status.PendingPermission is not { } pending || pending.DecisionId != authoritative.DecisionId || pending.RequestId != authoritative.RequestId || pending.TurnId != authoritative.TurnId)
+                throw new OrganizationConcurrencyException("Permission decision does not match the exact durable request, session binding, cached worker lease, and prompt turn.");
             try
             {
                 await lease.Session.InvokeAsync("permission", lease.Session.Mutation("permission", new Dictionary<string, object?> { ["decisionId"] = authoritative.DecisionId, ["processGeneration"] = authoritative.ProcessGeneration, ["requestId"] = authoritative.RequestId, ["turnId"] = authoritative.TurnId, ["decision"] = choice }), true, token).ConfigureAwait(false);
@@ -300,6 +304,8 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         {
             session = await _sessions.ConnectAsync(enrollment, token).ConfigureAwait(false);
             var initial = await StatusAsync(session, token).ConfigureAwait(false);
+            initial = await ReconcileRecordedSessionAsync(store, enrollment, session, initial, token).ConfigureAwait(false);
+            var sessionReconciliationHeld = initial.HoldReason == "session-reconciliation";
             var priorCursor = store.GetWorkerCursor(workerId);
             var ownershipAdvanced = priorCursor is not null && priorCursor.ObservedOwnershipEpoch > 0 && priorCursor.ObservedOwnershipEpoch != session.Lease.Epoch;
             var inheritedActive = ownershipAdvanced && (priorCursor!.ActiveRequestId is not null || priorCursor.PendingPermissionHash is not null);
@@ -311,6 +317,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             store.RecordWorkerConnectionState(workerId, "authenticated", session.Lease.Epoch);
             var replay = await ReplayKnownGenerationsAsync(store, enrollment, session, initial, priorCursor, token).ConfigureAwait(false);
             initial = replay.Status;
+            if (sessionReconciliationHeld) initial = WithSessionReconciliationHold(initial);
             store.RecordWorkerStatusAndEvents(workerId, ToController(initial), []);
             if (replay.Result == ReplaySequenceResult.HeldIncomplete)
             {
@@ -320,11 +327,21 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             }
             if (!inheritedActive) await ReconcileRequestsAsync(store, enrollment, session, initial, token).ConfigureAwait(false);
             var final = await StatusAsync(session, token).ConfigureAwait(false);
+            if (sessionReconciliationHeld) final = WithSessionReconciliationHold(final);
             if (inheritedActive) final = final with { DispatchHeld = true, HoldReasons = [.. final.HoldReasons, "ownership-changed-active-work"] };
             store.RecordWorkerStatusAndEvents(workerId, ToController(final), []);
             entry.Lease = new WorkerConnectionLease(session, final, _clock.UtcNow);
             session = null;
             return entry.Lease;
+        }
+        catch (Exception ex) when (IsCallerCancellation(ex, token))
+        {
+            // The caller canceled before any reachable effect, so the starting
+            // "connecting" state becomes "disconnected" rather than a durable hold.
+            // The uncommitted session is disposed and no recovery obligation exists.
+            store.RecordWorkerConnectionState(workerId, "disconnected");
+            if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
         catch
         {
@@ -332,6 +349,71 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    internal static async Task<BridgeWorkerStatus> ReconcileRecordedSessionAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, CancellationToken token)
+    {
+        if (!status.AcpInitialized || status.ProcessState != "running" || status.DispatchHeld) return status;
+        var binding = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
+        if (binding.Placement != "DeveloperContainer") throw new OrganizationConcurrencyException("Worker enrollment runtime binding is not a DeveloperContainer placement.");
+        var expected = binding.NativeSessionId;
+        if (status.SessionId is not null && expected is not null && status.SessionId != expected)
+            return RecordSessionReconciliationHold(store, enrollment, status, "session-mismatch", expected, status.SessionId);
+        if (expected is null || status.SessionId is not null) return status;
+        try
+        {
+            await session.InvokeAsync("load-session", session.Mutation("load-session", new Dictionary<string, object?> { ["sessionId"] = expected }), true, token).ConfigureAwait(false);
+        }
+        catch (WorkerRemoteException ex) when (ex.Code != "worker-operation-uncertain")
+        {
+            return RecordSessionReconciliationHold(store, enrollment, status, "load-rejected", expected, status.SessionId);
+        }
+        catch (Exception ex) when (IsCallerCancellation(ex, token))
+        {
+            // The caller canceled before the load could have any effect. This is not a
+            // worker or session failure, so hold nothing and leave no recovery
+            // obligation; a later healthy connect must not be blocked.
+            throw;
+        }
+        catch (Exception ex) when (ex is WorkerRemoteException or WorkerWriteUncertainException or WorkerReadUncertainException or IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            RecordSessionReconciliationHold(store, enrollment, status, "load-uncertain", expected, status.SessionId);
+            throw;
+        }
+        var loaded = await StatusAsync(session, token).ConfigureAwait(false);
+        if (loaded.DispatchHeld || !loaded.AcpInitialized || loaded.SessionId != expected)
+            return RecordSessionReconciliationHold(store, enrollment, loaded, "load-unconfirmed", expected, loaded.SessionId);
+        return loaded;
+    }
+
+    private static BridgeWorkerStatus RecordSessionReconciliationHold(OrganizationStore store, WorkerEnrollmentRecord enrollment, BridgeWorkerStatus status, string observation, string? expected, string? observed)
+    {
+        var marker = JsonSerializer.Serialize(new { kind = "session-reconciliation", observation, expectedSessionId = expected, observedSessionId = observed }, WorkerProtocol.JsonOptions);
+        store.RecordControllerRecovery(enrollment.WorkerId, "session-reconciliation", marker, marker);
+        return WithSessionReconciliationHold(status);
+    }
+
+    private static BridgeWorkerStatus WithSessionReconciliationHold(BridgeWorkerStatus status)
+    {
+        var reasons = status.HoldReasons.Contains("session-reconciliation", StringComparer.Ordinal) ? status.HoldReasons : [.. status.HoldReasons, "session-reconciliation"];
+        return status with { DispatchHeld = true, HoldReason = "session-reconciliation", HoldReasons = reasons };
+    }
+
+    internal static void EnsureSessionReadyForWork(OrganizationStore store, string workerId, string expectedNativeSessionId, BridgeWorkerStatus status)
+    {
+        var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+        var binding = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
+        if (status.ProcessState != "running" || !status.AcpInitialized || status.DispatchHeld || store.ListWorkerRecoveryObligations(workerId, activeOnly: true).Count > 0 || binding.Placement != "DeveloperContainer" || binding.NativeSessionId is null || binding.NativeSessionId != expectedNativeSessionId || status.SessionId != expectedNativeSessionId)
+            throw new OrganizationConcurrencyException("Worker is not initialized, running, unheld, recovery-free, and bound to the exact authoritative session.");
+    }
+
+    internal static void EnsureCancellationReady(OrganizationStore store, WorkerRequestRecord request, WorkerConnectionLease lease)
+    {
+        var enrollment = store.GetWorkerEnrollment(request.WorkerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+        var binding = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
+        var status = lease.Status;
+        if (status.ProcessState != "running" || !status.AcpInitialized || status.SessionId != request.NativeSessionId || binding.Placement != "DeveloperContainer" || binding.EmployeeId != request.EmployeeId || binding.SessionRecordId != request.SessionRecordId || binding.NativeSessionId != request.NativeSessionId || request.RuntimeBindingId != enrollment.RuntimeBindingId || request.OwnershipEpoch != lease.Ownership.Epoch || request.OwnershipEpoch != status.OwnershipEpoch || request.ProcessGeneration != status.ProcessGeneration)
+            throw new OrganizationConcurrencyException("Cancellation does not match the exact initialized running session, process generation, and ownership epoch.");
     }
 
     private sealed record ReplayOutcome(BridgeWorkerStatus Status, ReplaySequenceResult Result);
@@ -761,6 +843,15 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     /// surfaces as an uncertain write or read instead and is covered here.
     /// </summary>
     private static bool IsSessionLoss(Exception ex) => ex is WorkerWriteUncertainException or WorkerReadUncertainException or IOException or ObjectDisposedException;
+    /// <summary>
+    /// True when the failure is the caller's own cancellation rather than a worker
+    /// or session failure. <see cref="WorkerCallerCanceledException"/> means the
+    /// bridge proved nothing was written; a bare <see cref="OperationCanceledException"/>
+    /// is equivalent only while the caller's token is canceled. Either way there is
+    /// no remote effect and therefore no recovery obligation or durable hold.
+    /// </summary>
+    private static bool IsCallerCancellation(Exception ex, CancellationToken token) =>
+        ex is WorkerCallerCanceledException || (ex is OperationCanceledException && token.IsCancellationRequested);
     private void Touch(WorkerConnectionLease lease) { lease.LastContactUtc = _clock.UtcNow; }
     private WorkerEntry Entry(string workerId) => _workers.GetOrAdd(workerId, static _ => new WorkerEntry());
     private void RequireEnabled()

@@ -45,6 +45,12 @@ internal static class WorkerProgram
                 }
                 var runtime = new WorkerRuntime(store, WorkerRuntime.OpenInheritedFd(inputFd, FileAccess.Read), WorkerRuntime.OpenInheritedFd(outputFd, FileAccess.Write));
                 runtime.Start(start.Pid);
+                try { await runtime.InitializeAsync(options.InitializeTimeout ?? TimeSpan.FromSeconds(30)).ConfigureAwait(false); }
+                catch (Exception exception)
+                {
+                    if (store.Status().ProcessState == "running") store.SetProcessFailure("protocol-failed", "acp-initialize-failed");
+                    Console.Error.WriteLine(exception is OperationCanceledException ? "ACP initialization timed out; the recovery bridge remains available." : "ACP initialization failed; the recovery bridge remains available.");
+                }
                 await using var bridge = new WorkerBridge(options, store, runtime, key, terminal: new SupervisorWorkerTerminalBackend());
                 using var shutdown = new CancellationTokenSource();
                 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };

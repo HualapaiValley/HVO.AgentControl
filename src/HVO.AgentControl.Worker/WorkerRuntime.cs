@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Reflection;
 using System.Text.Json;
 
 namespace HVO.AgentControl.Worker;
@@ -16,6 +17,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly Stream _acpOutput;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly SemaphoreSlim _promptLock = new(1, 1);
+    private readonly SemaphoreSlim _sessionLock = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> _responses = new();
     private readonly ConcurrentDictionary<string, Task<StoredRequest>> _operations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<StoredCancellation>> _cancellations = new(StringComparer.Ordinal);
@@ -30,10 +32,125 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly NdjsonFrameReader _acpReader;
     private long _nextAcpId;
     private int _transportFailed;
+    private int _disposed;
     private Task? _reader;
 
     public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput, IWorkerObservationSink? observations = null) { _store = store; _observations = observations ?? store; _acpInput = acpInput; _acpOutput = acpOutput; _acpReader = WorkerProtocol.CreateAcpReader(acpInput); }
     public void Start(long? employeePid = null) { _reader = Task.Run(ReadAcpAsync); }
+
+    public async Task InitializeAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var result = await InvokeFixedAsync("initialize", new
+            {
+                protocolVersion = 1,
+                clientCapabilities = new { fs = new { readTextFile = false, writeTextFile = false }, terminal = false },
+                clientInfo = new { name = "HVO.AgentControl.Worker", version = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0" },
+            }, timeout ?? TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            if (result.TryGetProperty("error", out _) || !result.TryGetProperty("result", out var response) || response.ValueKind != JsonValueKind.Object ||
+                !response.TryGetProperty("protocolVersion", out var version) || version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out var value) || value != 1)
+                throw new WorkerProtocolException("ACP initialization failed protocol validation.");
+            _store.SetAcpInitialized(true);
+        }
+        catch
+        {
+            if (_store.Status().ProcessState == "running") _store.SetProcessFailure("protocol-failed", "acp-initialize-failed");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Creates one ACP session under the exact bridge lease. The ACP protocol call
+    /// carries no worker epoch itself, so the durable operation is fenced before
+    /// write and again when the returned session identity is committed. Any
+    /// completion that cannot be committed under that same lease is uncertain.
+    /// </summary>
+    public async Task<string> NewSessionAsync(long epoch, string connectionNonce, CancellationToken cancellationToken = default)
+    {
+        await _sessionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var status = _store.Status();
+            if (status.SessionId is not null) return status.SessionId;
+            var requestId = "session-op:" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+            _store.BeginSessionOperation(epoch, connectionNonce, "creating", requestId, null);
+            try
+            {
+                var result = await InvokeFixedAsync("session/new", new { cwd = "/workspace", mcpServers = Array.Empty<object>() }, TimeSpan.FromSeconds(30), cancellationToken, uncertainAfterWrite: true).ConfigureAwait(false);
+                if (result.TryGetProperty("error", out _)) { _store.AbortSessionOperation(requestId); throw new WorkerProtocolException("ACP session creation was rejected."); }
+                if (!result.TryGetProperty("result", out var response) || response.ValueKind != JsonValueKind.Object || !response.TryGetProperty("sessionId", out var session) || session.ValueKind != JsonValueKind.String || session.GetString() is not { } sessionId)
+                { _store.MarkSessionOperationUncertain(requestId); throw new WorkerOperationUncertainException("ACP session creation returned an invalid identity after the effect may have occurred."); }
+                try { WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id"); }
+                catch (WorkerProtocolException exception) { _store.MarkSessionOperationUncertain(requestId); throw new WorkerOperationUncertainException("ACP session creation returned an invalid identity after the effect may have occurred.", exception); }
+                try { _store.CompleteSessionOperation(epoch, connectionNonce, requestId, sessionId); }
+                catch (Exception exception) { _store.MarkSessionOperationUncertain(requestId); throw new WorkerOperationUncertainException("ACP session creation completed after ownership or process state changed.", exception); }
+                return sessionId;
+            }
+            catch (WorkerOperationUncertainException) { _store.MarkSessionOperationUncertain(requestId); throw; }
+            catch { _store.AbortSessionOperation(requestId); throw; }
+        }
+        finally { _sessionLock.Release(); }
+    }
+
+    /// <summary>
+    /// Loads the exact retained ACP session under the current bridge lease. A
+    /// post-write timeout, transport failure, or failed lease-fenced commit is
+    /// retained as uncertain and must never be retried as though no effect occurred.
+    /// </summary>
+    public async Task<string> LoadSessionAsync(long epoch, string connectionNonce, string sessionId, CancellationToken cancellationToken = default)
+    {
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+        await _sessionLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var status = _store.Status();
+            if (status.SessionId is not null)
+            {
+                if (status.SessionId == sessionId) return sessionId;
+                throw new WorkerProtocolException("The ACP process is already bound to a different session.");
+            }
+            var requestId = "session-op:" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+            _store.BeginSessionOperation(epoch, connectionNonce, "loading", requestId, sessionId);
+            try
+            {
+                var result = await InvokeFixedAsync("session/load", new { sessionId, cwd = "/workspace", mcpServers = Array.Empty<object>() }, TimeSpan.FromSeconds(30), cancellationToken, uncertainAfterWrite: true).ConfigureAwait(false);
+                if (result.TryGetProperty("error", out _)) { _store.AbortSessionOperation(requestId); throw new WorkerProtocolException("ACP session load was rejected."); }
+                try { _store.CompleteSessionOperation(epoch, connectionNonce, requestId, sessionId); }
+                catch (Exception exception) { _store.MarkSessionOperationUncertain(requestId); throw new WorkerOperationUncertainException("ACP session load completed after ownership or process state changed.", exception); }
+                return sessionId;
+            }
+            catch (WorkerOperationUncertainException) { _store.MarkSessionOperationUncertain(requestId); throw; }
+            catch { _store.AbortSessionOperation(requestId); throw; }
+        }
+        finally { _sessionLock.Release(); }
+    }
+
+    private async Task<JsonElement> InvokeFixedAsync(string method, object parameters, TimeSpan timeout, CancellationToken cancellationToken, bool uncertainAfterWrite = false)
+    {
+        if (_reader is null) throw new WorkerProtocolException("ACP reader is not running.");
+        var id = Interlocked.Increment(ref _nextAcpId);
+        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_responses.TryAdd(id, completion)) throw new WorkerProtocolException("ACP correlation allocation failed.");
+        var writeAttempted = false;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        deadline.CancelAfter(timeout);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await WriteAcpObjectAsync(new { jsonrpc = "2.0", id, method, @params = parameters }, deadline.Token, () => writeAttempted = true).ConfigureAwait(false);
+            return await completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (uncertainAfterWrite && writeAttempted)
+        {
+            throw new WorkerOperationUncertainException("ACP fixed request completion is uncertain.", exception);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            throw new WorkerProtocolException("ACP fixed request timed out.", exception);
+        }
+        finally { _responses.TryRemove(id, out _); }
+    }
 
     public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken)
     {
@@ -81,7 +198,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         ActivePromptContext? promptContext = null;
         try
         {
-            if (prompt) { _store.BindSession(registered.SessionId); _store.SetActiveRequest(requestId); }
+            if (prompt) _store.SetActiveRequest(requestId);
             correlationId = Interlocked.Increment(ref _nextAcpId);
             if (prompt)
             {
@@ -332,7 +449,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     }
 
     private Task WriteAcpAsync(JsonElement value, CancellationToken token) => WriteAcpObjectAsync(value, token);
-    private async Task WriteAcpObjectAsync(object value, CancellationToken token)
+    private async Task WriteAcpObjectAsync(object value, CancellationToken token, Action? beforeWrite = null)
     {
         if (Volatile.Read(ref _transportFailed) != 0) throw new WorkerProtocolException("ACP transport is faulted and cannot accept writes.");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, _transportFault.Token);
@@ -340,6 +457,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         try
         {
             if (Volatile.Read(ref _transportFailed) != 0) throw new WorkerProtocolException("ACP transport is faulted and cannot accept writes.");
+            beforeWrite?.Invoke();
             try { await WorkerProtocol.WriteAcpFrameAsync(_acpOutput, value, linked.Token).ConfigureAwait(false); }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException or SocketException or OperationCanceledException && !_lifetime.IsCancellationRequested)
             {
@@ -356,7 +474,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     }
     internal bool IsTransportHealthy => Volatile.Read(ref _transportFailed) == 0;
     private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long OwnershipEpoch, long CorrelationId, string SessionId);
-    public async ValueTask DisposeAsync() { _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
+    public async ValueTask DisposeAsync() { if (Interlocked.Exchange(ref _disposed, 1) != 0) return; _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _sessionLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
     public static FileStream OpenInheritedFd(int fd, FileAccess access) => new(new SafeFileHandle((IntPtr)fd, ownsHandle: false), access, 4096, isAsync: false);
 }
 
@@ -618,7 +736,7 @@ public sealed class WorkerBridge : IAsyncDisposable
         if (message.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Control message must be an object.");
         var operation = Required(message, "operation");
         _store.RequireLease(socketLease.Epoch, socketLease.ConnectionNonce);
-        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "reconcile-journal" or "submit" or "cancel" or "permission" or "stop-process";
+        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "reconcile-journal" or "new-session" or "load-session" or "submit" or "cancel" or "permission" or "stop-process";
         if (mutation)
         {
             var epoch = RequiredInt64(message, "epoch", 1);
@@ -638,6 +756,8 @@ public sealed class WorkerBridge : IAsyncDisposable
             "reconcile-journal" => Run(() => _store.ReconcileJournalFailure(RequiredBounded(message, "operationId"), RequiredInt64(message, "workerGeneration", 1))),
             "reconcile" => Reconcile(message),
             "stop-process" => await RunAsync(StopProcessAsync).ConfigureAwait(false),
+            "new-session" => await _runtime.NewSessionAsync(socketLease.Epoch, socketLease.ConnectionNonce, connectionToken).ConfigureAwait(false),
+            "load-session" => await _runtime.LoadSessionAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "sessionId"), connectionToken).ConfigureAwait(false),
             "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken).ConfigureAwait(false),
             "cancel" => await _runtime.CancelAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "cancellationId"), RequiredBounded(message, "targetRequestId"), RequiredElement(message, "envelope", JsonValueKind.Object), connectionToken).ConfigureAwait(false),
             "permission" => await _runtime.DecidePermissionAsync(socketLease.Epoch, RequiredBounded(message, "decisionId"), RequiredInt64(message, "processGeneration", 0), RequiredBounded(message, "requestId"), RequiredBounded(message, "turnId"), RequiredBounded(message, "decision"), connectionToken).ConfigureAwait(false),

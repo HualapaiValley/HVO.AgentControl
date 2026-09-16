@@ -59,7 +59,7 @@ public sealed class RemoteWorkerControlTests
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(4L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        Assert.Equal(5L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
         foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
     }
@@ -417,6 +417,26 @@ public sealed class RemoteWorkerControlTests
         fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = [reason] }, []);
         var obligations = fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true);
         Assert.Single(obligations, x => x.Kind == expectedKind);
+    }
+
+    /// <summary>
+    /// The worker's own uncertain session creation is a genuine, terminal
+    /// worker-side condition and must remain a worker-source obligation. The
+    /// identically-named controller reason that accompanies a marker-bearing
+    /// controller obligation must never be re-projected as a worker twin.
+    /// </summary>
+    [Fact]
+    public void WorkerSessionCreateUncertainProjectsTerminalObligationWithoutControllerTwin()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = ["session-create-uncertain"] }, []);
+        var workerObligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true));
+        Assert.Equal("worker", workerObligation.Source);
+        Assert.Equal("session-reconciliation", workerObligation.Kind);
+
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = ["session-reconciliation"] }, []);
+        var retained = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true));
+        Assert.Equal(workerObligation.Id, retained.Id);
     }
 
     [Fact]
@@ -783,6 +803,199 @@ public sealed class RemoteWorkerControlTests
         Assert.Same(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None), await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("permission-pending")]
+    [InlineData("replay-gap-unreconciled")]
+    [InlineData("manual-hold")]
+    public async Task CancellationForwardsThroughManagerDuringDispatchAndRecoveryHolds(string holdReason)
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var pending = holdReason == "permission-pending"
+            ? new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-cancel", "sha256:" + new string('7', 64), ["reject_once"], "pending", null)
+            : null;
+        var held = fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = holdReason, HoldReasons = [holdReason] };
+        var session = new FakeBridgeSession("controller-a", held);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var cancellation = await manager.CancelAsync(new(request.Id), CancellationToken.None);
+
+        Assert.Equal("Forwarded", cancellation.State);
+        Assert.Single(session.Invocations, x => x.Operation == "cancel");
+    }
+
+    [Fact]
+    public async Task CancellationRejectsOwnershipOrProcessMismatch()
+    {
+        using var processFixture = new RemoteStoreFixture();
+        var processRequest = processFixture.CreateEligibleRequest();
+        processRequest = processFixture.Store.TransitionWorkerRequest(processRequest.Id, processRequest.Revision, "Intent", "Forwarding");
+        processRequest = processFixture.Store.TransitionWorkerRequest(processRequest.Id, processRequest.Revision, "Forwarding", "Forwarded");
+        var changedProcess = new FakeBridgeSession("controller-a", processFixture.BridgeStatus(processGeneration: 2));
+        await using (var manager = processFixture.CreateManager(new FakeBridgeSessionFactory(changedProcess)))
+            await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.CancelAsync(new(processRequest.Id), CancellationToken.None));
+
+        using var ownerFixture = new RemoteStoreFixture();
+        var ownerRequest = ownerFixture.CreateEligibleRequest();
+        ownerRequest = ownerFixture.Store.TransitionWorkerRequest(ownerRequest.Id, ownerRequest.Revision, "Intent", "Forwarding");
+        ownerRequest = ownerFixture.Store.TransitionWorkerRequest(ownerRequest.Id, ownerRequest.Revision, "Forwarding", "Forwarded");
+        var changedOwner = new FakeBridgeSession("controller-a", ownerFixture.BridgeStatus() with { OwnershipEpoch = 2 });
+        await using (var manager = ownerFixture.CreateManager(new FakeBridgeSessionFactory(changedOwner)))
+            await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.CancelAsync(new(ownerRequest.Id), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ManagerSynchronizesExitedWorkerWithoutSessionReadinessAndKeepsRecoveryAvailable()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var exited = fixture.BridgeStatus() with { ProcessState = "exited", AcpInitialized = false, SessionId = null, DispatchHeld = true, HoldReason = "process-exited", HoldReasons = ["process-exited"] };
+        var session = new FakeBridgeSession(enrollment.ControllerId, exited);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal("exited", lease.Status.ProcessState);
+        Assert.DoesNotContain(session.Invocations, x => x.Operation is "load-session" or "new-session");
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ManagerPreservesExistingManualHoldWithoutLoadingRecordedSession()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var held = fixture.BridgeStatus() with { SessionId = null, DispatchHeld = true, HoldReason = "manual-hold", HoldReasons = ["manual-hold"] };
+        var session = new FakeBridgeSession(enrollment.ControllerId, held);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.True(lease.Status.DispatchHeld);
+        Assert.Equal("manual-hold", lease.Status.HoldReason);
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "load-session");
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ManagerLoadsExactNativeSessionAndReturnsHeldLeaseForSessionReconciliation()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var unloaded = fixture.BridgeStatus() with { SessionId = null };
+        var loading = new FakeBridgeSession(enrollment.ControllerId, unloaded);
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(loading)))
+        {
+            var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+            Assert.Equal(fixture.NativeSessionId, loading.LoadedSessionId);
+            Assert.Equal(fixture.NativeSessionId, lease.Status.SessionId);
+            Assert.Equal("status", loading.Invocations[0].Operation);
+            Assert.Equal("load-session", loading.Invocations[1].Operation);
+            Assert.Equal("status", loading.Invocations[2].Operation);
+        }
+
+        var mismatch = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus() with { SessionId = "native-other" });
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(mismatch)))
+        {
+            var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+            Assert.True(lease.Status.DispatchHeld);
+            Assert.Equal("session-reconciliation", lease.Status.HoldReason);
+            Assert.DoesNotContain(mismatch.Invocations, x => x.Operation == "load-session");
+        }
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        // The controller-synthesized session-reconciliation hold must project exactly
+        // one marker-bearing controller obligation. A worker-source twin would survive
+        // acknowledgement and keep the worker held forever.
+        var mismatchRecovery = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true));
+        Assert.Equal("controller", mismatchRecovery.Source);
+        Assert.Equal("session-reconciliation", mismatchRecovery.Kind);
+        Assert.Contains("\"expectedSessionId\":\"native-remote\"", mismatchRecovery.MarkerJson, StringComparison.Ordinal);
+        Assert.Contains("\"observedSessionId\":\"native-other\"", mismatchRecovery.MarkerJson, StringComparison.Ordinal);
+        fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, mismatchRecovery.Id, mismatchRecovery.Revision, "sha256:" + new string('a', 64), "acknowledged-after-external-reconciliation");
+
+        // With the controller obligation acknowledged and the worker reporting the
+        // exact authoritative session, the hold must clear, leave zero obligations,
+        // and let dispatch reach the worker.
+        var healthy = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus());
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(healthy)))
+        {
+            var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+            Assert.False(lease.Status.DispatchHeld);
+            Assert.Empty(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true));
+            var dispatched = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "after-reconciliation", "hello"), CancellationToken.None);
+            Assert.Equal("Forwarded", dispatched.State);
+            Assert.Single(healthy.Invocations, x => x.Operation == "submit");
+        }
+
+        var rejected = new FakeBridgeSession(enrollment.ControllerId, unloaded) { RejectLoadSession = true };
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(rejected)))
+        {
+            var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+            Assert.True(lease.Status.DispatchHeld);
+            Assert.Equal("session-reconciliation", lease.Status.HoldReason);
+            await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "held-session-reconciliation", "blocked"), CancellationToken.None));
+        }
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        var rejectedRecovery = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true));
+        Assert.Equal("controller", rejectedRecovery.Source);
+        Assert.Equal("session-reconciliation", rejectedRecovery.Kind);
+        Assert.Contains("\"observation\":\"load-rejected\"", rejectedRecovery.MarkerJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task UncertainSessionLoadPersistsReconciliationBeforeTheConnectionIsLost()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus() with { SessionId = null }) { FailLoadSessionUncertain = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerWriteUncertainException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "session-reconciliation");
+        Assert.Contains("\"observation\":\"load-uncertain\"", obligation.MarkerJson, StringComparison.Ordinal);
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// A caller cancellation at the recorded-session load is a clean abort, not an
+    /// uncertain reconciliation. It must leave no obligation, report the
+    /// connection as disconnected rather than held, and let a later healthy
+    /// connect succeed.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CallerCanceledSessionLoadLeavesNoObligationAndDisconnectsWithoutHolding(bool bridgeReported)
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        using var canceled = new CancellationTokenSource();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus() with { SessionId = null });
+        if (bridgeReported) session.FailLoadSessionAsCallerCanceled = true;
+        else session.OnInvoke = operation => { if (operation == "load-session") canceled.Cancel(); };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, canceled.Token));
+
+        // No load effect was recorded, no session-reconciliation obligation exists,
+        // and the connection is disconnected rather than held.
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "load-session");
+        Assert.Empty(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, activeOnly: true));
+        Assert.Equal("disconnected", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+
+        // A later healthy connect must not be blocked by the canceled attempt.
+        session.FailLoadSessionAsCallerCanceled = false;
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+        Assert.Equal(fixture.NativeSessionId, lease.Status.SessionId);
+        Assert.False(lease.Status.DispatchHeld);
+        Assert.Empty(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, activeOnly: true));
+    }
+
     /// <summary>
     /// The bootstrap key is encoded exactly the way the worker entry point parses
     /// it, and the encoded buffer never survives the call.
@@ -858,6 +1071,25 @@ public sealed class RemoteWorkerControlTests
         Assert.Contains("'--worker-bootstrap-key'", remote, StringComparison.Ordinal);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(remote, "key", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildBootstrap(host, options, new BootstrapSpec("agentcontrol-control-a", "sha256:" + new string('b', 64), "linux/amd64", identity), null));
+    }
+
+    [Fact]
+    public async Task ProvisioningCreatesFreshWorkerSessionAndRecordsAuthoritativeBindingBeforeEnrollment()
+    {
+        using var fixture = new RemoteStoreFixture(makeDeveloper: true, seedSession: false);
+        var remote = new RecordingProvisioner();
+        var verification = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { SessionId = null }) { NewSessionId = "native-fresh" };
+        var coordinator = fixture.CreateCoordinator(remote, new FakeBridgeSessionFactory(verification));
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+
+        var enrolled = await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+
+        var employee = fixture.Store.GetOverview().Employees.Single(x => x.RuntimeBindingId == fixture.BindingId);
+        Assert.Equal("enrolled", enrolled.LifecycleStatus);
+        Assert.Equal("native-fresh", employee.NativeSessionId);
+        Assert.NotNull(employee.SessionRecordId);
+        Assert.Contains(verification.Invocations, x => x.Operation == "new-session");
+        Assert.DoesNotContain(verification.Invocations, x => x.Operation == "load-session");
     }
 
     /// <summary>
@@ -1073,6 +1305,25 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
+    public async Task RejectPermissionRequiresTheExactTrackedRequestSessionClaim()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-exact", "sha256:" + new string('7', 64), ["reject_once"], "pending", null);
+        var session = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] });
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
+        using (var c = Open(fixture.DatabasePath)) c.Execute($"UPDATE runtime_bindings SET session_ref=NULL WHERE id='{fixture.BindingId}'");
+
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
+
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "permission");
+    }
+
+    [Fact]
     public async Task HeartbeatRefreshesRemoteStatusAndPersistsChangedProcessGeneration()
     {
         using var fixture = new RemoteStoreFixture();
@@ -1117,10 +1368,10 @@ public sealed class RemoteWorkerControlTests
         public string KeyId { get; } = "sha256:" + new string('b', 64);
         public string KnownHostsPath { get; }
         public string IdentityPath { get; }
-        public RemoteStoreFixture(bool probeHost = true, bool makeDeveloper = true)
+        public RemoteStoreFixture(bool probeHost = true, bool makeDeveloper = true, bool seedSession = true)
         {
             DatabasePath = Path.Combine(_temp.Path, "control.db"); Store = new OrganizationStore(DatabasePath); Store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-            using var c = Open(DatabasePath); BindingId = Raw(DatabasePath, "SELECT id FROM runtime_bindings LIMIT 1"); EmployeeId = Raw(DatabasePath, $"SELECT employee_id FROM runtime_bindings WHERE id='{BindingId}'"); SessionId = "ses-remote"; c.Execute($"UPDATE acp_sessions SET status='closed' WHERE employee_id='{EmployeeId}' AND status='active'; INSERT INTO acp_sessions(id,employee_id,native_session_id,title,status,created_at,updated_at) VALUES('{SessionId}','{EmployeeId}','{NativeSessionId}','Remote','active','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00')"); if (makeDeveloper) c.Execute($"UPDATE runtime_bindings SET placement='DeveloperContainer',container_ref='existing-container',session_ref='{SessionId}' WHERE id='{BindingId}'");
+            using var c = Open(DatabasePath); BindingId = Raw(DatabasePath, "SELECT id FROM runtime_bindings LIMIT 1"); EmployeeId = Raw(DatabasePath, $"SELECT employee_id FROM runtime_bindings WHERE id='{BindingId}'"); SessionId = "ses-remote"; if (seedSession) c.Execute($"UPDATE acp_sessions SET status='closed' WHERE employee_id='{EmployeeId}' AND status='active'; INSERT INTO acp_sessions(id,employee_id,native_session_id,title,status,created_at,updated_at) VALUES('{SessionId}','{EmployeeId}','{NativeSessionId}','Remote','active','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00')"); else c.Execute($"UPDATE acp_sessions SET status='closed' WHERE employee_id='{EmployeeId}' AND status='active'"); if (makeDeveloper) c.Execute($"UPDATE runtime_bindings SET placement='DeveloperContainer',container_ref='existing-container',session_ref={(seedSession ? $"'{SessionId}'" : "NULL")} WHERE id='{BindingId}'");
             Store.RegisterExecutionHost("host-a", "worker.example", 22, "docker", "/known", new("host-a", "host-a", "Host A")); if (probeHost) Store.RecordExecutionHostProbe("host-a", 1, new("ssh-ed25519", "SHA256:x", "sha256:" + new string('1', 64), "28", "1.48", "amd64", "overlay2", "ext4", false, 2_000_000_000, 2_000_000_000, 2, true, "linux/amd64", "valid"));
             KeyPath = Path.Combine(_temp.Path, "worker.key"); File.WriteAllBytes(KeyPath, new byte[32]); if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(KeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             KnownHostsPath = Path.Combine(_temp.Path, "known_hosts"); IdentityPath = Path.Combine(_temp.Path, "id_ed25519");
@@ -1131,7 +1382,7 @@ public sealed class RemoteWorkerControlTests
         public WorkerEnrollmentRecord CreateEnrolled() { var e = CreateEnrollment(); e = Store.UpdateEnrollmentLifecycle(e.WorkerId, e.Revision, "planned", "provisioning"); return Store.UpdateEnrollmentLifecycle(e.WorkerId, e.Revision, "provisioning", "enrolled"); }
         public WorkerEnrollmentRecord CreateEnrolledAndReady() { var e = CreateEnrolled(); using (var c = Open(DatabasePath)) { c.Execute($"UPDATE orientation_assignments SET state='Stale' WHERE runtime_binding_id='{BindingId}'; INSERT INTO orientation_assignments(id,employee_id,runtime_binding_id,session_id,policy_id,orientation_version,artifact_file_name,artifact_bytes,state,assigned_at,delivered_at,acknowledged_at,comprehended_at,evidence_hash,evidence_summary,evidence_source,required_runtime_generation,loaded_runtime_generation,last_error,revision) SELECT 'ori-remote','{EmployeeId}','{BindingId}','{SessionId}',id,'remote-v1','orientation.md',1,'Comprehended','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00','sha256:{new string('1', 64)}','ready','owner-submitted',NULL,NULL,NULL,1 FROM permission_policies LIMIT 1"); c.Execute($"UPDATE dispatch_holds SET active=0 WHERE runtime_binding_id='{BindingId}'"); } Store.RecordWorkerStatusAndEvents(e.WorkerId, Status(), []); return Store.GetWorkerEnrollment(e.WorkerId)!; }
         public ControllerWorkerStatus Status() => new(1, 1, "running", null, null, 1, false, [], 0, 0);
-        public BridgeWorkerStatus BridgeStatus(long processGeneration = 1, long workerGeneration = 1, long lastSequence = 0) => new(workerGeneration, processGeneration, "running", "life", 42, null, null, 1, true, false, null, [], 0, lastSequence, 0, 0, null, null, 0, [], true, true);
+        public BridgeWorkerStatus BridgeStatus(long processGeneration = 1, long workerGeneration = 1, long lastSequence = 0) => new(workerGeneration, processGeneration, "running", "life", 42, null, null, 1, true, false, null, [], 0, lastSequence, 0, 0, null, null, 0, [], true, true, true, NativeSessionId);
         public WorkerConnectionManager CreateManager(IWorkerBridgeSessionFactory factory) => new(Control(), factory, Microsoft.Extensions.Options.Options.Create(new WorkerControlOptions
         {
             Enabled = true,
@@ -1160,8 +1411,8 @@ public sealed class RemoteWorkerControlTests
             ExpectedControllerUid = ControllerPrivateFile.EffectiveUid,
         };
 
-        public RemoteWorkerProvisioningCoordinator CreateCoordinator(IRemoteWorkerProvisioner remote) =>
-            new(Control(), remote, Microsoft.Extensions.Options.Options.Create(Options()), new StubVerificationFactory(this));
+        public RemoteWorkerProvisioningCoordinator CreateCoordinator(IRemoteWorkerProvisioner remote, IWorkerBridgeSessionFactory? verification = null) =>
+            new(Control(), remote, Microsoft.Extensions.Options.Options.Create(Options()), verification ?? new StubVerificationFactory(this));
 
         private sealed class StubVerificationFactory(RemoteStoreFixture fixture) : IWorkerBridgeSessionFactory
         {
@@ -1915,6 +2166,11 @@ public sealed class RemoteWorkerControlTests
         var markerBearing = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "ownership-changed");
         Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, markerBearing.Id, markerBearing.Revision, evidence, "acknowledged-after-external-reconciliation"));
 
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "session-reconciliation", "session", "{\"kind\":\"session-reconciliation\",\"expectedSessionId\":\"native-remote\",\"observedSessionId\":\"native-other\"}");
+        var session = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "session-reconciliation");
+        Assert.False(fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, session.Id, session.Revision, evidence, "acknowledged-after-external-reconciliation").Active);
+        Assert.Equal("session-reconciliation", Assert.Single(fixture.Store.ListWorkerRecoveryAudit(enrollment.WorkerId), x => x.ObligationId == session.Id).Kind);
+
         fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", "controller-gap");
         var markerless = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "replay-gap");
         Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, markerless.Id, markerless.Revision + 1, evidence, "acknowledged-after-external-reconciliation"));
@@ -2032,6 +2288,13 @@ public sealed class RemoteWorkerControlTests
         public bool FailStatusAfterRejectedReplay { get; set; }
         public bool FailStatusAfterReplay { get; set; }
         public bool RejectRecovery { get; set; }
+        public bool RejectLoadSession { get; set; }
+        public bool FailLoadSessionUncertain { get; set; }
+        public bool FailLoadSessionAsCallerCanceled { get; set; }
+        /// <summary>Runs before the cancellation check so a test can cancel mid-connect.</summary>
+        public Action<string>? OnInvoke { get; set; }
+        public string? NewSessionId { get; set; }
+        public string? LoadedSessionId => _loadedSessionId;
         private bool _replayRejected;
         private bool _replayInvoked;
 
@@ -2040,12 +2303,39 @@ public sealed class RemoteWorkerControlTests
         public bool ClearLossAfterReconcile { get; set; }
         private bool _gapReconciled;
         private bool _lossReconciled;
+        private string? _loadedSessionId;
+        private BridgeWorkerStatus? _observedStatus;
 
         public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => new Dictionary<string, object?>(fields) { ["operation"] = operation };
 
+        /// <summary>
+        /// Mirrors the worker's stored-request answer to a submitted prompt so a
+        /// test can assert that dispatch reached the worker and correlated exactly,
+        /// rather than only that the local recovery gate rejected it.
+        /// </summary>
+        private object SubmitResult(JsonElement root)
+        {
+            var status = _observedStatus ?? _statuses.Peek();
+            return new
+            {
+                requestId = root.GetProperty("requestId").GetString(),
+                payloadHash = "sha256:" + new string('0', 64),
+                state = "forwarded",
+                outcomeJson = (string?)null,
+                processGeneration = status.ProcessGeneration,
+                ownershipEpoch = status.OwnershipEpoch,
+                turnId = root.GetProperty("turnId").GetString(),
+                sessionId = status.SessionId,
+            };
+        }
+
         public Task<WorkerSessionResult> InvokeAsync(string operation, object request, bool mutation, CancellationToken cancellationToken)
         {
+            OnInvoke?.Invoke(operation);
             cancellationToken.ThrowIfCancellationRequested();
+            // A prewrite caller cancellation leaves no invocation effect, exactly as
+            // the real bridge reports it.
+            if (operation == "load-session" && FailLoadSessionAsCallerCanceled) throw new WorkerCallerCanceledException("injected caller cancellation");
             var payload = JsonSerializer.Serialize(request, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions);
             Invocations.Add((operation, payload));
             using var requestDocument = JsonDocument.Parse(payload);
@@ -2064,6 +2354,13 @@ public sealed class RemoteWorkerControlTests
                 FailStatusAfterReplay = false;
                 throw new WorkerReadUncertainException("injected unavailable status");
             }
+            if (operation == "load-session")
+            {
+                if (FailLoadSessionUncertain) throw new WorkerWriteUncertainException("injected uncertain session load");
+                if (RejectLoadSession) throw new WorkerRemoteException("worker-request-rejected");
+                _loadedSessionId = root.GetProperty("sessionId").GetString();
+            }
+            if (operation == "new-session") _loadedSessionId = NewSessionId ?? "native-created";
             if (operation == "submit" && FailSubmitAsWriteUncertain) throw new WorkerWriteUncertainException("injected uncertain submit");
             if (operation == "submit" && FailSubmitAsRemoteUncertain) throw new WorkerRemoteException("worker-operation-uncertain");
             if (operation.StartsWith("reconcile-", StringComparison.Ordinal))
@@ -2084,6 +2381,8 @@ public sealed class RemoteWorkerControlTests
             {
                 "status" => Status(),
                 "replay" => ReplayResult(root),
+                "new-session" => _loadedSessionId!,
+                "submit" => SubmitResult(root),
                 _ => new { ok = true },
             };
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(value, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions));
@@ -2109,7 +2408,7 @@ public sealed class RemoteWorkerControlTests
                 .Where(reason => !(ClearGapsAfterReconcile && _gapReconciled && reason.Contains("replay-gap", StringComparison.Ordinal)))
                 .Where(reason => !(ClearLossAfterReconcile && _lossReconciled && reason.Contains("replay-loss", StringComparison.Ordinal)))
                 .ToArray();
-            return status with
+            var observed = status with
             {
                 DispatchHeld = holdReasons.Length > 0,
                 HoldReason = holdReasons.FirstOrDefault(),
@@ -2117,7 +2416,10 @@ public sealed class RemoteWorkerControlTests
                 ReplayLoss = replayLoss,
                 ReplayGaps = replayGaps,
                 ReplayGapCount = replayGaps.Count,
+                SessionId = status.SessionId ?? _loadedSessionId,
             };
+            _observedStatus = observed;
+            return observed;
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

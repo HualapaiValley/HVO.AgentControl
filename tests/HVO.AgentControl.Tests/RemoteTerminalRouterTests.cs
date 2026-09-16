@@ -97,6 +97,7 @@ public sealed class RemoteTerminalRouterTests
         private readonly OrganizationStore _store;
         private readonly IHost _host;
         private readonly string _origin;
+        private const string NativeSessionId = "native-router";
         private readonly RemoteWorkerSnapshot _target;
         private readonly RemoteTerminalRouter _router;
 
@@ -113,8 +114,7 @@ public sealed class RemoteTerminalRouterTests
             var bindingId = Raw(databasePath, "SELECT id FROM runtime_bindings LIMIT 1");
             var employeeId = Raw(databasePath, $"SELECT employee_id FROM runtime_bindings WHERE id='{bindingId}'");
             const string sessionId = "ses-router";
-            const string nativeSessionId = "native-router";
-            Execute(databasePath, $"UPDATE acp_sessions SET status='closed' WHERE employee_id='{employeeId}' AND status='active'; INSERT INTO acp_sessions(id,employee_id,native_session_id,title,status,created_at,updated_at) VALUES('{sessionId}','{employeeId}','{nativeSessionId}','Router','active','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00'); UPDATE runtime_bindings SET placement='DeveloperContainer',container_ref='existing',session_ref='{sessionId}' WHERE id='{bindingId}'");
+            Execute(databasePath, $"UPDATE acp_sessions SET status='closed' WHERE employee_id='{employeeId}' AND status='active'; INSERT INTO acp_sessions(id,employee_id,native_session_id,title,status,created_at,updated_at) VALUES('{sessionId}','{employeeId}','{NativeSessionId}','Router','active','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00'); UPDATE runtime_bindings SET placement='DeveloperContainer',container_ref='existing',session_ref='{sessionId}' WHERE id='{bindingId}'");
 
             _store.RegisterExecutionHost("host-a", "worker.example", 22, "docker", "/known", new("host-a", "host-a", "Host A"));
             _store.RecordExecutionHostProbe("host-a", 1, new("ssh-ed25519", "SHA256:x", "sha256:" + new string('1', 64), "29", "1.56", "amd64", "overlayfs", "unknown", false, 2_000_000_000, 2_000_000_000, 2, true, "linux/amd64", "valid"));
@@ -131,7 +131,7 @@ public sealed class RemoteTerminalRouterTests
             Worker.KeyPath = keyPath;
             Worker.ControllerId = enrollment.ControllerId;
             Worker.WorkerId = enrollment.WorkerId;
-            Worker.SessionId = nativeSessionId;
+            Worker.SessionId = NativeSessionId;
 
             var control = new AcpControlHost(Options.Create(new ControlOptions { DataDirectory = _temp.Path, PrivateDataDirectory = Path.Combine(_temp.Path, "private") }), Microsoft.Extensions.Logging.Abstractions.NullLogger<AcpControlHost>.Instance);
             typeof(AcpControlHost).GetField("_organization", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(control, _store);
@@ -162,7 +162,7 @@ public sealed class RemoteTerminalRouterTests
             _router = new RemoteTerminalRouter(control, manager, Worker, options);
             var router = _router;
 
-            _target = new RemoteWorkerSnapshot(employeeId, bindingId, enrollment.WorkerId, "host-a", "enrolled", true, "authenticated", "running", sessionId, nativeSessionId, 1, 1, false, true, true, [], null);
+            _target = new RemoteWorkerSnapshot(employeeId, bindingId, enrollment.WorkerId, "host-a", "enrolled", true, "authenticated", "running", sessionId, NativeSessionId, 1, 1, false, true, true, [], null);
 
             var builder = WebApplication.CreateSlimBuilder();
             builder.WebHost.UseUrls("http://127.0.0.1:0");
@@ -224,7 +224,7 @@ public sealed class RemoteTerminalRouterTests
             {
                 object value = operation switch
                 {
-                    "status" => new BridgeWorkerStatus(1, 1, "running", "life", 1, null, null, 1, true, false, null, [], 0, 0, 0, 0, null, null, 0, [], true, true),
+                    "status" => new BridgeWorkerStatus(1, 1, "running", "life", 1, null, null, 1, true, false, null, [], 0, 0, 0, 0, null, null, 0, [], true, true, true, RouterFixture.NativeSessionId),
                     "replay" => new BridgeReplayPage([], false, 0),
                     _ => new { ok = true },
                 };

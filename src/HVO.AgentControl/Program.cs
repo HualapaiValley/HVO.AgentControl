@@ -319,9 +319,10 @@ app.MapPost("/api/workers/{workerId}/recover", async (HttpContext context, AcpCo
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("RecoverRemoteWorker").WithTags("Remote workers");
 
-// Marker-less controller obligations exist only when authoritative worker status
-// was unavailable. They can never be auto-reconciled: an authenticated owner must
-// attest external reconciliation with a fixed disposition and bounded SHA-256
+// Controller obligations acknowledged here cannot be cleared by remote protocol
+// evidence alone. Marker-less replay/ownership obligations and marker-bearing
+// session-reconciliation obligations require an authenticated owner to attest
+// explicit external reconciliation with a fixed disposition and bounded SHA-256
 // evidence reference, which is retained in the recovery audit.
 app.MapPost("/api/workers/{workerId}/recover/{obligationId}/acknowledge", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId, string obligationId, WorkerRecoveryAcknowledgementRequest request) =>
 {
@@ -1157,6 +1158,10 @@ public partial class Program
     public static bool IsRemoteWorkerFailure(Exception exception) =>
         exception is HVO.AgentControl.Organization.OrganizationStoreException
             or HVO.AgentControl.RemoteWorker.RemoteWorkerException
+            or HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException
+            or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException
+            or HVO.AgentControl.RemoteWorker.WorkerRemoteException
+            or HVO.AgentControl.Worker.WorkerOperationUncertainException
             or KeyNotFoundException
             or InvalidOperationException;
 
@@ -1210,6 +1215,14 @@ public partial class Program
             detail: unavailable.Transport
                 ? "The fixed connector could not reach the approved host."
                 : "The approved host did not return a usable result."),
+        HVO.AgentControl.RemoteWorker.WorkerRemoteException { Code: "worker-request-rejected" } => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker bridge rejected the operation.",
+            detail: "The worker definitely rejected the request."),
+        HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException or HVO.AgentControl.Worker.WorkerOperationUncertainException or HVO.AgentControl.RemoteWorker.WorkerRemoteException => Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "Remote worker bridge is unavailable.",
+            detail: "The bridge transport failed or the remote operation outcome is uncertain."),
         HVO.AgentControl.Organization.OrganizationStoreException => Results.Problem(
             statusCode: StatusCodes.Status503ServiceUnavailable,
             title: "Worker store unavailable.",

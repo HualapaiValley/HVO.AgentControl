@@ -29,7 +29,7 @@ Controller-private state lives in the `/control-data` volume (controller UID
 workspace and conversation history.
 
 This is a development slice. The #217 hermetic controller core now includes
-schema-v4 enrollment/cursor/event/request/cancellation/recovery APIs, durable
+schema-v5 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
 minimal same-origin owner control routes. The fixed SSH/Docker adapter and hosted
