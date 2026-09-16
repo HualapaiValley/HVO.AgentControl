@@ -546,7 +546,7 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
-    public async Task RealUnixSocketHandshakeAuthenticatesAndFencesReconnectedOldSocket()
+    public async Task RealUnixSocketOperationRejectionSurvivesButFencedSocketCloses()
     {
         if (!OperatingSystem.IsLinux()) return;
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
@@ -555,10 +555,47 @@ public sealed class WorkerBridgeTests
         await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token);
         await Eventually(() => File.Exists(temp.Options().SocketPath));
         using var first = await AuthenticateAsync(temp.Options(), key, Nonce(10));
-        using var authenticatedOne = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); var leaseOne = authenticatedOne!.RootElement.GetProperty("lease");
+        using var authenticatedOne = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); var leaseOne = authenticatedOne!.RootElement.GetProperty("lease").Clone();
+
+        // A future replay cursor is rejected, but its exact durable gap can be read
+        // and reconciled on this same authenticated controller stream.
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "replay", workerGeneration = store.WorkerGeneration, afterSequence = 1L }, CancellationToken.None);
+        using (var rejected = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None))
+        {
+            Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString());
+            Assert.Equal("worker-request-rejected", rejected.RootElement.GetProperty("error").GetString());
+            Assert.Equal(2, rejected.RootElement.EnumerateObject().Count());
+        }
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None);
+        using var heldStatus = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        var gap = Assert.Single(heldStatus!.RootElement.GetProperty("result").GetProperty("replayGaps").EnumerateArray().ToArray());
+        Assert.Equal(1L, gap.GetProperty("afterSequence").GetInt64());
+        await WorkerProtocol.WriteFrameAsync(first, new
+        {
+            operation = "reconcile-replay-gap",
+            epoch = leaseOne.GetProperty("epoch").GetInt64(),
+            connectionNonce = leaseOne.GetProperty("connectionNonce").GetString(),
+            gapId = gap.GetProperty("id").GetString(),
+            workerGeneration = gap.GetProperty("workerGeneration").GetInt64(),
+            afterSequence = gap.GetProperty("afterSequence").GetInt64(),
+            firstRetainedSequence = gap.GetProperty("firstRetainedSequence").GetInt64(),
+            lastSequence = gap.GetProperty("lastSequence").GetInt64(),
+        }, CancellationToken.None);
+        using var reconciled = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        Assert.Equal("result", reconciled!.RootElement.GetProperty("type").GetString());
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None);
+        using var healthyStatus = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        Assert.Empty(healthyStatus!.RootElement.GetProperty("result").GetProperty("replayGaps").EnumerateArray());
+
         using var second = await AuthenticateAsync(temp.Options(), key, Nonce(11));
         using var authenticatedTwo = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); var leaseTwo = authenticatedTwo!.RootElement.GetProperty("lease");
-        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None); using var rejected = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None); Assert.Equal("error", rejected!.RootElement.GetProperty("type").GetString());
+        await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None);
+        using var fenced = await WorkerProtocol.ReadFrameAsync(first, CancellationToken.None);
+        Assert.Equal("error", fenced!.RootElement.GetProperty("type").GetString());
+        try { await WorkerProtocol.WriteFrameAsync(first, new { operation = "status" }, CancellationToken.None); } catch (IOException) { }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var closed = await Record.ExceptionAsync(async () => Assert.Null(await WorkerProtocol.ReadFrameAsync(first, timeout.Token)));
+        Assert.True(closed is null or IOException, closed?.ToString());
         await WorkerProtocol.WriteFrameAsync(second, new { operation = "status" }, CancellationToken.None); using var accepted = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); Assert.Equal("result", accepted!.RootElement.GetProperty("type").GetString());
         Assert.True(leaseTwo.GetProperty("epoch").GetInt64() > leaseOne.GetProperty("epoch").GetInt64());
         shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));

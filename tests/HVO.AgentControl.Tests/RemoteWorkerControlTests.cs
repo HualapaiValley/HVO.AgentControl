@@ -58,7 +58,7 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
         Assert.Equal(4L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
-        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "remote_terminal_viewers", "worker_event_retention" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
+        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
     }
 
@@ -69,7 +69,7 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var table in new[] { "worker_event_retention", "remote_terminal_viewers", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
+            foreach (var table in new[] { "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
             connection.Execute("UPDATE schema_version SET version=3");
         }
         var policyBefore = Raw(path, "SELECT version || ':' || revision || ':' || summary FROM permission_policies");
@@ -1389,7 +1389,7 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public async Task ReplayRejectionWithoutReadableStatusCreatesOnlyOperatorRecovery()
+    public async Task ReplayRejectionWithoutReadableStatusRequiresAuditedOwnerDisposition()
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
@@ -1404,8 +1404,53 @@ public sealed class RemoteWorkerControlTests
 
         var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap");
         Assert.Null(obligation.MarkerJson);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), []);
+        obligation = fixture.Store.GetWorkerRecoveryObligation(obligation.Id)!;
+        Assert.True(obligation.Active); // Healthy status never auto-clears controller evidence.
         await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => manager.RecoverAsync(enrollment.WorkerId, obligation.Id, obligation.Revision, CancellationToken.None));
-        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Id == obligation.Id);
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, obligation.Id, obligation.Revision, "sha256:bad", "acknowledged-after-external-reconciliation"));
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('a', 64), "wrong"));
+
+        var resolved = await manager.AcknowledgeRecoveryAsync(enrollment.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('a', 64), "acknowledged-after-external-reconciliation", CancellationToken.None);
+
+        Assert.False(resolved.Active);
+        var audit = Assert.Single(fixture.Store.ListWorkerRecoveryAudit(enrollment.WorkerId));
+        Assert.Equal(obligation.Id, audit.ObligationId);
+        Assert.Equal(obligation.MarkerHash, audit.MarkerHash);
+        Assert.Equal("sha256:" + new string('a', 64), audit.EvidenceHash);
+        Assert.Equal("acknowledged-after-external-reconciliation", audit.Disposition);
+        Assert.Equal("authenticated", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('b', 64), "acknowledged-after-external-reconciliation"));
+    }
+
+    [Fact]
+    public void ControllerRecoveryAcknowledgementRejectsWrongSourceMarkerKindAndRevision()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        const string evidence = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        var gap = new BridgeReplayGap("gap:test", "status", 1, 5, 1, 4, null, null);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = ["replay-gap-unreconciled"], ReplayGapMarkers = [JsonSerializer.Serialize(gap, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions)] }, []);
+        var worker = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "worker" && x.MarkerJson is not null);
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, worker.Id, worker.Revision, evidence, "acknowledged-after-external-reconciliation"));
+
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "replay-ack-uncertain", "ack");
+        var wrongKind = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "replay-ack-uncertain");
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, wrongKind.Id, wrongKind.Revision, evidence, "acknowledged-after-external-reconciliation"));
+
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "ownership-changed", "owner", "{}");
+        var markerBearing = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "ownership-changed");
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, markerBearing.Id, markerBearing.Revision, evidence, "acknowledged-after-external-reconciliation"));
+
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", "controller-gap");
+        var markerless = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "replay-gap");
+        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, markerless.Id, markerless.Revision + 1, evidence, "acknowledged-after-external-reconciliation"));
+
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", "other-gap");
+        var first = fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, markerless.Id, markerless.Revision, evidence, "acknowledged-after-external-reconciliation");
+        Assert.False(first.Active);
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState); // another obligation still holds dispatch
     }
 
     /// <summary>

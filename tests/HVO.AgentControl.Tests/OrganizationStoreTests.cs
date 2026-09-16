@@ -1239,6 +1239,7 @@ public sealed class OrganizationStoreTests
             PRAGMA foreign_keys = OFF;
             DROP TABLE worker_event_retention;
             DROP TABLE remote_terminal_viewers;
+            DROP TABLE worker_recovery_audit;
             DROP TABLE worker_pending_permissions;
             DROP TABLE worker_events;
             DROP TABLE worker_recovery_obligations;

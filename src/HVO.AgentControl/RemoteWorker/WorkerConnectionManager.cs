@@ -492,6 +492,19 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     }
 
     /// <summary>
+    /// Acknowledges a marker-less controller obligation after the owner has
+    /// externally reconciled the unverifiable effect. This path is store-only and
+    /// never contacts or infers state from the worker.
+    /// </summary>
+    public async Task<WorkerRecoveryObligationRecord> AcknowledgeRecoveryAsync(string workerId, string obligationId, int expectedRevision, string evidenceHash, string disposition, CancellationToken token)
+    {
+        RequireEnabled();
+        await EnsureStartupReconciledAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        return Store().AcknowledgeControllerRecovery(workerId, obligationId, expectedRevision, evidenceHash, disposition);
+    }
+
+    /// <summary>
     /// Builds the exact worker reconciliation for one retained marker. The marker
     /// field names are the worker's own status shapes (<c>ReplayGap</c>,
     /// <c>ReplayLoss</c>, <c>JournalFailure</c>), so an incomplete marker is

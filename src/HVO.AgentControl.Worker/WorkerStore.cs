@@ -207,6 +207,31 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         lock (_databaseGate) RequireLeaseLocked(epoch, nonce);
     }
 
+    /// <summary>
+    /// Checks whether an authenticated controller socket still owns the live lease
+    /// without extending it or changing any hold state.
+    /// </summary>
+    public bool IsLeaseCurrent(long epoch, string nonce)
+    {
+        lock (_databaseGate)
+        {
+            if (epoch < 1) return false;
+            byte[] parsed;
+            try { parsed = WorkerProtocol.ParseNonce(nonce, "connection nonce"); }
+            catch (WorkerProtocolException) { return false; }
+            using var nonceBytes = new ZeroingBuffer(parsed);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT epoch,connection_nonce,active FROM lease WHERE singleton=1";
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return false;
+            return reader.GetInt64(0) == epoch
+                && !reader.IsDBNull(1)
+                && reader.GetString(1) == nonce
+                && reader.GetInt64(2) == 1
+                && _clock.MonotonicMilliseconds <= _leaseDeadline;
+        }
+    }
+
     private void RequireLeaseLocked(long epoch, string nonce)
     {
         if (epoch < 1) throw new WorkerProtocolException("Invalid ownership epoch.");

@@ -34,6 +34,7 @@ public static class RemoteWorkerApi
         { "/api/workers/wrk-missing/permission/reject", "{\"decisionId\":\"perm-x\",\"revision\":1}" },
         { "/api/workers/wrk-missing/sync", null },
         { "/api/workers/wrk-missing/recover", "{\"obligationId\":\"rec-missing\",\"expectedRevision\":1}" },
+        { "/api/workers/wrk-missing/recover/rec-missing/acknowledge", "{\"expectedRevision\":1,\"evidenceHash\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"disposition\":\"acknowledged-after-external-reconciliation\"}" },
     };
 
     public static HttpRequestMessage Mutation(string path, string? body, string origin, string? password)

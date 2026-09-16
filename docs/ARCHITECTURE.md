@@ -101,7 +101,11 @@ events and the lexicographic generation/sequence ACK survive bridge restart and
 remain replayable; status exposes both the current generation and ACK generation.
 Pruning applies only behind that ACK cursor across the global 10,000-event/64-MiB
 bounds and removes reconciled loss rows before their referenced generation rows.
-Each missing generation/cursor creates or reuses an exact durable replay-gap
+The authenticated controller connection processes multiple operation frames. A
+well-framed operation rejection returns only the fixed `worker-request-rejected`
+category and leaves the stream usable while its lease is still current; malformed
+framing, authentication failure, transport failure, or a stale/fenced lease closes
+the connection. Each missing generation/cursor creates or reuses an exact durable replay-gap
 obligation identified by a stable hash; status exposes up to 128 obligations and
 their total count. Distinct gaps cannot overwrite each other, reconciliation names
 the exact ID and tuple, and a loss reconciliation clears only gaps linked to that
@@ -120,8 +124,16 @@ reported first-retained/last sequence values. When a replay request is rejected,
 the controller immediately reads status on that authenticated session and persists
 the worker-reported gap and loss markers; it never fabricates an exact tuple from
 the rejected request. If that status read is unavailable, recovery remains held by
-an operator-only controller obligation with no automatic-recovery marker until an
-authoritative worker status can be observed. A non-capacity observation append
+a marker-less controller obligation and later healthy status never auto-clears it.
+Because no exact worker marker exists, automatic worker reconciliation is impossible:
+only the same-origin owner API may acknowledge the obligation after external
+reconciliation, using the fixed `acknowledged-after-external-reconciliation`
+disposition and a SHA-256 evidence reference. The obligation clear and a hash-only
+`worker_recovery_audit` row commit atomically; no free-form notes are retained.
+Marker-less acknowledgment is limited to controller `replay-gap` and
+`ownership-changed` obligations. For ownership changes with active work, the owner
+must first externally confirm the outcome or choose a reconciled stop/restart; the
+acknowledgment itself neither stops nor adopts work. A non-capacity observation append
 failure does not cancel ACP or alter an already-established request, cancellation
 or permission outcome. It persists a sanitized `journal-failed` marker carrying a
 random operation ID, worker generation and category, then holds new dispatch.

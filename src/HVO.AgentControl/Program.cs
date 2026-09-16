@@ -319,6 +319,18 @@ app.MapPost("/api/workers/{workerId}/recover", async (HttpContext context, AcpCo
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("RecoverRemoteWorker").WithTags("Remote workers");
 
+// Marker-less controller obligations exist only when authoritative worker status
+// was unavailable. They can never be auto-reconciled: an authenticated owner must
+// attest external reconciliation with a fixed disposition and bounded SHA-256
+// evidence reference, which is retained in the recovery audit.
+app.MapPost("/api/workers/{workerId}/recover/{obligationId}/acknowledge", async (HttpContext context, AcpControlHost control, WorkerConnectionManager manager, string workerId, string obligationId, WorkerRecoveryAcknowledgementRequest request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Worker recovery acknowledgement") is { } rejection) return rejection;
+    if (control.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await manager.AcknowledgeRecoveryAsync(workerId, obligationId, request.ExpectedRevision, request.EvidenceHash, request.Disposition, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+}).WithName("AcknowledgeRemoteWorkerRecovery").WithTags("Remote workers");
+
 app.MapGet("/api/control", (AcpControlHost host) => Results.Ok(host.GetStatus()))
     .WithName("GetControlStatus")
     .WithTags("Control")
@@ -1333,6 +1345,7 @@ public partial class Program
 public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId);
 public sealed record WorkerPromptRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt);
 public sealed record WorkerRecoveryRequest(string ObligationId, int ExpectedRevision);
+public sealed record WorkerRecoveryAcknowledgementRequest(int ExpectedRevision, string EvidenceHash, string Disposition);
 public sealed record WorkerPermissionRejectRequest(string DecisionId, int Revision);
 public sealed record ModelSelection(string? Model);
 
