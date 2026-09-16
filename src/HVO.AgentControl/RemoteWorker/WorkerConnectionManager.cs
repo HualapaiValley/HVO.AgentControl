@@ -284,7 +284,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 initial = initial with { DispatchHeld = true, HoldReasons = [.. initial.HoldReasons, "ownership-changed-active-work"] };
             }
             store.RecordWorkerConnectionState(workerId, "authenticated", session.Lease.Epoch);
-            await ReplayKnownGenerationsAsync(store, enrollment, session, initial, priorCursor, token).ConfigureAwait(false);
+            initial = await ReplayKnownGenerationsAsync(store, enrollment, session, initial, priorCursor, token).ConfigureAwait(false);
             store.RecordWorkerStatusAndEvents(workerId, ToController(initial), []);
             if (!inheritedActive) await ReconcileRequestsAsync(store, enrollment, session, initial, token).ConfigureAwait(false);
             var final = await StatusAsync(session, token).ConfigureAwait(false);
@@ -302,7 +302,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         }
     }
 
-    private static async Task ReplayKnownGenerationsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, WorkerCursorRecord? cursor, CancellationToken token)
+    private static async Task<BridgeWorkerStatus> ReplayKnownGenerationsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, WorkerCursorRecord? cursor, CancellationToken token)
     {
         // A previous acknowledgment whose delivery was uncertain is retried first.
         // The worker's acknowledgment is idempotent for an already-committed cursor,
@@ -315,7 +315,8 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         if (requestedGeneration > 0) generations.Add((requestedGeneration, requestedSequence));
         if (status.WorkerGeneration > 0 && status.WorkerGeneration != requestedGeneration) generations.Add((status.WorkerGeneration, 0));
         if (generations.Count == 0 && status.WorkerGeneration > 0) generations.Add((status.WorkerGeneration, 0));
-        foreach (var item in generations) await ReplayAsync(store, enrollment, session, status, item.Generation, item.After, token).ConfigureAwait(false);
+        foreach (var item in generations) status = await ReplayAsync(store, enrollment, session, status, item.Generation, item.After, token).ConfigureAwait(false);
+        return status;
     }
 
     /// <summary>
@@ -330,24 +331,38 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     /// persisted as a recovery obligation and the hold survives the later healthy
     /// status, because an unacknowledged batch is a real data-loss risk.
     /// </remarks>
-    private static async Task ReplayAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long after, CancellationToken token)
+    private static async Task<BridgeWorkerStatus> ReplayAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long after, CancellationToken token)
     {
         WorkerSessionResult replay;
         try { replay = await session.InvokeAsync("replay", new { operation = "replay", workerGeneration = generation, afterSequence = after }, false, token).ConfigureAwait(false); }
         catch (WorkerRemoteException)
         {
-            store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"{generation}:{after}", ReplayGapMarker(generation, after));
-            store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] }, []);
-            return;
+            try
+            {
+                var authoritative = await StatusAsync(session, token).ConfigureAwait(false);
+                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(authoritative), []);
+                return authoritative;
+            }
+            catch (Exception statusException) when (statusException is WorkerProtocolException or JsonException or IOException or ObjectDisposedException)
+            {
+                // The replay rejection proves that recovery is required, but without
+                // the worker's status there is no safe exact tuple to invent. Keep an
+                // operator-only controller obligation with no marker; a later healthy
+                // status will project the worker's exact gap/loss markers.
+                store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"{generation}:{after}");
+                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] }, []);
+                return status with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "replay-gap"] };
+            }
         }
         var events = JsonSerializer.Deserialize<BridgeWorkerEvent[]>(replay.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? [];
         var sanitized = events.Select(x => { var json = SanitizeJson(x.PayloadJson); return new ControllerWorkerEvent(x.WorkerGeneration, x.Sequence, SanitizeKind(x.Kind), json, Encoding.UTF8.GetByteCount(json)); }).ToArray();
         store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
-        if (sanitized.Length == 0) return;
+        if (sanitized.Length == 0) return status;
 
         var ackGeneration = sanitized.Max(x => x.WorkerGeneration);
         var ackSequence = sanitized.Where(x => x.WorkerGeneration == ackGeneration).Max(x => x.Sequence);
         await AcknowledgeAsync(store, enrollment, session, status, ackGeneration, ackSequence, token).ConfigureAwait(false);
+        return status;
     }
 
     private static async Task AcknowledgeAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, long generation, long sequence, CancellationToken token)
@@ -381,7 +396,6 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     }
 
     internal static string AckMarker(long generation, long sequence) => JsonSerializer.Serialize(new { kind = "replay-ack-uncertain", workerGeneration = generation, sequence }, WorkerProtocol.JsonOptions);
-    internal static string ReplayGapMarker(long generation, long after) => JsonSerializer.Serialize(new { kind = "replay-gap", workerGeneration = generation, afterSequence = after }, WorkerProtocol.JsonOptions);
 
     internal static (long Generation, long Sequence)? TryReadAckMarker(string? markerJson)
     {

@@ -178,8 +178,7 @@ public sealed class WorkerImageContractTests
 
             var labels = JsonSerializer.Deserialize<Dictionary<string, string>>(fields[8])!;
             foreach (var expected in identity.Labels) Assert.Equal(expected.Value, labels[expected.Key]);
-            HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.RequireOwnedLabels(
-                labels.Where(x => x.Key.StartsWith("agentcontrol.", StringComparison.Ordinal)).ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal), identity);
+            HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.RequireOwnedLabels(labels, identity);
 
             Assert.True(fields[9] is "{}" or "null", "the worker container must publish no ports: " + fields[9]);
 

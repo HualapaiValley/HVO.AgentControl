@@ -116,7 +116,12 @@ explicitly acknowledges the exact loss marker through `reconcile-replay-loss`.
 A cursor-before-boundary gap tied to that unreconciled marker clears in the same
 exact transition. Unknown-generation, future-cursor and other gaps require
 `reconcile-replay-gap` with the exact gap ID, attempted generation/cursor and
-reported first-retained/last sequence values. A non-capacity observation append
+reported first-retained/last sequence values. When a replay request is rejected,
+the controller immediately reads status on that authenticated session and persists
+the worker-reported gap and loss markers; it never fabricates an exact tuple from
+the rejected request. If that status read is unavailable, recovery remains held by
+an operator-only controller obligation with no automatic-recovery marker until an
+authoritative worker status can be observed. A non-capacity observation append
 failure does not cancel ACP or alter an already-established request, cancellation
 or permission outcome. It persists a sanitized `journal-failed` marker carrying a
 random operation ID, worker generation and category, then holds new dispatch.

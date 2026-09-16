@@ -187,7 +187,8 @@ public static class RemoteWorkerCommandBuilder
 
     public static void RequireOwnedLabels(IReadOnlyDictionary<string, string> actual, WorkerResourceIdentity identity)
     {
-        if (actual.Count != identity.Labels.Count) throw new ForeignResourceException("The resource carries unexpected labels.");
+        var owned = actual.Where(label => label.Key.StartsWith("agentcontrol.", StringComparison.Ordinal)).ToArray();
+        if (owned.Length != identity.Labels.Count) throw new ForeignResourceException("The resource carries unexpected AgentControl labels.");
         foreach (var expected in identity.Labels) if (!actual.TryGetValue(expected.Key, out var value) || !string.Equals(value, expected.Value, StringComparison.Ordinal)) throw new ForeignResourceException("The resource is not exactly owned by this operation.");
     }
 }

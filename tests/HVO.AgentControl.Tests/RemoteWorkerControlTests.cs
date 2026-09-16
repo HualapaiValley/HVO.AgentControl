@@ -36,9 +36,19 @@ public sealed class RemoteWorkerControlTests
     public void DestructiveOwnershipRequiresEveryExactLabel()
     {
         var identity = new WorkerResourceIdentity("org-a", "controller-a", "host-a", "worker-a", "binding-a", "operation-a");
-        RemoteWorkerCommandBuilder.RequireOwnedLabels(identity.Labels, identity);
-        var changed = identity.Labels.ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal); changed["agentcontrol.worker"] = "other";
+        var actual = identity.Labels.ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+        actual["org.opencontainers.image.revision"] = "inherited-image-label";
+        RemoteWorkerCommandBuilder.RequireOwnedLabels(actual, identity);
+
+        var changed = new Dictionary<string, string>(actual, StringComparer.Ordinal) { ["agentcontrol.worker"] = "other" };
         Assert.Throws<ForeignResourceException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(changed, identity));
+
+        var unexpected = new Dictionary<string, string>(actual, StringComparer.Ordinal) { ["agentcontrol.unexpected"] = "present" };
+        Assert.Throws<ForeignResourceException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(unexpected, identity));
+
+        var missing = new Dictionary<string, string>(actual, StringComparer.Ordinal);
+        missing.Remove("agentcontrol.operation");
+        Assert.Throws<ForeignResourceException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(missing, identity));
     }
 
     [Fact]
@@ -1218,7 +1228,10 @@ public sealed class RemoteWorkerControlTests
         {
             if (FailInspect) throw new RemoteWorkerUnavailableException("injected inspect failure", transport: true);
             if (!_labels.TryGetValue(name, out var labels)) return Task.FromResult(new RemoteResourceInspection(false, null, new Dictionary<string, string>(), "absent"));
-            var effective = new Dictionary<string, string>(labels, StringComparer.Ordinal);
+            var effective = new Dictionary<string, string>(labels, StringComparer.Ordinal)
+            {
+                ["org.opencontainers.image.revision"] = "inherited-image-label",
+            };
             if (OwnerOverride is not null) effective["agentcontrol.owner"] = OwnerOverride;
             return Task.FromResult(new RemoteResourceInspection(true, "ref-" + name, effective, state));
         }
@@ -1329,6 +1342,72 @@ public sealed class RemoteWorkerControlTests
         Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "request-uncertain");
     }
 
+    [Fact]
+    public async Task ReplayRejectionReadsAuthoritativeGapAndLossMarkersForExactRecovery()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var initial = fixture.BridgeStatus();
+        var gap = new BridgeReplayGap("gap:rejected-replay", "future-cursor", 1, 9, 2, 8, 1, 7);
+        var loss = new BridgeReplayLoss(1, 7, 3, 128);
+        var held = initial with
+        {
+            DispatchHeld = true,
+            HoldReason = "replay-gap-unreconciled",
+            HoldReasons = ["replay-gap-unreconciled", "replay-loss-unreconciled"],
+            ReplayLoss = loss,
+            ReplayGapCount = 1,
+            ReplayGaps = [gap],
+        };
+        var session = new FakeBridgeSession(enrollment.ControllerId, initial, held)
+        {
+            RejectReplay = true,
+            ClearGapsAfterReconcile = true,
+            ClearLossAfterReconcile = true,
+        };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        var active = fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true);
+        var gapObligation = Assert.Single(active, item => item.Source == "worker" && item.Kind == "replay-gap" && item.MarkerJson is not null);
+        var lossObligation = Assert.Single(active, item => item.Source == "worker" && item.Kind == "replay-loss" && item.MarkerJson is not null);
+        Assert.DoesNotContain(active, item => item.Source == "controller" && item.Kind == "replay-gap");
+        Assert.Contains("gap:rejected-replay", gapObligation.MarkerJson, StringComparison.Ordinal);
+        Assert.Contains("\"markerSequence\":7", lossObligation.MarkerJson, StringComparison.Ordinal);
+
+        await manager.RecoverAsync(enrollment.WorkerId, gapObligation.Id, gapObligation.Revision, CancellationToken.None);
+        lossObligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Kind == "replay-loss" && item.MarkerJson is not null);
+        await manager.RecoverAsync(enrollment.WorkerId, lossObligation.Id, lossObligation.Revision, CancellationToken.None);
+
+        var gapRecovery = Assert.Single(session.Invocations, item => item.Operation == "reconcile-replay-gap");
+        Assert.Contains("gap:rejected-replay", gapRecovery.Payload, StringComparison.Ordinal);
+        var lossRecovery = Assert.Single(session.Invocations, item => item.Operation == "reconcile-replay-loss");
+        Assert.Contains("\"workerGeneration\":1", lossRecovery.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"markerSequence\":7", lossRecovery.Payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Kind is "replay-gap" or "replay-loss");
+    }
+
+    [Fact]
+    public async Task ReplayRejectionWithoutReadableStatusCreatesOnlyOperatorRecovery()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus())
+        {
+            RejectReplay = true,
+            FailStatusAfterRejectedReplay = true,
+        };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap");
+        Assert.Null(obligation.MarkerJson);
+        await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => manager.RecoverAsync(enrollment.WorkerId, obligation.Id, obligation.Revision, CancellationToken.None));
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Id == obligation.Id);
+    }
+
     /// <summary>
     /// Owner-triggered recovery must invoke the exact worker reconciliation and
     /// clear the controller obligation only after the worker accepted it.
@@ -1428,11 +1507,16 @@ public sealed class RemoteWorkerControlTests
         public List<(string Operation, string Payload)> Invocations { get; } = [];
         public bool FailAcknowledgment { get; set; }
         public bool FailSubmitAsWriteUncertain { get; set; }
+        public bool RejectReplay { get; set; }
+        public bool FailStatusAfterRejectedReplay { get; set; }
         public bool RejectRecovery { get; set; }
+        private bool _replayRejected;
 
         /// <summary>Models a worker that stops reporting its gaps once it accepts the reconciliation.</summary>
         public bool ClearGapsAfterReconcile { get; set; }
-        private bool _reconciled;
+        public bool ClearLossAfterReconcile { get; set; }
+        private bool _gapReconciled;
+        private bool _lossReconciled;
 
         public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => new Dictionary<string, object?>(fields) { ["operation"] = operation };
 
@@ -1445,11 +1529,22 @@ public sealed class RemoteWorkerControlTests
             var root = requestDocument.RootElement;
 
             if (operation == "reconcile") throw new WorkerRemoteException("worker-request-rejected");
+            if (operation == "replay" && RejectReplay)
+            {
+                _replayRejected = true;
+                throw new WorkerRemoteException("worker-request-rejected");
+            }
+            if (operation == "status" && FailStatusAfterRejectedReplay && _replayRejected)
+            {
+                FailStatusAfterRejectedReplay = false;
+                throw new WorkerReadUncertainException("injected unavailable status");
+            }
             if (operation == "submit" && FailSubmitAsWriteUncertain) throw new WorkerWriteUncertainException("injected uncertain submit");
             if (operation.StartsWith("reconcile-", StringComparison.Ordinal))
             {
                 if (RejectRecovery) throw new WorkerRemoteException("worker-operation-failed");
-                _reconciled = true;
+                if (operation == "reconcile-replay-gap") _gapReconciled = true;
+                if (operation == "reconcile-replay-loss") _lossReconciled = true;
             }
             if (operation == "ack-events")
             {
@@ -1472,7 +1567,21 @@ public sealed class RemoteWorkerControlTests
         private BridgeWorkerStatus Status()
         {
             var status = _statuses.Count > 1 ? _statuses.Dequeue() : _statuses.Peek();
-            return ClearGapsAfterReconcile && _reconciled ? status with { DispatchHeld = false, HoldReasons = [], ReplayGaps = [], ReplayGapCount = 0 } : status;
+            var replayGaps = ClearGapsAfterReconcile && _gapReconciled ? Array.Empty<BridgeReplayGap>() : status.ReplayGaps;
+            var replayLoss = ClearLossAfterReconcile && _lossReconciled ? null : status.ReplayLoss;
+            var holdReasons = status.HoldReasons
+                .Where(reason => !(ClearGapsAfterReconcile && _gapReconciled && reason.Contains("replay-gap", StringComparison.Ordinal)))
+                .Where(reason => !(ClearLossAfterReconcile && _lossReconciled && reason.Contains("replay-loss", StringComparison.Ordinal)))
+                .ToArray();
+            return status with
+            {
+                DispatchHeld = holdReasons.Length > 0,
+                HoldReason = holdReasons.FirstOrDefault(),
+                HoldReasons = holdReasons,
+                ReplayLoss = replayLoss,
+                ReplayGaps = replayGaps,
+                ReplayGapCount = replayGaps.Count,
+            };
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
