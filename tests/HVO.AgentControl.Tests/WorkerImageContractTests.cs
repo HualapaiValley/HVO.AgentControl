@@ -27,6 +27,7 @@ public sealed class WorkerImageContractTests
         Assert.Contains("find / -xdev -perm /6000 -type f -exec chmod a-s", dockerfile);
         Assert.Contains("profiles: [\"worker\"]", compose);
         Assert.Contains("restart: \"no\"", compose);
+        Assert.Contains("network_mode: none", compose);
         Assert.Contains("read_only: true", compose); Assert.Contains("pids_limit: 256", compose); Assert.Contains("mem_limit: 2g", compose); Assert.Contains("cpus: 2.0", compose);
         Assert.DoesNotContain("docker.sock", compose, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("DOCKER_HOST", compose, StringComparison.Ordinal);
@@ -76,7 +77,7 @@ public sealed class WorkerImageContractTests
             Thread.Sleep(1000);
             var pid = Run(["inspect", "-f", "{{.State.Pid}}", name]);
             Assert.True(pid.ExitCode == 0, pid.Output);
-            var process = Run(["exec", name, "sh", "-c", "test $(cat /proc/1/comm) = python3; test $(ps -eo stat= | awk '$1 ~ /^Z/ {n++} END {print n+0}') = 0; p=$(pgrep -f '^/usr/local/bin/node .*opencode.* acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; tr '\\0' '\\n' </proc/$p/environ | grep -q '^OPENCODE_SERVER_USERNAME=opencode$'; tr '\\0' '\\n' </proc/$p/environ | grep -q '^OPENCODE_SERVER_PASSWORD='; ! tr '\\0' '\\n' </proc/$p/environ | grep -q '^WORKER_CONTROLLER_ID='; runuser -u employee -- sh -c '! test -r /run/worker-supervisor.sock; ! test -w /run/worker-supervisor.sock'"]);
+            var process = Run(["exec", name, "sh", "-c", "set -e; test $(cat /proc/1/comm) = python3; test $(ps -eo stat= | awk '$1 ~ /^Z/ {n++} END {print n+0}') = 0; p=$(pgrep -f '^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_USERNAME=opencode$'; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_PASSWORD='; ! runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^WORKER_CONTROLLER_ID='; runuser -u employee -- sh -c '! test -r /run/worker-supervisor.sock; ! test -w /run/worker-supervisor.sock'"]);
             Assert.True(process.ExitCode == 0, process.Output);
             var network = Run(["inspect", "-f", "{{.HostConfig.NetworkMode}}", name]);
             Assert.True(network.ExitCode == 0 && network.Output.Trim() == "none", network.Output);
@@ -100,7 +101,7 @@ public sealed class WorkerImageContractTests
             var start = Run(["run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL", "--security-opt", "no-new-privileges", "-v", volume + ":/control", "-e", "WORKER_ID=test-worker", "-e", "WORKER_CONTROLLER_ID=test-controller", Image]);
             Assert.True(start.ExitCode == 0, start.Output);
             Thread.Sleep(1000);
-            var contract = Run(["exec", name, "sh", "-c", "p=$(pgrep -f '^/usr/local/bin/node .*opencode.* acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; grep -Eq '0100007F:1000 .* 0A ' /proc/$p/net/tcp; /usr/local/bin/opencode attach --help >/dev/null"]);
+            var contract = Run(["exec", name, "sh", "-c", "set -e; p=$(pgrep -f '^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; grep -Eq '0100007F:1000 .* 0A ' /proc/$p/net/tcp; /usr/local/bin/opencode attach --help >/dev/null"]);
             Assert.True(contract.ExitCode == 0, contract.Output);
         }
         finally { _ = Run(["rm", "-f", name]); _ = Run(["volume", "rm", "-f", volume]); }
@@ -111,12 +112,16 @@ public sealed class WorkerImageContractTests
     /// Docker daemon: the ephemeral bootstrap with controller-encoded key bytes,
     /// then the long-lived container. It proves the constructed argv, environment,
     /// capabilities, labels, network and mounts are exactly what the controller
-    /// intends, which no hermetic string assertion can establish.
+    /// intends, then starts the container and proves the runtime network contract
+    /// (eth0, loopback-only ACP, no published port), which no hermetic string
+    /// assertion can establish.
     /// </summary>
     /// <remarks>
-    /// Everything is disposable and local: no SSH, no approved-host configuration,
-    /// no registry, no provider credentials and no inference. The container is
-    /// created and inspected, then removed with its volumes.
+    /// Everything is disposable: no SSH, no approved-host configuration, no registry
+    /// and no provider credentials. The container is attached to Docker's default
+    /// bridge and can egress, but this test submits no prompt and its assertions do
+    /// not depend on Internet or DNS reachability once the image is built. The
+    /// container is created, started and inspected, then removed with its volumes.
     /// </remarks>
     [Fact]
     public void RealContainerCommandAppliesTheFixedIsolationBootstrapAndLabels()
@@ -154,6 +159,17 @@ public sealed class WorkerImageContractTests
             };
             var createArguments = LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildContainerCreate(
                 LocalHost(), options, new HVO.AgentControl.RemoteWorker.ContainerCreateSpec(container, digest, options.ApprovedImagePlatform, identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit)));
+            // The controller-provisioned worker uses the fixed default bridge so the
+            // approved provider is reachable, and must never publish ingress. Assert
+            // the positional flag/value pair in the argv, not a loose substring.
+            Assert.Equal(1, createArguments.Count(argument => argument == "--network"));
+            var networkIndex = Array.IndexOf(createArguments, "--network");
+            Assert.True(networkIndex >= 0 && networkIndex + 1 < createArguments.Length, "the create argv must carry a network value.");
+            Assert.Equal("bridge", createArguments[networkIndex + 1]);
+            Assert.NotEqual("host", createArguments[networkIndex + 1]);
+            Assert.DoesNotContain("--publish", createArguments);
+            Assert.DoesNotContain("-p", createArguments);
+            Assert.DoesNotContain("--expose", createArguments);
             var create = Run(createArguments);
             Assert.True(create.ExitCode == 0, create.Output);
 
@@ -163,7 +179,7 @@ public sealed class WorkerImageContractTests
             Assert.True(inspected.ExitCode == 0, inspected.Output);
             var fields = inspected.Output.Trim().Split('|');
 
-            Assert.Equal("none", fields[0]);
+            Assert.Equal("bridge", fields[0]);
             Assert.Equal("true", fields[1]);
             Assert.Equal(options.MemoryBytes.ToString(System.Globalization.CultureInfo.InvariantCulture), fields[2]);
             Assert.Equal(options.PidsLimit.ToString(System.Globalization.CultureInfo.InvariantCulture), fields[3]);
@@ -186,6 +202,40 @@ public sealed class WorkerImageContractTests
             var destinations = mounted.EnumerateArray().Select(x => x.GetProperty("Destination").GetString() ?? string.Empty).Order(StringComparer.Ordinal).ToArray();
             Assert.Equal(new[] { "/control", "/home/worker", "/session", "/workspace" }, destinations);
             Assert.All(mounted.EnumerateArray(), mount => Assert.Equal("volume", mount.GetProperty("Type").GetString()));
+
+            // The assertions above only prove the requested configuration. Start the
+            // container and prove the runtime network contract on the shared default
+            // bridge: the worker gets an eth0, while ACP stays bound to container
+            // loopback only and no host port is published.
+            var start = Run(["container", "start", container]);
+            Assert.True(start.ExitCode == 0, start.Output);
+
+            var listeners = WaitForAcpListeners(container) ?? throw new Xunit.Sdk.XunitException("the fixed ACP process and its loopback:4096 listener did not appear within the bound.");
+
+            var eth0 = Run(["exec", container, "sh", "-c", "test -e /sys/class/net/eth0"]);
+            Assert.True(eth0.ExitCode == 0, "a container on the default bridge must have an eth0 interface: " + eth0.Output);
+
+            // A live default-bridge attachment must carry an IPv4 address of its own.
+            var address = Run(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container]).Output.Trim();
+            Assert.Matches("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$", address);
+
+            // /proc/<pid>/net/tcp is the container network namespace's IPv4 table.
+            // Local addresses are little-endian hex and state 0A is LISTEN. ACP is
+            // given the literal IPv4 loopback address 127.0.0.1, so its only IPv4
+            // LISTEN on :4096 is 0100007F:1000. That single equality already excludes
+            // 0.0.0.0 and this container's bridge address, so no separate negative
+            // assertions are needed.
+            Assert.True(listeners.IPv4.Readable, "the process IPv4 TCP table must be readable: " + listeners.IPv4.Error);
+            Assert.NotEmpty(listeners.IPv4.Values);
+            Assert.All(listeners.IPv4.Values, value => Assert.Equal("0100007F:1000", value, ignoreCase: true));
+            // /proc/<pid>/net/tcp6 is the same namespace's IPv6 table. ACP is bound to
+            // the IPv4 literal 127.0.0.1, so it must not open any tcp6 LISTEN on
+            // :4096 - not even the otherwise-acceptable [::1]:4096.
+            Assert.True(listeners.IPv6.Readable, "the process IPv6 TCP table must be readable: " + listeners.IPv6.Error);
+            Assert.Empty(listeners.IPv6.Values);
+
+            var stop = Run(["container", "stop", "--timeout", "10", container]);
+            Assert.True(stop.ExitCode == 0, stop.Output);
         }
         finally
         {
@@ -224,6 +274,46 @@ public sealed class WorkerImageContractTests
         }
         if (current.Length > 0) arguments.Add(current.ToString());
         return [.. arguments];
+    }
+
+    /// <summary>
+    /// Bounded poll for the fixed ACP process and its LISTEN sockets. The worker
+    /// supervisor launches ACP asynchronously as PID1 starts, so the test waits a
+    /// deterministic maximum for both the process and a loopback:4096 listener
+    /// rather than sleeping an arbitrary fixed interval.
+    /// </summary>
+    private sealed record ListenerResult(bool Readable, string[] Values, string Error);
+
+    private static (ListenerResult IPv4, ListenerResult IPv6)? WaitForAcpListeners(string container, int timeoutSeconds = 30)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            var found = Run(["exec", container, "pgrep", "-f", "^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$"]);
+            if (found.ExitCode == 0 && found.Output.Trim().Length > 0)
+            {
+                var pid = found.Output.Trim().Split('\n')[0].Trim();
+                var ipv4 = Listeners(container, pid, "tcp");
+                var ipv6 = Listeners(container, pid, "tcp6");
+                if (ipv4.Readable && ipv4.Values.Length > 0) return (ipv4, ipv6);
+            }
+            Thread.Sleep(250);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Reads the LISTEN (state <c>0A</c>) local addresses for port 4096 (little-endian
+    /// hex <c>1000</c>) from the process network namespace's IPv4 (<c>tcp</c>) or IPv6
+    /// (<c>tcp6</c>) table.
+    /// </summary>
+    private static ListenerResult Listeners(string container, string pid, string table)
+    {
+        var path = "/proc/" + pid + "/net/" + table;
+        var result = Run(["exec", container, "sh", "-c", "test -r " + path + "; readable=$?; if [ \"$readable\" -ne 0 ]; then exit 2; fi; awk '$4 == \"0A\" { print $2 }' " + path]);
+        if (result.ExitCode == 2) return new(false, [], result.Output);
+        if (result.ExitCode != 0) return new(false, [], result.Output);
+        return new(true, result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(value => value.EndsWith(":1000", StringComparison.OrdinalIgnoreCase)).ToArray(), string.Empty);
     }
 
     private static string ImageDigest()

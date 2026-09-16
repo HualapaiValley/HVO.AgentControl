@@ -306,7 +306,19 @@ public sealed class RemoteWorkerControlTests
         var identity = new WorkerResourceIdentity("org-a", "controller-a", "host-a", "worker-a", "binding-a", "operation-a");
         var volumes = new[] { new NamedVolumeMount("control-a", "/control"), new NamedVolumeMount("home-a", "/home/worker"), new NamedVolumeMount("workspace-a", "/workspace"), new NamedVolumeMount("session-a", "/session") };
         var command = RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("worker-a", digest, "linux/amd64", identity, volumes, options.MemoryBytes, options.CpuLimit, options.PidsLimit)); var remote = command.Arguments[^1];
-        Assert.Contains("--network 'none'", remote, StringComparison.Ordinal); Assert.Contains("--cap-drop 'ALL'", remote, StringComparison.Ordinal); foreach (var capability in new[] { "CHOWN", "SETUID", "SETGID", "KILL" }) Assert.Contains($"--cap-add '{capability}'", remote, StringComparison.Ordinal); Assert.Contains("'WORKER_CONTROL_DIRECTORY=/control'", remote, StringComparison.Ordinal); Assert.Contains("'WORKER_ID=worker-a'", remote, StringComparison.Ordinal); Assert.Contains("'WORKER_CONTROLLER_ID=controller-a'", remote, StringComparison.Ordinal); Assert.Contains("--read-only", remote, StringComparison.Ordinal); Assert.DoesNotContain("--privileged", remote, StringComparison.Ordinal); Assert.Contains("'" + digest + "'", remote, StringComparison.Ordinal);
+        Assert.Contains("--cap-drop 'ALL'", remote, StringComparison.Ordinal); foreach (var capability in new[] { "CHOWN", "SETUID", "SETGID", "KILL" }) Assert.Contains($"--cap-add '{capability}'", remote, StringComparison.Ordinal); Assert.Contains("'WORKER_CONTROL_DIRECTORY=/control'", remote, StringComparison.Ordinal); Assert.Contains("'WORKER_ID=worker-a'", remote, StringComparison.Ordinal); Assert.Contains("'WORKER_CONTROLLER_ID=controller-a'", remote, StringComparison.Ordinal); Assert.Contains("--read-only", remote, StringComparison.Ordinal); Assert.DoesNotContain("--privileged", remote, StringComparison.Ordinal); Assert.Contains("'" + digest + "'", remote, StringComparison.Ordinal);
+        // Contract: outbound egress for the approved provider is permitted, but the
+        // worker publishes no ingress. The network is exactly one positional pair and
+        // is never host or an explicit publish/expose.
+        var tokens = remote.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(1, tokens.Count(token => token == "--network"));
+        var networkAt = Array.IndexOf(tokens, "--network");
+        Assert.True(networkAt >= 0 && networkAt + 1 < tokens.Length, "the create command must carry a network value.");
+        Assert.Equal("'bridge'", tokens[networkAt + 1]);
+        Assert.NotEqual("'host'", tokens[networkAt + 1]);
+        Assert.DoesNotContain("--publish", remote, StringComparison.Ordinal);
+        Assert.DoesNotContain("--expose", remote, StringComparison.Ordinal);
+        Assert.DoesNotContain(" -p ", remote, StringComparison.Ordinal);
     }
 
     [Theory]

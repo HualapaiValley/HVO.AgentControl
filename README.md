@@ -68,9 +68,19 @@ contain at least 24 characters after trimming in either runtime mode.
 The `worker` Docker target is independent of the control image. It uses a root
 PID1 fixed-operation supervisor, bridge UID 1101 and employee UID 1102, with
 separate persistent `/control`, `/home/worker`, `/workspace` and
-`/session` trees. The optional `worker` Compose profile has no published
-port, no Docker socket, an internal network and `restart: "no"`; it is not part
-of normal `docker compose up`.
+`/session` trees. The optional `worker` Compose profile is the hermetic local
+development artifact: no published port, no Docker socket, `network_mode: none`
+and `restart: "no"`; it is not part of normal `docker compose up`. A
+controller-provisioned remote worker instead attaches to Docker's default
+`bridge` network, which grants **unrestricted outbound egress**: the public
+Internet through the daemon's NAT, the Docker host's bridge gateway and any host
+services reachable there, and any other container co-attached to the same
+bridge. The fixed contract still publishes no ingress — no `-p`, `--publish` or
+`--expose`, and empty port bindings — and the worker's ACP/TUI HTTP listener
+stays on container loopback while its supervisor socket is a container-private
+path. That is an ingress-free and in-container guarantee, not network isolation
+or egress restriction. A per-worker dedicated network, or a host firewall/NAT
+policy that limits egress to the approved provider, is possible future work.
 
 Enrollment is bootstrap-only and consumes a disposable 32-byte key from stdin.
 For the checked-in Compose profile, bootstrap the named volume **before** the

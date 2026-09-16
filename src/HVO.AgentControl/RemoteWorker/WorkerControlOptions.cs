@@ -5,6 +5,26 @@ namespace HVO.AgentControl.RemoteWorker;
 public sealed class WorkerControlOptions
 {
     public const string SectionName = "WorkerControl";
+
+    /// <summary>
+    /// The fixed Docker network for every controller-provisioned worker container.
+    /// Docker's default <c>bridge</c> grants the worker <em>unrestricted outbound
+    /// egress</em>: it can reach the public Internet through the daemon's NAT, the
+    /// Docker host's bridge gateway and any host services listening there, and any
+    /// other container co-attached to the same default bridge. The safety guarantee
+    /// is therefore only ingress-free and loopback/private inside the container, not
+    /// network isolation or egress restriction: the fixed command publishes no
+    /// ingress (no <c>-p</c>, <c>--publish</c> or <c>--expose</c> and empty port
+    /// bindings), the ACP/TUI HTTP listener binds container loopback only, and the
+    /// supervisor Unix socket is a container-private path. The name is a constant
+    /// rather than an operator knob so it cannot be pointed at the host network or
+    /// an arbitrary network. A per-worker dedicated network, or a host firewall/NAT
+    /// policy that restricts egress to the approved provider, is possible future
+    /// work. The hermetic local <c>worker</c> Compose profile keeps
+    /// <c>network_mode: none</c> because it is not a live provider runtime.
+    /// </summary>
+    public const string ContainerNetworkMode = "bridge";
+
     public bool Enabled { get; set; }
     public string ControllerId { get; set; } = string.Empty;
     public ApprovedExecutionHost[] ApprovedHosts { get; set; } = [];

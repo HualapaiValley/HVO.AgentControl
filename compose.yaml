@@ -103,6 +103,13 @@ services:
     mem_limit: 2g
     cpus: 2.0
     restart: "no"
+    # Hermetic local development only: this checked-in profile has no network at
+    # all. Controller-provisioned worker containers instead attach to Docker's
+    # default `bridge` network (RemoteWorkerCommandBuilder fixed contract), which
+    # grants unrestricted outbound egress - the public Internet via NAT, the
+    # Docker host's bridge gateway/host services and co-attached containers - while
+    # the fixed contract still publishes no ports and keeps ACP/supervisor
+    # listener paths container-private. Restricting that egress is future work.
     network_mode: none
 networks:
   agents:
