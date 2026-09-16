@@ -1373,7 +1373,119 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public async Task ReplayAcceptsAPagePastTheInitialStatusSnapshotThenDefersItsSuffix()
+    public async Task CurrentGenerationCursorPastSnapshotTargetCreatesControllerReplayGapAndHolds()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), [new(1, 2, "acp-event", "{}", 2)]);
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.True(lease.Status.DispatchHeld);
+        Assert.Contains("replay-gap", lease.Status.HoldReasons);
+        Assert.DoesNotContain(session.Invocations, item => item.Operation == "replay");
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap" && item.MarkerJson is null);
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ConflictingDuplicateReplayMetadataCreatesControllerReplayGapAndThrowsProtocolFailure()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status(), [new(1, 1, "acp-event", "{}", 2)]);
+        using (var connection = Open(fixture.DatabasePath))
+            connection.Execute($"UPDATE worker_cursors SET acknowledged_sequence=0 WHERE worker_id='{enrollment.WorkerId}'");
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: 1));
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "different", "{}", 2)], false, 1);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var failure = await Assert.ThrowsAsync<WorkerProtocolException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.IsType<OrganizationConcurrencyException>(failure.InnerException);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap" && item.MarkerJson is null);
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ReplayEndingBeforeSnapshotPersistsExactAuthoritativeWorkerMarkersAndHolds()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var initial = fixture.BridgeStatus(lastSequence: 2);
+        var gap = new BridgeReplayGap("gap:terminal-page", "loss", 1, 0, 3, 2, 1, 2);
+        var loss = new BridgeReplayLoss(1, 2, 1, 2);
+        var authoritative = initial with
+        {
+            DispatchHeld = true,
+            HoldReason = "replay-loss-unreconciled",
+            HoldReasons = ["replay-loss-unreconciled", "replay-gap-unreconciled"],
+            ReplayLoss = loss,
+            ReplayGapCount = 1,
+            ReplayGaps = [gap],
+        };
+        var session = new FakeBridgeSession(enrollment.ControllerId, initial, authoritative);
+        session.ReplayPages[(1, 0)] = new BridgeReplayPage([], false, 0);
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.True(lease.Status.DispatchHeld);
+        Assert.Equal(authoritative.ReplayLoss, lease.Status.ReplayLoss);
+        Assert.Equal(authoritative.ReplayGaps, lease.Status.ReplayGaps);
+        Assert.Equal(authoritative.HoldReasons, lease.Status.HoldReasons);
+        var active = fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true);
+        Assert.Contains(active, item => item.Source == "worker" && item.Kind == "replay-gap" && item.MarkerJson == JsonSerializer.Serialize(gap, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions));
+        Assert.Contains(active, item => item.Source == "worker" && item.Kind == "replay-loss" && item.MarkerJson == JsonSerializer.Serialize(loss, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions));
+        Assert.DoesNotContain(active, item => item.Source == "controller" && item.Kind == "replay-gap");
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ZeroRetentionWorkerReplayLossIsProjectedExactlyWithoutMarkerlessReplacement()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        using var workerTemp = new TempDirectory();
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(workerTemp.Path, (UnixFileMode)0x1C0);
+        var workerOptions = new WorkerOptions(workerTemp.Path, "worker-test", "controller-test", System.IO.Path.Combine(workerTemp.Path, "bridge.sock"), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), EventLimit: 0);
+        using var workerStore = new WorkerStore(workerOptions);
+        workerStore.BeginProcessStart();
+        workerStore.CompleteProcessStart("lifecycle", 123);
+        Assert.Throws<WorkerReplayLossException>(() => workerStore.AppendEvent("acp-event", "{}"));
+        var workerStatus = workerStore.Status();
+        var loss = Assert.IsType<ReplayLoss>(workerStatus.ReplayLoss);
+        var authoritative = fixture.BridgeStatus(lastSequence: workerStatus.LastSequence) with
+        {
+            DispatchHeld = workerStatus.DispatchHeld,
+            HoldReason = workerStatus.HoldReason,
+            HoldReasons = workerStatus.HoldReasons,
+            FirstRetainedSequence = workerStatus.FirstRetainedSequence,
+            ReplayLoss = new(loss.WorkerGeneration, loss.MarkerSequence, loss.DroppedCount, loss.DroppedBytes),
+        };
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus(lastSequence: workerStatus.LastSequence), authoritative)
+        {
+            ReplayPageFactory = (generation, after) =>
+            {
+                Assert.Throws<WorkerProtocolException>(() => workerStore.Replay(generation, after));
+                throw new WorkerRemoteException("worker-request-rejected");
+            },
+        };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.True(lease.Status.DispatchHeld);
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "worker" && item.Kind == "replay-loss" && item.MarkerJson is not null);
+        Assert.Equal(JsonSerializer.Serialize(authoritative.ReplayLoss, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions), obligation.MarkerJson);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap");
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
+    [Fact]
+    public async Task ReplayPageCrossingCurrentGenerationSnapshotCreatesControllerReplayGapAndHolds()
     {
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
@@ -1381,11 +1493,15 @@ public sealed class RemoteWorkerControlTests
         session.ReplayPages[(1, 0)] = new BridgeReplayPage([new(1, 1, "acp-event", "{}", 2), new(1, 2, "acp-event", "{}", 2)], true, 2);
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
 
-        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+        var lease = await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
 
         Assert.Equal([(1L, 2L)], session.Acknowledgments);
+        Assert.True(lease.Status.DispatchHeld);
+        Assert.Contains("replay-gap", lease.Status.HoldReasons);
         Assert.DoesNotContain(session.Invocations, x => x.Operation == "replay" && x.Payload.Contains("\"afterSequence\":2", StringComparison.Ordinal));
         Assert.Equal([(1L, 1L), (1L, 2L)], fixture.Store.ListWorkerEvents(enrollment.WorkerId).Select(x => (x.WorkerGeneration, x.Sequence)).ToArray());
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), item => item.Source == "controller" && item.Kind == "replay-gap" && item.MarkerJson is null);
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
     }
 
     [Fact]

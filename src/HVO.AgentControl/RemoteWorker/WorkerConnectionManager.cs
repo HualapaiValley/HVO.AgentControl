@@ -379,7 +379,15 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         var eventCount = 0;
         var targetSequence = generation == status.WorkerGeneration ? status.LastSequence : (long?)null;
         var maxEventCount = targetSequence is null ? MaxReplayEvents : MaxReplayEvents + 256;
-        if (targetSequence is not null && cursor >= targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
+        if (targetSequence is not null)
+        {
+            if (cursor == targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
+            if (cursor > targetSequence.Value)
+            {
+                var held = RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                return new(held, ReplaySequenceResult.HeldIncomplete);
+            }
+        }
         while (true)
         {
             if (++pageCount > MaxReplayPages)
@@ -449,19 +457,38 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             {
                 store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
             }
-            catch (OrganizationValidationException)
+            catch (Exception exception) when (exception is OrganizationConcurrencyException or OrganizationValidationException)
             {
                 RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
-                throw;
+                throw new WorkerProtocolException("Worker replay conflicted with durable controller metadata.", exception);
             }
             if (sanitized.Length > 0 && !await AcknowledgeAsync(store, enrollment, session, status, generation, page.NextAfterSequence, token).ConfigureAwait(false))
                 return new(WithReplayAckHold(status), ReplaySequenceResult.HeldIncomplete);
-            if (targetSequence is not null && page.NextAfterSequence >= targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
+            if (targetSequence is not null)
+            {
+                if (page.NextAfterSequence == targetSequence.Value) return new(status, ReplaySequenceResult.Complete);
+                if (page.NextAfterSequence > targetSequence.Value)
+                {
+                    var held = RecordReplayProtocolFailure(store, enrollment, status, generation, page.NextAfterSequence);
+                    return new(held, ReplaySequenceResult.HeldIncomplete);
+                }
+            }
             if (!page.HasMore)
             {
                 if (targetSequence is not null)
                 {
-                    RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                    var authoritative = await StatusAsync(session, token).ConfigureAwait(false);
+                    if (HasReplayRecovery(authoritative))
+                    {
+                        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(authoritative), []);
+                        return new(authoritative, ReplaySequenceResult.HeldIncomplete);
+                    }
+                    if (authoritative.WorkerGeneration != generation || authoritative.LastSequence <= page.NextAfterSequence)
+                    {
+                        RecordReplayProtocolFailure(store, enrollment, authoritative, generation, page.NextAfterSequence);
+                        throw new WorkerProtocolException("Worker status diverged from the replay snapshot target.");
+                    }
+                    RecordReplayProtocolFailure(store, enrollment, authoritative, generation, page.NextAfterSequence);
                     throw new WorkerProtocolException("Worker replay ended before the status snapshot target.");
                 }
                 return new(status, ReplaySequenceResult.Complete);
@@ -470,11 +497,20 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         }
     }
 
-    private static void RecordReplayProtocolFailure(OrganizationStore store, WorkerEnrollmentRecord enrollment, BridgeWorkerStatus status, long generation, long cursor)
+    private static bool HasReplayRecovery(BridgeWorkerStatus status) =>
+        status.ReplayLoss is not null
+        || status.ReplayGaps.Count > 0
+        || status.DispatchHeld && ((status.HoldReason?.Contains("replay-gap", StringComparison.Ordinal) ?? false)
+            || (status.HoldReason?.Contains("replay-loss", StringComparison.Ordinal) ?? false)
+            || status.HoldReasons.Any(reason => reason.Contains("replay-gap", StringComparison.Ordinal) || reason.Contains("replay-loss", StringComparison.Ordinal)));
+
+    private static BridgeWorkerStatus RecordReplayProtocolFailure(OrganizationStore store, WorkerEnrollmentRecord enrollment, BridgeWorkerStatus status, long generation, long cursor)
     {
         store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"protocol:{generation}:{cursor}");
         var reasons = status.HoldReasons.Contains("replay-gap", StringComparer.Ordinal) ? status.HoldReasons : [.. status.HoldReasons, "replay-gap"];
-        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status with { DispatchHeld = true, HoldReasons = reasons }), []);
+        var held = status with { DispatchHeld = true, HoldReasons = reasons };
+        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(held), []);
+        return held;
     }
 
     private static BridgeWorkerStatus WithReplayAckHold(BridgeWorkerStatus status) =>
