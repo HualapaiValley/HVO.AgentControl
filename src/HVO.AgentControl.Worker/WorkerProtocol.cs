@@ -12,7 +12,7 @@ public sealed record WorkerOptions(string ControlDirectory, string WorkerId, str
     TimeSpan ChallengeLifetime, TimeSpan HeartbeatInterval, TimeSpan LeaseLifetime, int EventLimit = 10_000,
     long EventByteLimit = 64L * 1024 * 1024, int NonceCacheLimit = 4096, int ExpectedBridgeUid = -1,
     int PendingPermissionLimit = 64, long PendingPermissionByteLimit = 256 * 1024, int MaxConnections = 32, int MaxAuthenticatingConnections = 8,
-    int ReplayPageEventLimit = 256, int ReplayPageByteLimit = 256 * 1024)
+    int ReplayPageEventLimit = 256, int ReplayPageByteLimit = 256 * 1024, TimeSpan? InitializeTimeout = null)
 {
     public static WorkerOptions Production(string controlDirectory, string workerId, string controllerId) => new(
         controlDirectory, workerId, controllerId, Path.Combine(controlDirectory, "bridge.sock"), TimeSpan.FromSeconds(10),
@@ -30,7 +30,8 @@ public sealed record WorkerStatus(long WorkerGeneration, long ProcessGeneration,
     long? ObservedPid, string? ActiveRequestId, PendingPermission? PendingPermission, long OwnershipEpoch,
     bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence,
     long AcknowledgedWorkerGeneration, long AcknowledgedSequence, ReplayLoss? ReplayLoss, JournalFailure? JournalFailure,
-    int ReplayGapCount, IReadOnlyList<ReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false);
+    int ReplayGapCount, IReadOnlyList<ReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false,
+    bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null);
 public sealed record PendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId,
     string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision);
 public sealed record StoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson,

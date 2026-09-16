@@ -10,6 +10,8 @@ public sealed record ExecutionHostRegistration(string ApprovedHostId, string Slu
 public sealed record ExecutionHostRecord(string Id, string Slug, string DisplayName, string TransportKind, string EndpointHost, int EndpointPort, string EndpointUser, string KnownHostsReferenceStatus, string? HostKeyAlgorithm, string? HostKeyFingerprint, string? KnownHostsHash, string? DockerVersion, string? DockerApiVersion, string Os, string? Architecture, string? StorageDriver, string? BackingFilesystem, bool? SharedStorage, long? FreeBytes, long? MemoryBytes, int? CpuCount, bool? LimitsSupported, string? ImagePlatform, string CapabilityStatus, DateTimeOffset? LastProbeUtc, bool Enabled, bool Enrolled, string Status, int Revision);
 public sealed record ExecutionHostProbe(string HostKeyAlgorithm, string HostKeyFingerprint, string KnownHostsHash, string DockerVersion, string DockerApiVersion, string Architecture, string StorageDriver, string BackingFilesystem, bool SharedStorage, long FreeBytes, long MemoryBytes, int CpuCount, bool LimitsSupported, string ImagePlatform, string CapabilityStatus);
 public sealed record WorkerEnrollmentRecord(string WorkerId, string RuntimeBindingId, string HostId, string OrganizationId, string ContainerName, string? ContainerRef, string ControlVolumeName, string? ControlVolumeRef, string HomeVolumeName, string? HomeVolumeRef, string WorkspaceVolumeName, string? WorkspaceVolumeRef, string SessionVolumeName, string? SessionVolumeRef, string ResourceLabelsHash, string ExpectedImageDigest, string ExpectedPlatform, string ControllerId, string KeyFilePath, string KeyId, string BridgeSocketPath, string LifecycleStatus, long WorkerGeneration, long ProcessGeneration, long OwnershipEpoch, bool Enabled, int Revision);
+public sealed record RemoteWorkerSessionRecord(string Id, string NativeSessionId);
+public sealed record RemoteBindingSessionRecord(string BindingId, string EmployeeId, string Placement, string? SessionRecordId, string? NativeSessionId);
 public sealed record WorkerCursorRecord(string WorkerId, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, long ObservedWorkerGeneration, long ObservedProcessGeneration, long ObservedOwnershipEpoch, string Status, string? HoldSummary, string? ActiveRequestId, string? PendingPermissionHash, bool ViewerSupported, bool ViewerAvailable, string ConnectionState, DateTimeOffset? ObservedAt, int Revision);
 public sealed record WorkerPendingPermissionRecord(string WorkerId, string DecisionId, long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string PayloadHash, IReadOnlyList<string> OptionIds, string State, DateTimeOffset ObservedAt, int Revision);
 public sealed record WorkerEventRecord(string WorkerId, long WorkerGeneration, long Sequence, string Kind, string PayloadHash, int PayloadBytes, DateTimeOffset CommittedAt);
@@ -45,6 +47,9 @@ public sealed partial class OrganizationStore
     /// <summary>Retained sanitized worker-event bytes per worker after cursor commit.</summary>
     public const long ControllerEventByteLimit = 16L * 1024 * 1024;
 
+    // Exact released schema-v4 signature from main (3655ba5). This must remain
+    // immutable because v4 stores are accepted only after object-for-object
+    // verification and retained as migration evidence.
     private static string[] RemoteWorkerSchemaV4Statements =>
     [
         """CREATE TABLE execution_hosts (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, transport_kind TEXT NOT NULL CHECK(transport_kind='ssh-docker'), endpoint_host TEXT NOT NULL, endpoint_port INTEGER NOT NULL CHECK(endpoint_port BETWEEN 1 AND 65535), endpoint_user TEXT NOT NULL, known_hosts_path TEXT NOT NULL, host_key_algorithm TEXT, host_key_fingerprint TEXT, known_hosts_hash TEXT, docker_version TEXT, docker_api_version TEXT, os TEXT NOT NULL CHECK(os='linux'), architecture TEXT, storage_driver TEXT, backing_filesystem TEXT, shared_storage INTEGER CHECK(shared_storage IN(0,1)), free_bytes INTEGER CHECK(free_bytes>=0), memory_bytes INTEGER CHECK(memory_bytes>=0), cpu_count INTEGER CHECK(cpu_count>0), limits_supported INTEGER CHECK(limits_supported IN(0,1)), image_platform TEXT, capability_status TEXT NOT NULL CHECK(capability_status IN('unprobed','valid','invalid','unavailable')), last_probe_utc TEXT, enabled INTEGER NOT NULL CHECK(enabled IN(0,1)), enrolled INTEGER NOT NULL CHECK(enrolled IN(0,1)), status TEXT NOT NULL CHECK(status IN('registered','ready','disabled','held')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL)""",
@@ -63,10 +68,42 @@ public sealed partial class OrganizationStore
         """CREATE TABLE worker_event_retention (worker_id TEXT PRIMARY KEY REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, dropped_count INTEGER NOT NULL CHECK(dropped_count>=0), dropped_bytes INTEGER NOT NULL CHECK(dropped_bytes>=0), first_retained_generation INTEGER NOT NULL CHECK(first_retained_generation>=0), first_retained_sequence INTEGER NOT NULL CHECK(first_retained_sequence>=0), updated_at TEXT NOT NULL, revision INTEGER NOT NULL)""",
     ];
 
+    private const string WorkerRecoveryObligationsSchemaV5Statement =
+        """CREATE TABLE worker_recovery_obligations (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, source TEXT NOT NULL CHECK(source IN('controller','worker')), kind TEXT NOT NULL CHECK(kind IN('replay-gap','replay-loss','replay-ack-uncertain','journal-failure','request-uncertain','permission-pending','process-interrupted','ownership-changed','session-reconciliation')), marker_hash TEXT NOT NULL, worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0), active INTEGER NOT NULL CHECK(active IN(0,1)), detail_hash TEXT, marker_json TEXT CHECK(marker_json IS NULL OR length(marker_json)<=8192), created_at TEXT NOT NULL, cleared_at TEXT, revision INTEGER NOT NULL, UNIQUE(worker_id,kind,marker_hash))""";
+
+    private const string WorkerRecoveryAuditSchemaV5Statement =
+        """CREATE TABLE worker_recovery_audit (id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES worker_recovery_obligations(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('replay-gap','ownership-changed','session-reconciliation')), marker_hash TEXT NOT NULL, evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=71 AND substr(evidence_hash,1,7)='sha256:'), disposition TEXT NOT NULL CHECK(disposition='acknowledged-after-external-reconciliation'), recorded_at TEXT NOT NULL)""";
+
+    private static string[] RemoteWorkerSchemaV5Statements =>
+        [
+            .. RemoteWorkerSchemaV4Statements[..10],
+            WorkerRecoveryObligationsSchemaV5Statement,
+            WorkerRecoveryAuditSchemaV5Statement,
+            .. RemoteWorkerSchemaV4Statements[12..],
+        ];
+
     public IReadOnlyList<ExecutionHostRecord> ListExecutionHosts() => Query("SELECT id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,host_key_algorithm,host_key_fingerprint,known_hosts_hash,docker_version,docker_api_version,os,architecture,storage_driver,backing_filesystem,shared_storage,free_bytes,memory_bytes,cpu_count,limits_supported,image_platform,capability_status,last_probe_utc,enabled,enrolled,status,revision FROM execution_hosts ORDER BY slug COLLATE BINARY", ReadHost);
     public ExecutionHostRecord? GetExecutionHost(string id) => ListExecutionHosts().SingleOrDefault(x => x.Id == id);
     public IReadOnlyList<WorkerEnrollmentRecord> ListWorkerEnrollments() => Query("SELECT worker_id,runtime_binding_id,host_id,organization_id,container_name,container_ref,control_volume_name,control_volume_ref,home_volume_name,home_volume_ref,workspace_volume_name,workspace_volume_ref,session_volume_name,session_volume_ref,resource_labels_hash,expected_image_digest,expected_platform,controller_id,key_file_path,key_id,bridge_socket_path,lifecycle_status,worker_generation,process_generation,ownership_epoch,enabled,revision FROM worker_enrollments ORDER BY worker_id", ReadEnrollment);
     public WorkerEnrollmentRecord? GetWorkerEnrollment(string id) => ListWorkerEnrollments().SingleOrDefault(x => x.WorkerId == id);
+    public RemoteBindingSessionRecord GetRemoteBindingSession(string bindingId)
+    {
+        ValidateIdentifier(bindingId, nameof(bindingId));
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var q = c.CreateCommand();
+            q.CommandText = "SELECT b.id,b.employee_id,b.placement,b.session_ref,s.native_session_id FROM runtime_bindings b LEFT JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=b.employee_id WHERE b.id=$id";
+            q.Parameters.AddWithValue("$id", bindingId);
+            using var r = q.ExecuteReader();
+            if (!r.Read()) throw new OrganizationNotFoundException("Runtime binding not found.");
+            var result = new RemoteBindingSessionRecord(r.GetString(0), r.GetString(1), r.GetString(2), N(r, 3), N(r, 4));
+            if (r.Read()) throw new OrganizationStoreCorruptException("Runtime binding session lookup returned ambiguous rows.");
+            if (result.SessionRecordId is not null && result.NativeSessionId is null) throw new OrganizationStoreCorruptException("Runtime binding references a missing employee session.");
+            return result;
+        }
+    }
     public IReadOnlyList<WorkerCursorRecord> ListWorkerCursors() => Query("SELECT worker_id,acknowledged_worker_generation,acknowledged_sequence,observed_worker_generation,observed_process_generation,observed_ownership_epoch,status,hold_summary,active_request_id,pending_permission_hash,viewer_supported,viewer_available,connection_state,observed_at,revision FROM worker_cursors ORDER BY worker_id", ReadCursor);
     public WorkerCursorRecord? GetWorkerCursor(string id) => ListWorkerCursors().SingleOrDefault(x => x.WorkerId == id);
     public IReadOnlyList<WorkerEventRecord> ListWorkerEvents(string? workerId = null) => Query("SELECT worker_id,worker_generation,sequence,kind,payload_hash,payload_bytes,committed_at FROM worker_events" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY worker_id,worker_generation,sequence", ReadEvent, workerId);
@@ -105,6 +142,47 @@ public sealed partial class OrganizationStore
         ValidateIdentifier(bindingId, nameof(bindingId)); ValidateIdentifier(hostId, nameof(hostId)); ValidateIdentifier(controllerId, nameof(controllerId)); if (!Path.IsPathRooted(keyPath) || !IsHash(keyId) || !IsHash(digest) || platform is not ("linux/amd64" or "linux/arm64")) throw new OrganizationValidationException("Enrollment descriptor is invalid.");
         var worker = requested ?? "wrk-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant(); ValidateIdentifier(worker, nameof(worker)); var suffix = worker.ToLowerInvariant().Replace(':', '-').Replace('_', '-'); var container = "agentcontrol-worker-" + suffix; var control = "agentcontrol-control-" + suffix; var home = "agentcontrol-home-" + suffix; var workspace = "agentcontrol-workspace-" + suffix; var session = "agentcontrol-session-" + suffix; var labels = Hash($"{controllerId}\n{hostId}\n{worker}\n{bindingId}"); var organizationId = GetOverview().Id;
         lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var check = c.CreateCommand()) { check.Transaction = tx; check.CommandText = internalPlan ? "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.container_ref IS NOT NULL" : "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=e.id AND s.status='active' JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.container_ref IS NOT NULL AND b.session_ref IS NOT NULL"; Add(check, ("$host", hostId), ("$binding", bindingId)); if (Convert.ToInt64(check.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationConcurrencyException("The exact DeveloperContainer binding, active session, and ready host are required."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "INSERT INTO worker_enrollments VALUES($w,$b,$h,$org,$cn,NULL,$cv,NULL,$hv,NULL,$wv,NULL,$sv,NULL,$labels,$digest,$platform,$controller,$path,$key,'/control/bridge.sock','planned',0,0,0,1,$now,$now,1)"; Add(q, ("$w", worker), ("$b", bindingId), ("$h", hostId), ("$org", organizationId), ("$cn", container), ("$cv", control), ("$hv", home), ("$wv", workspace), ("$sv", session), ("$labels", labels), ("$digest", digest), ("$platform", platform), ("$controller", controllerId), ("$path", keyPath), ("$key", keyId), ("$now", Now())); q.ExecuteNonQuery(); tx.Commit(); return GetWorkerEnrollment(worker)!; }
+    }
+
+    public RemoteWorkerSessionRecord RecordRemoteWorkerSession(string bindingId, string workerId, string nativeSessionId, string? title)
+    {
+        ValidateIdentifier(bindingId, nameof(bindingId)); ValidateIdentifier(workerId, nameof(workerId)); ValidateIdentifier(nativeSessionId, nameof(nativeSessionId));
+        if (title is { Length: > 128 } || title?.Any(char.IsControl) == true) throw new OrganizationValidationException("Session title is invalid.");
+        lock (_gate)
+        {
+            RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction();
+            string employeeId;
+            string? existingRow;
+            string? existingNative;
+            using (var check = c.CreateCommand())
+            {
+                check.Transaction = tx;
+                check.CommandText = "SELECT b.employee_id,b.session_ref,s.native_session_id FROM runtime_bindings b JOIN worker_enrollments w ON w.runtime_binding_id=b.id AND w.worker_id=$worker AND w.enabled=1 LEFT JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=b.employee_id WHERE b.id=$binding AND b.placement='DeveloperContainer'";
+                Add(check, ("$worker", workerId), ("$binding", bindingId)); using var reader = check.ExecuteReader();
+                if (!reader.Read()) throw new OrganizationConcurrencyException("The exact DeveloperContainer worker placement and enrollment are required.");
+                employeeId = reader.GetString(0); existingRow = reader.IsDBNull(1) ? null : reader.GetString(1); existingNative = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (reader.Read()) throw new OrganizationConcurrencyException("Worker session placement is ambiguous.");
+            }
+            if (existingNative is not null && existingNative != nativeSessionId) throw new OrganizationConcurrencyException("The binding already records a different native session.");
+            var rowId = existingRow;
+            if (rowId is null)
+            {
+                using var find = c.CreateCommand(); find.Transaction = tx; find.CommandText = "SELECT id FROM acp_sessions WHERE employee_id=$employee AND native_session_id=$native"; Add(find, ("$employee", employeeId), ("$native", nativeSessionId)); rowId = find.ExecuteScalar() as string;
+            }
+            var now = Now();
+            using (var supersede = c.CreateCommand()) { supersede.Transaction = tx; supersede.CommandText = "UPDATE acp_sessions SET status='superseded',updated_at=$now WHERE employee_id=$employee AND native_session_id<>$native AND status='active'"; Add(supersede, ("$now", now), ("$employee", employeeId), ("$native", nativeSessionId)); supersede.ExecuteNonQuery(); }
+            if (rowId is null)
+            {
+                rowId = OrganizationIds.NewSessionId();
+                using var insert = c.CreateCommand(); insert.Transaction = tx; insert.CommandText = "INSERT INTO acp_sessions(id,employee_id,native_session_id,title,status,created_at,updated_at) VALUES($id,$employee,$native,$title,'active',$now,$now)"; Add(insert, ("$id", rowId), ("$employee", employeeId), ("$native", nativeSessionId), ("$title", title), ("$now", now)); insert.ExecuteNonQuery();
+            }
+            else
+            {
+                using var promote = c.CreateCommand(); promote.Transaction = tx; promote.CommandText = "UPDATE acp_sessions SET status='active',updated_at=$now WHERE id=$id AND employee_id=$employee AND native_session_id=$native"; Add(promote, ("$now", now), ("$id", rowId), ("$employee", employeeId), ("$native", nativeSessionId)); if (promote.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The retained worker session identity changed.");
+            }
+            using (var bind = c.CreateCommand()) { bind.Transaction = tx; bind.CommandText = "UPDATE runtime_bindings SET session_ref=$session,updated_at=$now,revision=revision+1 WHERE id=$binding AND employee_id=$employee AND (session_ref IS NULL OR session_ref=$session)"; Add(bind, ("$session", rowId), ("$now", now), ("$binding", bindingId), ("$employee", employeeId)); if (bind.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The runtime binding session changed before it could be recorded."); }
+            tx.Commit(); return new(rowId, nativeSessionId);
+        }
     }
 
     public void SetExecutionHostEnrolled(string hostId, bool enrolled)
@@ -228,7 +306,7 @@ public sealed partial class OrganizationStore
     /// </summary>
     public void RecordControllerRecovery(string workerId, string kind, string marker, string? markerJson = null)
     {
-        if (kind is not ("replay-gap" or "replay-ack-uncertain" or "request-uncertain" or "ownership-changed")) throw new OrganizationValidationException("Controller recovery kind is invalid.");
+        if (kind is not ("replay-gap" or "replay-ack-uncertain" or "request-uncertain" or "ownership-changed" or "session-reconciliation")) throw new OrganizationValidationException("Controller recovery kind is invalid.");
         lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); AddRecovery(c, tx, workerId, "controller", kind, Hash(marker), 0, 0, Hash(marker), markerJson); ApplyActiveRecoveryHold(c, tx, workerId, [kind]); tx.Commit(); }
     }
     public void ResolveRecoveryObligation(string workerId, string kind, string markerHash) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "UPDATE worker_recovery_obligations SET active=0,cleared_at=$now,revision=revision+1 WHERE worker_id=$w AND kind=$k AND marker_hash=$m AND active=1"; Add(q, ("$now", Now()), ("$w", workerId), ("$k", kind), ("$m", markerHash)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The exact active recovery marker was not found."); } }
@@ -267,7 +345,8 @@ public sealed partial class OrganizationStore
                 if (!reader.Read()) throw new OrganizationNotFoundException("Recovery obligation not found.");
                 var source = reader.GetString(0); kind = reader.GetString(1); markerHash = reader.GetString(2);
                 var markerMissing = reader.IsDBNull(3); var active = reader.GetBoolean(4); var revision = reader.GetInt32(5);
-                if (source != "controller" || !markerMissing || kind is not ("replay-gap" or "ownership-changed")) throw new OrganizationValidationException("Only an unverifiable controller recovery may be acknowledged.");
+                var eligible = source == "controller" && ((markerMissing && kind is "replay-gap" or "ownership-changed") || (!markerMissing && kind == "session-reconciliation"));
+                if (!eligible) throw new OrganizationValidationException("Only an externally verifiable controller recovery may be acknowledged.");
                 if (!active || revision != expectedRevision) throw new OrganizationConcurrencyException("The recovery obligation changed.");
             }
             var now = Now();
@@ -359,7 +438,19 @@ public sealed partial class OrganizationStore
     private static void ReconcileGeneratedRecoveries(SqliteConnection c, SqliteTransaction tx, string worker, ControllerWorkerStatus status)
     {
         var current = new Dictionary<(string Kind, string Marker), string?>(StringTupleComparer.Ordinal);
-        foreach (var reason in status.HoldReasons) current[(RecoveryKind(reason), Hash(reason))] = null;
+        foreach (var reason in status.HoldReasons)
+        {
+            // A controller-synthesized session-reconciliation reason always
+            // accompanies a marker-bearing controller obligation recorded by the
+            // caller that observed the divergence. Projecting it again here would
+            // create a second, worker-source obligation for the same condition and
+            // the owner's acknowledgement could never leave zero active obligations.
+            // The worker's own session-create-uncertain marker is deliberately not
+            // skipped: it maps to the same kind but is a genuinely different,
+            // terminal worker-side condition that must remain visible.
+            if (string.Equals(reason, "session-reconciliation", StringComparison.Ordinal)) continue;
+            current[(RecoveryKind(reason), Hash(reason))] = null;
+        }
         foreach (var gap in status.ReplayGapMarkers ?? []) current[("replay-gap", Hash(gap))] = Bounded(gap);
         if (status.ReplayLossMarker is { } loss) current[("replay-loss", Hash(loss))] = Bounded(loss);
         if (status.JournalFailureMarker is { } journal) current[("journal-failure", Hash(journal))] = Bounded(journal);
@@ -451,7 +542,7 @@ public sealed partial class OrganizationStore
         q.ExecuteNonQuery();
     }
     private static void ClearRecovery(SqliteConnection c, SqliteTransaction tx, string worker, string kind, string marker) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE worker_recovery_obligations SET active=0,cleared_at=$now,revision=revision+1 WHERE worker_id=$w AND kind=$k AND marker_hash=$m AND active=1"; Add(q, ("$now", Now()), ("$w", worker), ("$k", kind), ("$m", marker)); q.ExecuteNonQuery(); }
-    private static string RecoveryKind(string reason) => reason.Contains("replay-loss", StringComparison.Ordinal) ? "replay-loss" : reason.Contains("replay", StringComparison.Ordinal) ? "replay-gap" : reason.Contains("journal", StringComparison.Ordinal) ? "journal-failure" : reason.Contains("permission", StringComparison.Ordinal) ? "permission-pending" : "process-interrupted";
+    private static string RecoveryKind(string reason) => reason.Contains("session-create-uncertain", StringComparison.Ordinal) || reason.Contains("session-reconciliation", StringComparison.Ordinal) ? "session-reconciliation" : reason.Contains("replay-loss", StringComparison.Ordinal) ? "replay-loss" : reason.Contains("replay", StringComparison.Ordinal) ? "replay-gap" : reason.Contains("journal", StringComparison.Ordinal) ? "journal-failure" : reason.Contains("permission", StringComparison.Ordinal) ? "permission-pending" : "process-interrupted";
     private static (long, long) CursorAfter(WorkerCursorRecord? cursor, IReadOnlyList<ControllerWorkerEvent> events) { var current = (Generation: cursor?.AcknowledgedWorkerGeneration ?? 0, Sequence: cursor?.AcknowledgedSequence ?? 0); foreach (var item in events) if (item.WorkerGeneration > current.Generation || item.WorkerGeneration == current.Generation && item.Sequence > current.Sequence) current = (item.WorkerGeneration, item.Sequence); return current; }
     private static bool RequestTransition(string from, string to) => (from, to) is ("Intent", "Forwarding") or ("Intent", "Interrupted") or ("Forwarding", "Forwarded") or ("Forwarding", "Completed") or ("Forwarding", "Failed") or ("Forwarding", "Uncertain") or ("Forwarded", "Completed") or ("Forwarded", "Failed") or ("Forwarded", "Uncertain") or ("Uncertain", "Forwarded") or ("Uncertain", "Completed") or ("Uncertain", "Failed") or ("Uncertain", "Interrupted");
     private static string Hash(string value) => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant(); private static bool IsHash(string value) => value is { Length: 71 } && value.StartsWith("sha256:", StringComparison.Ordinal) && value[7..].All(Uri.IsHexDigit);

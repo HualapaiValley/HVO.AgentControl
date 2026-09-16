@@ -76,6 +76,11 @@ public static class RemoteWorkerApi
         { new HVO.AgentControl.Organization.OrganizationNotFoundException(SecretDetail), 404, "Remote worker record not found." },
         { new KeyNotFoundException(SecretDetail), 404, "Remote worker record not found." },
         { new HVO.AgentControl.Organization.OrganizationStoreException(SecretDetail), 503, "Worker store unavailable." },
+        { new HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException(SecretDetail), 502, "Remote worker bridge is unavailable." },
+        { new HVO.AgentControl.RemoteWorker.WorkerReadUncertainException(SecretDetail), 502, "Remote worker bridge is unavailable." },
+        { new HVO.AgentControl.Worker.WorkerOperationUncertainException(SecretDetail), 502, "Remote worker bridge is unavailable." },
+        { new HVO.AgentControl.RemoteWorker.WorkerRemoteException("worker-request-rejected"), 409, "Remote worker bridge rejected the operation." },
+        { new HVO.AgentControl.RemoteWorker.WorkerRemoteException("worker-operation-failed"), 502, "Remote worker bridge is unavailable." },
         // An internal invariant failure is a sanitized 500, never a client-fixable conflict.
         { new InvalidOperationException(SecretDetail), 500, "Remote worker operation failed." },
     };
@@ -118,6 +123,12 @@ public sealed class RemoteWorkerProblemMappingTests
         Assert.Equal(expectedTitle, problem.GetProperty("title").GetString());
         // The raw exception message is never surfaced.
         Assert.DoesNotContain(exception.Message, problem.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GenericLocalProtocolInvariantIsNotMappedAsARemoteFailure()
+    {
+        Assert.False(Program.IsRemoteWorkerFailure(new HVO.AgentControl.Worker.WorkerProtocolException(RemoteWorkerApi.SecretDetail)));
     }
 
     /// <summary>The recovery problem names the obligation kind an operator must act on.</summary>

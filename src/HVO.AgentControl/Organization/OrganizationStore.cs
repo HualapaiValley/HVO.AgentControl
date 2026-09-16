@@ -92,11 +92,11 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 4 extends the released schema-3 organization and policy store with
-    /// controller-owned remote-worker records. Migration accepts only the exact
-    /// released v3 signature and creates verified, immutable source evidence first.
+    /// Schema 5 extends the released schema-4 remote-worker store with the
+    /// session-reconciliation recovery kind. Migration accepts only exact released
+    /// signatures and creates verified, immutable source evidence at each boundary.
     /// </summary>
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -108,6 +108,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV2BackupHashFileName = "control.schema-v2.sha256";
     public const string SchemaV3BackupFileName = "control.schema-v3.db";
     public const string SchemaV3BackupHashFileName = "control.schema-v3.sha256";
+    public const string SchemaV4BackupFileName = "control.schema-v4.db";
+    public const string SchemaV4BackupHashFileName = "control.schema-v4.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -486,11 +488,17 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV4Statements =
         [.. SchemaV3Statements, .. RemoteWorkerSchemaV4Statements];
 
+    private static readonly string[] SchemaV5Statements =
+        [.. SchemaV3Statements, .. RemoteWorkerSchemaV5Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV4 =
         BuildExpectedSchema(SchemaV4Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV5Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1434,6 +1442,17 @@ public sealed partial class OrganizationStore : IDisposable
             EnsureSchemaV3Backup(connection);
             AfterMigrationBackup?.Invoke();
             MigrateV3ToV4(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV4);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 4)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV4);
+            EnsureSchemaV4Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV4ToV5(connection);
         }
         else if (version != CurrentSchemaVersion)
         {
@@ -1796,6 +1815,29 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV4Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 4, SchemaV4BackupFileName, SchemaV4BackupHashFileName, ExpectedSchemaV4);
+
+    private void MigrateV4ToV5(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+
+        // Rename the referencing table first. SQLite rewrites its foreign-key
+        // target to the renamed obligation table, allowing both old tables to be
+        // retained until all rows have been copied into the exact v5 definitions.
+        Execute(connection, transaction, "ALTER TABLE worker_recovery_audit RENAME TO worker_recovery_audit_v4");
+        Execute(connection, transaction, "ALTER TABLE worker_recovery_obligations RENAME TO worker_recovery_obligations_v4");
+        Execute(connection, transaction, WorkerRecoveryObligationsSchemaV5Statement);
+        Execute(connection, transaction, WorkerRecoveryAuditSchemaV5Statement);
+        Execute(connection, transaction, "INSERT INTO worker_recovery_obligations SELECT * FROM worker_recovery_obligations_v4");
+        Execute(connection, transaction, "INSERT INTO worker_recovery_audit SELECT * FROM worker_recovery_audit_v4");
+        Execute(connection, transaction, "DROP TABLE worker_recovery_audit_v4");
+        Execute(connection, transaction, "DROP TABLE worker_recovery_obligations_v4");
+        Execute(connection, transaction, "UPDATE schema_version SET version = 5 WHERE version = 4");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1807,7 +1849,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore the verified schema-v3 backup or another authoritative source. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore the verified schema-v4 backup or another authoritative source. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -1949,7 +1991,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV4Statements)
+        foreach (var statement in SchemaV5Statements)
         {
             Execute(connection, transaction, statement);
         }

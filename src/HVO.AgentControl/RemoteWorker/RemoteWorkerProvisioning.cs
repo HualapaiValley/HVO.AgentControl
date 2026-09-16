@@ -195,10 +195,51 @@ public sealed class RemoteWorkerProvisioningCoordinator
         }
         var enrollment = Store().GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker not found.");
         await using var session = await _verification.ConnectAsync(enrollment, token).ConfigureAwait(false);
-        await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
+        var statusResult = await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
+        var status = JsonSerializer.Deserialize<BridgeWorkerStatus>(statusResult.Result.GetRawText(), HVO.AgentControl.Worker.WorkerProtocol.JsonOptions) ?? throw new HVO.AgentControl.Worker.WorkerProtocolException("Worker status is invalid.");
+        status = await EnsureProvisionedSessionAsync(Store(), enrollment, session, status, token).ConfigureAwait(false);
+        var authoritative = Store().GetRemoteBindingSession(enrollment.RuntimeBindingId);
+        if (authoritative.NativeSessionId is not { } nativeSessionId) throw new OrganizationConcurrencyException("Provisioning did not establish an authoritative worker session.");
+        WorkerConnectionManager.EnsureSessionReadyForWork(Store(), workerId, nativeSessionId, status);
         if (enrollment.LifecycleStatus == "provisioning") enrollment = Store().UpdateEnrollmentLifecycle(workerId, enrollment.Revision, "provisioning", "enrolled");
         Store().SetExecutionHostEnrolled(enrollment.HostId, true);
         return enrollment;
+    }
+
+    private static async Task<BridgeWorkerStatus> EnsureProvisionedSessionAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, CancellationToken token)
+    {
+        if (status.ProcessState != "running" || !status.AcpInitialized) throw new OrganizationConcurrencyException("Provisioning verification requires an initialized running ACP process.");
+        if (status.SessionOperationState == "uncertain") throw new WorkerRecoveryRequiredException("ACP session creation is uncertain; replace and re-enroll the worker container.", "session-create-uncertain");
+        var binding = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
+        if (binding.Placement != "DeveloperContainer") throw new OrganizationConcurrencyException("Worker enrollment runtime binding is not a DeveloperContainer placement.");
+        if (binding.NativeSessionId is { } recorded)
+        {
+            if (status.SessionId is null)
+            {
+                await session.InvokeAsync("load-session", session.Mutation("load-session", new Dictionary<string, object?> { ["sessionId"] = recorded }), true, token).ConfigureAwait(false);
+                status = await ReadStatusAsync(session, token).ConfigureAwait(false);
+            }
+            if (status.SessionId != recorded) throw new OrganizationConcurrencyException("Worker session does not match the authoritative provisioning session.");
+            return status;
+        }
+        var nativeSessionId = status.SessionId;
+        if (nativeSessionId is null)
+        {
+            var created = await session.InvokeAsync("new-session", session.Mutation("new-session", new Dictionary<string, object?>()), true, token).ConfigureAwait(false);
+            if (created.Result.ValueKind != JsonValueKind.String || created.Result.GetString() is not { } value) throw new HVO.AgentControl.Worker.WorkerProtocolException("Worker session creation result is invalid.");
+            HVO.AgentControl.Worker.WorkerProtocol.ValidateIdentifier(value, HVO.AgentControl.Worker.WorkerProtocol.MaxIdentifierLength, "session id");
+            nativeSessionId = value;
+            status = await ReadStatusAsync(session, token).ConfigureAwait(false);
+            if (status.SessionId != nativeSessionId) throw new OrganizationConcurrencyException("Worker did not retain the newly created session.");
+        }
+        store.RecordRemoteWorkerSession(enrollment.RuntimeBindingId, enrollment.WorkerId, nativeSessionId, "Remote worker");
+        return status;
+    }
+
+    private static async Task<BridgeWorkerStatus> ReadStatusAsync(IWorkerBridgeSession session, CancellationToken token)
+    {
+        var result = await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<BridgeWorkerStatus>(result.Result.GetRawText(), HVO.AgentControl.Worker.WorkerProtocol.JsonOptions) ?? throw new HVO.AgentControl.Worker.WorkerProtocolException("Worker status is invalid.");
     }
 
     /// <summary>

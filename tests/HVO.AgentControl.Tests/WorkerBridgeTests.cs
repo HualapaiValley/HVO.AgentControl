@@ -94,6 +94,60 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
+    public void StoreMigratesExactSchemaV7WithVerifiedCreateOnceBackupAndPreservesJournalIdentity()
+    {
+        using var temp = new WorkerTemp(); var options = temp.Options();
+        using (var store = new WorkerStore(options))
+        {
+            Start(store);
+            var lease = store.AcquireLease("controller-test", Nonce(1));
+            using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+            store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, "req-v7", prompt.RootElement, "turn-v7");
+            store.MarkForwarded("req-v7");
+            store.AppendEvent("v7-event", "{\"preserved\":true}");
+            store.CheckpointForTests();
+        }
+        var db = System.IO.Path.Combine(temp.Path, "bridge.db");
+        using (var connection = Open(db))
+        {
+            connection.Execute("DROP TABLE session_operation; DELETE FROM holds WHERE name='session-operation'; ALTER TABLE process_slot RENAME TO process_slot_v9; CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL); INSERT INTO process_slot(singleton,state,lifecycle_handle,active_request_id,pid,updated_utc) SELECT singleton,state,lifecycle_handle,active_request_id,pid,updated_utc FROM process_slot_v9; DROP TABLE process_slot_v9; DELETE FROM meta WHERE key='acp_initialized'; UPDATE meta SET value='7' WHERE key='schema_version'; UPDATE meta SET value='hvo-worker-bridge-v7-20260915' WHERE key='schema_signature'; PRAGMA wal_checkpoint(TRUNCATE)");
+        }
+
+        using (var migrated = new WorkerStore(options))
+        {
+            using var migratedConnection = Open(db);
+            Assert.Equal(WorkerStore.SchemaVersion, Convert.ToInt32(Scalar(migratedConnection, "SELECT value FROM meta WHERE key='schema_version'"), System.Globalization.CultureInfo.InvariantCulture));
+            Assert.NotNull(migrated.GetRequest("req-v7"));
+            Assert.Contains(migrated.Replay(1, 0).Events, x => x.Kind == "v7-event");
+            using var connection = Open(db);
+            Assert.Equal("controller-test", Scalar(connection, "SELECT controller_id FROM lease"));
+            Assert.Equal(1L, Convert.ToInt64(Scalar(connection, "SELECT epoch FROM lease")));
+        }
+
+        var backup = System.IO.Path.Combine(temp.Path, WorkerStore.SchemaV7BackupFileName);
+        var hashPath = System.IO.Path.Combine(temp.Path, WorkerStore.SchemaV7BackupHashFileName);
+        Assert.True(File.Exists(backup)); Assert.True(File.Exists(hashPath));
+        var retainedHash = File.ReadAllText(hashPath).Trim();
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), retainedHash);
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(backup));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(hashPath));
+        }
+        using (var backupConnection = Open(backup))
+        {
+            Assert.Equal("7", Scalar(backupConnection, "SELECT value FROM meta WHERE key='schema_version'"));
+            Assert.Equal("hvo-worker-bridge-v7-20260915", Scalar(backupConnection, "SELECT value FROM meta WHERE key='schema_signature'"));
+            Assert.Equal(1L, Convert.ToInt64(Scalar(backupConnection, "SELECT COUNT(*) FROM requests WHERE request_id='req-v7'")));
+            Assert.Equal(1L, Convert.ToInt64(Scalar(backupConnection, "SELECT COUNT(*) FROM events WHERE kind='v7-event'")));
+        }
+        var backupBytes = File.ReadAllBytes(backup);
+        using (var reopened = new WorkerStore(options)) { }
+        Assert.True(backupBytes.AsSpan().SequenceEqual(File.ReadAllBytes(backup)));
+        Assert.Equal(retainedHash, File.ReadAllText(hashPath).Trim());
+    }
+
+    [Fact]
     public void PersistentInstanceLockOnlyRejectsALiveHolder()
     {
         using var temp = new WorkerTemp(); var options = temp.Options();
@@ -301,14 +355,135 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
+    public async Task RuntimeInitializesThenLoadsOnlyTheExactFixedSessionBeforePromptDispatch()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+
+        var initialize = runtime.InitializeAsync(TimeSpan.FromSeconds(2));
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
+        using (var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]))
+        {
+            var root = frame.RootElement;
+            Assert.Equal("initialize", root.GetProperty("method").GetString());
+            Assert.Equal(1, root.GetProperty("params").GetProperty("protocolVersion").GetInt32());
+            Assert.False(root.GetProperty("params").GetProperty("clientCapabilities").GetProperty("terminal").GetBoolean());
+            Assert.False(root.GetProperty("params").GetProperty("clientCapabilities").GetProperty("fs").GetProperty("readTextFile").GetBoolean());
+            Assert.False(root.GetProperty("params").GetProperty("clientCapabilities").GetProperty("fs").GetProperty("writeTextFile").GetBoolean());
+            Assert.Equal("HVO.AgentControl.Worker", root.GetProperty("params").GetProperty("clientInfo").GetProperty("name").GetString());
+            input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{root.GetProperty("id").GetInt64()},\"result\":{{\"protocolVersion\":1}}}}\n");
+        }
+        await initialize;
+        Assert.True(store.Status().AcpInitialized);
+        Assert.Null(store.Status().SessionId);
+
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "before-load", prompt.RootElement, "turn-before", CancellationToken.None));
+
+        var load = runtime.LoadSessionAsync(lease.Epoch, lease.ConnectionNonce, "ses-test");
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        using (var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]))
+        {
+            var root = frame.RootElement;
+            Assert.Equal("session/load", root.GetProperty("method").GetString());
+            var parameters = root.GetProperty("params");
+            Assert.Equal("ses-test", parameters.GetProperty("sessionId").GetString());
+            Assert.Equal("/workspace", parameters.GetProperty("cwd").GetString());
+            Assert.Empty(parameters.GetProperty("mcpServers").EnumerateArray());
+            input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{root.GetProperty("id").GetInt64()},\"result\":{{}}}}\n");
+        }
+        await load;
+        await runtime.LoadSessionAsync(lease.Epoch, lease.ConnectionNonce, "ses-test");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.LoadSessionAsync(lease.Epoch, lease.ConnectionNonce, "ses-other"));
+        Assert.Equal("ses-test", store.Status().SessionId);
+
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "after-load", prompt.RootElement, "turn-after", CancellationToken.None);
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 3);
+        using var submitted = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[2]);
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{submitted.RootElement.GetProperty("id").GetInt64()},\"result\":{{}}}}\n");
+        Assert.Equal("completed", (await submit).State);
+    }
+
+    [Fact]
+    public void InMemoryJournalFailureBlocksSessionCreationAndLoading()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); store.SetAcpInitialized(true); var lease = store.AcquireLease("controller-test", Nonce(1));
+
+        store.FailClosedJournalInMemory();
+
+        Assert.Throws<WorkerProtocolException>(() => store.BeginSessionOperation(lease.Epoch, lease.ConnectionNonce, "creating", "session-op:create", null));
+        Assert.Throws<WorkerProtocolException>(() => store.BeginSessionOperation(lease.Epoch, lease.ConnectionNonce, "loading", "session-op:load", "ses-test"));
+        Assert.Contains("journal-failed", store.Status().HoldReasons);
+    }
+
+    [Fact]
+    public async Task RuntimeCreatesFixedSessionAndNeverRetriesAnUncertainCreation()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); store.SetAcpInitialized(true); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+
+        var created = runtime.NewSessionAsync(lease.Epoch, lease.ConnectionNonce);
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
+        using (var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]))
+        {
+            var root = frame.RootElement;
+            Assert.Equal("session/new", root.GetProperty("method").GetString());
+            var parameters = root.GetProperty("params");
+            Assert.Equal("/workspace", parameters.GetProperty("cwd").GetString());
+            Assert.Empty(parameters.GetProperty("mcpServers").EnumerateArray());
+            Assert.Equal(2, parameters.EnumerateObject().Count());
+            input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{root.GetProperty("id").GetInt64()},\"result\":{{\"sessionId\":\"ses-created\"}}}}\n");
+        }
+        Assert.Equal("ses-created", await created);
+        Assert.Equal("ses-created", await runtime.NewSessionAsync(lease.Epoch, lease.ConnectionNonce));
+        Assert.Single(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+
+        using var uncertainTemp = new WorkerTemp(); using var uncertainStore = new WorkerStore(uncertainTemp.Options()); uncertainStore.BeginProcessStart(); uncertainStore.CompleteProcessStart("lifecycle", 123); uncertainStore.SetAcpInitialized(true); var uncertainLease = uncertainStore.AcquireLease("controller-test", Nonce(2));
+        await using var blockedInput = new GateStream(); await using var blockedOutput = new CaptureStream(); await using var uncertainRuntime = new WorkerRuntime(uncertainStore, blockedInput, blockedOutput); uncertainRuntime.Start();
+        await Assert.ThrowsAsync<WorkerOperationUncertainException>(() => uncertainRuntime.NewSessionAsync(uncertainLease.Epoch, uncertainLease.ConnectionNonce, new CancellationTokenSource(TimeSpan.FromMilliseconds(50)).Token));
+        Assert.Equal("uncertain", uncertainStore.Status().SessionOperationState);
+        Assert.Contains("session-create-uncertain", uncertainStore.Status().HoldReasons);
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => uncertainRuntime.NewSessionAsync(uncertainLease.Epoch, uncertainLease.ConnectionNonce));
+        Assert.Single(blockedOutput.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
+    public async Task RuntimeRejectsInitializeProtocolVersionMismatchAndHoldsProcess()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var initialize = runtime.InitializeAsync(TimeSpan.FromSeconds(2));
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var frame = JsonDocument.Parse(output.Text);
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{frame.RootElement.GetProperty("id").GetInt64()},\"result\":{{\"protocolVersion\":2}}}}\n");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => initialize);
+        Assert.Equal("protocol-failed", store.Status().ProcessState);
+        Assert.Equal("acp-initialize-failed", store.Status().HoldReason);
+        Assert.False(store.Status().AcpInitialized);
+
+        if (OperatingSystem.IsLinux())
+        {
+            var key = new byte[32];
+            await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token);
+            await Eventually(() => File.Exists(temp.Options().SocketPath));
+            await using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(3));
+            using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); Assert.Equal("authenticated", authenticated!.RootElement.GetProperty("type").GetString());
+            await WorkerProtocol.WriteFrameAsync(stream, new { operation = "status" }, CancellationToken.None);
+            using var response = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+            Assert.Equal("protocol-failed", response!.RootElement.GetProperty("result").GetProperty("processState").GetString());
+            shutdown.Cancel(); await run;
+        }
+    }
+
+    [Fact]
     public async Task PinnedPermissionFrameBindsOnlyToHostOwnedActivePromptAndIgnoresSpoofedIds()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-current\",\"text\":\"permission\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"permission\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "host-request", envelope.RootElement, "host-turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-current","requestId":"spoofed-request","turnId":"spoofed-turn","decisionId":"spoofed-decision","toolCall":{"toolCallId":"tc-1","kind":"read","title":"diagnostic:public","status":"pending","rawInput":{"secret":"do-not-retain"}},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
+        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","requestId":"spoofed-request","turnId":"spoofed-turn","decisionId":"spoofed-decision","toolCall":{"toolCallId":"tc-1","kind":"read","title":"diagnostic:public","status":"pending","rawInput":{"secret":"do-not-retain"}},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
         await Eventually(() => store.Status().PendingPermission is not null);
         var pending = store.Status().PendingPermission!;
         Assert.Equal("host-request", pending.RequestId); Assert.Equal("host-turn", pending.TurnId); Assert.StartsWith("perm:", pending.DecisionId, StringComparison.Ordinal);
@@ -326,7 +501,7 @@ public sealed class WorkerBridgeTests
         input.Enqueue("""{"jsonrpc":"2.0","id":8001,"method":"session/request_permission","params":{"options":[{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
         Assert.Null(store.Status().PendingPermission); Assert.Equal("running", store.Status().ProcessState);
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-current\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         input.Enqueue("""{"jsonrpc":"2.0","id":8002,"method":"session/request_permission","params":{"sessionId":"ses-other","options":[{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
@@ -342,10 +517,10 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new GatedFlushStream(2); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-current\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.FirstFlush.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-current","options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
+        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
         await Eventually(() => store.Status().PendingPermission is not null); var pending = store.Status().PendingPermission!; using var disconnected = new CancellationTokenSource();
         var decision = runtime.DecidePermissionAsync(pending.DecisionId, pending.ProcessGeneration, pending.RequestId, pending.TurnId, "reject_once", disconnected.Token);
         await output.Blocked.Task.WaitAsync(TimeSpan.FromSeconds(2)); disconnected.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => decision); output.Release.TrySetResult();
@@ -929,7 +1104,7 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1, eventBytes: 128)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         store.AppendEvent("full", "{}");
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var first = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-one\"}}");
+        using var first = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-one", first.RootElement, "turn-one", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var firstId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
@@ -937,7 +1112,7 @@ public sealed class WorkerBridgeTests
         Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         Assert.IsType<WorkerReplayLossException>(Record.Exception(() => store.AppendEvent("another", "{}")));
         store.ReconcileReplayLoss(store.Status().ReplayLoss!.WorkerGeneration, store.Status().ReplayLoss!.MarkerSequence);
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-one\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-two", second.RootElement, "turn-two", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var secondId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
@@ -969,10 +1144,10 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1, eventBytes: 256)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         store.AppendEvent("full", "{}");
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-current\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-current","options":[{"optionId":"reject_once"}]}}""" + "\n");
+        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"reject_once"}]}}""" + "\n");
         await Eventually(() => store.Status().PendingPermission is not null);
         var pending = store.Status().PendingPermission!;
         var decided = await runtime.DecidePermissionAsync(lease.Epoch, pending.DecisionId, pending.ProcessGeneration, pending.RequestId, pending.TurnId, "reject_once", CancellationToken.None);
@@ -1020,8 +1195,7 @@ public sealed class WorkerBridgeTests
     public async Task UncertainViewerInputEndsTheSessionWithAnExplicitCloseAndNoInputContent()
     {
         if (!OperatingSystem.IsLinux()) return;
-        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
-        store.BindSession("ses-viewer");
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store, "ses-viewer");
         var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
         var terminal = new FakeTerminalBackend { WriteFailure = new WorkerTerminalWriteUncertainException("injected partial write", 7) };
         var key = new byte[32];
@@ -1057,8 +1231,7 @@ public sealed class WorkerBridgeTests
     public async Task FailedViewerOutputPumpSendsAnExplicitCloseCategoryBeforeTheStreamEnds()
     {
         if (!OperatingSystem.IsLinux()) return;
-        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
-        store.BindSession("ses-viewer");
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store, "ses-viewer");
         var runtime = new WorkerRuntime(store, new GateStream(), new CaptureStream());
         var terminal = new FakeTerminalBackend { OutputFailure = new IOException("injected output failure") };
         var key = new byte[32];
@@ -1085,8 +1258,7 @@ public sealed class WorkerBridgeTests
     [Fact]
     public void UncertainViewerStopSuppressesViewerAvailabilityWithoutHoldingDispatch()
     {
-        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
-        store.BindSession("ses-viewer");
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store, "ses-viewer");
         Assert.Null(store.ViewerHoldReason());
 
         store.SetViewerHold("viewer-stop-uncertain");
@@ -1179,7 +1351,7 @@ public sealed class WorkerBridgeTests
         }
     }
 
-    private static void Start(WorkerStore store) { store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); }
+    private static void Start(WorkerStore store, string sessionId = "ses-test") { store.BeginProcessStart(); store.CompleteProcessStart("lifecycle", 123); store.SetAcpInitialized(true); store.BindSession(sessionId); }
     private static string Nonce(byte value) => Convert.ToBase64String(Enumerable.Repeat(value, 32).ToArray());
     private static SqliteConnection Open(string path) { var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False"); connection.Open(); return connection; }
     private static object? Scalar(SqliteConnection connection, string sql) { using var command = connection.CreateCommand(); command.CommandText = sql; return command.ExecuteScalar(); }

@@ -121,7 +121,7 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
-    public void SchemaV4WithAnyDifferentSignatureIsUnsupported()
+    public void SchemaV5WithAnyDifferentSignatureIsUnsupported()
     {
         using var root = new TempStore();
         using (var store = Open(root))
@@ -135,7 +135,68 @@ public sealed class OrganizationStoreTests
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
         Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+    }
+
+    [Fact]
+    public void ExactSchemaV4MigratesToV5WithVerifiedCreateOnceBackupAndPreservesRecoveryRows()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+
+        DowngradeToCanonicalV4(root.Path);
+        SeedV4RecoveryRows(root.Path);
+
+        using (var migrated = Open(root))
+        {
+            migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            var obligation = Assert.Single(migrated.ListWorkerRecoveryObligations("wrk-v4"));
+            var audit = Assert.Single(migrated.ListWorkerRecoveryAudit("wrk-v4"));
+            Assert.Equal("ownership-changed", obligation.Kind);
+            Assert.Equal(obligation.Id, audit.ObligationId);
+        }
+
+        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_obligations'"), StringComparison.Ordinal);
+        Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupHashFileName);
+        Assert.True(File.Exists(backup));
+        AssertNoBackupSidecars(backup);
+        Assert.Equal(4, RawScalar(backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(backup, "SELECT COUNT(*) FROM worker_recovery_obligations;"));
+        Assert.Equal(1, RawScalar(backup, "SELECT COUNT(*) FROM worker_recovery_audit;"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), File.ReadAllText(hash).Trim());
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(backup));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(hash));
+        }
+
+        var retained = File.ReadAllBytes(backup);
+        using var restarted = Open(root);
+        restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(retained, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
+    public void UnknownSchemaV4ShapeFailsBeforeBackupOrMigration()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        }
+        DowngradeToCanonicalV4(root.Path);
+        ExecuteRaw(root.Path, "ALTER TABLE worker_recovery_obligations ADD COLUMN unknown_v4_value TEXT;");
+
+        using var reopened = Open(root);
+        Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName)));
     }
 
     [Fact]
@@ -169,7 +230,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -218,7 +279,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -354,7 +415,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(4, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -1296,6 +1357,36 @@ public sealed class OrganizationStoreTests
             """);
     }
 
+    private static void DowngradeToCanonicalV4(string path)
+    {
+        ExecuteRaw(
+            path,
+            """
+            PRAGMA foreign_keys = OFF;
+            DROP TABLE worker_recovery_audit;
+            DROP TABLE worker_recovery_obligations;
+            CREATE TABLE worker_recovery_obligations (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, source TEXT NOT NULL CHECK(source IN('controller','worker')), kind TEXT NOT NULL CHECK(kind IN('replay-gap','replay-loss','replay-ack-uncertain','journal-failure','request-uncertain','permission-pending','process-interrupted','ownership-changed')), marker_hash TEXT NOT NULL, worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0), active INTEGER NOT NULL CHECK(active IN(0,1)), detail_hash TEXT, marker_json TEXT CHECK(marker_json IS NULL OR length(marker_json)<=8192), created_at TEXT NOT NULL, cleared_at TEXT, revision INTEGER NOT NULL, UNIQUE(worker_id,kind,marker_hash));
+            CREATE TABLE worker_recovery_audit (id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES worker_recovery_obligations(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('replay-gap','ownership-changed')), marker_hash TEXT NOT NULL, evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=71 AND substr(evidence_hash,1,7)='sha256:'), disposition TEXT NOT NULL CHECK(disposition='acknowledged-after-external-reconciliation'), recorded_at TEXT NOT NULL);
+            UPDATE schema_version SET version = 4;
+            PRAGMA foreign_keys = ON;
+            """);
+    }
+
+    private static void SeedV4RecoveryRows(string path)
+    {
+        ExecuteRaw(
+            path,
+            """
+            INSERT INTO execution_hosts(id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,os,capability_status,enabled,enrolled,status,created_at,updated_at,revision)
+            VALUES('host-v4','host-v4','Host V4','ssh-docker','worker.example',22,'docker','/known','linux','valid',1,1,'ready','2026-09-16T00:00:00.0000000+00:00','2026-09-16T00:00:00.0000000+00:00',1);
+            INSERT INTO worker_enrollments(worker_id,runtime_binding_id,host_id,organization_id,container_name,control_volume_name,home_volume_name,workspace_volume_name,session_volume_name,resource_labels_hash,expected_image_digest,expected_platform,controller_id,key_file_path,key_id,bridge_socket_path,lifecycle_status,worker_generation,process_generation,ownership_epoch,enabled,created_at,updated_at,revision)
+            SELECT 'wrk-v4',b.id,'host-v4',e.organization_id,'container-v4','control-v4','home-v4','workspace-v4','session-v4','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','linux/amd64','controller-v4','/control/key','sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','/control/bridge.sock','enrolled',1,1,1,1,'2026-09-16T00:00:00.0000000+00:00','2026-09-16T00:00:00.0000000+00:00',1
+            FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id LIMIT 1;
+            INSERT INTO worker_recovery_obligations VALUES('rec-v4','wrk-v4','controller','ownership-changed','sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',1,7,0,NULL,NULL,'2026-09-16T00:00:00.0000000+00:00','2026-09-16T00:01:00.0000000+00:00',2);
+            INSERT INTO worker_recovery_audit VALUES('audit-v4','rec-v4','wrk-v4','ownership-changed','sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee','acknowledged-after-external-reconciliation','2026-09-16T00:01:00.0000000+00:00');
+            """);
+    }
+
     private static string SnapshotCoreData(string path)
     {
         var builder = new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, Pooling = false };
@@ -1417,6 +1508,8 @@ public sealed class OrganizationStoreTests
 
     private static string SessionStatus(string path, string nativeSessionId) =>
         RawScalarString(path, $"SELECT status FROM acp_sessions WHERE native_session_id = '{nativeSessionId}';");
+
+    private static string RawText(string path, string sql) => RawScalarString(path, sql);
 
     private static int RawScalar(string path, string sql)
     {

@@ -9,10 +9,15 @@ namespace HVO.AgentControl.Worker;
 
 public sealed class WorkerStore : IDisposable, IWorkerObservationSink
 {
-    public const int SchemaVersion = 8;
-    public const string SchemaSignature = "hvo-worker-bridge-v8-20260915";
+    public const int SchemaVersion = 9;
+    public const string SchemaSignature = "hvo-worker-bridge-v9-20260916";
     public const int ReplayGapLimit = 128;
-    private static readonly string[] HoldNames = ["manual", "replay-gap", "replay-loss", "process", "permission", "ownership", "transport", "journal"];
+    internal const string SchemaV7Signature = "hvo-worker-bridge-v7-20260915";
+    internal const string SchemaV8Signature = "hvo-worker-bridge-v8-20260915";
+    internal const string SchemaV7BackupFileName = "bridge.schema-v7.db";
+    internal const string SchemaV7BackupHashFileName = "bridge.schema-v7.db.sha256";
+    private static readonly string[] LegacyHoldNames = ["manual", "replay-gap", "replay-loss", "process", "permission", "ownership", "transport", "journal"];
+    private static readonly string[] HoldNames = [.. LegacyHoldNames, "session-operation"];
     private const string ReplayLossMarker = "{\"loss\":\"events-dropped\"}";
     private const UnixFileMode PrivateDirectoryMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
     private const UnixFileMode PrivateFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -49,6 +54,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             {
                 _connection = OpenDatabase(_databasePath, create: false);
                 ConfigureConnection();
+                MigrateLegacySchemaIfRequired();
                 ValidateSchema();
             }
             else
@@ -67,6 +73,14 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
 
     public long WorkerGeneration { get { lock (_databaseGate) return MetaLongLocked("worker_generation"); } }
     public long ProcessGeneration { get { lock (_databaseGate) return MetaLongLocked("process_generation"); } }
+    public void SetAcpInitialized(bool initialized)
+    {
+        lock (_databaseGate)
+        {
+            if (initialized && Scalar("SELECT state FROM process_slot WHERE singleton=1")?.ToString() != "running") throw new WorkerProtocolException("A running process is required before ACP initialization.");
+            Execute("INSERT INTO meta VALUES('acp_initialized',$v) ON CONFLICT(key) DO UPDATE SET value=$v", null, ("$v", initialized ? "1" : "0"));
+        }
+    }
 
     private static SqliteConnection OpenDatabase(string path, bool create)
     {
@@ -79,6 +93,19 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         }.ToString());
         try { connection.Open(); return connection; }
         catch (SqliteException exception) { connection.Dispose(); throw new WorkerStoreException("Worker journal could not be opened safely.", exception); }
+    }
+
+    private static SqliteConnection OpenReadOnlyDatabase(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+            DefaultTimeout = 1,
+        }.ToString());
+        try { connection.Open(); return connection; }
+        catch (SqliteException exception) { connection.Dispose(); throw new WorkerStoreException("Worker journal evidence could not be opened safely.", exception); }
     }
 
     private SqliteConnection CreateAndPublishDatabase()
@@ -113,6 +140,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
     }
 
     private void ConfigureConnection() => Execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;");
+    private static void ConfigureEvidenceConnection(SqliteConnection connection) { using var command = connection.CreateCommand(); command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;"; command.ExecuteNonQuery(); }
 
     private void CreateSchema()
     {
@@ -130,6 +158,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             CREATE TABLE journal_failures(operation_id TEXT PRIMARY KEY, worker_generation INTEGER NOT NULL CHECK(worker_generation>0), error_category TEXT NOT NULL, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), created_utc TEXT NOT NULL);
             CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL);
             CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL);
+            CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL);
             CREATE TABLE holds(name TEXT PRIMARY KEY, held INTEGER NOT NULL CHECK(held IN(0,1)), reason TEXT);
             CREATE INDEX ix_pending_permissions_state ON pending_permissions(state, created_utc);
             """, tx);
@@ -140,31 +169,156 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         InsertMeta("worker_generation", "0", tx);
         InsertMeta("process_generation", "0", tx);
         InsertMeta("next_event_sequence", "1", tx);
-        Execute("INSERT INTO lease VALUES(1,0,NULL,NULL,NULL,0); INSERT INTO replay VALUES(1,0,0); INSERT INTO process_slot VALUES(1,'stopped',NULL,NULL,NULL,NULL,$now); INSERT INTO holds VALUES('manual',0,NULL),('replay-gap',0,NULL),('replay-loss',0,NULL),('process',0,NULL),('permission',0,NULL),('ownership',0,NULL),('transport',0,NULL),('journal',0,NULL);", tx, ("$now", Now()));
+        Execute("INSERT INTO lease VALUES(1,0,NULL,NULL,NULL,0); INSERT INTO replay VALUES(1,0,0); INSERT INTO process_slot VALUES(1,'stopped',NULL,NULL,NULL,NULL,$now); INSERT INTO session_operation VALUES(1,'none',NULL,NULL,$now); INSERT INTO holds VALUES('manual',0,NULL),('replay-gap',0,NULL),('replay-loss',0,NULL),('process',0,NULL),('permission',0,NULL),('ownership',0,NULL),('transport',0,NULL),('journal',0,NULL),('session-operation',0,NULL);", tx, ("$now", Now()));
         tx.Commit();
+    }
+
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV9 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: true);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV8 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: false);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV7 { get; } = BuildExpectedSchema(includeSessionId: false, includeSessionOperation: false);
+
+    private static IReadOnlyDictionary<string, string> BuildExpectedSchema(bool includeSessionId, bool includeSessionOperation)
+    {
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["index:ix_pending_permissions_state"] = "CREATE INDEX ix_pending_permissions_state ON pending_permissions(state, created_utc)",
+            ["table:cancellations"] = "CREATE TABLE cancellations(cancellation_id TEXT PRIMARY KEY, target_request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('forwarding','forwarded','uncertain')), process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), created_utc TEXT NOT NULL)",
+            ["table:event_generations"] = "CREATE TABLE event_generations(worker_generation INTEGER PRIMARY KEY CHECK(worker_generation>0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0))",
+            ["table:events"] = "CREATE TABLE events(worker_generation INTEGER NOT NULL CHECK(worker_generation>0), sequence INTEGER NOT NULL CHECK(sequence>0), kind TEXT NOT NULL, payload_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), created_utc TEXT NOT NULL, PRIMARY KEY(worker_generation, sequence), FOREIGN KEY(worker_generation) REFERENCES event_generations(worker_generation))",
+            ["table:holds"] = "CREATE TABLE holds(name TEXT PRIMARY KEY, held INTEGER NOT NULL CHECK(held IN(0,1)), reason TEXT)",
+            ["table:journal_failures"] = "CREATE TABLE journal_failures(operation_id TEXT PRIMARY KEY, worker_generation INTEGER NOT NULL CHECK(worker_generation>0), error_category TEXT NOT NULL, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), created_utc TEXT NOT NULL)",
+            ["table:lease"] = "CREATE TABLE lease(singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL CHECK(epoch>=0), controller_id TEXT, connection_nonce TEXT, observed_utc TEXT, active INTEGER NOT NULL CHECK(active IN(0,1)))",
+            ["table:meta"] = "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            ["table:pending_permissions"] = "CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL)",
+            ["table:process_slot"] = includeSessionId
+                ? "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)"
+                : "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)",
+            ["table:replay"] = "CREATE TABLE replay(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ack_worker_generation INTEGER NOT NULL CHECK(ack_worker_generation>=0), ack_sequence INTEGER NOT NULL CHECK(ack_sequence>=0))",
+            ["table:replay_gaps"] = "CREATE TABLE replay_gaps(id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('status','loss','overflow')), worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), after_sequence INTEGER NOT NULL CHECK(after_sequence>=0), first_retained INTEGER NOT NULL CHECK(first_retained>=0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0), loss_marker_generation INTEGER, loss_marker_sequence INTEGER, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), CHECK((kind='loss' AND loss_marker_generation IS NOT NULL AND loss_marker_sequence IS NOT NULL) OR (kind<>'loss' AND loss_marker_generation IS NULL AND loss_marker_sequence IS NULL)), UNIQUE(kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence))",
+            ["table:replay_loss"] = "CREATE TABLE replay_loss(worker_generation INTEGER PRIMARY KEY CHECK(worker_generation>0), marker_sequence INTEGER NOT NULL CHECK(marker_sequence>0), dropped_count INTEGER NOT NULL CHECK(dropped_count>0), dropped_bytes INTEGER NOT NULL CHECK(dropped_bytes>=0), reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), FOREIGN KEY(worker_generation) REFERENCES event_generations(worker_generation))",
+            ["table:requests"] = "CREATE TABLE requests(request_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('forwarding','forwarded','completed','failed','uncertain')), outcome_json TEXT, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), turn_id TEXT NOT NULL, session_id TEXT NOT NULL, created_utc TEXT NOT NULL)",
+        };
+        if (includeSessionOperation) expected["table:session_operation"] = "CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL)";
+        return expected;
+    }
+
+    private void MigrateLegacySchemaIfRequired()
+    {
+        long version;
+        string signature;
+        try
+        {
+            version = MetaLongLocked("schema_version");
+            signature = MetaLocked("schema_signature");
+        }
+        catch (Exception exception) when (exception is SqliteException or WorkerStoreException or FormatException)
+        {
+            throw new WorkerStoreException("Worker journal legacy metadata is unreadable.", exception);
+        }
+        if (version == SchemaVersion && signature == SchemaSignature) return;
+        var expected = version switch
+        {
+            7 when signature == SchemaV7Signature => ExpectedSchemaV7,
+            8 when signature == SchemaV8Signature => ExpectedSchemaV8,
+            _ => throw new WorkerStoreException("Worker journal schema version or signature is unsupported."),
+        };
+        ValidateSchemaShape(expected, LegacyHoldNames, version, signature);
+        if (version == 7) EnsureSchemaV7Backup();
+        using var tx = _connection.BeginTransaction();
+        if (version == 7)
+        {
+            Execute("ALTER TABLE process_slot RENAME TO process_slot_v7; CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL); INSERT INTO process_slot(singleton,state,lifecycle_handle,active_request_id,session_id,pid,updated_utc) SELECT singleton,state,lifecycle_handle,active_request_id,NULL,pid,updated_utc FROM process_slot_v7; DROP TABLE process_slot_v7", tx);
+        }
+        Execute("CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL); INSERT INTO session_operation VALUES(1,'none',NULL,NULL,$now); INSERT INTO holds VALUES('session-operation',0,NULL); UPDATE meta SET value=$version WHERE key='schema_version'; UPDATE meta SET value=$signature WHERE key='schema_signature'", tx, ("$now", Now()), ("$version", SchemaVersion.ToString(CultureInfo.InvariantCulture)), ("$signature", SchemaSignature));
+        tx.Commit();
+    }
+
+    private void EnsureSchemaV7Backup()
+    {
+        var backupPath = Path.Combine(_options.ControlDirectory, SchemaV7BackupFileName);
+        var hashPath = Path.Combine(_options.ControlDirectory, SchemaV7BackupHashFileName);
+        ValidateAbsentOrPrivateRegular(backupPath, allowAbsent: true, expectedUid: _options.ExpectedBridgeUid);
+        ValidateAbsentOrPrivateRegular(hashPath, allowAbsent: true, expectedUid: _options.ExpectedBridgeUid);
+        if (!File.Exists(backupPath))
+        {
+            var temporary = Path.Combine(_options.ControlDirectory, $".{SchemaV7BackupFileName}.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                using (var destination = OpenDatabase(temporary, create: true)) _connection.BackupDatabase(destination);
+                using (var destination = OpenDatabase(temporary, create: false))
+                {
+                    ConfigureEvidenceConnection(destination);
+                    ValidateIntegrity(destination);
+                    ValidateSchemaShape(destination, ExpectedSchemaV7, LegacyHoldNames, 7, SchemaV7Signature);
+                    using var checkpoint = destination.CreateCommand(); checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE"; checkpoint.ExecuteNonQuery();
+                }
+                foreach (var sidecar in new[] { temporary + "-wal", temporary + "-shm" }) if (File.Exists(sidecar)) File.Delete(sidecar);
+                ValidateAbsentOrPrivateRegular(temporary, allowAbsent: false, expectedUid: _options.ExpectedBridgeUid, requireMode: false);
+                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temporary, PrivateFileMode);
+                File.Move(temporary, backupPath, false);
+                FsyncDirectory(_options.ControlDirectory);
+            }
+            finally
+            {
+                foreach (var path in new[] { temporary, temporary + "-wal", temporary + "-shm" }) if (File.Exists(path)) File.Delete(path);
+            }
+        }
+        var bytes = File.ReadAllBytes(backupPath);
+        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (File.Exists(hashPath))
+        {
+            if (!string.Equals(File.ReadAllText(hashPath).Trim(), hash, StringComparison.Ordinal)) throw new WorkerStoreException("The retained schema-v7 backup hash does not match the backup.");
+        }
+        else
+        {
+            var temporaryHash = hashPath + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
+            try
+            {
+                File.WriteAllText(temporaryHash, hash + "\n", Encoding.ASCII);
+                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temporaryHash, PrivateFileMode);
+                File.Move(temporaryHash, hashPath, false);
+                FsyncDirectory(_options.ControlDirectory);
+            }
+            finally { if (File.Exists(temporaryHash)) File.Delete(temporaryHash); }
+        }
+        if (!OperatingSystem.IsWindows()) { File.SetUnixFileMode(backupPath, PrivateFileMode); File.SetUnixFileMode(hashPath, PrivateFileMode); }
+        ValidateAbsentOrPrivateRegular(backupPath, allowAbsent: false, expectedUid: _options.ExpectedBridgeUid);
+        ValidateAbsentOrPrivateRegular(hashPath, allowAbsent: false, expectedUid: _options.ExpectedBridgeUid);
+        using var verify = OpenReadOnlyDatabase(backupPath);
+        ValidateIntegrity(verify);
+        ValidateSchemaShape(verify, ExpectedSchemaV7, LegacyHoldNames, 7, SchemaV7Signature);
+        if (File.Exists(backupPath + "-wal") || File.Exists(backupPath + "-shm")) throw new WorkerStoreException("Verifying the retained schema-v7 backup created an unexpected SQLite sidecar.");
+        if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(File.ReadAllBytes(backupPath)), Convert.FromHexString(hash))) throw new WorkerStoreException("The retained schema-v7 backup changed during verification.");
+    }
+
+    private void ValidateSchemaShape(IReadOnlyDictionary<string, string> expected, IReadOnlyList<string> holds, long version, string signature) =>
+        ValidateSchemaShape(_connection, expected, holds, version, signature);
+
+    private void ValidateSchemaShape(SqliteConnection connection, IReadOnlyDictionary<string, string> expected, IReadOnlyList<string> holds, long version, string signature)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_autoindex_%' AND name NOT LIKE 'sqlite_%' ORDER BY type,name";
+        using var reader = command.ExecuteReader();
+        var actual = new Dictionary<string, string>(StringComparer.Ordinal);
+        while (reader.Read()) actual[$"{reader.GetString(0)}:{reader.GetString(1)}"] = reader.GetString(2);
+        if (actual.Count != expected.Count || expected.Any(pair => !actual.TryGetValue(pair.Key, out var sql) || !string.Equals(sql, pair.Value, StringComparison.Ordinal))) throw new WorkerStoreException("Worker journal schema does not exactly match the supported signature.");
+        string MetaFrom(string key) { using var q = connection.CreateCommand(); q.CommandText = "SELECT value FROM meta WHERE key=$key"; q.Parameters.AddWithValue("$key", key); return q.ExecuteScalar()?.ToString() ?? throw new WorkerStoreException("Worker journal metadata is incomplete."); }
+        if (long.Parse(MetaFrom("schema_version"), CultureInfo.InvariantCulture) != version || MetaFrom("schema_signature") != signature || MetaFrom("worker_id") != _options.WorkerId || MetaFrom("controller_id") != _options.ControllerId) throw new WorkerStoreException("Worker journal identity or schema signature mismatch.");
+        using var holdCommand = connection.CreateCommand(); holdCommand.CommandText = "SELECT name FROM holds ORDER BY name"; using var holdReader = holdCommand.ExecuteReader(); var names = new List<string>(); while (holdReader.Read()) names.Add(holdReader.GetString(0));
+        if (!names.SequenceEqual(holds.Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw new WorkerStoreException("Worker journal hold state does not exactly match the supported signature.");
+    }
+
+    private static void ValidateIntegrity(SqliteConnection connection)
+    {
+        using var quick = connection.CreateCommand(); quick.CommandText = "PRAGMA quick_check"; if (!string.Equals(quick.ExecuteScalar()?.ToString(), "ok", StringComparison.Ordinal)) throw new WorkerStoreException("Worker journal integrity check failed.");
+        using var foreign = connection.CreateCommand(); foreign.CommandText = "PRAGMA foreign_key_check"; using var violations = foreign.ExecuteReader(); if (violations.Read()) throw new WorkerStoreException("Worker journal foreign-key validation failed.");
     }
 
     private void ValidateSchema()
     {
         try
         {
-            var expected = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["index:ix_pending_permissions_state"] = "CREATE INDEX ix_pending_permissions_state ON pending_permissions(state, created_utc)",
-                ["table:cancellations"] = "CREATE TABLE cancellations(cancellation_id TEXT PRIMARY KEY, target_request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('forwarding','forwarded','uncertain')), process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), created_utc TEXT NOT NULL)",
-                ["table:event_generations"] = "CREATE TABLE event_generations(worker_generation INTEGER PRIMARY KEY CHECK(worker_generation>0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0))",
-                ["table:events"] = "CREATE TABLE events(worker_generation INTEGER NOT NULL CHECK(worker_generation>0), sequence INTEGER NOT NULL CHECK(sequence>0), kind TEXT NOT NULL, payload_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), created_utc TEXT NOT NULL, PRIMARY KEY(worker_generation, sequence), FOREIGN KEY(worker_generation) REFERENCES event_generations(worker_generation))",
-                ["table:holds"] = "CREATE TABLE holds(name TEXT PRIMARY KEY, held INTEGER NOT NULL CHECK(held IN(0,1)), reason TEXT)",
-                ["table:journal_failures"] = "CREATE TABLE journal_failures(operation_id TEXT PRIMARY KEY, worker_generation INTEGER NOT NULL CHECK(worker_generation>0), error_category TEXT NOT NULL, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), created_utc TEXT NOT NULL)",
-                ["table:lease"] = "CREATE TABLE lease(singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch INTEGER NOT NULL CHECK(epoch>=0), controller_id TEXT, connection_nonce TEXT, observed_utc TEXT, active INTEGER NOT NULL CHECK(active IN(0,1)))",
-                ["table:meta"] = "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-                ["table:pending_permissions"] = "CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL)",
-                ["table:process_slot"] = "CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL)",
-                ["table:replay"] = "CREATE TABLE replay(singleton INTEGER PRIMARY KEY CHECK(singleton=1), ack_worker_generation INTEGER NOT NULL CHECK(ack_worker_generation>=0), ack_sequence INTEGER NOT NULL CHECK(ack_sequence>=0))",
-                ["table:replay_gaps"] = "CREATE TABLE replay_gaps(id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN('status','loss','overflow')), worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), after_sequence INTEGER NOT NULL CHECK(after_sequence>=0), first_retained INTEGER NOT NULL CHECK(first_retained>=0), last_sequence INTEGER NOT NULL CHECK(last_sequence>=0), loss_marker_generation INTEGER, loss_marker_sequence INTEGER, reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), CHECK((kind='loss' AND loss_marker_generation IS NOT NULL AND loss_marker_sequence IS NOT NULL) OR (kind<>'loss' AND loss_marker_generation IS NULL AND loss_marker_sequence IS NULL)), UNIQUE(kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence))",
-                ["table:replay_loss"] = "CREATE TABLE replay_loss(worker_generation INTEGER PRIMARY KEY CHECK(worker_generation>0), marker_sequence INTEGER NOT NULL CHECK(marker_sequence>0), dropped_count INTEGER NOT NULL CHECK(dropped_count>0), dropped_bytes INTEGER NOT NULL CHECK(dropped_bytes>=0), reconciled INTEGER NOT NULL CHECK(reconciled IN(0,1)), FOREIGN KEY(worker_generation) REFERENCES event_generations(worker_generation))",
-                ["table:requests"] = "CREATE TABLE requests(request_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('forwarding','forwarded','completed','failed','uncertain')), outcome_json TEXT, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), turn_id TEXT NOT NULL, session_id TEXT NOT NULL, created_utc TEXT NOT NULL)",
-            };
+            var expected = ExpectedSchemaV9;
             using var command = _connection.CreateCommand();
             command.CommandText = "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_autoindex_%' AND name NOT LIKE 'sqlite_%' ORDER BY type,name";
             using var reader = command.ExecuteReader();
@@ -268,7 +422,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         using var tx = _connection.BeginTransaction();
         var state = Scalar("SELECT state FROM process_slot WHERE singleton=1", tx)?.ToString();
         if (state is "running" or "starting") throw new WorkerProtocolException("The worker process is already active.");
-        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='process_generation'; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE process_slot SET state='starting',lifecycle_handle=NULL,active_request_id=NULL,session_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1", tx, ("$u", Now()));
+        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='process_generation'; DELETE FROM meta WHERE key='acp_initialized'; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE process_slot SET state='starting',lifecycle_handle=NULL,active_request_id=NULL,session_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1; UPDATE session_operation SET state=CASE WHEN state='uncertain' THEN state ELSE 'none' END,request_id=CASE WHEN state='uncertain' THEN request_id ELSE NULL END,expected_session_id=CASE WHEN state='uncertain' THEN expected_session_id ELSE NULL END,updated_utc=$u WHERE singleton=1", tx, ("$u", Now()));
         var generation = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='process_generation'", tx), CultureInfo.InvariantCulture);
         tx.Commit(); return generation;
     }
@@ -297,7 +451,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         lock (_databaseGate)
         {
             using var tx = _connection.BeginTransaction();
-            Execute("UPDATE process_slot SET state=$s,active_request_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE holds SET held=1,reason=$r WHERE name=$n", tx, ("$s", state), ("$u", Now()), ("$r", holdReason), ("$n", HoldNameForProcessFailure(holdReason)));
+            Execute("DELETE FROM meta WHERE key='acp_initialized'; UPDATE process_slot SET state=$s,active_request_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE holds SET held=1,reason=$r WHERE name=$n", tx, ("$s", state), ("$u", Now()), ("$r", holdReason), ("$n", HoldNameForProcessFailure(holdReason)));
             tx.Commit();
         }
     }
@@ -366,8 +520,80 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             if (current is not null && current != sessionId) throw new WorkerProtocolException("The running process is already bound to a different session.");
             Execute("UPDATE process_slot SET session_id=$s,updated_utc=$u WHERE singleton=1 AND state='running'", tx, ("$s", sessionId), ("$u", Now()));
             if (Convert.ToInt64(Scalar("SELECT changes()", tx), CultureInfo.InvariantCulture) != 1) throw new WorkerProtocolException("A running process is required before binding its session.");
+            Execute("UPDATE session_operation SET state='bound',request_id=NULL,expected_session_id=$s,updated_utc=$u WHERE singleton=1; UPDATE holds SET held=0,reason=NULL WHERE name='session-operation'", tx, ("$s", sessionId), ("$u", Now()));
             tx.Commit();
         }
+    }
+
+    public void RequireSessionOperationAllowed(long epoch, string nonce, string? expectedSessionId)
+    {
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, nonce);
+            if (expectedSessionId is not null) WorkerProtocol.ValidateIdentifier(expectedSessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT p.state,p.active_request_id,p.session_id,(SELECT value FROM meta WHERE key='acp_initialized'),s.state,s.expected_session_id,(SELECT COUNT(*) FROM holds WHERE held=1) FROM process_slot p,session_operation s WHERE p.singleton=1 AND s.singleton=1";
+            using var reader = command.ExecuteReader(); reader.Read();
+            var bound = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var operationState = reader.GetString(4);
+            var retained = reader.IsDBNull(5) ? null : reader.GetString(5);
+            if (reader.GetString(0) != "running" || !reader.IsDBNull(1) || reader.IsDBNull(3) || reader.GetString(3) != "1") throw new WorkerProtocolException("ACP session mutation requires an initialized idle running process.");
+            if (reader.GetInt64(6) != 0 || Volatile.Read(ref _journalFailClosed) != 0) throw new WorkerProtocolException("ACP session mutation is held.");
+            if (bound is not null && (expectedSessionId is null || bound != expectedSessionId)) throw new WorkerProtocolException("The ACP process is already bound to a different session.");
+            if (operationState == "uncertain") throw new WorkerProtocolException("ACP session creation or loading is uncertain and requires worker replacement.");
+            if (expectedSessionId is null && operationState == "bound" && retained is not null) throw new WorkerProtocolException("A retained ACP session exists and must not be replaced blindly.");
+            if (expectedSessionId is not null && operationState == "bound" && retained is not null && retained != expectedSessionId) throw new WorkerProtocolException("The retained ACP session does not match the requested session.");
+        }
+    }
+
+    public void BeginSessionOperation(long epoch, string nonce, string state, string requestId, string? expectedSessionId)
+    {
+        if (state is not ("creating" or "loading")) throw new WorkerProtocolException("Invalid ACP session operation state.");
+        WorkerProtocol.ValidateIdentifier(requestId, WorkerProtocol.MaxIdentifierLength, "session operation request id");
+        lock (_databaseGate)
+        {
+            RequireSessionOperationAllowed(epoch, nonce, expectedSessionId);
+            Execute("UPDATE session_operation SET state=$state,request_id=$request,expected_session_id=$session,updated_utc=$u WHERE singleton=1", null, ("$state", state), ("$request", requestId), ("$session", expectedSessionId), ("$u", Now()));
+        }
+    }
+
+    public void CompleteSessionOperation(long epoch, string nonce, string requestId, string sessionId)
+    {
+        WorkerProtocol.ValidateIdentifier(requestId, WorkerProtocol.MaxIdentifierLength, "session operation request id");
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, nonce);
+            using var tx = _connection.BeginTransaction();
+            var operationValue = Scalar("SELECT request_id FROM session_operation WHERE singleton=1 AND state IN('creating','loading')", tx);
+            var expectedValue = Scalar("SELECT expected_session_id FROM session_operation WHERE singleton=1", tx);
+            var operationRequest = operationValue is null or DBNull ? null : operationValue.ToString();
+            var expected = expectedValue is null or DBNull ? null : expectedValue.ToString();
+            if (operationRequest != requestId || (expected is not null && expected != sessionId)) throw new WorkerProtocolException("ACP session operation identity changed before binding.");
+            var initialized = Scalar("SELECT value FROM meta WHERE key='acp_initialized'", tx)?.ToString();
+            if (initialized != "1" || Scalar("SELECT state FROM process_slot WHERE singleton=1", tx)?.ToString() != "running") throw new WorkerProtocolException("ACP process changed before session binding.");
+            Execute("UPDATE process_slot SET session_id=$s,updated_utc=$u WHERE singleton=1 AND session_id IS NULL", tx, ("$s", sessionId), ("$u", Now()));
+            if (Convert.ToInt64(Scalar("SELECT changes()", tx), CultureInfo.InvariantCulture) != 1) throw new WorkerProtocolException("ACP process session binding changed concurrently.");
+            Execute("UPDATE session_operation SET state='bound',request_id=NULL,expected_session_id=$s,updated_utc=$u WHERE singleton=1; UPDATE holds SET held=0,reason=NULL WHERE name='session-operation'", tx, ("$s", sessionId), ("$u", Now()));
+            tx.Commit();
+        }
+    }
+
+    public void MarkSessionOperationUncertain(string requestId)
+    {
+        WorkerProtocol.ValidateIdentifier(requestId, WorkerProtocol.MaxIdentifierLength, "session operation request id");
+        lock (_databaseGate)
+        {
+            using var tx = _connection.BeginTransaction();
+            Execute("UPDATE session_operation SET state='uncertain',updated_utc=$u WHERE singleton=1 AND request_id=$request AND state IN('creating','loading'); UPDATE holds SET held=1,reason='session-create-uncertain' WHERE name='session-operation' AND EXISTS(SELECT 1 FROM session_operation WHERE singleton=1 AND state='uncertain')", tx, ("$request", requestId), ("$u", Now()));
+            tx.Commit();
+        }
+    }
+
+    public void AbortSessionOperation(string requestId)
+    {
+        WorkerProtocol.ValidateIdentifier(requestId, WorkerProtocol.MaxIdentifierLength, "session operation request id");
+        lock (_databaseGate) Execute("UPDATE session_operation SET state='none',request_id=NULL,expected_session_id=NULL,updated_utc=$u WHERE singleton=1 AND request_id=$request AND state IN('creating','loading')", null, ("$request", requestId), ("$u", Now()));
     }
     /// <summary>
     /// Records that a viewer stop could not be confirmed, so a viewer may still be
@@ -443,6 +669,10 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             tx.Commit(); return existing;
         }
         EnsureDispatchAllowed(tx, epoch, nonce);
+        var initialized = Scalar("SELECT value FROM meta WHERE key='acp_initialized'", tx)?.ToString();
+        var boundValue = Scalar("SELECT session_id FROM process_slot WHERE singleton=1", tx);
+        var boundSession = boundValue is null or DBNull ? null : boundValue.ToString();
+        if (initialized != "1" || !string.Equals(boundSession, sessionId, StringComparison.Ordinal)) throw new WorkerProtocolException("ACP is not initialized and bound to the requested session.");
         var generation = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='process_generation'", tx), CultureInfo.InvariantCulture);
         Execute("INSERT INTO requests VALUES($id,$h,'forwarding',NULL,$g,$e,$t,$s,$u)", tx, ("$id", id), ("$h", hash), ("$g", generation), ("$e", epoch), ("$t", turnId), ("$s", sessionId), ("$u", Now()));
         tx.Commit(); return new StoredRequest(id, hash, "forwarding", null, generation, epoch, turnId, sessionId);
@@ -756,14 +986,16 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         string? lifecycleHandle;
         long? observedPid;
         string? activeRequestId;
+        string? sessionId;
         using (var command = _connection.CreateCommand())
         {
-            command.CommandText = "SELECT state,lifecycle_handle,pid,active_request_id FROM process_slot WHERE singleton=1";
+            command.CommandText = "SELECT state,lifecycle_handle,pid,active_request_id,session_id FROM process_slot WHERE singleton=1";
             using var reader = command.ExecuteReader(); reader.Read();
             processState = reader.GetString(0);
             lifecycleHandle = reader.IsDBNull(1) ? null : reader.GetString(1);
             observedPid = reader.IsDBNull(2) ? null : reader.GetInt64(2);
             activeRequestId = reader.IsDBNull(3) ? null : reader.GetString(3);
+            sessionId = reader.IsDBNull(4) ? null : reader.GetString(4);
         }
         var epoch = Convert.ToInt64(Scalar("SELECT epoch FROM lease WHERE singleton=1"), CultureInfo.InvariantCulture);
         var active = Convert.ToInt64(Scalar("SELECT active FROM lease WHERE singleton=1"), CultureInfo.InvariantCulture) == 1 && _clock.MonotonicMilliseconds <= _leaseDeadline;
@@ -779,7 +1011,10 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         var ackSequence = Convert.ToInt64(Scalar("SELECT ack_sequence FROM replay WHERE singleton=1"), CultureInfo.InvariantCulture);
         var replayGaps = CurrentReplayGapsLocked();
         var replayGapCount = Convert.ToInt32(Scalar("SELECT COUNT(*) FROM replay_gaps WHERE reconciled=0"), CultureInfo.InvariantCulture);
-        return new WorkerStatus(workerGeneration, processGeneration, processState, lifecycleHandle, observedPid, activeRequestId, CurrentPermissionLocked(), epoch, active, held || Volatile.Read(ref _journalFailClosed) != 0, reason, holdReasons, first, last, ackGeneration, ackSequence, CurrentReplayLossLocked(), CurrentJournalFailureLocked(), replayGapCount, replayGaps);
+        var acpInitialized = processState == "running" && string.Equals(MetaOptionalLocked("acp_initialized"), "1", StringComparison.Ordinal);
+        using var sessionOperation = _connection.CreateCommand(); sessionOperation.CommandText = "SELECT state,request_id FROM session_operation WHERE singleton=1"; using var operationReader = sessionOperation.ExecuteReader(); operationReader.Read();
+        var sessionOperationState = operationReader.GetString(0); var sessionOperationRequestId = operationReader.IsDBNull(1) ? null : operationReader.GetString(1);
+        return new WorkerStatus(workerGeneration, processGeneration, processState, lifecycleHandle, observedPid, activeRequestId, CurrentPermissionLocked(), epoch, active, held || Volatile.Read(ref _journalFailClosed) != 0, reason, holdReasons, first, last, ackGeneration, ackSequence, CurrentReplayLossLocked(), CurrentJournalFailureLocked(), replayGapCount, replayGaps, false, false, acpInitialized, sessionId, sessionOperationState, sessionOperationRequestId);
     }
 
     public void SetHold(bool held, string? reason)
@@ -861,7 +1096,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
     private void IncrementWorkerGenerationAndReconcileStartup()
     {
         using var tx = _connection.BeginTransaction();
-        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='worker_generation'; INSERT INTO event_generations(worker_generation,last_sequence) VALUES((SELECT CAST(value AS INTEGER) FROM meta WHERE key='worker_generation'),0); UPDATE meta SET value='1' WHERE key='next_event_sequence'; UPDATE lease SET active=0 WHERE singleton=1; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE requests SET state='uncertain' WHERE state IN('forwarding','forwarded'); UPDATE cancellations SET state='uncertain' WHERE state='forwarding'; UPDATE process_slot SET state='exited',lifecycle_handle=NULL,active_request_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1 AND state IN('starting','running','protocol-failed','transport-uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE holds SET held=1,reason='process-exited' WHERE name='process' AND EXISTS(SELECT 1 FROM process_slot WHERE singleton=1 AND state='exited'); DELETE FROM pending_permissions WHERE state IN('decided','invalidated') OR process_generation<(SELECT CAST(value AS INTEGER) FROM meta WHERE key='process_generation'); DELETE FROM cancellations WHERE process_generation<(SELECT CAST(value AS INTEGER) FROM meta WHERE key='process_generation') AND state='forwarded'", tx, ("$u", Now()));
+        Execute("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='worker_generation'; INSERT INTO event_generations(worker_generation,last_sequence) VALUES((SELECT CAST(value AS INTEGER) FROM meta WHERE key='worker_generation'),0); UPDATE meta SET value='1' WHERE key='next_event_sequence'; UPDATE lease SET active=0 WHERE singleton=1; UPDATE pending_permissions SET state='invalidated' WHERE state IN('pending','deciding','uncertain'); UPDATE requests SET state='uncertain' WHERE state IN('forwarding','forwarded'); UPDATE cancellations SET state='uncertain' WHERE state='forwarding'; UPDATE session_operation SET state='uncertain',updated_utc=$u WHERE singleton=1 AND state IN('creating','loading'); UPDATE process_slot SET state='exited',lifecycle_handle=NULL,active_request_id=NULL,pid=NULL,updated_utc=$u WHERE singleton=1 AND state IN('starting','running','protocol-failed','transport-uncertain'); UPDATE holds SET held=0,reason=NULL WHERE name IN('ownership','permission'); UPDATE holds SET held=1,reason='process-exited' WHERE name='process' AND EXISTS(SELECT 1 FROM process_slot WHERE singleton=1 AND state='exited'); UPDATE holds SET held=1,reason='session-create-uncertain' WHERE name='session-operation' AND EXISTS(SELECT 1 FROM session_operation WHERE singleton=1 AND state='uncertain'); DELETE FROM pending_permissions WHERE state IN('decided','invalidated') OR process_generation<(SELECT CAST(value AS INTEGER) FROM meta WHERE key='process_generation'); DELETE FROM cancellations WHERE process_generation<(SELECT CAST(value AS INTEGER) FROM meta WHERE key='process_generation') AND state='forwarded'", tx, ("$u", Now()));
         tx.Commit();
     }
     internal void CheckpointForTests()
@@ -870,7 +1105,8 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
     }
 
     private string Meta(string key) { lock (_databaseGate) return MetaLocked(key); }
-    private string MetaLocked(string key) => Scalar("SELECT value FROM meta WHERE key=$k", null, ("$k", key))?.ToString() ?? throw new WorkerStoreException("Worker journal metadata is incomplete.");
+    private string MetaLocked(string key) => MetaOptionalLocked(key) ?? throw new WorkerStoreException("Worker journal metadata is incomplete.");
+    private string? MetaOptionalLocked(string key) => Scalar("SELECT value FROM meta WHERE key=$k", null, ("$k", key))?.ToString();
     private long MetaLong(string key) { lock (_databaseGate) return MetaLongLocked(key); }
     private long MetaLongLocked(string key) => long.Parse(MetaLocked(key), CultureInfo.InvariantCulture);
     private void InsertMeta(string key, string value, SqliteTransaction tx) => Execute("INSERT INTO meta VALUES($k,$v)", tx, ("$k", key), ("$v", value));
