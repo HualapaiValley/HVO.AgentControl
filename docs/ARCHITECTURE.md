@@ -138,11 +138,18 @@ explicitly acknowledges the exact loss marker through `reconcile-replay-loss`.
 A cursor-before-boundary gap tied to that unreconciled marker clears in the same
 exact transition. Unknown-generation, future-cursor and other gaps require
 `reconcile-replay-gap` with the exact gap ID, attempted generation/cursor and
-reported first-retained/last sequence values. When a replay request is rejected,
-the controller immediately reads status on that authenticated session and persists
-the worker-reported gap and loss markers; it never fabricates an exact tuple from
-the rejected request. If that status read is unavailable, recovery remains held by
-a marker-less controller obligation and later healthy status never auto-clears it.
+reported first-retained/last sequence values. The initial status `LastSequence` is a
+lower-bound snapshot: events appended while paging are accepted when generation and
+strict sequence/cursor progress remain valid.
+Replay is independently bounded to 10,000 total events and 10,001 pages; every
+non-final page must contain at least one event, so the page cap cannot be reached by
+a conforming retained journal. When a replay request is rejected, the controller
+immediately reads status on that authenticated session and persists the worker-reported
+gap and loss markers; it never fabricates an exact tuple from the rejected request.
+A malformed replay page or exceeded controller replay bound closes the session after
+persisting a marker-less controller replay-gap obligation. If status after a worker
+rejection is unavailable, recovery likewise remains held by a marker-less controller
+obligation and later healthy status never auto-clears it.
 Because no exact worker marker exists, automatic worker reconciliation is impossible:
 only the same-origin owner API may acknowledge the obligation after external
 reconciliation, using the fixed `acknowledged-after-external-reconciliation`

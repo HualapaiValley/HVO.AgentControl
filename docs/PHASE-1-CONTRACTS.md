@@ -374,11 +374,14 @@ Design constraints:
   An uncertain ACK stops replay and newer-generation processing; reconnect retries
   that exact ACK first, resumes the same generation after the committed controller
   cursor, finishes its suffix, and only then advances. A failed retry keeps dispatch
-  held even though the authenticated connection may remain open. Replay rejects null
-  items, empty `hasMore` pages, out-of-status sequences and responses beyond the
-  10,000-event/10,001-page bound. Duplicates are ignored by generation/sequence. Bound
-  retained replay to 64 MiB and 10,000 events initially. An overflow or missing
-  cursor records an exact durable replay-gap obligation, holds dispatch and requires
+  held even though the authenticated connection may remain open. Initial status
+  `LastSequence` is a lower bound because the worker may append while paging. Replay
+  rejects null items, empty `hasMore` pages, non-increasing/wrong-generation sequences
+  and responses beyond independent 10,000-event/10,001-page bounds. A malformed or
+  over-bound response records a marker-less controller replay-gap obligation before
+  the session is faulted. Duplicates are ignored by generation/sequence. Bound retained
+  replay to 64 MiB and 10,000 events initially. An overflow or missing cursor records
+  an exact durable replay-gap obligation, holds dispatch and requires
   ID-and-tuple reconciliation; distinct obligations use set semantics and a bounded
   overflow marker prevents unbounded growth. Observation journal infrastructure
   failure holds new dispatch but does not stop ACP or rewrite request, cancellation

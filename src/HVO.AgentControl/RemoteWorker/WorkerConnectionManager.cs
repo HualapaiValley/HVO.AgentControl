@@ -377,13 +377,13 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         var cursor = after;
         var pageCount = 0;
         var eventCount = 0;
-        var remaining = generation == status.WorkerGeneration ? Math.Max(0, status.LastSequence - after) : MaxReplayEvents;
-        var pageLimit = generation == status.WorkerGeneration
-            ? Math.Min(MaxReplayPages, checked((int)Math.Min(MaxReplayPages, (remaining + 255) / 256 + 1)))
-            : MaxReplayPages;
         while (true)
         {
-            if (++pageCount > pageLimit) throw new WorkerProtocolException("Worker replay exceeded the bounded page count.");
+            if (++pageCount > MaxReplayPages)
+            {
+                RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                throw new WorkerProtocolException("Worker replay exceeded the bounded page count.");
+            }
             WorkerSessionResult replay;
             try { replay = await session.InvokeAsync("replay", new { operation = "replay", workerGeneration = generation, afterSequence = cursor }, false, token).ConfigureAwait(false); }
             catch (WorkerRemoteException)
@@ -406,25 +406,50 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                     return new(held, ReplaySequenceResult.HeldIncomplete);
                 }
             }
-            var page = JsonSerializer.Deserialize<BridgeReplayPage>(replay.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? throw new WorkerProtocolException("Worker replay page is invalid.");
-            if (page.Events is null || page.Events.Any(x => x is null || x.Kind is null || x.PayloadJson is null)) throw new WorkerProtocolException("Worker replay events are invalid.");
+            BridgeReplayPage page;
+            try
+            {
+                page = JsonSerializer.Deserialize<BridgeReplayPage>(replay.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? throw new WorkerProtocolException("Worker replay page is invalid.");
+                if (page.Events is null || page.Events.Any(x => x is null || x.Kind is null || x.PayloadJson is null)) throw new WorkerProtocolException("Worker replay events are invalid.");
+                var replayEvents = page.Events.Cast<BridgeWorkerEvent>().ToArray();
+                eventCount = checked(eventCount + replayEvents.Length);
+                if (replayEvents.Length > 256 || eventCount > MaxReplayEvents || (page.HasMore && replayEvents.Length == 0)) throw new WorkerProtocolException("Worker replay page exceeded the bounded event contract.");
+                if (replayEvents.Any(x => x.WorkerGeneration != generation || x.Sequence <= cursor)
+                    || replayEvents.Zip(replayEvents.Skip(1), (left, right) => right.Sequence <= left.Sequence).Any(invalid => invalid)
+                    || page.NextAfterSequence < cursor
+                    || (replayEvents.Length > 0 && page.NextAfterSequence != replayEvents[^1].Sequence)
+                    || (replayEvents.Length == 0 && page.NextAfterSequence != cursor))
+                    throw new WorkerProtocolException("Worker replay page did not make valid progress.");
+            }
+            catch (Exception exception) when (exception is WorkerProtocolException or JsonException or OverflowException)
+            {
+                RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                throw;
+            }
             var events = page.Events.Cast<BridgeWorkerEvent>().ToArray();
-            eventCount = checked(eventCount + events.Length);
-            if (events.Length > 256 || eventCount > MaxReplayEvents || (page.HasMore && events.Length == 0)) throw new WorkerProtocolException("Worker replay page exceeded the bounded event contract.");
-            if (events.Any(x => x.WorkerGeneration != generation || x.Sequence <= cursor)
-                || events.Zip(events.Skip(1), (left, right) => right.Sequence <= left.Sequence).Any(invalid => invalid)
-                || page.NextAfterSequence < cursor
-                || (events.Length > 0 && page.NextAfterSequence != events[^1].Sequence)
-                || (events.Length == 0 && page.NextAfterSequence != cursor)
-                || (generation == status.WorkerGeneration && events.Any(x => x.Sequence > status.LastSequence)))
-                throw new WorkerProtocolException("Worker replay page did not make valid progress.");
-            var sanitized = events.Select(x => { var json = SanitizeJson(x.PayloadJson); return new ControllerWorkerEvent(x.WorkerGeneration, x.Sequence, SanitizeKind(x.Kind), json, Encoding.UTF8.GetByteCount(json)); }).ToArray();
+            ControllerWorkerEvent[] sanitized;
+            try
+            {
+                sanitized = events.Select(x => { var json = SanitizeJson(x.PayloadJson); return new ControllerWorkerEvent(x.WorkerGeneration, x.Sequence, SanitizeKind(x.Kind), json, Encoding.UTF8.GetByteCount(json)); }).ToArray();
+            }
+            catch (JsonException exception)
+            {
+                RecordReplayProtocolFailure(store, enrollment, status, generation, cursor);
+                throw new WorkerProtocolException("Worker replay event payload is invalid.", exception);
+            }
             store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status), sanitized);
             if (sanitized.Length > 0 && !await AcknowledgeAsync(store, enrollment, session, status, generation, page.NextAfterSequence, token).ConfigureAwait(false))
                 return new(WithReplayAckHold(status), ReplaySequenceResult.HeldIncomplete);
             if (!page.HasMore) return new(status, ReplaySequenceResult.Complete);
             cursor = page.NextAfterSequence;
         }
+    }
+
+    private static void RecordReplayProtocolFailure(OrganizationStore store, WorkerEnrollmentRecord enrollment, BridgeWorkerStatus status, long generation, long cursor)
+    {
+        store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", $"protocol:{generation}:{cursor}");
+        var reasons = status.HoldReasons.Contains("replay-gap", StringComparer.Ordinal) ? status.HoldReasons : [.. status.HoldReasons, "replay-gap"];
+        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status with { DispatchHeld = true, HoldReasons = reasons }), []);
     }
 
     private static BridgeWorkerStatus WithReplayAckHold(BridgeWorkerStatus status) =>
