@@ -74,11 +74,22 @@ public sealed partial class OrganizationStore
     private const string WorkerRecoveryAuditSchemaV5Statement =
         """CREATE TABLE worker_recovery_audit (id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES worker_recovery_obligations(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('replay-gap','ownership-changed','session-reconciliation')), marker_hash TEXT NOT NULL, evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=71 AND substr(evidence_hash,1,7)='sha256:'), disposition TEXT NOT NULL CHECK(disposition='acknowledged-after-external-reconciliation'), recorded_at TEXT NOT NULL)""";
 
+    private const string WorkerRecoveryAuditSchemaV6Statement =
+        """CREATE TABLE worker_recovery_audit (id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES worker_recovery_obligations(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('replay-gap','ownership-changed','session-reconciliation','request-uncertain')), marker_hash TEXT NOT NULL, evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=71 AND substr(evidence_hash,1,7)='sha256:'), disposition TEXT NOT NULL CHECK(disposition='acknowledged-after-external-reconciliation'), recorded_at TEXT NOT NULL)""";
+
     private static string[] RemoteWorkerSchemaV5Statements =>
         [
             .. RemoteWorkerSchemaV4Statements[..10],
             WorkerRecoveryObligationsSchemaV5Statement,
             WorkerRecoveryAuditSchemaV5Statement,
+            .. RemoteWorkerSchemaV4Statements[12..],
+        ];
+
+    private static string[] RemoteWorkerSchemaV6Statements =>
+        [
+            .. RemoteWorkerSchemaV4Statements[..10],
+            WorkerRecoveryObligationsSchemaV5Statement,
+            WorkerRecoveryAuditSchemaV6Statement,
             .. RemoteWorkerSchemaV4Statements[12..],
         ];
 
@@ -112,6 +123,28 @@ public sealed partial class OrganizationStore
     public IReadOnlyList<WorkerTaskRecord> ListWorkerTasks() => Query<WorkerTaskRecord>("SELECT id,employee_id,runtime_binding_id,worker_id,description_hash,state,revision FROM worker_tasks ORDER BY created_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetInt32(6)));
     public WorkerTaskRecord? GetWorkerTask(string id) => ListWorkerTasks().SingleOrDefault(x => x.Id == id);
     public IReadOnlyList<WorkerRequestRecord> ListWorkerRequests() => Query("SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,revision FROM worker_requests ORDER BY created_at,id", ReadRequest);
+    public IReadOnlyList<WorkerRequestRecord> ListWorkerRequestsForReconciliation(string workerId, IReadOnlyCollection<string> states)
+    {
+        ValidateIdentifier(workerId, nameof(workerId));
+        var requestedStates = states.Distinct(StringComparer.Ordinal).ToArray();
+        if (requestedStates.Length == 0 || requestedStates.Any(state => state is not ("Intent" or "Forwarding" or "Forwarded" or "Uncertain"))) throw new OrganizationValidationException("Request reconciliation states are invalid.");
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var q = c.CreateCommand();
+            var stateParameters = requestedStates.Select((_, index) => "$state" + index.ToString(CultureInfo.InvariantCulture)).ToArray();
+            q.CommandText = $"SELECT r.id,r.task_id,r.session_id,r.native_session_id,r.employee_id,r.runtime_binding_id,r.worker_id,r.payload_hash,r.state,r.ownership_epoch,r.process_generation,r.turn_id,r.outcome_hash,r.outcome_category,r.outcome_bytes,r.idempotency_key,r.revision FROM worker_requests r WHERE r.worker_id=$worker AND r.state IN({string.Join(',', stateParameters)}) AND NOT EXISTS(SELECT 1 FROM worker_recovery_audit a JOIN worker_recovery_obligations o ON o.id=a.obligation_id WHERE r.state='Uncertain' AND a.worker_id=r.worker_id AND a.kind='request-uncertain' AND a.disposition='acknowledged-after-external-reconciliation' AND o.marker_json=$markerPrefix || r.id || $markerSuffix) ORDER BY r.created_at,r.id";
+            q.Parameters.AddWithValue("$worker", workerId);
+            q.Parameters.AddWithValue("$markerPrefix", "{\"kind\":\"request-uncertain\",\"requestId\":\"");
+            q.Parameters.AddWithValue("$markerSuffix", "\"}");
+            for (var index = 0; index < requestedStates.Length; index++) q.Parameters.AddWithValue(stateParameters[index], requestedStates[index]);
+            using var r = q.ExecuteReader();
+            var requests = new List<WorkerRequestRecord>();
+            while (r.Read()) requests.Add(ReadRequest(r));
+            return requests;
+        }
+    }
     public WorkerRequestRecord? GetWorkerRequest(string id) => ListWorkerRequests().SingleOrDefault(x => x.Id == id);
     public IReadOnlyList<WorkerCancellationRecord> ListWorkerCancellations() => Query<WorkerCancellationRecord>("SELECT id,request_id,payload_hash,state,ownership_epoch,process_generation,revision FROM worker_cancellations ORDER BY created_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetInt64(4), r.GetInt64(5), r.GetInt32(6)));
     public WorkerCancellationRecord? GetWorkerCancellation(string id) => ListWorkerCancellations().SingleOrDefault(x => x.Id == id);
@@ -263,8 +296,8 @@ public sealed partial class OrganizationStore
     {
         if (!RequestTransition(from, to)) throw new OrganizationValidationException("Request transition is invalid."); int? bytes = outcomeJson is null ? null : Encoding.UTF8.GetByteCount(outcomeJson); if (bytes > 64 * 1024) throw new OrganizationValidationException("Outcome metadata is too large."); var hash = outcomeJson is null ? null : Hash(outcomeJson); lock (_gate)
         {
-            RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state=$to,outcome_hash=$hash,outcome_category=$category,outcome_bytes=$bytes,forwarded_at=CASE WHEN $to='Forwarded' THEN $now ELSE forwarded_at END,completed_at=CASE WHEN $to IN('Completed','Failed','Interrupted') THEN $now ELSE completed_at END,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r AND state=$from"; Add(q, ("$to", (object)to), ("$hash", (object?)hash ?? DBNull.Value), ("$category", (object?)SanitizeRemote(outcomeCategory, 64) ?? DBNull.Value), ("$bytes", bytes is null ? DBNull.Value : bytes.Value), ("$now", Now()), ("$id", id), ("$r", expectedRevision), ("$from", from)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Request revision or state is stale."); if (to == "Uncertain") AddRecovery(c, tx, GetWorkerRequestIn(c, tx, id).WorkerId, "controller", "request-uncertain", Hash(id), 0, 0, Hash(id));
-            if (from == "Uncertain" && to is "Completed" or "Failed" or "Interrupted") ClearRecovery(c, tx, GetWorkerRequestIn(c, tx, id).WorkerId, "request-uncertain", Hash(id)); using var task = c.CreateCommand(); task.Transaction = tx; task.CommandText = "UPDATE worker_tasks SET state=CASE $to WHEN 'Forwarded' THEN 'Running' WHEN 'Completed' THEN 'Completed' WHEN 'Failed' THEN 'Failed' WHEN 'Interrupted' THEN 'Uncertain' WHEN 'Uncertain' THEN 'Uncertain' ELSE state END,updated_at=$now,revision=revision+1 WHERE id=(SELECT task_id FROM worker_requests WHERE id=$id)"; Add(task, ("$to", to), ("$now", Now()), ("$id", id)); task.ExecuteNonQuery(); tx.Commit(); return GetWorkerRequest(id)!;
+            RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state=$to,outcome_hash=$hash,outcome_category=$category,outcome_bytes=$bytes,forwarded_at=CASE WHEN $to='Forwarded' THEN $now ELSE forwarded_at END,completed_at=CASE WHEN $to IN('Completed','Failed','Interrupted') THEN $now ELSE completed_at END,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r AND state=$from"; Add(q, ("$to", (object)to), ("$hash", (object?)hash ?? DBNull.Value), ("$category", (object?)SanitizeRemote(outcomeCategory, 64) ?? DBNull.Value), ("$bytes", bytes is null ? DBNull.Value : bytes.Value), ("$now", Now()), ("$id", id), ("$r", expectedRevision), ("$from", from)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Request revision or state is stale."); if (to == "Uncertain") AddRecovery(c, tx, GetWorkerRequestIn(c, tx, id).WorkerId, "controller", "request-uncertain", Hash(id), 0, 0, Hash(id), RequestUncertainMarker(id));
+            if (to is "Completed" or "Failed") ClearRecovery(c, tx, GetWorkerRequestIn(c, tx, id).WorkerId, "request-uncertain", Hash(id)); using var task = c.CreateCommand(); task.Transaction = tx; task.CommandText = "UPDATE worker_tasks SET state=CASE $to WHEN 'Forwarded' THEN 'Running' WHEN 'Completed' THEN 'Completed' WHEN 'Failed' THEN 'Failed' WHEN 'Interrupted' THEN 'Uncertain' WHEN 'Uncertain' THEN 'Uncertain' ELSE state END,updated_at=$now,revision=revision+1 WHERE id=(SELECT task_id FROM worker_requests WHERE id=$id)"; Add(task, ("$to", to), ("$now", Now()), ("$id", id)); task.ExecuteNonQuery(); tx.Commit(); return GetWorkerRequest(id)!;
         }
     }
 
@@ -344,10 +377,24 @@ public sealed partial class OrganizationStore
                 using var reader = read.ExecuteReader();
                 if (!reader.Read()) throw new OrganizationNotFoundException("Recovery obligation not found.");
                 var source = reader.GetString(0); kind = reader.GetString(1); markerHash = reader.GetString(2);
-                var markerMissing = reader.IsDBNull(3); var active = reader.GetBoolean(4); var revision = reader.GetInt32(5);
-                var eligible = source == "controller" && ((markerMissing && kind is "replay-gap" or "ownership-changed") || (!markerMissing && kind == "session-reconciliation"));
+                var markerJson = reader.IsDBNull(3) ? null : reader.GetString(3); var active = reader.GetBoolean(4); var revision = reader.GetInt32(5);
+                var requestId = kind == "request-uncertain" ? ReadRequestUncertainMarker(markerJson, markerHash) : null;
+                var eligible = source == "controller" && ((markerJson is null && kind is "replay-gap" or "ownership-changed") || (markerJson is not null && kind == "session-reconciliation") || requestId is not null);
                 if (!eligible) throw new OrganizationValidationException("Only an externally verifiable controller recovery may be acknowledged.");
                 if (!active || revision != expectedRevision) throw new OrganizationConcurrencyException("The recovery obligation changed.");
+                if (requestId is not null)
+                {
+                    using var request = c.CreateCommand(); request.Transaction = tx;
+                    // An acknowledged request obligation is external-effects
+                    // reconciliation, so it may name either an Uncertain request or an
+                    // Interrupted one whose remote effect was never verified (Interrupted
+                    // is the controller-restart terminal for an intent that never left
+                    // the controller, and its task stays Uncertain). The request's own
+                    // state is never advanced by the acknowledgment.
+                    request.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE id=$request AND worker_id=$worker AND state IN('Uncertain','Interrupted')";
+                    Add(request, ("$request", requestId), ("$worker", workerId));
+                    if (Convert.ToInt64(request.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationValidationException("The request recovery marker does not match an uncertain or interrupted worker request.");
+                }
             }
             var now = Now();
             using (var clear = c.CreateCommand())
@@ -380,7 +427,7 @@ public sealed partial class OrganizationStore
             return GetWorkerRecoveryObligation(obligationId)!;
         }
     }
-    public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
+    public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
 
     public ExecutionHostRecord DisableExecutionHost(string id, int expectedRevision, bool reconciledStop = false) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var active = c.CreateCommand()) { active.Transaction = tx; active.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE host_id=$id AND enabled=1 AND lifecycle_status NOT IN('stopped','failed')"; active.Parameters.AddWithValue("$id", id); if (Convert.ToInt64(active.ExecuteScalar(), CultureInfo.InvariantCulture) != 0 && !reconciledStop) throw new OrganizationConcurrencyException("Execution host has active enrollments and requires an explicit reconciled stop."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET enabled=0,status='disabled',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r"; Add(q, ("$id", id), ("$r", expectedRevision), ("$now", Now())); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host revision is stale."); tx.Commit(); return GetExecutionHost(id)!; } }
 
@@ -537,7 +584,7 @@ public sealed partial class OrganizationStore
     {
         if (markerJson is { Length: > 8192 }) throw new OrganizationValidationException("Recovery marker detail is too large.");
         using var q = c.CreateCommand(); q.Transaction = tx;
-        q.CommandText = "INSERT INTO worker_recovery_obligations VALUES($id,$w,$source,$k,$m,$g,$s,1,$d,$json,$now,NULL,1) ON CONFLICT(worker_id,kind,marker_hash) DO UPDATE SET source=$source,active=1,cleared_at=NULL,marker_json=COALESCE($json,marker_json),revision=revision+1";
+        q.CommandText = "INSERT INTO worker_recovery_obligations SELECT $id,$w,$source,$k,$m,$g,$s,1,$d,$json,$now,NULL,1 WHERE NOT ($source='controller' AND $k='request-uncertain' AND EXISTS(SELECT 1 FROM worker_recovery_audit WHERE worker_id=$w AND kind=$k AND marker_hash=$m AND disposition='acknowledged-after-external-reconciliation')) ON CONFLICT(worker_id,kind,marker_hash) DO UPDATE SET source=$source,active=1,cleared_at=NULL,marker_json=COALESCE($json,marker_json),revision=revision+1 WHERE NOT ($source='controller' AND $k='request-uncertain' AND EXISTS(SELECT 1 FROM worker_recovery_audit WHERE worker_id=$w AND kind=$k AND marker_hash=$m AND disposition='acknowledged-after-external-reconciliation'))";
         Add(q, ("$id", "rec-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant()), ("$w", worker), ("$source", source), ("$k", kind), ("$m", marker), ("$g", generation), ("$s", sequence), ("$d", (object?)detail ?? DBNull.Value), ("$json", (object?)markerJson ?? DBNull.Value), ("$now", Now()));
         q.ExecuteNonQuery();
     }
@@ -545,6 +592,27 @@ public sealed partial class OrganizationStore
     private static string RecoveryKind(string reason) => reason.Contains("session-create-uncertain", StringComparison.Ordinal) || reason.Contains("session-reconciliation", StringComparison.Ordinal) ? "session-reconciliation" : reason.Contains("replay-loss", StringComparison.Ordinal) ? "replay-loss" : reason.Contains("replay", StringComparison.Ordinal) ? "replay-gap" : reason.Contains("journal", StringComparison.Ordinal) ? "journal-failure" : reason.Contains("permission", StringComparison.Ordinal) ? "permission-pending" : "process-interrupted";
     private static (long, long) CursorAfter(WorkerCursorRecord? cursor, IReadOnlyList<ControllerWorkerEvent> events) { var current = (Generation: cursor?.AcknowledgedWorkerGeneration ?? 0, Sequence: cursor?.AcknowledgedSequence ?? 0); foreach (var item in events) if (item.WorkerGeneration > current.Generation || item.WorkerGeneration == current.Generation && item.Sequence > current.Sequence) current = (item.WorkerGeneration, item.Sequence); return current; }
     private static bool RequestTransition(string from, string to) => (from, to) is ("Intent", "Forwarding") or ("Intent", "Interrupted") or ("Forwarding", "Forwarded") or ("Forwarding", "Completed") or ("Forwarding", "Failed") or ("Forwarding", "Uncertain") or ("Forwarded", "Completed") or ("Forwarded", "Failed") or ("Forwarded", "Uncertain") or ("Uncertain", "Forwarded") or ("Uncertain", "Completed") or ("Uncertain", "Failed") or ("Uncertain", "Interrupted");
+    internal static string RequestUncertainMarker(string requestId)
+    {
+        ValidateIdentifier(requestId, nameof(requestId));
+        return JsonSerializer.Serialize(new { kind = "request-uncertain", requestId });
+    }
+    private static string? ReadRequestUncertainMarker(string? markerJson, string markerHash)
+    {
+        if (markerJson is null) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(markerJson, new JsonDocumentOptions { MaxDepth = 8 });
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("kind", out var kind) && kind.ValueKind == JsonValueKind.String && kind.GetString() == "request-uncertain"
+                && root.TryGetProperty("requestId", out var requestId) && requestId.ValueKind == JsonValueKind.String
+                && requestId.GetString() is { } id && Hash(id) == markerHash
+                    ? id
+                    : null;
+        }
+        catch (JsonException) { return null; }
+    }
     private static string Hash(string value) => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant(); private static bool IsHash(string value) => value is { Length: 71 } && value.StartsWith("sha256:", StringComparison.Ordinal) && value[7..].All(Uri.IsHexDigit);
     private static string? SanitizeRemote(string? value, int max) => value is null ? null : new string(value.Where(ch => !char.IsControl(ch)).Take(max).ToArray()); private static string Now() => DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
     private static void Add(SqliteCommand q, params (string Name, object? Value)[] values) { foreach (var value in values) q.Parameters.AddWithValue(value.Name, value.Value ?? DBNull.Value); }

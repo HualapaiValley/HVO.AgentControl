@@ -40,6 +40,9 @@ from the `generation = 2` identity.
 The runtime is disabled by default for host development; Compose enables it.
 This slice does not provision developers, route tasks, or implement the full
 organization lifecycle.
+Remote-worker reconciliation-integrity failures return a sanitized `502`
+ProblemDetails response titled `Remote worker reconciliation is invalid`; the
+detail states that correlation failed and dispatch remains held.
 
 ## Communication
 
@@ -173,7 +176,10 @@ the cursor becomes `disconnected`, clears its hold summary, and suppresses viewe
 availability until a subsequent authenticated worker status is recorded. The
 owner-authenticated `/api/workers/status` response exposes the hash-only audit rows.
 Marker-less acknowledgment is limited to controller `replay-gap` and
-`ownership-changed` obligations. For ownership changes with active work, the owner
+`ownership-changed` obligations. Marker-bearing controller `session-reconciliation`
+and `request-uncertain` obligations are also eligible when their bounded marker is
+valid; the latter is the explicit escape hatch when repeated request-id reconciliation
+cannot establish a worker outcome. For ownership changes with active work, the owner
 must first externally confirm the outcome or choose a reconciled stop/restart; the
 acknowledgment itself neither stops nor adopts work. A non-capacity observation append
 failure does not cancel ACP or alter an already-established request, cancellation
@@ -201,7 +207,13 @@ atomically invalidate old permissions, clear ownership/permission holds and reta
 `process-exited` hold. ACP process exit is not itself a bridge transport failure:
 status, replay, hold and exact recovery operations remain available on the same
 healthy owner connection, while submit/cancel/permission continue to enforce their
-own running-process and hold gates. Cancellation likewise requires an explicit cancellation ID, target request,
+own running-process and hold gates. Submit receipt is deliberately split from prompt
+completion: registration and the ACP frame write complete the controller-facing call
+with durable `forwarded` state, while a bridge-owned operation continues waiting for
+the correlated response, retains the active prompt and prompt lock, and records the
+terminal outcome for reconciliation. This keeps the authenticated connection reader
+available for status, cancellation, replay and permission decisions during an active
+prompt. Cancellation likewise requires an explicit cancellation ID, target request,
 epoch/nonce and bounded `session/cancel` envelope. Its canonical intent is persisted
 before the bridge-lifetime write; same ID/hash is idempotent, changed reuse rejects,
 forwarded receipt is not target completion, and ambiguous writes reconcile as

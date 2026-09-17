@@ -108,8 +108,17 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
 
     public async Task<WorkerCursorRecord> SynchronizeOnceAsync(string workerId, CancellationToken cancellationToken)
     {
-        var lease = await ConnectAndSynchronizeAsync(workerId, cancellationToken).ConfigureAwait(false);
-        return Store().GetWorkerCursor(workerId) ?? throw new OrganizationStoreException("Worker cursor was not persisted.");
+        RequireEnabled();
+        await EnsureStartupReconciledAsync(cancellationToken).ConfigureAwait(false);
+        var entry = Entry(workerId);
+        await entry.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var lease = await EnsureConnectedAndSynchronizedLockedAsync(workerId, entry, cancellationToken).ConfigureAwait(false);
+            await RefreshStatusLockedAsync(workerId, entry, lease, cancellationToken).ConfigureAwait(false);
+            return Store().GetWorkerCursor(workerId) ?? throw new OrganizationStoreException("Worker cursor was not persisted.");
+        }
+        finally { entry.Gate.Release(); }
     }
 
     public async Task<WorkerRequestRecord> DispatchAsync(RemoteDispatchCommand command, CancellationToken cancellationToken)
@@ -138,7 +147,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 var mutation = lease.Session.Mutation("submit", new Dictionary<string, object?> { ["requestId"] = request.Id, ["envelope"] = envelope, ["turnId"] = request.TurnId });
                 var result = await lease.Session.InvokeAsync("submit", mutation, true, cancellationToken).ConfigureAwait(false);
                 Touch(lease);
-                var remote = JsonSerializer.Deserialize<BridgeStoredRequest>(result.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? throw new WorkerProtocolException("Worker submit result is invalid.");
+                var remote = DeserializeRequired<BridgeStoredRequest>(result.Result, "Worker submit result");
                 return ApplyRemoteRequest(store, request, remote);
             }
             catch (WorkerRemoteException ex) when (ex.Code == "worker-operation-uncertain")
@@ -147,6 +156,20 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
                 return store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain", ex.Code);
             }
             catch (WorkerRemoteException ex) { return store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Failed", ex.Code); }
+            catch (WorkerReconciliationInvalidException)
+            {
+                // The worker answered the submit with state that cannot be correlated
+                // to the durable controller intent. The write may still have taken
+                // effect remotely, so the request becomes an exact uncertain
+                // obligation, the owner session is dropped, and the worker is held
+                // until an operator resolves that obligation. The failure is
+                // rethrown so the API reports a sanitized 502 rather than a result.
+                var enrollment = store.GetWorkerEnrollment(command.WorkerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+                RecordRequestUncertain(store, enrollment, lease.Status, request, "worker-submit-protocol-invalid");
+                await LoseSessionLockedAsync(command.WorkerId, entry).ConfigureAwait(false);
+                Store().RecordWorkerConnectionState(command.WorkerId, "held");
+                throw;
+            }
             catch (Exception ex) when (IsSessionLoss(ex))
             {
                 await LoseSessionLockedAsync(command.WorkerId, entry).ConfigureAwait(false);
@@ -207,7 +230,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         {
             if (entry.Lease is null) throw new OrganizationConcurrencyException("The cached owner lease is unavailable; reconnect would fence the pending permission.");
             var lease = entry.Lease;
-            await RefreshStatusLockedAsync(command.WorkerId, entry, lease, token).ConfigureAwait(false);
+            await RefreshStatusLockedAsync(command.WorkerId, entry, lease, token, reconcileForwarded: false).ConfigureAwait(false);
             var authoritative = store.GetWorkerPendingPermission(command.WorkerId, command.DecisionId) ?? throw new KeyNotFoundException("Pending worker permission not found.");
             if (authoritative.Revision != command.Revision || authoritative.State != "pending") throw new OrganizationConcurrencyException("Pending worker permission changed.");
             var request = store.GetWorkerRequest(authoritative.RequestId) ?? throw new OrganizationConcurrencyException("Pending worker permission is not backed by a controller-tracked request.");
@@ -345,6 +368,11 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         }
         catch
         {
+            // This arm is deliberately asymmetric with the caller-cancellation arm
+            // above: every other failure (including an invalid reconciliation answer
+            // or an uncertain session load) may have reached the worker, so the
+            // uncommitted session is disposed and the worker held until the durable
+            // obligation is resolved. Caller cancellation proved no effect first.
             store.RecordWorkerConnectionState(workerId, "held");
             if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
             throw;
@@ -664,33 +692,45 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         catch (JsonException) { return null; }
     }
 
-    private static async Task ReconcileRequestsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, CancellationToken token)
+    private static async Task ReconcileRequestsAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, CancellationToken token, bool forwardedOnly = false)
     {
-        foreach (var request in store.ListWorkerRequests().Where(x => x.WorkerId == enrollment.WorkerId && x.State is "Intent" or "Forwarding" or "Uncertain"))
+        var states = forwardedOnly ? new[] { "Forwarded" } : new[] { "Intent", "Forwarding", "Forwarded", "Uncertain" };
+        foreach (var request in store.ListWorkerRequestsForReconciliation(enrollment.WorkerId, states))
         {
             if (request.State == "Intent")
             {
                 store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Interrupted", "controller-restarted-before-forwarding");
                 continue;
             }
-            if (request.OwnershipEpoch != session.Lease.Epoch || request.ProcessGeneration != status.ProcessGeneration)
+            if (request.ProcessGeneration != status.ProcessGeneration)
             {
-                store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id, RequestMarker(request.Id));
-                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "request-recovery-required"] }, []);
+                RecordRequestUncertain(store, enrollment, status, request, "worker-process-generation-changed");
                 continue;
             }
             try
             {
                 var result = await session.InvokeAsync("reconcile", new { operation = "reconcile", kind = "request", requestId = request.Id }, false, token).ConfigureAwait(false);
-                var remote = JsonSerializer.Deserialize<BridgeStoredRequest>(result.Result.GetRawText(), WorkerProtocol.JsonOptions);
-                if (remote is not null) ApplyRemoteRequest(store, request, remote);
+                var remote = DeserializeRequired<BridgeStoredRequest>(result.Result, "Worker reconcile result");
+                ApplyRemoteRequest(store, request, remote);
             }
             catch (WorkerRemoteException)
             {
-                store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id, RequestMarker(request.Id));
-                store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "request-recovery-required"] }, []);
+                RecordRequestUncertain(store, enrollment, status, request);
+            }
+            catch (WorkerReconciliationInvalidException)
+            {
+                RecordRequestUncertain(store, enrollment, status, request, "worker-reconcile-protocol-invalid");
+                throw;
             }
         }
+    }
+
+    private static void RecordRequestUncertain(OrganizationStore store, WorkerEnrollmentRecord enrollment, BridgeWorkerStatus status, WorkerRequestRecord request, string outcomeCategory = "worker-request-unknown")
+    {
+        if (request.State != "Uncertain")
+            store.TransitionWorkerRequest(request.Id, request.Revision, request.State, "Uncertain", outcomeCategory);
+        store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", request.Id, OrganizationStore.RequestUncertainMarker(request.Id));
+        store.RecordWorkerStatusAndEvents(enrollment.WorkerId, ToController(status) with { DispatchHeld = true, HoldReasons = [.. status.HoldReasons, "request-recovery-required"] }, []);
     }
 
     /// <summary>
@@ -745,9 +785,10 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     }
 
     /// <summary>
-    /// Acknowledges a marker-less controller obligation after the owner has
-    /// externally reconciled the unverifiable effect. This path is store-only and
-    /// never contacts or infers state from the worker.
+    /// Acknowledges an eligible controller obligation after the owner has
+    /// externally reconciled the unverifiable effect. This includes marker-less
+    /// transport obligations and marker-bearing request uncertainty. This path is
+    /// store-only and never contacts or infers state from the worker.
     /// </summary>
     public async Task<WorkerRecoveryObligationRecord> AcknowledgeRecoveryAsync(string workerId, string obligationId, int expectedRevision, string evidenceHash, string disposition, CancellationToken token)
     {
@@ -777,7 +818,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         };
     }
 
-    internal static string RequestMarker(string requestId) => JsonSerializer.Serialize(new { kind = "request-uncertain", requestId }, WorkerProtocol.JsonOptions);
+    internal static string RequestMarker(string requestId) => OrganizationStore.RequestUncertainMarker(requestId);
 
     internal async Task<WorkerConnectionLease?> GetCachedLeaseAsync(string workerId, CancellationToken token, bool refresh = false)
     {
@@ -793,14 +834,26 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         finally { entry.Gate.Release(); }
     }
 
-    private async Task RefreshStatusLockedAsync(string workerId, WorkerEntry entry, WorkerConnectionLease lease, CancellationToken token)
+    private async Task RefreshStatusLockedAsync(string workerId, WorkerEntry entry, WorkerConnectionLease lease, CancellationToken token, bool reconcileForwarded = true)
     {
         try
         {
             var status = await StatusAsync(lease.Session, token).ConfigureAwait(false);
-            Store().RecordWorkerStatusAndEvents(workerId, ToController(status), []);
+            var store = Store();
+            store.RecordWorkerStatusAndEvents(workerId, ToController(status), []);
+            if (reconcileForwarded)
+            {
+                var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+                await ReconcileRequestsAsync(store, enrollment, lease.Session, status, token, forwardedOnly: true).ConfigureAwait(false);
+            }
             lease.Status = status;
             Touch(lease);
+        }
+        catch (WorkerReconciliationInvalidException)
+        {
+            await LoseSessionLockedAsync(workerId, entry).ConfigureAwait(false);
+            Store().RecordWorkerConnectionState(workerId, "held");
+            throw;
         }
         catch (Exception ex) when (IsSessionLoss(ex))
         {
@@ -819,8 +872,8 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
 
     private static WorkerRequestRecord ApplyRemoteRequest(OrganizationStore store, WorkerRequestRecord local, BridgeStoredRequest remote)
     {
-        if (remote.RequestId != local.Id || remote.OwnershipEpoch != local.OwnershipEpoch || remote.ProcessGeneration != local.ProcessGeneration || remote.TurnId != local.TurnId || remote.SessionId != local.NativeSessionId) throw new WorkerProtocolException("Worker request correlation does not match the durable controller intent.");
-        var to = remote.State switch { "forwarding" or "forwarded" => "Forwarded", "completed" => "Completed", "failed" => "Failed", "uncertain" => "Uncertain", _ => throw new WorkerProtocolException("Worker request state is invalid.") };
+        if (remote.RequestId != local.Id || remote.OwnershipEpoch != local.OwnershipEpoch || remote.ProcessGeneration != local.ProcessGeneration || remote.TurnId != local.TurnId || remote.SessionId != local.NativeSessionId) throw new WorkerReconciliationInvalidException("Worker request correlation does not match the durable controller intent.");
+        var to = remote.State switch { "forwarding" or "forwarded" => "Forwarded", "completed" => "Completed", "failed" => "Failed", "uncertain" => "Uncertain", _ => throw new WorkerReconciliationInvalidException("Worker request state is invalid.") };
         if (local.State == to) return local;
         return store.TransitionWorkerRequest(local.Id, local.Revision, local.State, to, to.ToLowerInvariant(), remote.OutcomeJson);
     }
@@ -828,8 +881,32 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     private static async Task<BridgeWorkerStatus> StatusAsync(IWorkerBridgeSession session, CancellationToken token)
     {
         var result = await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<BridgeWorkerStatus>(result.Result.GetRawText(), WorkerProtocol.JsonOptions) ?? throw new WorkerProtocolException("Worker status is invalid.");
+        return DeserializeRequired<BridgeWorkerStatus>(result.Result, "Worker status");
     }
+
+    /// <summary>
+    /// Deserializes one exact bridge result into its protocol record, converting a
+    /// malformed or wrongly-typed payload into
+    /// <see cref="WorkerReconciliationInvalidException"/>. A raw
+    /// <see cref="JsonException"/> escaped the submit and reconcile boundaries
+    /// otherwise: the request stayed in <c>Forwarding</c> with a live, unheld
+    /// session and no durable uncertain obligation. Treating the answer as a
+    /// reconciliation-integrity failure makes the caller drop the session, hold the
+    /// worker, and let the API report a sanitized 502.
+    /// </summary>
+    private static T DeserializeRequired<T>(JsonElement result, string description) where T : class
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<T>(result.GetRawText(), WorkerProtocol.JsonOptions)
+                ?? throw new WorkerReconciliationInvalidException($"{description} is invalid.");
+        }
+        catch (JsonException exception)
+        {
+            throw new WorkerReconciliationInvalidException($"{description} is invalid.", exception);
+        }
+    }
+
     private static ControllerWorkerStatus ToController(BridgeWorkerStatus s) => new(s.WorkerGeneration, s.ProcessGeneration, s.ProcessState, s.ActiveRequestId, s.PendingPermission?.PayloadHash, s.OwnershipEpoch, s.DispatchHeld, s.HoldReasons, s.AcknowledgedWorkerGeneration, s.AcknowledgedSequence, s.ReplayLoss is null ? null : JsonSerializer.Serialize(s.ReplayLoss, WorkerProtocol.JsonOptions), s.ReplayGaps.Select(x => JsonSerializer.Serialize(x, WorkerProtocol.JsonOptions)).ToArray(), s.JournalFailure is null ? null : JsonSerializer.Serialize(s.JournalFailure, WorkerProtocol.JsonOptions), s.PendingPermission is null ? null : new ControllerPendingPermission(s.PendingPermission.ProcessGeneration, s.PendingPermission.OwnershipEpoch, s.PendingPermission.RequestId, s.PendingPermission.TurnId, s.PendingPermission.DecisionId, s.PendingPermission.PayloadHash, s.PendingPermission.OptionIds, s.PendingPermission.State), s.ViewerSupported, s.ViewerAvailable);
     private static string SanitizeKind(string kind) { var value = new string(kind.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_').Take(64).ToArray()); return value.Length > 0 ? value : "event"; }
     private static string SanitizeJson(string json) { using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 }); return JsonSerializer.Serialize(document.RootElement, WorkerProtocol.JsonOptions); }

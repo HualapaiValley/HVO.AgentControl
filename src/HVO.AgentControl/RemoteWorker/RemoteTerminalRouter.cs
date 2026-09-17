@@ -45,10 +45,26 @@ public sealed class RemoteTerminalRouter(
         if (enrollment is null) { context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable; return; }
         WorkerConnectionLease? lease;
         try { lease = await manager.GetCachedLeaseAsync(target.WorkerId, token, refresh: true).ConfigureAwait(false); }
-        catch (Exception exception) when (exception is OrganizationStoreException or RemoteWorkerException or InvalidOperationException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            // The caller abandoned the request before anything was upgraded, so
+            // there is no response to write; the host owns the aborted request.
+            throw;
+        }
+        catch (Exception exception) when (IsLeaseRefreshFailure(exception))
         {
             // Nothing is upgraded yet, so a status code is still the right answer.
-            context.Response.StatusCode = exception is RemoteWorkerUnavailableException { Transport: true } ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable;
+            // The mapping is deliberately local so the router never depends on the
+            // API ProblemDetails translation. A worker protocol/transport failure or
+            // an invalid reconciliation answer is a bad gateway; store or runtime
+            // unavailability is a service-unavailable condition. A non-caller
+            // cancellation is treated as unavailable rather than given its own arm.
+            context.Response.StatusCode = exception switch
+            {
+                RemoteWorkerUnavailableException { Transport: true } => StatusCodes.Status502BadGateway,
+                WorkerProtocolException or IOException or ObjectDisposedException => StatusCodes.Status502BadGateway,
+                _ => StatusCodes.Status503ServiceUnavailable,
+            };
             return;
         }
         if (lease is null || target.SessionRecordId is null || target.NativeSessionId is null || lease.Ownership.Epoch != target.OwnershipEpoch || lease.Status.ProcessGeneration != target.ProcessGeneration)
@@ -141,6 +157,23 @@ public sealed class RemoteTerminalRouter(
             browser.Dispose();
         }
     }
+
+    /// <summary>
+    /// True when a cached-lease refresh failure can still be answered with a status
+    /// code before the socket upgrade. This covers the worker protocol family
+    /// (reconciliation, remote rejection, uncertain read/write), the transport
+    /// failures beneath it, store/runtime unavailability, and a non-caller
+    /// cancellation. The caller's own cancellation is handled by the guard above
+    /// because it has no HTTP response.
+    /// </summary>
+    private static bool IsLeaseRefreshFailure(Exception exception) =>
+        exception is OrganizationStoreException
+            or RemoteWorkerException
+            or WorkerProtocolException
+            or IOException
+            or ObjectDisposedException
+            or OperationCanceledException
+            or InvalidOperationException;
 
     private static void Fail(OrganizationStore store, string workerId, string viewerId)
     {

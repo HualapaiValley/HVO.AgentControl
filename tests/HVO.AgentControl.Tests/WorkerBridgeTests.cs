@@ -400,8 +400,9 @@ public sealed class WorkerBridgeTests
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "after-load", prompt.RootElement, "turn-after", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 3);
         using var submitted = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[2]);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{submitted.RootElement.GetProperty("id").GetInt64()},\"result\":{{}}}}\n");
-        Assert.Equal("completed", (await submit).State);
+        await Eventually(() => store.GetRequest("after-load")?.State == "completed");
     }
 
     [Fact]
@@ -488,9 +489,10 @@ public sealed class WorkerBridgeTests
         var pending = store.Status().PendingPermission!;
         Assert.Equal("host-request", pending.RequestId); Assert.Equal("host-turn", pending.TurnId); Assert.StartsWith("perm:", pending.DecisionId, StringComparison.Ordinal);
         Assert.NotEqual("spoofed-decision", pending.DecisionId); Assert.Contains("reject_once", pending.OptionIds); Assert.DoesNotContain("do-not-retain", JsonSerializer.Serialize(pending), StringComparison.Ordinal);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         var acpId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
-        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("host-request")?.State == "completed");
     }
 
     [Fact]
@@ -540,9 +542,8 @@ public sealed class WorkerBridgeTests
         using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"transport\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         if (input is FailingGateStream failing) failing.Fail(new IOException("raw injected transport detail")); else ((GateStream)input).Complete();
-        var failure = await Assert.ThrowsAsync<WorkerOperationUncertainException>(() => submit.WaitAsync(TimeSpan.FromSeconds(2)));
-        Assert.DoesNotContain("raw injected", failure.Message, StringComparison.Ordinal);
         await Eventually(() => store.GetRequest("req")?.State == "uncertain" && store.Status().ActiveRequestId is null);
         Assert.Equal(throwOnRead ? "transport-uncertain" : "exited", store.Status().ProcessState); Assert.Equal(throwOnRead ? "acp-transport-uncertain" : "process-exited", store.Status().HoldReason);
         var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
@@ -561,8 +562,9 @@ public sealed class WorkerBridgeTests
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
-        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("req")?.State == "completed");
         input.Complete(); await Eventually(() => store.Status().ProcessState == "exited");
         Assert.Equal("completed", store.GetRequest("req")!.State);
     }
@@ -739,6 +741,21 @@ public sealed class WorkerBridgeTests
         Assert.Equal(1L, CountRows(System.IO.Path.Combine(temp.Path, "bridge.db"), "cancellations"));
     }
 
+    [Theory]
+    [InlineData("{\"jsonrpc\":\"1.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses-test\"}}")]
+    [InlineData("{\"jsonrpc\":2.0,\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses-test\"}}")]
+    public async Task CancellationEnvelopeWithWrongJsonRpcVersionIsRejectedBeforeRegistration(string envelopeJson)
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
+        using var invalid = JsonDocument.Parse(envelopeJson);
+
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-bad-jsonrpc", "target", invalid.RootElement, CancellationToken.None));
+
+        Assert.Null(store.GetCancellation("cancel-bad-jsonrpc"));
+    }
+
     [Fact]
     public async Task FailedCancellationWriteBecomesUncertainAndIsNotBlindlyRetried()
     {
@@ -833,6 +850,63 @@ public sealed class WorkerBridgeTests
         Assert.True(closed is null or IOException, closed?.ToString());
         await WorkerProtocol.WriteFrameAsync(second, new { operation = "status" }, CancellationToken.None); using var accepted = await WorkerProtocol.ReadFrameAsync(second, CancellationToken.None); Assert.Equal("result", accepted!.RootElement.GetProperty("type").GetString());
         Assert.True(leaseTwo.GetProperty("epoch").GetInt64() > leaseOne.GetProperty("epoch").GetInt64());
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task RealUnixSocketProcessesStatusAndCancelBeforePromptCompletion()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
+        using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(12));
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-async", turnId = "turn-async", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        using (var submitted = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", submitted!.RootElement.GetProperty("result").GetProperty("state").GetString());
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "status" }, CancellationToken.None);
+        using (var status = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("req-async", status!.RootElement.GetProperty("result").GetProperty("activeRequestId").GetString());
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "cancel", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), cancellationId = "cancel-async", targetRequestId = "req-async", envelope = new { jsonrpc = "2.0", method = "session/cancel", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        using (var cancelled = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", cancelled!.RootElement.GetProperty("result").GetProperty("state").GetString());
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        var frames = output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(value => JsonDocument.Parse(value)).ToArray();
+        Assert.Contains(frames, frame => frame.RootElement.GetProperty("method").GetString() == "session/cancel");
+        var promptId = frames.Single(frame => frame.RootElement.GetProperty("method").GetString() == "session/prompt").RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
+        await Eventually(() => store.GetRequest("req-async")?.State == "completed");
+        foreach (var frame in frames) frame.Dispose();
+
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task RealUnixSocketProcessesPermissionDecisionBeforePromptCompletion()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
+        using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(13));
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-permission", turnId = "turn-permission", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        using (var submitted = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", submitted!.RootElement.GetProperty("result").GetProperty("state").GetString());
+        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"reject_once"}]}}""" + "\n");
+        await Eventually(() => store.Status().PendingPermission is not null);
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "status" }, CancellationToken.None);
+        using var status = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        var pending = status!.RootElement.GetProperty("result").GetProperty("pendingPermission");
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "permission", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), decisionId = pending.GetProperty("decisionId").GetString(), processGeneration = pending.GetProperty("processGeneration").GetInt64(), requestId = pending.GetProperty("requestId").GetString(), turnId = pending.GetProperty("turnId").GetString(), decision = "reject_once" }, CancellationToken.None);
+        using (var decided = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("decided", decided!.RootElement.GetProperty("result").GetProperty("state").GetString());
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        var promptId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
+        await Eventually(() => store.GetRequest("req-permission")?.State == "completed");
+
         shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
     }
 
@@ -946,9 +1020,12 @@ public sealed class WorkerBridgeTests
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "missing", missing.RootElement, "turn", CancellationToken.None));
         using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"raw-request-secret\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", prompt.RootElement, "turn-a", CancellationToken.None); await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", prompt.RootElement, "turn-b", CancellationToken.None));
-        var id = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64(); var oversizedCode = new string('x', 2_048); input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":\"{oversizedCode}\",\"message\":\"raw-result-secret\"}}}}\n"); var completed = await submit.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal("failed", completed.State); Assert.DoesNotContain(oversizedCode, completed.OutcomeJson, StringComparison.Ordinal); Assert.Contains("\"errorCategory\":null", completed.OutcomeJson, StringComparison.Ordinal);
+        var id = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64(); var oversizedCode = new string('x', 2_048); input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":\"{oversizedCode}\",\"message\":\"raw-result-secret\"}}}}\n");
+        await Eventually(() => store.GetRequest("req")?.State == "failed");
+        var completed = store.GetRequest("req")!;
+        Assert.DoesNotContain(oversizedCode, completed.OutcomeJson, StringComparison.Ordinal); Assert.Contains("\"errorCategory\":null", completed.OutcomeJson, StringComparison.Ordinal);
         var databasePath = System.IO.Path.Combine(temp.Path, "bridge.db");
         using (var connection = Open(databasePath))
         {
@@ -1065,9 +1142,10 @@ public sealed class WorkerBridgeTests
         var marker = store.Status().JournalFailure!;
         Assert.Equal("observation-append", marker.ErrorCategory);
         Assert.Equal("running", store.Status().ProcessState);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
-        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("req")?.State == "completed");
         Assert.Throws<WorkerProtocolException>(() => store.ReconcileJournalFailure(marker.OperationId + "x", marker.WorkerGeneration));
         Assert.True(store.Status().DispatchHeld);
         store.ReconcileJournalFailure(marker.OperationId, marker.WorkerGeneration);
@@ -1078,8 +1156,9 @@ public sealed class WorkerBridgeTests
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
+        Assert.Equal("forwarded", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{nextId},\"result\":{{}}}}\n");
-        Assert.Equal("completed", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("next")?.State == "completed");
         Assert.Equal("running", store.Status().ProcessState);
     }
 
@@ -1108,16 +1187,18 @@ public sealed class WorkerBridgeTests
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-one", first.RootElement, "turn-one", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var firstId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{firstId},\"result\":{{\"ok\":true}}}}\n");
-        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("req-one")?.State == "completed" && store.Status().ActiveRequestId is null);
         Assert.IsType<WorkerReplayLossException>(Record.Exception(() => store.AppendEvent("another", "{}")));
         store.ReconcileReplayLoss(store.Status().ReplayLoss!.WorkerGeneration, store.Status().ReplayLoss!.MarkerSequence);
         using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-two", second.RootElement, "turn-two", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var secondId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
+        Assert.Equal("forwarded", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{secondId},\"result\":{{}}}}\n");
-        Assert.Equal("completed", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("req-two")?.State == "completed");
         Assert.Equal("running", store.Status().ProcessState);
     }
 
@@ -1133,9 +1214,10 @@ public sealed class WorkerBridgeTests
         using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses-test\"}}");
         var forwarded = await runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel", "target", cancellation.RootElement, CancellationToken.None);
         Assert.Equal("forwarded", forwarded.State); Assert.Equal("forwarded", store.GetCancellation("cancel")!.State);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         var promptId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
-        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("target")?.State == "completed");
     }
 
     [Fact]
@@ -1155,9 +1237,10 @@ public sealed class WorkerBridgeTests
         Assert.Equal(2, output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
         Assert.Equal("decided", (await runtime.DecidePermissionAsync(lease.Epoch, pending.DecisionId, pending.ProcessGeneration, pending.RequestId, pending.TurnId, "reject_once", CancellationToken.None)).State);
         Assert.Equal(2, output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         var promptId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
-        Assert.Equal("completed", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        await Eventually(() => store.GetRequest("req")?.State == "completed");
     }
 
     [Fact]

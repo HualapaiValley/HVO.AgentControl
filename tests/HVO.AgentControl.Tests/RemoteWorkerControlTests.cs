@@ -54,12 +54,12 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public void FreshSchemaIsV4AndCarriesRemoteWorkerTablesWithoutSeededEnrollment()
+    public void FreshSchemaIsV6AndCarriesRemoteWorkerTablesWithoutSeededEnrollment()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(5L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        Assert.Equal(6L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
         foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
     }
@@ -508,7 +508,9 @@ public sealed class RemoteWorkerControlTests
     public void StartupReconciliationMarksForwardingRequestUncertainAndCreatesObligation()
     {
         using var fixture = new RemoteStoreFixture(); var request = fixture.CreateEligibleRequest(); request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
-        Assert.Equal(1, fixture.Store.ReconcileControllerStartup()); Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(request.Id)!.State); Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+        Assert.Equal(1, fixture.Store.ReconcileControllerStartup()); Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == WorkerConnectionManager.RequestMarker(request.Id));
+        Assert.False(fixture.Store.AcknowledgeControllerRecovery(request.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('a', 64), "acknowledged-after-external-reconciliation").Active);
     }
 
     [Fact]
@@ -547,6 +549,50 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture(); var request = fixture.CreateEligibleRequest(); request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding"); request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
         Assert.Throws<OrganizationValidationException>(() => fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Uncertain", "Forwarding"));
+    }
+
+    [Fact]
+    public void InterruptingUncertainRequestRetainsRecoveryObligation()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
+
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Uncertain", "Interrupted");
+
+        Assert.Equal("Interrupted", request.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+    }
+
+    [Fact]
+    public void AcknowledgingInterruptedRequestReconcilesExternalEffectAndSuppressesRecreation()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Uncertain", "Interrupted");
+        var marker = WorkerConnectionManager.RequestMarker(request.Id);
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == marker);
+
+        var acknowledged = fixture.Store.AcknowledgeControllerRecovery(request.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('a', 64), "acknowledged-after-external-reconciliation");
+
+        Assert.False(acknowledged.Active);
+        // External-effects reconciliation never advances the request or its task.
+        Assert.Equal("Interrupted", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.Equal("Uncertain", fixture.Store.GetWorkerTask(request.TaskId)!.State);
+        Assert.Equal("request-uncertain", Assert.Single(fixture.Store.ListWorkerRecoveryAudit(request.WorkerId), x => x.ObligationId == obligation.Id).Kind);
+
+        // The immutable audit suppresses re-creating the exact acknowledged obligation.
+        fixture.Store.RecordControllerRecovery(request.WorkerId, "request-uncertain", request.Id, marker);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+
+        // A marker that does not hash the named request is refused even when the
+        // request is Interrupted.
+        fixture.Store.RecordControllerRecovery(request.WorkerId, "request-uncertain", "other-marker", marker);
+        var mismatched = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(request.WorkerId, mismatched.Id, mismatched.Revision, "sha256:" + new string('a', 64), "acknowledged-after-external-reconciliation"));
     }
 
     [Fact]
@@ -815,6 +861,298 @@ public sealed class RemoteWorkerControlTests
         Assert.Same(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None), await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task ForwardedDispatchReconcilesToCompletionAndCancellationUsesCachedLease()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var dispatched = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "async-dispatch", "hello"), CancellationToken.None);
+        Assert.Equal("Forwarded", dispatched.State);
+        var lease = await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None);
+
+        var cancellation = await manager.CancelAsync(new(dispatched.Id), CancellationToken.None);
+        Assert.Equal("Forwarded", cancellation.State);
+        Assert.Same(lease, await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+
+        session.ReconcileRequestState = "completed";
+        await manager.SynchronizeOnceAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Completed", fixture.Store.GetWorkerRequest(dispatched.Id)!.State);
+        Assert.Contains(session.Invocations, x => x.Operation == "reconcile");
+    }
+
+    [Fact]
+    public async Task ReconnectAtNewLeaseEpochReconcilesRequestStoredUnderPriorEpoch()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var epoch1 = new FakeBridgeSession(enrollment.ControllerId, 1, fixture.BridgeStatus()) { ReconcileRequestState = "forwarded" };
+        WorkerRequestRecord dispatched;
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(epoch1)))
+            dispatched = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "epoch-reconnect", "hello"), CancellationToken.None);
+
+        Assert.Equal("Forwarded", dispatched.State);
+        Assert.Equal(1, dispatched.OwnershipEpoch);
+
+        var epoch2Status = fixture.BridgeStatus() with { OwnershipEpoch = 2 };
+        var epoch2 = new FakeBridgeSession(enrollment.ControllerId, 2, epoch2Status)
+        {
+            ReconcileRequestState = "completed",
+            ReconcileOwnershipEpoch = 1,
+            ReconcileTurnId = dispatched.TurnId,
+        };
+        await using var reconnected = fixture.CreateManager(new FakeBridgeSessionFactory(epoch2));
+        await reconnected.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Completed", fixture.Store.GetWorkerRequest(dispatched.Id)!.State);
+        Assert.Contains(epoch2.Invocations, x => x.Operation == "reconcile" && x.Payload.Contains(dispatched.Id, StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "request-uncertain");
+
+        var next = await reconnected.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "epoch2-dispatch", "next"), CancellationToken.None);
+        Assert.Equal("Forwarded", next.State);
+        Assert.Equal(2, next.OwnershipEpoch);
+    }
+
+    [Fact]
+    public async Task HeartbeatProcessGenerationChangeMakesForwardedRequestUncertainUntilExactCompletion()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Uncertain", "Forwarded");
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+        var current = fixture.BridgeStatus();
+        var restarted = fixture.BridgeStatus(processGeneration: 2);
+        var session = new FakeBridgeSession("controller-a", current, current, restarted) { ReconcileRequestState = "forwarded" };
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session)))
+        {
+            await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+            await manager.HeartbeatAsync(request.WorkerId, TimeSpan.FromSeconds(10), CancellationToken.None);
+        }
+
+        Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == WorkerConnectionManager.RequestMarker(request.Id));
+
+        var completed = new FakeBridgeSession("controller-a", fixture.BridgeStatus()) { ReconcileRequestState = "completed" };
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(completed)))
+            await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Completed", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+    }
+
+    [Fact]
+    public async Task UnknownForwardedRequestBecomesUncertainThenExactCompletionClearsRecovery()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var unknown = new FakeBridgeSession("controller-a", fixture.BridgeStatus());
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(unknown)))
+            await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == WorkerConnectionManager.RequestMarker(request.Id));
+
+        var completed = new FakeBridgeSession("controller-a", fixture.BridgeStatus()) { ReconcileRequestState = "completed" };
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(completed)))
+            await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Completed", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+    }
+
+    [Fact]
+    public async Task UncertainForwardedCompletionClearsRecoveryAndAllowsDispatch()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+
+        // Reconcile the uncertain request back to an exact forwarded receipt first;
+        // that durable re-confirmation must retain the obligation.
+        var reForwarded = new FakeBridgeSession("controller-a", fixture.BridgeStatus()) { ReconcileRequestState = "forwarded" };
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(reForwarded)))
+            await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Forwarded", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+
+        // The later exact completion clears the obligation regardless of coming from
+        // Forwarded rather than Uncertain, and releases the worker to accept work.
+        var completed = new FakeBridgeSession("controller-a", fixture.BridgeStatus()) { ReconcileRequestState = "completed" };
+        await using (var manager = fixture.CreateManager(new FakeBridgeSessionFactory(completed)))
+        {
+            await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+
+            Assert.Equal("Completed", fixture.Store.GetWorkerRequest(request.Id)!.State);
+            Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+
+            var dispatched = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, request.WorkerId, fixture.SessionId, fixture.NativeSessionId, "after-uncertain-completion", "hello"), CancellationToken.None);
+            Assert.Equal("Forwarded", dispatched.State);
+        }
+    }
+
+    [Fact]
+    public async Task AcknowledgedUncertainRequestStaysAdjudicatedAcrossReconnectAndAllowsDispatch()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Uncertain");
+        var obligation = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+        fixture.Store.AcknowledgeControllerRecovery(request.WorkerId, obligation.Id, obligation.Revision, "sha256:" + new string('a', 64), "acknowledged-after-external-reconciliation");
+
+        var session = new FakeBridgeSession("controller-a", fixture.BridgeStatus()) { ReconcileRequestState = "unknown" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+
+        Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "reconcile" && x.Payload.Contains(request.Id, StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain");
+
+        var dispatched = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, request.WorkerId, fixture.SessionId, fixture.NativeSessionId, "after-owner-ack", "next"), CancellationToken.None);
+        Assert.Equal("Forwarded", dispatched.State);
+    }
+
+    [Fact]
+    public async Task MalformedRequestReconciliationPersistsRecoveryDropsSessionAndHoldsWorker()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var session = new FakeBridgeSession("controller-a", fixture.BridgeStatus()) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        session.ReconcileOwnershipEpoch = 2;
+
+        await Assert.ThrowsAsync<WorkerReconciliationInvalidException>(() => manager.SynchronizeOnceAsync(request.WorkerId, CancellationToken.None));
+
+        Assert.Equal("Uncertain", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == WorkerConnectionManager.RequestMarker(request.Id));
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(request.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(request.WorkerId, CancellationToken.None));
+        Assert.True(session.Disposed);
+    }
+
+    [Fact]
+    public async Task MalformedSubmitCorrelationPersistsRecoveryDropsSessionAndHoldsWorker()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { SubmitOwnershipEpoch = 99 };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        await Assert.ThrowsAsync<WorkerReconciliationInvalidException>(() => manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "malformed-submit", "hello"), CancellationToken.None));
+
+        var request = Assert.Single(fixture.Store.ListWorkerRequests(), x => x.IdempotencyKey == "malformed-submit");
+        Assert.Equal("Uncertain", request.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == WorkerConnectionManager.RequestMarker(request.Id));
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.True(session.Disposed);
+
+        // The durable obligation, not only the dropped lease, blocks the next
+        // dispatch from reaching the worker again.
+        var submits = session.Invocations.Count(x => x.Operation == "submit");
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "blocked-submit", "hello"), CancellationToken.None));
+        Assert.Equal(submits, session.Invocations.Count(x => x.Operation == "submit"));
+    }
+
+    [Fact]
+    public async Task MalformedSubmitPayloadPersistsRecoveryDropsSessionAndHoldsWorker()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { MalformedSubmitResult = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        // A wrongly-typed stored-request payload is not a transport loss: an exact
+        // durable uncertain obligation is recorded, the owner session dropped, and
+        // the worker held before the sanitized 502 leaves the API.
+        var exception = await Assert.ThrowsAsync<WorkerReconciliationInvalidException>(() => manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "malformed-submit-json", "hello"), CancellationToken.None));
+        Assert.True(Program.IsRemoteWorkerFailure(exception));
+
+        var request = Assert.Single(fixture.Store.ListWorkerRequests(), x => x.IdempotencyKey == "malformed-submit-json");
+        Assert.Equal("Uncertain", request.State);
+        Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Kind == "request-uncertain" && x.MarkerJson == WorkerConnectionManager.RequestMarker(request.Id));
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.True(session.Disposed);
+
+        // The durable obligation, not only the dropped lease, blocks the next
+        // dispatch from reaching the worker again.
+        var submits = session.Invocations.Count(x => x.Operation == "submit");
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "blocked-submit-json", "hello"), CancellationToken.None));
+        Assert.Equal(submits, session.Invocations.Count(x => x.Operation == "submit"));
+    }
+
+    [Fact]
+    public async Task MalformedStatusDuringRefreshDropsSessionAndHoldsWorker()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+        Assert.NotNull(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+
+        session.MalformedStatusResult = true;
+
+        await Assert.ThrowsAsync<WorkerReconciliationInvalidException>(() => manager.SynchronizeOnceAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.True(session.Disposed);
+    }
+
+    [Fact]
+    public async Task MalformedStatusDuringConnectHoldsWorkerAndDisposesSession()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { MalformedStatusResult = true };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+
+        var exception = await Assert.ThrowsAsync<WorkerReconciliationInvalidException>(() => manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.True(Program.IsRemoteWorkerFailure(exception));
+
+        Assert.Equal("held", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+        Assert.Null(await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.True(session.Disposed);
+    }
+
+    [Fact]
+    public async Task CleanStatusRejectionPropagatesWithoutDroppingAuthenticatedSession()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        var session = new FakeBridgeSession(enrollment.ControllerId, fixture.BridgeStatus()) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None);
+        var lease = await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None);
+        Assert.NotNull(lease);
+
+        session.RejectStatus = true;
+
+        await Assert.ThrowsAsync<WorkerRemoteException>(() => manager.SynchronizeOnceAsync(enrollment.WorkerId, CancellationToken.None));
+
+        // A clean authenticated status rejection must not be mistaken for a lost
+        // session: the effect is known to have been refused, so the lease, cursor,
+        // and worker connection state all survive the propagation.
+        Assert.Same(lease, await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None));
+        Assert.False(session.Disposed);
+        Assert.Equal("authenticated", fixture.Store.GetWorkerCursor(enrollment.WorkerId)!.ConnectionState);
+    }
+
     [Theory]
     [InlineData("permission-pending")]
     [InlineData("replay-gap-unreconciled")]
@@ -939,6 +1277,8 @@ public sealed class RemoteWorkerControlTests
             var dispatched = await manager.DispatchAsync(new(fixture.EmployeeId, fixture.BindingId, enrollment.WorkerId, fixture.SessionId, fixture.NativeSessionId, "after-reconciliation", "hello"), CancellationToken.None);
             Assert.Equal("Forwarded", dispatched.State);
             Assert.Single(healthy.Invocations, x => x.Operation == "submit");
+            healthy.ReconcileRequestState = "completed";
+            await manager.SynchronizeOnceAsync(enrollment.WorkerId, CancellationToken.None);
         }
 
         var rejected = new FakeBridgeSession(enrollment.ControllerId, unloaded) { RejectLoadSession = true };
@@ -1333,6 +1673,30 @@ public sealed class RemoteWorkerControlTests
         await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
 
         Assert.DoesNotContain(session.Invocations, x => x.Operation == "permission");
+    }
+
+    [Fact]
+    public async Task RejectPermissionDoesNotReconcileForwardedRequestDuringDecision()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-reject", "sha256:" + new string('7', 64), ["reject_once"], "pending", null);
+        var status = fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] };
+        var session = new FakeBridgeSession("controller-a", status) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
+        var reconcileCount = session.Invocations.Count(x => x.Operation == "reconcile");
+        session.ReconcileRequestState = "unknown";
+
+        await manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None);
+
+        Assert.Equal(reconcileCount, session.Invocations.Count(x => x.Operation == "reconcile"));
+        Assert.Equal("decided", fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!.State);
+        Assert.Equal("Forwarded", fixture.Store.GetWorkerRequest(request.Id)!.State);
+        Assert.Single(session.Invocations, x => x.Operation == "permission");
     }
 
     [Fact]
@@ -2164,6 +2528,9 @@ public sealed class RemoteWorkerControlTests
         using var fixture = new RemoteStoreFixture();
         var enrollment = fixture.CreateEnrolledAndReady();
         const string evidence = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var uncertainRequest = fixture.BeginRequest("sha256:" + new string('d', 64));
+        uncertainRequest = fixture.Store.TransitionWorkerRequest(uncertainRequest.Id, uncertainRequest.Revision, "Intent", "Forwarding");
+        fixture.Store.TransitionWorkerRequest(uncertainRequest.Id, uncertainRequest.Revision, "Forwarding", "Uncertain");
 
         var gap = new BridgeReplayGap("gap:test", "status", 1, 5, 1, 4, null, null);
         fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { DispatchHeld = true, HoldReasons = ["replay-gap-unreconciled"], ReplayGapMarkers = [JsonSerializer.Serialize(gap, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions)] }, []);
@@ -2182,6 +2549,14 @@ public sealed class RemoteWorkerControlTests
         var session = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "session-reconciliation");
         Assert.False(fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, session.Id, session.Revision, evidence, "acknowledged-after-external-reconciliation").Active);
         Assert.Equal("session-reconciliation", Assert.Single(fixture.Store.ListWorkerRecoveryAudit(enrollment.WorkerId), x => x.ObligationId == session.Id).Kind);
+
+        var requestUncertain = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "request-uncertain");
+        Assert.False(fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, requestUncertain.Id, requestUncertain.Revision, evidence, "acknowledged-after-external-reconciliation").Active);
+        Assert.Equal("request-uncertain", Assert.Single(fixture.Store.ListWorkerRecoveryAudit(enrollment.WorkerId), x => x.ObligationId == requestUncertain.Id).Kind);
+
+        fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "request-uncertain", "request-invalid-marker", "{\"kind\":\"request-uncertain\",\"requestId\":\"different-request\"}");
+        var invalidRequestMarker = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "request-uncertain");
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.AcknowledgeControllerRecovery(enrollment.WorkerId, invalidRequestMarker.Id, invalidRequestMarker.Revision, evidence, "acknowledged-after-external-reconciliation"));
 
         fixture.Store.RecordControllerRecovery(enrollment.WorkerId, "replay-gap", "controller-gap");
         var markerless = Assert.Single(fixture.Store.ListWorkerRecoveryObligations(enrollment.WorkerId, true), x => x.Source == "controller" && x.Kind == "replay-gap");
@@ -2279,8 +2654,13 @@ public sealed class RemoteWorkerControlTests
     {
         private readonly Queue<BridgeWorkerStatus> _statuses;
         public FakeBridgeSession(string controllerId, params BridgeWorkerStatus[] statuses)
+            : this(controllerId, 1, statuses)
         {
-            Lease = new WorkerBridgeLease(1, controllerId, Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
+        }
+
+        public FakeBridgeSession(string controllerId, long leaseEpoch, params BridgeWorkerStatus[] statuses)
+        {
+            Lease = new WorkerBridgeLease(leaseEpoch, controllerId, Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
             _statuses = new Queue<BridgeWorkerStatus>(statuses);
         }
 
@@ -2296,13 +2676,24 @@ public sealed class RemoteWorkerControlTests
         public (long Generation, long Sequence)? FailAcknowledgmentAt { get; set; }
         public bool FailSubmitAsWriteUncertain { get; set; }
         public bool FailSubmitAsRemoteUncertain { get; set; }
+        /// <summary>Returns a JSON string where a stored-request object is required, so deserialization throws.</summary>
+        public bool MalformedSubmitResult { get; set; }
+        public string SubmitState { get; set; } = "forwarded";
+        public long? SubmitOwnershipEpoch { get; set; }
+        public string ReconcileRequestState { get; set; } = "unknown";
+        public long? ReconcileOwnershipEpoch { get; set; }
+        public string? ReconcileTurnId { get; set; }
         public bool RejectReplay { get; set; }
         public bool FailStatusAfterRejectedReplay { get; set; }
         public bool FailStatusAfterReplay { get; set; }
+        public bool RejectStatus { get; set; }
+        /// <summary>Returns a JSON string where a status object is required, so deserialization throws.</summary>
+        public bool MalformedStatusResult { get; set; }
         public bool RejectRecovery { get; set; }
         public bool RejectLoadSession { get; set; }
         public bool FailLoadSessionUncertain { get; set; }
         public bool FailLoadSessionAsCallerCanceled { get; set; }
+        public bool Disposed { get; private set; }
         /// <summary>Runs before the cancellation check so a test can cancel mid-connect.</summary>
         public Action<string>? OnInvoke { get; set; }
         public string? NewSessionId { get; set; }
@@ -2332,10 +2723,10 @@ public sealed class RemoteWorkerControlTests
             {
                 requestId = root.GetProperty("requestId").GetString(),
                 payloadHash = "sha256:" + new string('0', 64),
-                state = "forwarded",
+                state = SubmitState,
                 outcomeJson = (string?)null,
                 processGeneration = status.ProcessGeneration,
-                ownershipEpoch = status.OwnershipEpoch,
+                ownershipEpoch = SubmitOwnershipEpoch ?? status.OwnershipEpoch,
                 turnId = root.GetProperty("turnId").GetString(),
                 sessionId = status.SessionId,
             };
@@ -2353,7 +2744,7 @@ public sealed class RemoteWorkerControlTests
             using var requestDocument = JsonDocument.Parse(payload);
             var root = requestDocument.RootElement;
 
-            if (operation == "reconcile") throw new WorkerRemoteException("worker-request-rejected");
+            if (operation == "reconcile" && ReconcileRequestState == "unknown") throw new WorkerRemoteException("worker-request-rejected");
             if (operation == "replay") _replayInvoked = true;
             if (operation == "replay" && RejectReplay)
             {
@@ -2366,6 +2757,7 @@ public sealed class RemoteWorkerControlTests
                 FailStatusAfterReplay = false;
                 throw new WorkerReadUncertainException("injected unavailable status");
             }
+            if (operation == "status" && RejectStatus) throw new WorkerRemoteException("worker-request-rejected");
             if (operation == "load-session")
             {
                 if (FailLoadSessionUncertain) throw new WorkerWriteUncertainException("injected uncertain session load");
@@ -2391,14 +2783,39 @@ public sealed class RemoteWorkerControlTests
 
             object value = operation switch
             {
-                "status" => Status(),
+                "status" => MalformedStatusResult ? (object)"not-a-status" : Status(),
                 "replay" => ReplayResult(root),
                 "new-session" => _loadedSessionId!,
-                "submit" => SubmitResult(root),
+                "submit" => MalformedSubmitResult ? (object)"not-a-request" : SubmitResult(root),
+                "reconcile" => ReconcileResult(root),
                 _ => new { ok = true },
             };
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(value, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions));
             return Task.FromResult(new WorkerSessionResult(operation, document.RootElement.Clone(), mutation));
+        }
+
+        private object ReconcileResult(JsonElement root)
+        {
+            var status = _observedStatus ?? _statuses.Peek();
+            return new
+            {
+                requestId = root.GetProperty("requestId").GetString(),
+                payloadHash = "sha256:" + new string('0', 64),
+                state = ReconcileRequestState,
+                outcomeJson = ReconcileRequestState is "completed" or "failed" ? "{}" : null,
+                processGeneration = status.ProcessGeneration,
+                ownershipEpoch = ReconcileOwnershipEpoch ?? status.OwnershipEpoch,
+                turnId = ReconcileTurnId ?? FindRequestTurn(root.GetProperty("requestId").GetString()!),
+                sessionId = status.SessionId,
+            };
+        }
+
+        private string FindRequestTurn(string requestId)
+        {
+            var submit = Invocations.LastOrDefault(x => x.Operation == "submit" && x.Payload.Contains(requestId, StringComparison.Ordinal));
+            if (submit == default) return "turn-test";
+            using var document = JsonDocument.Parse(submit.Payload);
+            return document.RootElement.GetProperty("turnId").GetString()!;
         }
 
         private BridgeReplayPage ReplayResult(JsonElement root)
@@ -2434,7 +2851,11 @@ public sealed class RemoteWorkerControlTests
             return observed;
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            return ValueTask.CompletedTask;
+        }
     }
 
     [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)] private static extern int link(string oldpath, string newpath);

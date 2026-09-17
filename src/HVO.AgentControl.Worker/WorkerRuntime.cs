@@ -19,7 +19,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly SemaphoreSlim _promptLock = new(1, 1);
     private readonly SemaphoreSlim _sessionLock = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> _responses = new();
-    private readonly ConcurrentDictionary<string, Task<StoredRequest>> _operations = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, OperationHandle> _operations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<StoredCancellation>> _cancellations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<PendingPermission>> _permissionDecisions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (JsonElement RequestId, PendingPermission Pending)> _permissionFrames = new(StringComparer.Ordinal);
@@ -152,12 +152,12 @@ public sealed class WorkerRuntime : IAsyncDisposable
         finally { _responses.TryRemove(id, out _); }
     }
 
-    public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken)
+    public Task<StoredRequest> BeginSubmit(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken)
     {
         ValidatePromptEnvelope(envelope);
         const bool prompt = true;
         if (turnId is null) throw new WorkerProtocolException("Prompt submissions require a host turn id.");
-        Task<StoredRequest> durable;
+        OperationHandle handle;
         lock (_submitGate)
         {
             if (_operations.TryGetValue(requestId, out var existingOperation))
@@ -165,7 +165,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 var existing = _store.GetRequest(requestId) ?? throw new WorkerProtocolException("Active request has no durable identity.");
                 var hash = Convert.ToHexString(WorkerProtocol.CanonicalPayloadHash(envelope)).ToLowerInvariant();
                 if (existing.PayloadHash != hash || existing.TurnId != turnId) throw new WorkerProtocolException("Request id was reused with different authorization data.");
-                return existingOperation.WaitAsync(connectionToken);
+                return existingOperation.Forwarded.Task.WaitAsync(connectionToken);
             }
             var promptOwned = prompt && _promptLock.Wait(0);
             if (prompt && !promptOwned) throw new WorkerProtocolException("Another prompt request is active.");
@@ -177,19 +177,26 @@ public sealed class WorkerRuntime : IAsyncDisposable
                     if (promptOwned) _promptLock.Release();
                     return Task.FromResult(registered);
                 }
-                durable = RunRequestAsync(registered, envelope.Clone(), promptOwned);
-                if (!_operations.TryAdd(requestId, durable)) throw new WorkerProtocolException("Request ownership is ambiguous.");
+                var forwarded = new TaskCompletionSource<StoredRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
+                handle = new OperationHandle(forwarded);
+                if (!_operations.TryAdd(requestId, handle)) throw new WorkerProtocolException("Request ownership is ambiguous.");
+                handle.Completion = RunRequestAsync(registered, envelope.Clone(), promptOwned, forwarded);
+                _ = handle.Completion.ContinueWith(static task => _ = task.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
             catch
             {
                 if (promptOwned) _promptLock.Release();
+                _operations.TryRemove(requestId, out _);
                 throw;
             }
         }
-        return durable.WaitAsync(connectionToken);
+        return handle.Forwarded.Task.WaitAsync(connectionToken);
     }
 
-    private async Task<StoredRequest> RunRequestAsync(StoredRequest registered, JsonElement envelope, bool promptOwned)
+    public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken) =>
+        BeginSubmit(epoch, connectionNonce, requestId, envelope, turnId, connectionToken);
+
+    private async Task<StoredRequest> RunRequestAsync(StoredRequest registered, JsonElement envelope, bool promptOwned, TaskCompletionSource<StoredRequest> forwarded)
     {
         await Task.Yield();
         var requestId = registered.RequestId;
@@ -214,6 +221,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
             if (!_responses.TryAdd(correlationId.Value, completion)) throw new WorkerProtocolException("ACP correlation allocation failed.");
             await WriteAcpAsync(normalized.RootElement, _lifetime.Token).ConfigureAwait(false);
             _store.MarkForwarded(requestId);
+            forwarded.TrySetResult(_store.GetRequest(requestId)!);
             var result = await completion.Task.ConfigureAwait(false);
             var state = result.TryGetProperty("error", out _) ? "failed" : "completed";
             _store.CompleteRequest(requestId, state, SanitizeOutcome(result, state));
@@ -224,7 +232,14 @@ public sealed class WorkerRuntime : IAsyncDisposable
         {
             var current = _store.GetRequest(requestId);
             if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
-            throw new WorkerOperationUncertainException("ACP request completion is uncertain.", exception);
+            var uncertain = new WorkerOperationUncertainException("ACP request completion is uncertain.", exception);
+            forwarded.TrySetException(uncertain);
+            throw uncertain;
+        }
+        catch (OperationCanceledException exception)
+        {
+            forwarded.TrySetException(exception);
+            throw;
         }
         finally
         {
@@ -420,7 +435,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
     {
         if (envelope.ValueKind != JsonValueKind.Object || !envelope.TryGetProperty("method", out var method) || method.ValueKind != JsonValueKind.String || method.GetString() != "session/cancel")
             throw new WorkerProtocolException("Cancellation envelope must use session/cancel.");
-        foreach (var property in envelope.EnumerateObject()) if (property.Name is not ("method" or "params")) throw new WorkerProtocolException("Cancellation envelope contains unsupported fields.");
+        foreach (var property in envelope.EnumerateObject()) if (property.Name is not ("jsonrpc" or "method" or "params")) throw new WorkerProtocolException("Cancellation envelope contains unsupported fields.");
+        if (envelope.TryGetProperty("jsonrpc", out var version) && (version.ValueKind != JsonValueKind.String || version.GetString() != "2.0")) throw new WorkerProtocolException("Cancellation envelope has an invalid JSON-RPC version.");
         if (!envelope.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Cancellation params are required.");
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["method"] = "session/cancel", ["params"] = parameters.Clone() }, WorkerProtocol.JsonOptions));
     }
@@ -474,7 +490,12 @@ public sealed class WorkerRuntime : IAsyncDisposable
     }
     internal bool IsTransportHealthy => Volatile.Read(ref _transportFailed) == 0;
     private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long OwnershipEpoch, long CorrelationId, string SessionId);
-    public async ValueTask DisposeAsync() { if (Interlocked.Exchange(ref _disposed, 1) != 0) return; _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Cast<Task>().Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _sessionLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
+    private sealed class OperationHandle(TaskCompletionSource<StoredRequest> forwarded)
+    {
+        public TaskCompletionSource<StoredRequest> Forwarded { get; } = forwarded;
+        public Task<StoredRequest> Completion { get; set; } = Task.FromException<StoredRequest>(new InvalidOperationException("Operation completion was not initialized."));
+    }
+    public async ValueTask DisposeAsync() { if (Interlocked.Exchange(ref _disposed, 1) != 0) return; _lifetime.Cancel(); _transportFault.Cancel(); _acpInput.Dispose(); _acpOutput.Dispose(); if (_reader is not null) try { await _reader.ConfigureAwait(false); } catch { } var operations = _operations.Values.Select(x => (Task)x.Completion).Concat(_cancellations.Values).Concat(_permissionDecisions.Values).ToArray(); if (operations.Length > 0) try { await Task.WhenAll(operations).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false); } catch { } _permissionFrames.Clear(); _writeLock.Dispose(); _promptLock.Dispose(); _sessionLock.Dispose(); _transportFault.Dispose(); _lifetime.Dispose(); }
     public static FileStream OpenInheritedFd(int fd, FileAccess access) => new(new SafeFileHandle((IntPtr)fd, ownsHandle: false), access, 4096, isAsync: false);
 }
 

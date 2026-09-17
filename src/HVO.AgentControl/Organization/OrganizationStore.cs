@@ -92,11 +92,12 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 5 extends the released schema-4 remote-worker store with the
-    /// session-reconciliation recovery kind. Migration accepts only exact released
-    /// signatures and creates verified, immutable source evidence at each boundary.
+    /// Schema 6 extends schema 5's recovery audit kind constraint so an owner can
+    /// acknowledge a marker-bearing request-uncertain obligation after externally
+    /// verifying its outcome. Migration accepts only exact released signatures and
+    /// creates verified, immutable source evidence at each boundary.
     /// </summary>
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -110,6 +111,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV3BackupHashFileName = "control.schema-v3.sha256";
     public const string SchemaV4BackupFileName = "control.schema-v4.db";
     public const string SchemaV4BackupHashFileName = "control.schema-v4.sha256";
+    public const string SchemaV5BackupFileName = "control.schema-v5.db";
+    public const string SchemaV5BackupHashFileName = "control.schema-v5.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -491,14 +494,20 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV5Statements =
         [.. SchemaV3Statements, .. RemoteWorkerSchemaV5Statements];
 
+    private static readonly string[] SchemaV6Statements =
+        [.. SchemaV3Statements, .. RemoteWorkerSchemaV6Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV4 =
         BuildExpectedSchema(SchemaV4Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV5 =
         BuildExpectedSchema(SchemaV5Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV6Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1453,6 +1462,17 @@ public sealed partial class OrganizationStore : IDisposable
             EnsureSchemaV4Backup(connection);
             AfterMigrationBackup?.Invoke();
             MigrateV4ToV5(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV5);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 5)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV5);
+            EnsureSchemaV5Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV5ToV6(connection);
         }
         else if (version != CurrentSchemaVersion)
         {
@@ -1838,6 +1858,21 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV5Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 5, SchemaV5BackupFileName, SchemaV5BackupHashFileName, ExpectedSchemaV5);
+
+    private void MigrateV5ToV6(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        Execute(connection, transaction, "ALTER TABLE worker_recovery_audit RENAME TO worker_recovery_audit_v5");
+        Execute(connection, transaction, WorkerRecoveryAuditSchemaV6Statement);
+        Execute(connection, transaction, "INSERT INTO worker_recovery_audit SELECT * FROM worker_recovery_audit_v5");
+        Execute(connection, transaction, "DROP TABLE worker_recovery_audit_v5");
+        Execute(connection, transaction, "UPDATE schema_version SET version = 6 WHERE version = 5");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1849,7 +1884,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore the verified schema-v4 backup or another authoritative source. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore the verified schema-v5 backup or another authoritative source. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -1991,7 +2026,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV5Statements)
+        foreach (var statement in SchemaV6Statements)
         {
             Execute(connection, transaction, statement);
         }

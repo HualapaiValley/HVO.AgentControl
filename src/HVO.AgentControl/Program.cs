@@ -1161,6 +1161,7 @@ public partial class Program
             or HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException
             or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException
             or HVO.AgentControl.RemoteWorker.WorkerRemoteException
+            or HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException
             or HVO.AgentControl.Worker.WorkerOperationUncertainException
             or KeyNotFoundException
             or InvalidOperationException;
@@ -1215,6 +1216,10 @@ public partial class Program
             detail: unavailable.Transport
                 ? "The fixed connector could not reach the approved host."
                 : "The approved host did not return a usable result."),
+        HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException => Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "Remote worker reconciliation is invalid",
+            detail: "Worker returned state that could not be correlated; dispatch remains held."),
         HVO.AgentControl.RemoteWorker.WorkerRemoteException { Code: "worker-request-rejected" } => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
             title: "Remote worker bridge rejected the operation.",

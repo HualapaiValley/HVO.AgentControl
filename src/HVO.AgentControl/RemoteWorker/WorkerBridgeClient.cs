@@ -21,6 +21,14 @@ public sealed class WorkerReadUncertainException(string message, Exception? inne
 public sealed class WorkerCallerCanceledException(string message, Exception? inner = null) : OperationCanceledException(message, inner);
 public sealed class WorkerRemoteException(string code) : WorkerProtocolException("The worker rejected the operation with a fixed error category.") { public string Code { get; } = code; }
 
+/// <summary>
+/// The worker returned a reconcile answer that could not be deserialized or that
+/// does not correlate exactly with the durable controller intent. This is a
+/// reconciliation-integrity failure rather than a clean remote rejection, so the
+/// owner session must be dropped and the worker held.
+/// </summary>
+public sealed class WorkerReconciliationInvalidException(string message, Exception? inner = null) : WorkerProtocolException(message, inner);
+
 public sealed class WorkerBridgeClient : IAsyncDisposable
 {
     private static readonly HashSet<string> FixedErrors = ["worker-request-rejected", "worker-operation-failed", "worker-operation-uncertain"];
