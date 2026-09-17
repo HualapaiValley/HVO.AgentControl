@@ -121,7 +121,7 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
-    public void SchemaV5WithAnyDifferentSignatureIsUnsupported()
+    public void SchemaV6WithAnyDifferentSignatureIsUnsupported()
     {
         using var root = new TempStore();
         using (var store = Open(root))
@@ -135,11 +135,11 @@ public sealed class OrganizationStoreTests
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
         Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(6, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
-    public void ExactSchemaV4MigratesToV5WithVerifiedCreateOnceBackupAndPreservesRecoveryRows()
+    public void ExactSchemaV4MigratesThroughV5ToV6WithVerifiedCreateOnceBackupsAndPreservesRecoveryRows()
     {
         using var root = new TempStore();
         using (var store = Open(root))
@@ -159,27 +159,77 @@ public sealed class OrganizationStoreTests
             Assert.Equal(obligation.Id, audit.ObligationId);
         }
 
-        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(6, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_obligations'"), StringComparison.Ordinal);
-        Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
-        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
-        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupHashFileName);
-        Assert.True(File.Exists(backup));
-        AssertNoBackupSidecars(backup);
-        Assert.Equal(4, RawScalar(backup, "SELECT version FROM schema_version;"));
-        Assert.Equal(1, RawScalar(backup, "SELECT COUNT(*) FROM worker_recovery_obligations;"));
-        Assert.Equal(1, RawScalar(backup, "SELECT COUNT(*) FROM worker_recovery_audit;"));
-        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), File.ReadAllText(hash).Trim());
+        Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
+        var v4Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
+        var v4Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupHashFileName);
+        var v5Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName);
+        var v5Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupHashFileName);
+        Assert.True(File.Exists(v4Backup));
+        Assert.True(File.Exists(v5Backup));
+        AssertNoBackupSidecars(v4Backup);
+        AssertNoBackupSidecars(v5Backup);
+        Assert.Equal(4, RawScalar(v4Backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(5, RawScalar(v5Backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(v4Backup, "SELECT COUNT(*) FROM worker_recovery_obligations;"));
+        Assert.Equal(1, RawScalar(v5Backup, "SELECT COUNT(*) FROM worker_recovery_audit;"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v4Backup))).ToLowerInvariant(), File.ReadAllText(v4Hash).Trim());
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v5Backup))).ToLowerInvariant(), File.ReadAllText(v5Hash).Trim());
         if (!OperatingSystem.IsWindows())
         {
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(backup));
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(hash));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(v4Backup));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(v4Hash));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(v5Backup));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(v5Hash));
         }
 
+        var retainedV4 = File.ReadAllBytes(v4Backup);
+        var retainedV5 = File.ReadAllBytes(v5Backup);
+        using var restarted = Open(root);
+        restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(retainedV4, File.ReadAllBytes(v4Backup));
+        Assert.Equal(retainedV5, File.ReadAllBytes(v5Backup));
+    }
+
+    [Fact]
+    public void ExactSchemaV5MigratesToV6WithVerifiedCreateOnceBackup()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        DowngradeToCanonicalV5(root.Path);
+
+        using (var migrated = Open(root))
+            migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+
+        Assert.Equal(6, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupHashFileName);
+        Assert.True(File.Exists(backup));
+        AssertNoBackupSidecars(backup);
+        Assert.Equal(5, RawScalar(backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), File.ReadAllText(hash).Trim());
         var retained = File.ReadAllBytes(backup);
         using var restarted = Open(root);
         restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(retained, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
+    public void UnknownSchemaV5ShapeFailsBeforeBackupOrMigration()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        DowngradeToCanonicalV5(root.Path);
+        ExecuteRaw(root.Path, "ALTER TABLE worker_recovery_audit ADD COLUMN unknown_v5_value TEXT;");
+
+        using var reopened = Open(root);
+        Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName)));
     }
 
     [Fact]
@@ -230,7 +280,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(6, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -279,7 +329,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(6, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -415,7 +465,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(5, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(6, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -1353,6 +1403,19 @@ public sealed class OrganizationStoreTests
             FROM runtime_bindings_v2;
             DROP TABLE runtime_bindings_v2;
             UPDATE schema_version SET version = 1;
+            PRAGMA foreign_keys = ON;
+            """);
+    }
+
+    private static void DowngradeToCanonicalV5(string path)
+    {
+        ExecuteRaw(
+            path,
+            """
+            PRAGMA foreign_keys = OFF;
+            DROP TABLE worker_recovery_audit;
+            CREATE TABLE worker_recovery_audit (id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES worker_recovery_obligations(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('replay-gap','ownership-changed','session-reconciliation')), marker_hash TEXT NOT NULL, evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=71 AND substr(evidence_hash,1,7)='sha256:'), disposition TEXT NOT NULL CHECK(disposition='acknowledged-after-external-reconciliation'), recorded_at TEXT NOT NULL);
+            UPDATE schema_version SET version = 5;
             PRAGMA foreign_keys = ON;
             """);
     }

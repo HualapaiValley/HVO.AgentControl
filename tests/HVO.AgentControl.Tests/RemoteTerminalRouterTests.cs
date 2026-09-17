@@ -91,6 +91,67 @@ public sealed class RemoteTerminalRouterTests
         Assert.False(document.RootElement.TryGetProperty("data", out _));
     }
 
+    /// <summary>
+    /// An invalid reconciliation answer during the pre-upgrade lease refresh must be
+    /// refused with the same 502 the API contract uses, before any viewer record or
+    /// socket accept, and must not escape to the middleware pipeline.
+    /// </summary>
+    [Fact]
+    public async Task ReconciliationInvalidDuringLeaseRefreshReturns502WithNoViewerOrUpgrade()
+    {
+        using var fixture = new RouterFixture();
+        fixture.RefreshException = new WorkerReconciliationInvalidException("stale correlation");
+
+        var status = await fixture.RequestUpgradeStatusAsync();
+
+        Assert.Equal(502, status);
+        Assert.Equal(0, fixture.ViewerCount());
+        Assert.False(fixture.ExceptionEscapedToMiddleware);
+    }
+
+    /// <summary>
+    /// The worker protocol/transport family maps to 502 Bad Gateway, while store or
+    /// runtime unavailability maps to 503. A non-caller cancellation is treated as
+    /// unavailable rather than given its own status arm.
+    /// </summary>
+    [Theory]
+    [InlineData("worker-protocol", 502)]
+    [InlineData("worker-remote", 502)]
+    [InlineData("worker-read-uncertain", 502)]
+    [InlineData("worker-write-uncertain", 502)]
+    [InlineData("io", 502)]
+    [InlineData("object-disposed", 502)]
+    [InlineData("remote-transport", 502)]
+    [InlineData("store", 503)]
+    [InlineData("invalid-operation", 503)]
+    [InlineData("remote-unavailable", 503)]
+    [InlineData("canceled", 503)]
+    public async Task LeaseRefreshFailureMapsToBadGatewayOrServiceUnavailable(string kind, int expected)
+    {
+        using var fixture = new RouterFixture();
+        fixture.RefreshException = kind switch
+        {
+            "worker-protocol" => new WorkerProtocolException("invalid protocol"),
+            "worker-remote" => new WorkerRemoteException("worker-operation-failed"),
+            "worker-read-uncertain" => new WorkerReadUncertainException("read uncertain"),
+            "worker-write-uncertain" => new WorkerWriteUncertainException("write uncertain"),
+            "io" => new IOException("transport failed"),
+            "object-disposed" => new ObjectDisposedException("owner session"),
+            "remote-transport" => new RemoteWorkerUnavailableException("host unreachable", transport: true),
+            "store" => new OrganizationStoreException("store unavailable"),
+            "invalid-operation" => new InvalidOperationException("internal invariant"),
+            "remote-unavailable" => new RemoteWorkerUnavailableException("host unavailable"),
+            "canceled" => new OperationCanceledException("internal timeout"),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+        };
+
+        var status = await fixture.RequestUpgradeStatusAsync();
+
+        Assert.Equal(expected, status);
+        Assert.Equal(0, fixture.ViewerCount());
+        Assert.False(fixture.ExceptionEscapedToMiddleware);
+    }
+
     private sealed class RouterFixture : IDisposable
     {
         private readonly TempDirectory _temp = new();
@@ -100,10 +161,18 @@ public sealed class RemoteTerminalRouterTests
         private const string NativeSessionId = "native-router";
         private readonly RemoteWorkerSnapshot _target;
         private readonly RemoteTerminalRouter _router;
+        private readonly StubSession _session;
 
         public FakeViewerWorker Worker { get; } = new();
         public bool ExceptionEscapedToMiddleware { get; private set; }
         public Exception? Failure { get; private set; }
+
+        /// <summary>
+        /// When set, the next cached-lease status refresh fails with this exception.
+        /// It is only mutated after the initial authenticated connect, so the
+        /// fixture still establishes a real cached owner lease first.
+        /// </summary>
+        public Exception? RefreshException { get => _session.RefreshException; set => _session.RefreshException = value; }
 
         public RouterFixture()
         {
@@ -155,7 +224,8 @@ public sealed class RemoteTerminalRouterTests
                 ApprovedHosts = [new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Port = 22, Username = "docker", KnownHostsPath = knownHostsPath, IdentityFilePath = identityPath }],
             });
 
-            var manager = new WorkerConnectionManager(control, new StubSessionFactory(), options, new SystemControllerClock(), new SystemWorkerDelay());
+            _session = new StubSession("controller-a");
+            var manager = new WorkerConnectionManager(control, new StubSessionFactory(_session), options, new SystemControllerClock(), new SystemWorkerDelay());
             // The router attaches only onto an already-cached owner lease, exactly as
             // the hosted manager establishes one in production.
             manager.ConnectAndSynchronizeAsync(enrollment.WorkerId, CancellationToken.None).GetAwaiter().GetResult();
@@ -181,8 +251,54 @@ public sealed class RemoteTerminalRouterTests
 
         public string ViewerState() => _store.ListRemoteTerminalViewers(_target.WorkerId).Last().State;
 
+        /// <summary>The number of viewer records, used to prove a pre-upgrade refusal left none.</summary>
+        public int ViewerCount() => _store.ListRemoteTerminalViewers(_target.WorkerId).Count;
+
         /// <summary>Exposes the router so a test can assert its exact unclassified failure.</summary>
         public RemoteTerminalRouter Router => _router;
+
+        /// <summary>
+        /// Issues a real WebSocket upgrade request over loopback and returns the HTTP
+        /// status the server committed before any socket accept. A 101 proves the
+        /// server upgraded; any other code proves it refused before the handshake.
+        /// </summary>
+        public async Task<int> RequestUpgradeStatusAsync()
+        {
+            var uri = new Uri(_origin);
+            using var client = new System.Net.Sockets.TcpClient();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await client.ConnectAsync(uri.Host, uri.Port, timeout.Token);
+            await using var stream = client.GetStream();
+            var request =
+                $"GET /terminal HTTP/1.1\r\n"
+                + $"Host: {uri.Host}:{uri.Port}\r\n"
+                + "Upgrade: websocket\r\n"
+                + "Connection: Upgrade\r\n"
+                + $"Sec-WebSocket-Key: {Convert.ToBase64String(Guid.NewGuid().ToByteArray())}\r\n"
+                + "Sec-WebSocket-Version: 13\r\n"
+                + $"Origin: {_origin}\r\n\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(request), timeout.Token);
+            await stream.FlushAsync(timeout.Token);
+            var buffer = new byte[512];
+            var received = new StringBuilder();
+            while (true)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(), timeout.Token);
+                if (read == 0) break;
+                received.Append(Encoding.ASCII.GetString(buffer, 0, read));
+                var text = received.ToString();
+                var lineEnd = text.IndexOf("\r\n", StringComparison.Ordinal);
+                if (lineEnd < 0)
+                {
+                    if (received.Length > 4096) throw new InvalidOperationException("The HTTP response headers were unbounded.");
+                    continue;
+                }
+                var parts = text[..lineEnd].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2 || !int.TryParse(parts[1], out var status)) throw new InvalidOperationException($"Unexpected HTTP status line: {text[..lineEnd]}");
+                return status;
+            }
+            throw new InvalidOperationException("The connection closed before an HTTP status line was received.");
+        }
 
         public async Task<(WebSocketCloseStatus Status, string Reason)> AttachAndAwaitCloseAsync()
         {
@@ -210,18 +326,21 @@ public sealed class RemoteTerminalRouterTests
         }
 
         /// <summary>The router only needs a cached authenticated lease to proceed.</summary>
-        private sealed class StubSessionFactory : IWorkerBridgeSessionFactory
+        private sealed class StubSessionFactory(StubSession session) : IWorkerBridgeSessionFactory
         {
             public Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken) =>
-                Task.FromResult<IWorkerBridgeSession>(new StubSession(enrollment.ControllerId));
+                Task.FromResult<IWorkerBridgeSession>(session);
         }
 
         private sealed class StubSession(string controllerId) : IWorkerBridgeSession
         {
             public WorkerBridgeLease Lease { get; } = new(1, controllerId, Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
+            /// <summary>When set, the status refresh (and only that) faults with this exception.</summary>
+            public Exception? RefreshException { get; set; }
             public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => new Dictionary<string, object?>(fields) { ["operation"] = operation };
             public Task<WorkerSessionResult> InvokeAsync(string operation, object request, bool mutation, CancellationToken cancellationToken)
             {
+                if (operation == "status" && RefreshException is not null) throw RefreshException;
                 object value = operation switch
                 {
                     "status" => new BridgeWorkerStatus(1, 1, "running", "life", 1, null, null, 1, true, false, null, [], 0, 0, 0, 0, null, null, 0, [], true, true, true, RouterFixture.NativeSessionId),

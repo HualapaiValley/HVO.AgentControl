@@ -11,7 +11,7 @@ Build a Docker-native controller for self-contained OpenCode workers using ACP.
 No Fleet dependency, Claude-specific adapter, shared worker checkout, or
 implicit reuse of existing infrastructure. The active baseline implements a
 single control-host portal plus a disabled-by-default hermetic remote-worker
-controller slice: schema-v5 records, approved-host validation, fixed SSH/Docker
+controller slice: schema-v6 records, approved-host validation, fixed SSH/Docker
 command construction and shared bridge protocol code. Live provisioning and task
 routing are implemented hermetically, as are the viewer protocol and fixed
 production worker PTY backend; live remote operation and two-host evidence remain unavailable and are not authorized. Distinguish code capability from operationally tested behavior.

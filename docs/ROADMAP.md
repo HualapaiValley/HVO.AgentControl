@@ -9,7 +9,7 @@ Status reflects the active code, not the standalone POC.
    portal, owner Basic auth, embedded terminal, one owned OpenCode ACP runtime,
    loopback native HTTP, and an authoritative SQLite organization/session store
    at `/control-data/control.db` (with `runtime.json` retained as evidence).
-3. **Durable controller — partial:** schema v5 preserves organization/session
+3. **Durable controller — partial:** schema v6 preserves organization/session
    and #213 policy identity and adds remote host/enrollment, cursor, task/request,
    provisioning/resource and recovery-obligation records with exact-signature
    chained migration and verified v3/v4 backups. The schema also has a sanitized deduplicated
