@@ -576,7 +576,10 @@ public sealed class WorkerBridgeTests
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
         using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"delayed\"}}"); using var disconnected = new CancellationTokenSource();
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", disconnected.Token);
-        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2)); disconnected.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => submit);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var receipt = await submit.WaitAsync(TimeSpan.FromSeconds(2));
+        disconnected.Cancel();
+        Assert.Equal("forwarded", receipt.State);
         Assert.Equal("req", store.Status().ActiveRequestId); Assert.Equal("forwarded", store.GetRequest("req")!.State);
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64(); input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
         await Eventually(() => store.GetRequest("req")?.State == "completed" && store.Status().ActiveRequestId is null); Assert.Equal(1L, CountRows(System.IO.Path.Combine(temp.Path, "bridge.db"), "requests"));
