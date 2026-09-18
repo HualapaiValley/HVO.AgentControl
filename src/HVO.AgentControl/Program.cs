@@ -2,8 +2,12 @@ using HVO.AgentControl.Components;
 using HVO.AgentControl.Runtime;
 using HVO.AgentControl.RemoteWorker;
 using HVO.AgentControl.Terminal;
+using Microsoft.AspNetCore.Http.Metadata;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
+using Microsoft.AspNetCore.Routing.Template;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Net.Http.Headers;
 using Microsoft.OpenApi;
 using System.Security.Cryptography;
 using System.Text;
@@ -131,12 +135,17 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
     }
 }));
 
-// Converts status-only responses (route 404s, data-binding 400s, and the
-// terminal's raw status codes) into the same ProblemDetails contract.
+// Converts status-only API, OpenAPI, and terminal responses (including the
+// terminal's raw 400/404/503 statuses and framework-generated 405s) into the
+// same ProblemDetails contract. Portal routes keep their endpoint-owned HTML;
+// the NotFoundPage catch-all writes a friendly document and sets 404 itself.
 app.UseStatusCodePages(async statusCodeContext =>
 {
     var httpContext = statusCodeContext.HttpContext;
-    await Results.Problem(statusCode: httpContext.Response.StatusCode).ExecuteAsync(httpContext);
+    if (Program.IsMachineContractPath(httpContext.Request.Path))
+    {
+        await Program.WriteProblemAsync(httpContext, httpContext.Response.StatusCode);
+    }
 });
 
 app.Use(async (context, next) =>
@@ -175,10 +184,69 @@ app.Use(async (context, next) =>
 });
 app.UseWebSockets();
 app.UseStaticFiles();
+
+// Select an endpoint before antiforgery runs so unmatched machine-contract
+// paths cannot fall through to the Razor catch-all. The middleware below is
+// populated from the final endpoint data sources after all routes are mapped.
+app.UseRouting();
+var machineContractRoutes = new Program.MachineContractRouteCatalog();
+app.Use(async (context, next) =>
+{
+    // Normal API/health endpoints, including framework method and content-type
+    // rejection endpoints, execute without a catalog scan. Only a machine path
+    // that routing would otherwise hand to the Razor portal catch-all needs the
+    // cached endpoint metadata fallback.
+    if (Program.IsUnknownOpenApiPath(context.Request.Path))
+    {
+        await Program.WriteProblemAsync(context, StatusCodes.Status404NotFound);
+        return;
+    }
+
+    if (Program.IsMachineContractPath(context.Request.Path)
+        && (context.GetEndpoint() is not RouteEndpoint
+            || Program.IsPortalCatchAll(context.GetEndpoint())
+            || Program.IsFrameworkMethodNotAllowed(context.GetEndpoint()))
+        && machineContractRoutes.Classify(context) is { } rejection)
+    {
+        if (rejection.AllowedMethods.Count > 0)
+        {
+            context.Response.Headers.Allow = string.Join(", ", rejection.AllowedMethods);
+        }
+
+        await Program.WriteProblemAsync(context, rejection.StatusCode);
+        return;
+    }
+
+    await next();
+
+    // Framework-generated 405 responses do not consistently advertise a
+    // truthful Allow set. Machine routes use their cached endpoint metadata;
+    // portal component routes support GET only and deliberately do not claim
+    // implicit HEAD support.
+    if (context.Response.StatusCode == StatusCodes.Status405MethodNotAllowed)
+    {
+        if (Program.IsMachineContractPath(context.Request.Path)
+            && machineContractRoutes.Classify(context) is { StatusCode: StatusCodes.Status405MethodNotAllowed } methodRejection)
+        {
+            context.Response.Headers.Allow = string.Join(", ", methodRejection.AllowedMethods);
+        }
+        else if (Program.IsKnownPortalGetPath(context.Request.Path))
+        {
+            context.Response.Headers.Allow = HttpMethods.Get;
+        }
+    }
+});
 app.UseAntiforgery();
 app.MapStaticAssets();
 app.MapRazorComponents<App>();
 app.MapOpenApi();
+
+// Environment-only fault endpoint used by the sanitized exception contract
+// tests. It is not mapped in Development, Production, or any normal runtime.
+if (app.Environment.IsEnvironment("ExceptionPathTests"))
+{
+    app.MapGet("/__test/fault", (HttpContext _) => throw new InvalidOperationException("injected-sensitive-failure-detail"));
+}
 
 app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     "HVO.AgentControl",
@@ -383,7 +451,8 @@ app.MapGet("/api/organization/portal", (AcpControlHost host, HVO.AgentControl.Re
             store.GetOverview(),
             host.OrganizationIdentity,
             host.GetStatus(),
-            remoteWorkers);
+            remoteWorkers,
+            store.ListHireRequests());
         return Results.Ok(result);
     }
     catch (HVO.AgentControl.Organization.OrganizationStoreException)
@@ -450,6 +519,161 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/departments/{id}", (AcpControlHost host, IRemoteWorkerStatusProvider remoteWorkers, string id) =>
+{
+    if (!Program.IsValidDepartmentId(id))
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid department id.",
+            detail: "A bounded stable department id is required.");
+    }
+
+    var store = host.Organization;
+    if (store is null)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The control runtime is disabled or the authoritative store has not opened.");
+    }
+
+    try
+    {
+        var department = HVO.AgentControl.Organization.PortalOrganizationReadModel.FindDepartment(
+            store.GetOverview(),
+            host.OrganizationIdentity,
+            host.GetStatus(),
+            id,
+            remoteWorkers);
+        return department is null
+            ? Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "Department not found.",
+                detail: "No department with that stable id exists.")
+            : Results.Ok(department);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Organization store unavailable.",
+            detail: "The authoritative store could not be read.");
+    }
+})
+    .WithName("GetDepartment")
+    .WithTags("Organization")
+    .WithSummary("Returns the authoritative roles, roster and scoped availability for one department selected by stable id.")
+    .Produces<HVO.AgentControl.Organization.PortalDepartmentDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/hire-requests", (AcpControlHost host) =>
+{
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(store.ListHireRequests()); }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire requests unavailable.", detail: "The authoritative store could not be read.");
+    }
+})
+    .WithName("ListHireRequests").WithTags("Hiring")
+    .WithSummary("Lists durable owner hire requests; it does not list provisioned employees.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.HireRequestSummary>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/hire-requests/{id}", (AcpControlHost host, string id) =>
+{
+    if (!Program.IsValidHireRequestId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request id.", detail: "A bounded stable hire request id is required.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var request = store.GetHireRequest(id);
+        return request is null
+            ? Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.")
+            : Results.Ok(request);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire request unavailable.");
+    }
+})
+    .WithName("GetHireRequest").WithTags("Hiring")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/hire-requests", (HttpContext context, AcpControlHost host, HVO.AgentControl.Organization.HireRequestCreate request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Hire requests") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var headerIdempotencyKey = context.Request.Headers.TryGetValue("Idempotency-Key", out var values)
+        && !string.IsNullOrEmpty(values.ToString())
+        ? values.ToString()
+        : null;
+    try { return Results.Ok(store.CreateHireRequest(request, headerIdempotencyKey)); }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request idempotency conflict.", detail: "The idempotency key is already bound to a different immutable request payload.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire request unavailable.");
+    }
+})
+    .WithName("CreateHireRequest").WithTags("Hiring")
+    .WithSummary("Creates one durable owner request. It does not approve, provision, orient, or create an employee.")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHost host, string id, HVO.AgentControl.Organization.HireRequestReject request) =>
+{
+    if (!Program.IsValidHireRequestId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request id.", detail: "A bounded stable hire request id is required.");
+    if (Program.RejectCrossOrigin(context, "Hire request rejection") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(store.RejectHireRequest(id, request.ExpectedRevision)); }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request rejection.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request rejection conflicted.", detail: "The request changed or is no longer in Requested state.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire request unavailable.");
+    }
+})
+    .WithName("RejectHireRequest").WithTags("Hiring")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPatch("/api/organization", (HttpContext context, AcpControlHost host, OrganizationUpdate update) =>
@@ -1083,7 +1307,10 @@ app.Map("/terminal", async (HttpContext context, AcpControlHost host, IRemoteWor
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 // Process liveness only; deliberately unauthenticated and dependency-free.
-app.MapGet("/health/live", () => Results.Ok(new HealthResponse("healthy")))
+app.MapMethods("/health/live", [HttpMethods.Get, HttpMethods.Head], (HttpContext context) =>
+    HttpMethods.IsHead(context.Request.Method)
+        ? Results.Ok()
+        : Results.Ok(new HealthResponse("healthy")))
     .WithName("HealthLive")
     .WithTags("Health")
     .WithSummary("Process liveness. Does not probe the runtime or any dependency.")
@@ -1091,11 +1318,11 @@ app.MapGet("/health/live", () => Results.Ok(new HealthResponse("healthy")))
 
 // Readiness of the exact owned ACP session and attached TUI. It is not a
 // database, worker, or provider check and must not claim one.
-app.MapGet("/health/ready", (AcpControlHost host) =>
+app.MapMethods("/health/ready", [HttpMethods.Get, HttpMethods.Head], (HttpContext context, AcpControlHost host) =>
 {
     var status = host.GetStatus();
     return IsRuntimeReady(status)
-        ? Results.Ok(new HealthResponse("ready"))
+        ? HttpMethods.IsHead(context.Request.Method) ? Results.Ok() : Results.Ok(new HealthResponse("ready"))
         : Results.Problem(
             statusCode: StatusCodes.Status503ServiceUnavailable,
             title: "Runtime not ready.",
@@ -1119,6 +1346,7 @@ app.MapGet("/api/version", () => Results.Ok(new VersionResponse(
     .Produces<VersionResponse>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
 
+machineContractRoutes.Initialize(((IEndpointRouteBuilder)app).DataSources);
 app.Run();
 
 public partial class Program
@@ -1128,6 +1356,210 @@ public partial class Program
 
     /// <summary>Maximum length accepted for a stable employee id on the wire.</summary>
     public const int MaximumEmployeeIdLength = 64;
+
+    /// <summary>Maximum length accepted for a stable department id on the wire.</summary>
+    public const int MaximumDepartmentIdLength = 64;
+
+    /// <summary>Maximum length accepted for a stable hire request id on the wire.</summary>
+    public const int MaximumHireRequestIdLength = 64;
+
+    /// <summary>
+    /// Returns true for paths whose HTTP error contract is always RFC 9457 JSON
+    /// rather than the portal's friendly HTML. Segment-aware prefix matching
+    /// keeps unrelated paths such as <c>/apiary</c> in the portal namespace.
+    /// </summary>
+    public static bool IsMachineContractPath(PathString path) =>
+        path.StartsWithSegments("/api")
+        || path.StartsWithSegments("/health")
+        || path.StartsWithSegments("/openapi")
+        || path.StartsWithSegments("/terminal");
+
+    /// <summary>Returns true for an OpenAPI document path other than the configured v1 document.</summary>
+    internal static bool IsUnknownOpenApiPath(PathString path) =>
+        path.StartsWithSegments("/openapi")
+        && !path.Equals("/openapi/v1.json", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Returns true for a concrete owner-portal route whose implemented method is GET.</summary>
+    internal static bool IsKnownPortalGetPath(PathString path)
+    {
+        var value = path.Value?.TrimEnd('/') ?? string.Empty;
+        if (value.Length == 0)
+        {
+            value = "/";
+        }
+
+        if (value is "/" or "/organization" or "/organization/departments" or "/employees" or "/hiring" or "/system")
+        {
+            return true;
+        }
+
+        return HasSingleRouteValue(value, "/organization/departments/")
+            || HasSingleRouteValue(value, "/employees/");
+    }
+
+    private static bool HasSingleRouteValue(string path, string prefix) =>
+        path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+        && path.Length > prefix.Length
+        && path.IndexOf('/', prefix.Length) < 0;
+
+    /// <summary>Identifies the Razor component endpoint reserved for portal 404 HTML.</summary>
+    internal static bool IsPortalCatchAll(Endpoint? endpoint) =>
+        endpoint is RouteEndpoint route
+        && route.RoutePattern.Parameters.Any(parameter => parameter.IsCatchAll);
+
+    /// <summary>Identifies endpoint routing's synthetic wrong-method endpoint.</summary>
+    internal static bool IsFrameworkMethodNotAllowed(Endpoint? endpoint) =>
+        string.Equals(endpoint?.DisplayName, "405 HTTP Method Not Supported", StringComparison.Ordinal);
+
+    /// <summary>Writes the required ProblemDetails media type regardless of Accept.</summary>
+    internal static async Task WriteProblemAsync(HttpContext context, int statusCode)
+    {
+        context.Response.StatusCode = statusCode;
+        var problemDetailsService = context.RequestServices.GetRequiredService<IProblemDetailsService>();
+        if (await problemDetailsService.TryWriteAsync(new ProblemDetailsContext
+        {
+            HttpContext = context,
+            ProblemDetails = new ProblemDetails { Status = statusCode },
+        }))
+        {
+            return;
+        }
+
+        var problem = new ProblemDetails
+        {
+            Status = statusCode,
+            Title = ReasonPhrases.GetReasonPhrase(statusCode),
+            Type = ProblemType(statusCode),
+            Instance = context.Request.Path,
+        };
+        problem.Extensions["traceId"] =
+            System.Diagnostics.Activity.Current?.Id ?? context.TraceIdentifier;
+        await context.Response.WriteAsJsonAsync(
+            problem,
+            options: null,
+            contentType: "application/problem+json",
+            cancellationToken: context.RequestAborted);
+    }
+
+    /// <summary>
+    /// Cached endpoint metadata used only when endpoint routing selected the
+    /// Razor portal catch-all for a machine-contract path. It recovers the same
+    /// 404/405/415 distinction without scanning endpoints on normal requests.
+    /// </summary>
+    internal sealed class MachineContractRouteCatalog
+    {
+        private readonly List<MachineContractRoute> _routes = [];
+
+        public void Initialize(IEnumerable<EndpointDataSource> dataSources)
+        {
+            _routes.AddRange(dataSources
+                .SelectMany(source => source.Endpoints)
+                .OfType<RouteEndpoint>()
+                .Where(route => !route.RoutePattern.Parameters.Any(parameter => parameter.IsCatchAll))
+                .Select(route =>
+                {
+                    var accepts = route.Metadata.GetMetadata<IAcceptsMetadata>();
+                    return new MachineContractRoute(
+                        new TemplateMatcher(
+                            TemplateParser.Parse(route.RoutePattern.RawText ?? string.Empty),
+                            new RouteValueDictionary()),
+                        route.Metadata.GetMetadata<IHttpMethodMetadata>()?.HttpMethods
+                            .Select(method => method.ToUpperInvariant())
+                            .ToArray() ?? [],
+                        accepts?.ContentTypes.ToArray() ?? [],
+                        accepts is not null,
+                        accepts?.RequestType is not null && !accepts.IsOptional);
+                }));
+        }
+
+        public MachineContractRejection? Classify(HttpContext context)
+        {
+            var path = context.Request.Path.Value ?? string.Empty;
+            var pathMatches = _routes
+                .Where(route => route.Matcher.TryMatch(path, new RouteValueDictionary()))
+                .ToArray();
+            if (pathMatches.Length == 0)
+            {
+                return new(StatusCodes.Status404NotFound, []);
+            }
+
+            var method = context.Request.Method.ToUpperInvariant();
+            var methodMatches = pathMatches
+                .Where(route => route.Methods.Count == 0
+                    || route.Methods.Contains(method, StringComparer.OrdinalIgnoreCase))
+                .ToArray();
+            if (methodMatches.Length == 0)
+            {
+                var allowed = pathMatches
+                    .SelectMany(route => route.Methods)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Order(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                return new(StatusCodes.Status405MethodNotAllowed, allowed);
+            }
+
+            var acceptsMatches = methodMatches.Where(route => route.HasAcceptsMetadata).ToArray();
+            if (acceptsMatches.Length > 0)
+            {
+                var contentTypePresent = !string.IsNullOrWhiteSpace(context.Request.ContentType);
+                var contentTypeAccepted = contentTypePresent
+                    && acceptsMatches.Any(route => route.ContentTypes.Count == 0
+                        || route.ContentTypes.Any(contentType => MediaTypeHeaderValue.TryParse(contentType, out var accepted)
+                            && MediaTypeHeaderValue.TryParse(context.Request.ContentType, out var supplied)
+                            && supplied.IsSubsetOf(accepted)));
+
+                // A supplied media type is authoritative even when a server or
+                // test transport normalizes away Content-Length and
+                // Transfer-Encoding. Wrong Content-Type is therefore always 415,
+                // including an explicitly empty body.
+                if (contentTypePresent && !contentTypeAccepted)
+                {
+                    return new(StatusCodes.Status415UnsupportedMediaType, []);
+                }
+
+                var hasBodySignal = context.Request.ContentLength is > 0
+                    || context.Request.Headers.TransferEncoding.Count > 0;
+                if (!contentTypePresent && hasBodySignal)
+                {
+                    return new(StatusCodes.Status415UnsupportedMediaType, []);
+                }
+
+                if (!contentTypePresent
+                    && !hasBodySignal
+                    && acceptsMatches.All(route => route.BodyRequired))
+                {
+                    return new(StatusCodes.Status400BadRequest, []);
+                }
+            }
+
+            // The path and method are known and content type is acceptable. This
+            // should normally have selected the real endpoint, so fail closed as
+            // not found rather than execute portal HTML for a machine path.
+            return new(StatusCodes.Status404NotFound, []);
+        }
+
+        private sealed record MachineContractRoute(
+            TemplateMatcher Matcher,
+            IReadOnlyList<string> Methods,
+            IReadOnlyList<string> ContentTypes,
+            bool HasAcceptsMetadata,
+            bool BodyRequired);
+    }
+
+    internal sealed record MachineContractRejection(int StatusCode, IReadOnlyList<string> AllowedMethods);
+
+    private static string ProblemType(int statusCode) => statusCode switch
+    {
+        StatusCodes.Status400BadRequest => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.1",
+        StatusCodes.Status401Unauthorized => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.2",
+        StatusCodes.Status403Forbidden => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.4",
+        StatusCodes.Status404NotFound => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.5",
+        StatusCodes.Status405MethodNotAllowed => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.6",
+        StatusCodes.Status415UnsupportedMediaType => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.16",
+        StatusCodes.Status500InternalServerError => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.1",
+        StatusCodes.Status503ServiceUnavailable => "https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.4",
+        _ => "about:blank",
+    };
 
     /// <summary>
     /// Returns a ProblemDetails 403 when a state-changing request did not come
@@ -1309,14 +1741,29 @@ public partial class Program
     /// made only of hyphens is rejected. Generated hex ids and persisted test
     /// ids such as <c>emp-test</c> both fit this shape.
     /// </summary>
-    public static bool IsValidEmployeeId(string? value)
+    public static bool IsValidEmployeeId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.EmployeePrefix, MaximumEmployeeIdLength);
+
+    /// <summary>
+    /// Validates the stable department-id wire shape accepted by
+    /// <c>/api/departments/{id}</c>. It applies the same bounded, lower-case,
+    /// prefix-bound rule as <see cref="IsValidEmployeeId"/> so a path traversal,
+    /// uppercase, padded or forged value is rejected before any store read.
+    /// </summary>
+    public static bool IsValidDepartmentId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.DepartmentPrefix, MaximumDepartmentIdLength);
+
+    /// <summary>Validates the bounded stable ID used by hire request read/reject routes.</summary>
+    public static bool IsValidHireRequestId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.HireRequestPrefix, MaximumHireRequestIdLength);
+
+    private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {
-        if (string.IsNullOrWhiteSpace(value) || value.Length > MaximumEmployeeIdLength)
+        if (string.IsNullOrWhiteSpace(value) || value.Length > maximumLength)
         {
             return false;
         }
 
-        var prefix = HVO.AgentControl.Organization.OrganizationIds.EmployeePrefix;
         if (!value.StartsWith(prefix, StringComparison.Ordinal))
         {
             return false;

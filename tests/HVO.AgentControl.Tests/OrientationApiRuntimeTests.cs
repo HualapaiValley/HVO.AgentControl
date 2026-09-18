@@ -14,6 +14,7 @@ namespace HVO.AgentControl.Tests;
 /// ProblemDetails mapping and the no-rebuild update guarantee. No provider
 /// credential or live inference is involved.
 /// </summary>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class OrientationApiRuntimeTests : IClassFixture<EnabledRuntimeFactory>
 {
     private readonly EnabledRuntimeFactory _factory;

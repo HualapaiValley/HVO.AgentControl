@@ -240,6 +240,20 @@ jobs:
         run: npm run ci --prefix tests/Browser
       - name: Run terminal wire checks
         run: npm run terminal-wire --prefix tests/Browser
+      # state-kind.mjs is a pure unit check of the terminal state vocabulary. It
+      # independently enumerates every reachable server state by C# source and
+      # asserts the client classification (and availability-over-control
+      # precedence) so a wire value cannot silently collapse to "unknown".
+      - name: Run terminal state-kind checks
+        run: npm run state-kind --prefix tests/Browser
+      # system-drafts.mjs and route-receipts.mjs are hermetic loopback-stub suites
+      # that serve the real route JS modules. They need no app process, owner
+      # password, provider or runtime mutation and pin the cross-module
+      # status/receipt contract (neutral load success, pending/error/ok mutations).
+      - name: Run hermetic system draft receipt checks (loopback stub)
+        run: npm run ci-system-drafts --prefix tests/Browser
+      - name: Run hermetic route receipt checks (loopback stub)
+        run: npm run ci-route-receipts --prefix tests/Browser
       # ci-organization.mjs is the separate enabled-runtime suite: it starts the
       # app with Control__Enabled=true, a disposable owner password and the
       # checked-in fake ACP fixture (no inference/provider credentials), then

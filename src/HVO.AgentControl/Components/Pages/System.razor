@@ -1,0 +1,15 @@
+@page "/system"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>System · AgentControl V2</PageTitle>
+<section class="page" data-page="system" data-system-page>
+    <header class="page-heading"><div><p class="eyebrow">System</p><h1>Organization instructions</h1><p>Drafts retain the authoritative revision from when editing began. Conflicts preserve the draft until you reset or intentionally retry.</p></div></header>
+    <p class="page-status" data-page-status role="status">Loading configuration…</p>
+    <div class="system-forms" data-system-forms hidden>
+        <form class="panel-form" data-org-name-form><label for="org-name">Company display name<input id="org-name" data-org-name-input data-system-control aria-describedby="org-name-draft-state" required maxlength="128" disabled /></label><p id="org-name-draft-state" class="draft-state-cue" data-org-name-draft-state hidden></p><div class="draft-actions"><button class="btn" type="submit" data-system-control disabled>Save display name</button><button class="text-button" type="button" data-reset-org-name hidden>Discard draft</button></div></form>
+        <form class="panel-form" data-org-instructions-form><label for="org-instructions">Organization basic instructions<textarea id="org-instructions" data-org-instructions data-system-control aria-describedby="org-instructions-draft-state" rows="7" required disabled></textarea></label><p id="org-instructions-draft-state" class="draft-state-cue" data-org-instructions-draft-state hidden></p><div class="draft-actions"><button class="btn" type="submit" data-system-control disabled>Save basic instructions</button><button class="text-button" type="button" data-reset-org-instructions hidden>Discard draft</button></div></form>
+        <form class="panel-form" data-role-instructions-form><label for="role-select">Authoritative role<select id="role-select" data-role-select data-system-control disabled></select></label><label for="role-instructions">Selected role standing instructions<textarea id="role-instructions" data-role-instructions data-system-control aria-describedby="role-instructions-draft-state" rows="7" required disabled></textarea></label><p id="role-instructions-draft-state" class="draft-state-cue" data-role-instructions-draft-state hidden></p><div class="draft-actions"><button class="btn" type="submit" data-system-control disabled>Save role instructions</button><button class="text-button" type="button" data-reset-role-instructions hidden>Discard draft</button></div></form>
+    </div>
+    <p class="receipt" data-config-receipt role="status" aria-live="polite"></p>
+</section>
+<script type="module" src="/js/system.js"></script>

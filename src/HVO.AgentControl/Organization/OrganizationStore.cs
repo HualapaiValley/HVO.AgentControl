@@ -92,12 +92,11 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 6 extends schema 5's recovery audit kind constraint so an owner can
-    /// acknowledge a marker-bearing request-uncertain obligation after externally
-    /// verifying its outcome. Migration accepts only exact released signatures and
-    /// creates verified, immutable source evidence at each boundary.
+    /// Schema 7 adds durable owner hire requests and append-only request events.
+    /// Migration accepts only the exact released schema-v6 signature and creates
+    /// verified, immutable source evidence before changing the authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -113,6 +112,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV4BackupHashFileName = "control.schema-v4.sha256";
     public const string SchemaV5BackupFileName = "control.schema-v5.db";
     public const string SchemaV5BackupHashFileName = "control.schema-v5.sha256";
+    public const string SchemaV6BackupFileName = "control.schema-v6.db";
+    public const string SchemaV6BackupHashFileName = "control.schema-v6.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -497,6 +498,9 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV6Statements =
         [.. SchemaV3Statements, .. RemoteWorkerSchemaV6Statements];
 
+    private static readonly string[] SchemaV7Statements =
+        [.. SchemaV6Statements, .. HireRequestSchemaV7Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -506,8 +510,11 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV5 =
         BuildExpectedSchema(SchemaV5Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV6 =
         BuildExpectedSchema(SchemaV6Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV7Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1473,6 +1480,20 @@ public sealed partial class OrganizationStore : IDisposable
             EnsureSchemaV5Backup(connection);
             AfterMigrationBackup?.Invoke();
             MigrateV5ToV6(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV6);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 6)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV6);
+            EnsureSchemaV6Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV6ToV7(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchema);
+            version = ReadSchemaVersion(connection);
         }
         else if (version != CurrentSchemaVersion)
         {
@@ -1873,6 +1894,21 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV6Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 6, SchemaV6BackupFileName, SchemaV6BackupHashFileName, ExpectedSchemaV6);
+
+    private void MigrateV6ToV7(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in HireRequestSchemaV7Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 7 WHERE version = 6");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1884,7 +1920,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore the verified schema-v5 backup or another authoritative source. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v6 file is pre-migration evidence only and restoring it would lose hires recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2026,7 +2062,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV6Statements)
+        foreach (var statement in SchemaV7Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -2307,6 +2343,26 @@ public sealed partial class OrganizationStore : IDisposable
         return (id, slug, displayName, description, basicInstructions, revision, createdAt, updatedAt);
     }
 
+    /// <summary>
+    /// Extracts the authoritative body of the active department orientation
+    /// fragment. A department without a persisted fragment is reported as null
+    /// by the caller; a fragment missing the expected heading is returned as
+    /// persisted rather than invented.
+    /// </summary>
+    private static string ReadDepartmentStandingInstructions(string fragmentContent)
+    {
+        const string heading = "# Department";
+        var normalized = fragmentContent
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Trim();
+        var lines = normalized.Split('\n');
+        var headingLine = Array.FindIndex(lines, line => string.Equals(line, heading, StringComparison.Ordinal));
+        return headingLine < 0
+            ? normalized
+            : string.Join('\n', lines[(headingLine + 1)..]).Trim();
+    }
+
     private static string ReadRoleStandingInstructions(string fragmentContent)
     {
         const string marker = "Standing instructions:\n";
@@ -2339,7 +2395,10 @@ public sealed partial class OrganizationStore : IDisposable
             command.CommandText =
                 """
                 SELECT d.id, d.slug, d.display_name,
-                       (SELECT COUNT(*) FROM employees e WHERE e.department_id = d.id)
+                       (SELECT COUNT(*) FROM employees e WHERE e.department_id = d.id),
+                       d.revision,
+                       (SELECT f.content FROM orientation_fragments f
+                        WHERE f.layer = 'department' AND f.scope_id = d.id AND f.active = 1)
                 FROM departments d
                 WHERE d.organization_id = $organization
                 ORDER BY d.slug
@@ -2352,7 +2411,9 @@ public sealed partial class OrganizationStore : IDisposable
                     reader.GetString(0),
                     reader.GetString(1),
                     reader.GetString(2),
-                    reader.GetInt32(3)));
+                    reader.GetInt32(3),
+                    reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : ReadDepartmentStandingInstructions(reader.GetString(5))));
             }
         }
 

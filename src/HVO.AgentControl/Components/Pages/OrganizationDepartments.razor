@@ -1,0 +1,10 @@
+@page "/organization/departments"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Departments · AgentControl V2</PageTitle>
+<section class="page" data-page="organization-departments" data-organization-departments-page>
+    <header class="page-heading"><div><p class="eyebrow"><a href="/organization">Organization</a></p><h1>Department directory</h1><p>The authoritative organization hierarchy. Each department opens its roles, roster, scoped availability, and its own request-employee path.</p></div></header>
+    <p class="page-status" data-page-status role="status">Loading departments…</p>
+    <ul class="department-directory directory-list" data-department-directory hidden></ul>
+</section>
+<script type="module" src="/js/organization-departments.js"></script>

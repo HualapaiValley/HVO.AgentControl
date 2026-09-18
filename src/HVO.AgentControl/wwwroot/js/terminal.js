@@ -3,7 +3,8 @@
 // Loaded as an external ES module after the locally bundled @xterm/xterm and
 // @xterm/addon-fit UMD builds. There is intentionally no SignalR / Blazor
 // circuit here: the static server render is enhanced by
-//   - polling GET /api/control (bounded to one request every 2 seconds), and
+//   - polling the selected employee's authoritative status (bounded to one
+//     request every 2 seconds), and
 //   - attaching xterm.js to the same-origin WebSocket at /terminal.
 //
 // Wire protocol (JSON text frames):
@@ -69,24 +70,104 @@ function clamp(value, min, max) {
     return Math.min(max, Math.max(min, rounded));
 }
 
-function stateKind(rawState) {
-    const value = String(rawState || "").toLowerCase();
-    if (!value) {
-        return "unknown";
+// Every reachable server-side state string, enumerated per source so a state
+// added on the server cannot silently collapse to "unknown". The wire values
+// are copied from the owning C# constants, not inferred from UI buckets:
+//
+//   control wire     Runtime/ControlStatus.cs ControlState / ToWireValue
+//   session          Runtime/ControlStatus.cs ControlStatus.SessionState
+//   availability     Organization/PortalOrganizationReadModel.cs
+//                    EmployeeAvailabilityCategories (plus literal "unknown")
+//   remote connection Organization/RemoteWorkerStore.cs
+//                    RecordWorkerConnectionState allow-list
+//   process          Worker/WorkerStore.cs SetProcess / process_slot CHECK
+//   session op       Worker/WorkerStore.cs BeginSessionOperation /
+//                    session_operation CHECK (state literal "none")
+//
+// The UI kind is a presentation bucket: ready=healthy/controllable,
+// loading=in progress, held=paused pending operator action,
+// faulted=terminal/recovery failure, idle=cleanly inactive.
+const STATE_SOURCES = {
+    control: {
+        ready: ["ready", "degraded"],
+        loading: ["starting"],
+        faulted: ["faulted"],
+        idle: ["disabled", "stopped"],
+    },
+    session: {
+        ready: ["busy"],
+        idle: ["idle"],
+    },
+    availability: {
+        ready: ["ready"],
+        loading: ["provisioning"],
+        held: ["held", "reconciliation-required", "reload-required", "orientation-stale"],
+        faulted: ["orientation-failed", "runtime-unavailable", "interrupted"],
+    },
+    remoteConnection: {
+        ready: ["authenticated"],
+        loading: ["connecting"],
+        held: ["held"],
+        faulted: ["expired"],
+        idle: ["disconnected"],
+    },
+    process: {
+        ready: ["running"],
+        loading: ["starting"],
+        faulted: ["exited", "protocol-failed", "transport-uncertain"],
+        idle: ["stopped"],
+    },
+    sessionOperation: {
+        ready: ["bound"],
+        loading: ["creating", "loading"],
+        faulted: ["uncertain"],
+        idle: ["none"],
+    },
+};
+
+const STATE_KINDS = new Map();
+for (const kind of ["ready", "loading", "held", "faulted", "idle"]) {
+    for (const source of Object.values(STATE_SOURCES)) {
+        for (const state of source[kind] || []) {
+            STATE_KINDS.set(state, kind);
+        }
     }
-    if (/(fault|error|fail|crash|unhealthy)/.test(value)) {
-        return "faulted";
+}
+
+export function stateKind(rawState) {
+    const value = normalizeState(rawState);
+    return STATE_KINDS.get(value) || "unknown";
+}
+
+function normalizeState(rawState) {
+    return String(rawState ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_]+/g, "-")
+        .replace(/-+/g, "-");
+}
+
+// Derives the display kind and text source for a remote-owned employee.
+// Availability is the host-computed lifecycle authority: every non-ready
+// availability state, including a new/foreign value, wins over lower-level
+// connection/session detail. This prevents an authenticated bridge from
+// painting a worker green while it is provisioning, held, interrupted, or in a
+// lifecycle state this client does not yet understand. Once availability is
+// ready (or absent), connection/session state may refine the presentation.
+export function remoteStatePresentation(runtime, data) {
+    const runtimeData = runtime && typeof runtime === "object" ? runtime : {};
+    const employee = data && typeof data === "object" ? data : {};
+    const availability = normalizeState(employee.availability);
+    const availabilityKind = stateKind(availability);
+    if (availability && availabilityKind !== "ready") {
+        return { kind: availabilityKind, rawState: employee.availability };
     }
-    if (/(load|start|init|sync|pending|provision|wait|connect)/.test(value)) {
-        return "loading";
-    }
-    if (/(ready|run|active|healthy|ok|attached)/.test(value)) {
-        return "ready";
-    }
-    if (/(stop|off|idle|detach|disconnect|disable|suspend|exit)/.test(value)) {
-        return "idle";
-    }
-    return "unknown";
+    const rawState = runtimeData.controlStatus || runtimeData.sessionState || employee.availability;
+    return { kind: stateKind(rawState), rawState };
+}
+
+export function remoteStateKind(runtime, data) {
+    return remoteStatePresentation(runtime, data).kind;
 }
 
 function displayState(rawState) {
@@ -156,6 +237,10 @@ class TerminalPortal {
         this.terminalReady = false;
         this.selectedEmployeeId = "";
         this.selectedTerminalUrl = "";
+        // Ownership is unknown until employee-detail.js supplies an exact
+        // selection. Treating first paint as host-owned can apply host telemetry
+        // (or open its terminal) before the requested employee is known.
+        this.hostOwned = null;
         this.runtimeState = "";
         this.runtimeSessionId = "";
         this.canControl = false;
@@ -169,12 +254,21 @@ class TerminalPortal {
         this.cancelAbort = null;
         this.notifiedDetachedInput = false;
         this.awaitingObservedIdle = false;
+        // employee-detail.js may finish its read before this module starts. Keep
+        // the replay inert until start() has created xterm and rendered the base
+        // connection state, so an immediately attachable employee cannot open a
+        // socket before output has somewhere to go.
+        this.pendingInitialEmployee = root.agentControlSelectedEmployee || null;
 
-        // Model dropdown state. The authoritative value comes from /api/control;
+        // Host model dropdown state. The authoritative value comes from /api/control;
         // the select is only reconciled when the operator is not interacting and
         // no change request is pending.
         this.modelCatalog = [];
         this.authoritativeModel = "";
+        // A host session may support model sync; a remote viewer never does.
+        // Leaving this false until an authoritative host status says otherwise
+        // keeps the selector disabled for a remote employee on first paint.
+        this.modelSyncSupported = false;
         this.modelChangeInFlight = false;
         this.modelAbort = null;
         this.modelTimedOut = false;
@@ -210,7 +304,13 @@ class TerminalPortal {
         document.addEventListener("visibilitychange", this.onVisibility, { passive: true });
         window.addEventListener("pagehide", this.onPageHide);
         window.addEventListener("pageshow", this.onPageShow);
-        root.addEventListener("agentcontrol:employee-selected", (event) => this.selectEmployee(event.detail));
+        root.addEventListener("agentcontrol:employee-selected", (event) => {
+            if (!this.running) {
+                this.pendingInitialEmployee = event.detail;
+                return;
+            }
+            this.selectEmployee(event.detail);
+        });
     }
 
     // ---- lifecycle -------------------------------------------------------
@@ -223,10 +323,41 @@ class TerminalPortal {
         this.createTerminal();
         this.applyFit();
         this.renderConnection("idle", true);
-        this.pollOnce();
+        const initialEmployee = this.pendingInitialEmployee;
+        this.pendingInitialEmployee = null;
+        if (initialEmployee) {
+            // selectEmployee performs the single authoritative poll for a
+            // first selection. Do not also resume below, or the first
+            // selection would poll twice.
+            this.selectEmployee(initialEmployee);
+        } else if (this.hostOwned !== null && this.selectedEmployeeId) {
+            // A bfcache pageshow restores a page whose selection is already
+            // established and whose ownership/id/url survived stop(). Resume
+            // authority immediately instead of leaving the pre-hide telemetry
+            // on screen: pollOnce refreshes status, and reattaches through the
+            // normal status path once the runtime is (still) ready.
+            this.resumeSelected();
+        }
         this.updateButtons();
     }
 
+    // Re-establishes an already-selected terminal after a stop/start cycle
+    // (bfcache pageshow). The selection is authoritative and retained, so the
+    // existing ready snapshot may reopen the socket at once; the immediate poll
+    // then reconciles every displayed field with the server.
+    resumeSelected() {
+        if (this.canAttach()) {
+            this.maybeAutoConnect();
+        } else {
+            this.renderNotAttachable();
+        }
+        this.pollOnce();
+    }
+
+    // Tears down the live transport and any in-flight work, but deliberately
+    // retains selectedEmployeeId / selectedTerminalUrl / hostOwned and the last
+    // authoritative snapshot so a bfcache pageshow can resume the exact
+    // selection. Only the socket is closed here.
     stop() {
         this.running = false;
         if (this.pollTimer) {
@@ -286,7 +417,10 @@ class TerminalPortal {
     }
 
     canAttach() {
-        return this.isRuntimeEstablished()
+        const runtimeAvailable = this.hostOwned === true
+            ? this.isRuntimeEstablished()
+            : this.hostOwned === false && this.runtimeKind === "ready";
+        return runtimeAvailable
             && this.terminalReady === true
             && Boolean(this.selectedEmployeeId)
             && Boolean(this.selectedTerminalUrl);
@@ -294,11 +428,17 @@ class TerminalPortal {
 
     selectEmployee(detail) {
         const employee = detail && typeof detail === "object" ? detail : {};
-        const nextId = typeof employee.id === "string" ? employee.id : "";
+        const nextId = typeof employee.id === "string" ? employee.id.trim() : "";
+        const runtime = employee.runtime && typeof employee.runtime === "object" ? employee.runtime : {};
+        const nextHostOwned = nextId ? runtime.hostOwned === true : null;
         const terminal = employee.terminal && typeof employee.terminal === "object" ? employee.terminal : {};
-        const nextUrl = terminal.available === true && typeof terminal.url === "string" ? terminal.url : "";
+        const nextUrl = nextId && terminal.available === true && typeof terminal.url === "string"
+            ? terminal.url.trim()
+            : "";
+        const previousHostOwned = this.hostOwned;
         const targetChanged = nextId !== this.selectedEmployeeId
             || nextUrl !== this.selectedTerminalUrl
+            || nextHostOwned !== this.hostOwned
             || !nextId
             || !nextUrl;
         if (targetChanged) {
@@ -308,11 +448,83 @@ class TerminalPortal {
             this.nextConnectAt = 0;
             this.autoConnectSuppressed = false;
         }
+        if (this.pollTimer) {
+            clearTimeout(this.pollTimer);
+            this.pollTimer = null;
+        }
+        if (this.pollAbort) {
+            this.pollAbort.abort();
+            this.pollAbort = null;
+        }
         this.selectedEmployeeId = nextId;
         this.selectedTerminalUrl = nextUrl;
+        this.hostOwned = nextHostOwned;
+        if (this.hostOwned === null) {
+            delete this.root.dataset.hostOwned;
+        } else {
+            this.root.dataset.hostOwned = String(this.hostOwned);
+        }
+        const hostNote = this.root.querySelector('[data-model-host-note]');
+        if (hostNote) hostNote.hidden = this.hostOwned !== false;
+        const cancelNote = this.root.querySelector('[data-remote-cancel-note]');
+        if (cancelNote) cancelNote.hidden = this.hostOwned !== false;
+        if (this.hostOwned === false) {
+            this.applyRemoteStatus(employee);
+        } else if (this.hostOwned === null) {
+            this.resetUnresolvedTelemetry();
+        } else if (previousHostOwned !== true || targetChanged) {
+            // Ownership moved to the host (typically remote -> host) or the
+            // host target changed. Blank every value the previous selection
+            // owned before the first host poll: a stale remote session/model
+            // must never be shown as if it were the newly selected host's.
+            this.resetHostTelemetry();
+        }
         if (this.canAttach()) this.maybeAutoConnect();
         else this.renderNotAttachable();
         this.updateButtons();
+        if (this.hostOwned !== null) {
+            this.pollOnce();
+        }
+    }
+
+    // Neutralize the telemetry surface while no exact employee is selected.
+    resetUnresolvedTelemetry() {
+        this.runtimeKind = "unknown";
+        this.runtimeState = "";
+        this.runtimeSessionId = "";
+        this.canControl = false;
+        this.terminalReady = false;
+        this.root.dataset.runtimeState = "unknown";
+        this.setField("state-detail", "Select an employee");
+        this.setField("sessionId", "\u2014");
+        this.setField("syncedAt", "\u2014");
+        this.hideError();
+        this.renderStatePills("unknown");
+    }
+
+    // Clear host-owned telemetry to a neutral Synchronizing state. Used when a
+    // selection newly becomes host-owned (or swaps host employees) so no remote
+    // or previous-employee snapshot lingers during the first host poll. The
+    // next authoritative /api/control response repopulates every field.
+    resetHostTelemetry() {
+        this.runtimeKind = "unknown";
+        this.runtimeState = "";
+        this.runtimeSessionId = "";
+        this.canControl = false;
+        this.terminalReady = false;
+        this.modelSyncSupported = false;
+        this.authoritativeModel = "";
+        this.modelCatalog = [];
+        this.modelAwaiting = null;
+        this.modelUnconfirmed = null;
+        this.root.dataset.runtimeState = "unknown";
+        this.setField("state-detail", "Synchronizing");
+        this.setField("sessionId", "\u2014");
+        this.setField("model", "\u2014");
+        this.setField("syncedAt", "\u2014");
+        this.setModelPlaceholder("Synchronizing\u2026");
+        this.renderStatePills("unknown");
+        this.hideError();
     }
 
     // ---- terminal --------------------------------------------------------
@@ -469,7 +681,7 @@ class TerminalPortal {
     }
 
     maybeAutoConnect() {
-        if (!this.canAttach() || this.manualDetach || this.socket) {
+        if (!this.running || !this.term || !this.canAttach() || this.manualDetach || this.socket) {
             return;
         }
         if (this.autoConnectSuppressed) {
@@ -682,13 +894,25 @@ class TerminalPortal {
     // ---- status polling --------------------------------------------------
 
     async pollOnce() {
-        if (!this.running) {
+        if (!this.running || this.hostOwned === null) {
+            return;
+        }
+        if (this.hostOwned === false && !this.selectedEmployeeId) {
+            this.resetUnresolvedTelemetry();
+            this.closeSocket(1000, "employee-selection-unresolved");
+            this.renderNotAttachable();
+            this.updateButtons();
             return;
         }
         const controller = new AbortController();
         this.pollAbort = controller;
+        const requestedHostOwned = this.hostOwned;
+        const requestedEmployeeId = this.selectedEmployeeId;
         try {
-            const response = await fetch(STATUS_ENDPOINT, {
+            const endpoint = requestedHostOwned === true
+                ? STATUS_ENDPOINT
+                : `/api/employees/${encodeURIComponent(requestedEmployeeId)}`;
+            const response = await fetch(endpoint, {
                 method: "GET",
                 headers: { Accept: "application/json" },
                 cache: "no-store",
@@ -699,18 +923,23 @@ class TerminalPortal {
                 throw new Error(`HTTP ${response.status}`);
             }
             const status = await response.json();
-            if (this.running) {
-                this.applyStatus(status);
+            const selectionChanged = requestedHostOwned !== this.hostOwned
+                || (requestedHostOwned === false && requestedEmployeeId !== this.selectedEmployeeId);
+            if (this.running && !selectionChanged) {
+                if (requestedHostOwned === true) this.applyStatus(status);
+                else this.applyRemoteStatus(status);
             }
         } catch (error) {
             if (!error || error.name !== "AbortError") {
                 this.setField("syncedAt", "status unavailable");
             }
         } finally {
-            if (this.pollAbort === controller) {
+            const ownsPoll = this.pollAbort === controller;
+            if (ownsPoll) {
                 this.pollAbort = null;
             }
-            if (this.running && !document.hidden) {
+            if (ownsPoll && this.running && !document.hidden && this.hostOwned !== null
+                && (this.hostOwned === true || Boolean(this.selectedEmployeeId))) {
                 this.pollTimer = window.setTimeout(() => this.pollOnce(), POLL_INTERVAL_MS);
             }
         }
@@ -729,7 +958,63 @@ class TerminalPortal {
         await this.pollOnce();
     }
 
+    applyRemoteStatus(employee) {
+        if (this.hostOwned !== false) {
+            return;
+        }
+        const data = employee && typeof employee === "object" ? employee : {};
+        const runtime = data.runtime && typeof data.runtime === "object" ? data.runtime : {};
+        const terminal = data.terminal && typeof data.terminal === "object" ? data.terminal : {};
+        const { kind, rawState } = remoteStatePresentation(runtime, data);
+        const previousKind = this.root.dataset.runtimeState;
+        const nextUrl = terminal.available === true && typeof terminal.url === "string" ? terminal.url : "";
+        if (nextUrl !== this.selectedTerminalUrl) {
+            this.closeSocket(1000, "remote-terminal-target-changed");
+            this.selectedTerminalUrl = nextUrl;
+            this.connectFailures = 0;
+            this.nextConnectAt = 0;
+            this.autoConnectSuppressed = false;
+        }
+
+        this.runtimeKind = kind;
+        this.runtimeState = typeof rawState === "string" ? rawState.trim().toLowerCase() : "";
+        this.runtimeSessionId = typeof runtime.nativeSessionId === "string" ? runtime.nativeSessionId.trim() : "";
+        this.canControl = false;
+        this.terminalReady = terminal.available === true;
+        this.root.dataset.runtimeState = kind;
+        this.setField("state-detail", displayState(rawState));
+        this.setField("sessionId", this.runtimeSessionId || "\u2014");
+        this.authoritativeModel = typeof runtime.controlModel === "string" ? runtime.controlModel : "";
+        this.setField("model", this.authoritativeModel || "\u2014");
+        this.setModelPlaceholder(this.authoritativeModel || "Unavailable");
+        this.selectModelValue(this.authoritativeModel);
+        this.setField("syncedAt", new Date().toLocaleTimeString());
+        this.renderStatePills(kind);
+        if (runtime.sanitizedError) {
+            this.showError(runtime.sanitizedError);
+        } else {
+            this.hideError();
+        }
+
+        if (kind !== previousKind) {
+            this.connectFailures = 0;
+            this.nextConnectAt = 0;
+            this.autoConnectSuppressed = false;
+        }
+        if (this.canAttach()) {
+            this.setOverlay(this.autoConnectSuppressed ? "Reconnect required" : "");
+            this.maybeAutoConnect();
+        } else {
+            this.closeSocket(1000, "remote-runtime-not-ready");
+            this.renderNotAttachable();
+        }
+        this.updateButtons();
+    }
+
     applyStatus(status) {
+        if (this.hostOwned !== true) {
+            return;
+        }
         const data = status && typeof status === "object" ? status : {};
         const kind = stateKind(data.state);
         const previousKind = this.root.dataset.runtimeState;
@@ -747,9 +1032,7 @@ class TerminalPortal {
         this.setField("transport", data.transport || "ACP");
         this.setField("syncedAt", new Date().toLocaleTimeString());
 
-        this.root.querySelectorAll('[data-field="state"]').forEach((pill) => {
-            pill.dataset.state = kind;
-        });
+        this.renderStatePills(kind);
 
         if (data.error) {
             this.showError(data.error);
@@ -816,11 +1099,18 @@ class TerminalPortal {
     showError(message) {
         const banner = this.root.querySelector('[data-field="error-banner"]');
         const text = this.root.querySelector('[data-field="error"]');
+        const wasHidden = !banner || banner.hidden;
+        // Expose the live region before changing its text so role=alert
+        // announces a newly visible error. Repeated polls update in place and do
+        // not keep pulling an operator back after they scroll elsewhere.
+        if (banner) {
+            banner.hidden = false;
+        }
         if (text) {
             text.textContent = String(message);
         }
-        if (banner) {
-            banner.hidden = false;
+        if (banner && wasHidden) {
+            banner.scrollIntoView({ block: "nearest", inline: "nearest" });
         }
     }
 
@@ -834,6 +1124,24 @@ class TerminalPortal {
     // ---- cancel (interrupt) ----------------------------------------------
 
     async interrupt() {
+        // Ownership is unknown until an exact employee is selected. That is a
+        // selection problem, not a remote-capability problem, and must not be
+        // reported as if a remote employee had been chosen.
+        if (this.hostOwned === null) {
+            this.setReceipt("Interrupt was not sent: select an employee first.", "error");
+            return;
+        }
+        if (this.hostOwned === false && !this.selectedEmployeeId) {
+            this.setReceipt(
+                "Interrupt was not sent: the selected remote employee id is empty; select an employee first.",
+                "error",
+            );
+            return;
+        }
+        if (this.hostOwned === false) {
+            this.setReceipt("Interrupt was not sent: remote turn cancellation is unavailable from this console.", "error");
+            return;
+        }
         // Gated on a controllable session (ready or degraded); the button is
         // disabled otherwise.
         if (this.cancelInFlight || !this.isRuntimeControllable()) {
@@ -1019,12 +1327,33 @@ class TerminalPortal {
         }
     }
 
+    // A remote employee has no host model catalog or host model control.
+    // Replace the host-only placeholder (or a stale host catalog) with a single
+    // explicit option so the disabled control never implies a pending host sync
+    // that cannot occur.
+    setModelPlaceholder(text) {
+        const select = this.modelSelect;
+        if (!select) {
+            return;
+        }
+        const options = Array.from(select.options);
+        if (options.length === 1 && options[0].textContent === text && options[0].value === "") {
+            return;
+        }
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = text;
+        option.disabled = true;
+        option.selected = true;
+        select.replaceChildren(option);
+    }
+
     updateModelDisabled() {
         if (!this.modelSelect) {
             return;
         }
         const hasCatalog = Array.isArray(this.modelCatalog) && this.modelCatalog.length > 0;
-        this.modelSelect.disabled = !this.modelSyncSupported || !this.isRuntimeReady() || this.modelChangeInFlight || !hasCatalog;
+        this.modelSelect.disabled = !this.hostOwned || !this.modelSyncSupported || !this.isRuntimeReady() || this.modelChangeInFlight || !hasCatalog;
         this.modelSelect.setAttribute("aria-busy", this.modelChangeInFlight ? "true" : "false");
     }
 
@@ -1069,6 +1398,11 @@ class TerminalPortal {
 
     handleModelChange() {
         const select = this.modelSelect;
+        if (!this.hostOwned) {
+            this.setModelReceipt("Model change was not sent: model selection is unavailable for a remote employee.", "error");
+            this.selectModelValue(this.authoritativeModel);
+            return;
+        }
         if (!select || this.modelChangeInFlight) {
             return;
         }
@@ -1259,6 +1593,15 @@ class TerminalPortal {
         });
     }
 
+    // State pills (the header state, and the runtime-state detail) expose their
+    // normalized kind as data-state so CSS can color the pill without coupling
+    // to text. The detail span is addressed by data-field like any other field.
+    renderStatePills(kind) {
+        this.root.querySelectorAll('[data-field="state"], [data-field="state-detail"]').forEach((pill) => {
+            pill.dataset.state = kind;
+        });
+    }
+
     renderConnection(kind, force) {
         if (this.connectionKind === kind && !force) {
             return;
@@ -1309,8 +1652,9 @@ class TerminalPortal {
             this.buttons.clear.disabled = !this.term;
         }
         if (this.buttons.interrupt) {
-            this.buttons.interrupt.disabled = !this.isRuntimeControllable() || this.cancelInFlight;
+            this.buttons.interrupt.disabled = !this.hostOwned || !this.isRuntimeControllable() || this.cancelInFlight;
         }
+        this.updateModelDisabled();
     }
 
     // ---- event bindings --------------------------------------------------
@@ -1338,8 +1682,10 @@ function boot() {
     portal.start();
 }
 
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot, { once: true });
-} else {
-    boot();
+if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", boot, { once: true });
+    } else {
+        boot();
+    }
 }

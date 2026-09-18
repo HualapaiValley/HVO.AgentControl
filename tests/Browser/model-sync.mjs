@@ -26,6 +26,15 @@
 //      and keeps its error banner, while faulted/disabled do not; a fake
 //      canControl:true on a faulted status must not enable the controls
 //  11. modelSyncSupported:false keeps the model selector disabled
+//  12. selection/ownership gates: an unresolved or empty-id selection never
+//      polls or attaches, a remote selection only attaches when its
+//      availability/runtime is ready, and an interrupt on unresolved ownership
+//      asks for an employee instead of blaming remote cancellation
+//  13. delayed host/remote poll responses cannot overwrite a newer selection
+//  14. a remote -> host selection clears stale remote telemetry to
+//      Synchronizing / em-dash before the first host poll
+//  15. a bfcache pagehide/pageshow pair resumes polling, refreshes telemetry
+//      and reopens the ready socket without a stale pre-hide snapshot
 //
 // Usage: node tests/Browser/model-sync.mjs
 import { chromium } from 'playwright';
@@ -62,6 +71,10 @@ const state = {
   },
   modelPlan: { status: 200, mode: 'echo', delayMs: 0, body: null },
   modelRequests: [],
+  controlDelayMs: 0,
+  employees: {},
+  controlRequests: 0,
+  employeeRequests: [],
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,12 +141,35 @@ const HARNESS = `<!doctype html>
   </main>
 </div>
 <script>
+  window.__terminalEvents = [];
+  window.__errorScrolls = 0;
+  Element.prototype.scrollIntoView = function () { window.__errorScrolls += 1; };
   window.Terminal = class {
-    constructor() { this.cols = 80; this.rows = 24; }
-    loadAddon() {} open() {} onData() {} onResize() {} write() {} clear() {} focus() {}
+    constructor() { this.cols = 80; this.rows = 24; window.__terminalEvents.push('terminal-created'); }
+    loadAddon() {} open() { window.__terminalEvents.push('terminal-opened'); } onData() {} onResize() {} write() {} clear() {} focus() {}
     resize(cols, rows) { this.cols = cols; this.rows = rows; }
   };
   window.FitAddon = { FitAddon: class { proposeDimensions() { return { cols: 80, rows: 24 }; } } };
+  window.WebSocket = class {
+    static OPEN = 1; static CONNECTING = 0;
+    constructor(url) { this.url = url; this.readyState = 0; window.__terminalEvents.push('socket-created:' + url); setTimeout(() => { this.readyState = 1; window.__terminalEvents.push('socket-opened:' + url); this.onopen?.(); }, 0); }
+    close(code, reason) { this.readyState = 3; window.__terminalEvents.push('socket-closed:' + code + ':' + reason); }
+    send() {}
+  };
+  const parameters = new URLSearchParams(location.search);
+  if (parameters.has('initial-host')) {
+    document.querySelector('[data-portal]').agentControlSelectedEmployee = {
+      id: 'host-stub', availability: 'ready',
+      runtime: { hostOwned: true },
+      terminal: { available: true, url: '/terminal?employeeId=host-stub' },
+    };
+  } else if (parameters.has('initial-employee')) {
+    document.querySelector('[data-portal]').agentControlSelectedEmployee = {
+      id: 'emp-fast', availability: 'ready',
+      runtime: { hostOwned: false, controlStatus: 'ready', nativeSessionId: 'fast-session', controlModel: 'fast/model' },
+      terminal: { available: true, url: '/terminal?employeeId=emp-fast' },
+    };
+  }
 </script>
 <script type="module" src="/js/terminal.js"></script>
 </body>
@@ -142,7 +178,13 @@ const HARNESS = `<!doctype html>
 function applyStub(patch) {
   if (patch.control) Object.assign(state.control, patch.control);
   if (patch.modelPlan) Object.assign(state.modelPlan, patch.modelPlan);
+  if ('controlDelayMs' in patch) state.controlDelayMs = Number(patch.controlDelayMs) || 0;
+  if (patch.employees) state.employees = { ...state.employees, ...patch.employees };
   if (patch.resetRequests) state.modelRequests.length = 0;
+  if (patch.resetPollRequests) {
+    state.controlRequests = 0;
+    state.employeeRequests.length = 0;
+  }
 }
 
 const server = createServer(async (req, res) => {
@@ -156,7 +198,24 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/') return send(200, HARNESS, 'text/html; charset=utf-8');
   if (url.pathname === '/js/terminal.js') return send(200, readFileSync(TERMINAL_JS, 'utf8'), 'text/javascript; charset=utf-8');
   if (url.pathname === '/css/portal.css') return send(200, readFileSync(PORTAL_CSS, 'utf8'), 'text/css; charset=utf-8');
-  if (url.pathname === '/api/control' && req.method === 'GET') return send(200, state.control);
+  if (url.pathname === '/api/control' && req.method === 'GET') {
+    state.controlRequests += 1;
+    const snapshot = structuredClone(state.control);
+    const delayMs = state.controlDelayMs;
+    if (delayMs > 0) await sleep(delayMs);
+    return send(200, snapshot);
+  }
+  if (url.pathname.startsWith('/api/employees/') && req.method === 'GET') {
+    const id = decodeURIComponent(url.pathname.slice('/api/employees/'.length));
+    state.employeeRequests.push(id);
+    const employee = state.employees[id];
+    if (!employee) return send(404, { error: 'employee not found' });
+    const snapshot = structuredClone(employee);
+    const delayMs = Number(snapshot.__delayMs || 0);
+    delete snapshot.__delayMs;
+    if (delayMs > 0) await sleep(delayMs);
+    return send(200, snapshot);
+  }
 
   if (url.pathname === '/__stub' && req.method === 'POST') {
     applyStub(JSON.parse((await readBody(req)) || '{}'));
@@ -224,7 +283,101 @@ async function waitFor(predicate, label, timeoutMs = 6000) {
 }
 
 try {
-  await page.goto(base, { waitUntil: 'domcontentloaded' });
+  // ---- selection/attachment safety gates --------------------------------
+  await fetch(`${base}/__stub`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ controlDelayMs: 1500, resetPollRequests: true }),
+  });
+  const unselectedPage = await context.newPage();
+  await unselectedPage.goto(base, { waitUntil: 'domcontentloaded' });
+  await sleep(250);
+  const unselected = await unselectedPage.evaluate(() => ({
+    hostOwned: document.querySelector('[data-portal]').dataset.hostOwned || '',
+    state: document.querySelector('[data-field="state-detail"]')?.textContent.trim(),
+    session: document.querySelector('[data-field="sessionId"]')?.textContent.trim(),
+    errorHidden: document.querySelector('[data-field="error-banner"]')?.hidden,
+    events: window.__terminalEvents,
+  }));
+  record('initial ownership stays unresolved and does not poll or apply host telemetry before selection',
+    state.controlRequests === 0 && state.employeeRequests.length === 0
+      && unselected.hostOwned === '' && unselected.state === 'Synchronizing'
+      && unselected.session === '—' && unselected.errorHidden
+      && !unselected.events.some((event) => event.startsWith('socket-created:')),
+    { controlRequests: state.controlRequests, employeeRequests: state.employeeRequests, unselected });
+
+  // Programmatic interrupt on a disabled control (dispatchEvent bypasses the
+  // disabled UI gate) must report the selection problem, never imply that a
+  // remote employee was selected and therefore lacked cancellation.
+  const readInterruptReceipt = (target) => target.evaluate(() => {
+    document.querySelector('[data-action="interrupt"]').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return document.querySelector('[data-field="receipt"]').textContent.trim();
+  });
+  const unresolvedReceipt = await readInterruptReceipt(unselectedPage);
+  record('interrupt with unresolved ownership asks for an employee, not a remote excuse',
+    unresolvedReceipt.includes('select an employee') && !unresolvedReceipt.includes('remote turn cancellation'),
+    { unresolvedReceipt });
+
+  await unselectedPage.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: { id: '   ', runtime: { hostOwned: false }, terminal: { available: true, url: '/terminal?employeeId=' } } },
+  )));
+  await sleep(100);
+  const unresolved = await unselectedPage.evaluate(() => ({
+    state: document.querySelector('[data-field="state-detail"]')?.textContent.trim(),
+    connection: document.querySelector('[data-field="connection"]')?.textContent.trim(),
+  }));
+  record('an empty remote employee id stays unresolved and performs no employee fetch',
+    state.employeeRequests.length === 0 && unresolved.state === 'Select an employee'
+      && unresolved.connection === 'Unavailable',
+    { employeeRequests: state.employeeRequests, unresolved });
+  const emptyRemoteReceipt = await readInterruptReceipt(unselectedPage);
+  record('an explicitly empty remote employee id keeps the interrupt receipt explicit about selection',
+    emptyRemoteReceipt.includes('select an employee') && !emptyRemoteReceipt.includes('remote turn cancellation'),
+    { emptyRemoteReceipt });
+
+  const remoteCases = [
+    { name: 'provisioning availability', availability: 'provisioning', controlStatus: 'authenticated', expectedSockets: 0 },
+    { name: 'unknown availability', availability: 'future-state', controlStatus: 'authenticated', expectedSockets: 0 },
+    { name: 'non-ready runtime status', availability: 'ready', controlStatus: 'connecting', expectedSockets: 0 },
+    { name: 'ready authenticated runtime', availability: 'ready', controlStatus: 'authenticated', expectedSockets: 1 },
+  ];
+  for (const [index, item] of remoteCases.entries()) {
+    await unselectedPage.evaluate(({ index: caseIndex, item: current }) => {
+      window.__terminalEvents.length = 0;
+      document.querySelector('[data-portal]').dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail: {
+        id: `emp-gate-${caseIndex}`,
+        availability: current.availability,
+        runtime: { hostOwned: false, controlStatus: current.controlStatus, nativeSessionId: `session-${caseIndex}` },
+        terminal: { available: true, url: `/terminal?employeeId=emp-gate-${caseIndex}` },
+      } }));
+    }, { index, item });
+    await sleep(100);
+    const events = await unselectedPage.evaluate(() => window.__terminalEvents);
+    const sockets = events.filter((event) => event.startsWith('socket-created:')).length;
+    record(`remote ${item.name} with terminal.available=true opens ${item.expectedSockets} sockets`,
+      sockets === item.expectedSockets, { events });
+  }
+  await unselectedPage.evaluate(() => {
+    window.__terminalEvents.length = 0;
+    document.querySelector('[data-portal]').dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail: {
+      id: '', runtime: { hostOwned: false }, terminal: { available: false, url: null },
+    } }));
+  });
+  await sleep(50);
+  const invalidSelection = await unselectedPage.evaluate(() => ({
+    events: window.__terminalEvents,
+    connection: document.querySelector('[data-field="connection"]')?.textContent.trim(),
+  }));
+  record('invalid selection closes an attached remote terminal and renders unavailable',
+    invalidSelection.events.some((event) => event.includes('socket-closed:1000:employee-terminal-target-changed'))
+      && invalidSelection.connection === 'Unavailable', invalidSelection);
+  await unselectedPage.close();
+
+  await fetch(`${base}/__stub`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ controlDelayMs: 0, resetPollRequests: true }),
+  });
+  await page.goto(`${base}/?initial-host=1`, { waitUntil: 'domcontentloaded' });
 
   // ---- 1. catalog render ------------------------------------------------
   await waitFor(async () => (await valueOf('#model-select')) === 'openai/gpt-5', 'initial catalog selection');
@@ -422,7 +575,7 @@ try {
   await waitFor(async () => (await buttonDisabled('interrupt')) === false, 'degraded allows interrupt');
   await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
     'agentcontrol:employee-selected',
-    { detail: { id: 'emp-degraded', terminal: { available: true, url: '/terminal?employeeId=emp-degraded' } } },
+    { detail: { id: 'emp-degraded', runtime: { hostOwned: true }, terminal: { available: true, url: '/terminal?employeeId=emp-degraded' } } },
   )));
   record('a degraded established session can control the terminal and cancel',
     (await buttonDisabled('interrupt')) === false && (await buttonDisabled('reconnect')) === false,
@@ -470,33 +623,304 @@ try {
   record('modelSyncSupported false keeps the model selector disabled',
     (await disabled()) === true, { disabled: await disabled() });
 
-  // ---- 13. employee terminal target changes tear down immediately --------
+  // ---- 13. remote employee keeps viewer controls but not host controls ----
   await fetch(`${base}/__stub`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ control: { state: 'ready', sessionId: 'stub-session', terminalReady: true, canControl: true } }),
+    body: JSON.stringify({ control: { state: 'ready', sessionId: 'stub-session', terminalReady: true, canControl: true, modelSyncSupported: true, models: CATALOG } }),
   });
   await sleep(2200);
-  const terminalEvents = await page.evaluate(() => {
+  await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: { id: 'emp-remote', runtime: { hostOwned: false, controlStatus: 'ready', nativeSessionId: 'remote-session', controlModel: 'remote/model' }, terminal: { available: true, url: '/terminal?employeeId=emp-remote' } } },
+  )));
+  record('remote employee disables host model and interrupt while retaining terminal reconnect',
+    (await disabled()) === true && (await buttonDisabled('interrupt')) === true && (await buttonDisabled('reconnect')) === false,
+    { model: await disabled(), interrupt: await buttonDisabled('interrupt'), reconnect: await buttonDisabled('reconnect') });
+  record('remote employee telemetry is not overwritten by host status polling',
+    (await headerModel()) === 'remote/model' && (await page.locator('[data-field="sessionId"]').innerText()) === 'remote-session',
+    { model: await headerModel(), session: await page.locator('[data-field="sessionId"]').innerText() });
+
+  // ---- 14. employee terminal target changes tear down immediately --------
+  await fetch(`${base}/__stub`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ control: { state: 'ready', sessionId: 'stub-session', terminalReady: true, canControl: true }, controlDelayMs: 0 }),
+  });
+  await sleep(2200);
+  await page.evaluate(() => {
     const events = [];
-    const sockets = [];
+    window.__socketEvents = events;
     class Socket {
       static OPEN = 1; static CONNECTING = 0;
-      constructor(url) { this.url = url; this.readyState = 1; sockets.push(this); events.push(`open:${url}`); setTimeout(() => this.onopen?.(), 0); }
+      constructor(url) { this.url = url; this.readyState = 1; events.push(`open:${url}`); setTimeout(() => this.onopen?.(), 0); }
       close(code, reason) { this.readyState = 3; events.push(`close:${code}:${reason}`); }
       send() {}
     }
     window.WebSocket = Socket;
     const root = document.querySelector('[data-portal]');
-    const dispatch = (detail) => root.dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail }));
-    dispatch({ id: 'emp-one', terminal: { available: true, url: '/terminal?employeeId=emp-one' } });
-    root.querySelector('[data-action="reconnect"]').click();
-    dispatch({ id: 'emp-one', terminal: { available: true, url: '/terminal?employeeId=emp-one&revision=2' } });
-    dispatch({ id: 'emp-one', terminal: { available: false, url: null } });
-    return events;
+    root.dispatchEvent(new CustomEvent('agentcontrol:employee-selected', {
+      detail: { id: 'emp-one', runtime: { hostOwned: true }, terminal: { available: true, url: '/terminal?employeeId=emp-one' } },
+    }));
   });
+  // Let the host poll establish readiness for the new target before attaching.
+  await waitFor(() => page.evaluate(() => document.querySelector('[data-portal]').dataset.runtimeState === 'ready'), 'emp-one host ready');
+  await page.evaluate(() => document.querySelector('[data-action="reconnect"]').click());
+  await sleep(50);
+  // Same employee, new terminal URL: the old socket must close immediately and
+  // must not reattach until a poll confirms readiness again.
+  await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: { id: 'emp-one', runtime: { hostOwned: true }, terminal: { available: true, url: '/terminal?employeeId=emp-one&revision=2' } } },
+  )));
+  const afterUrlChange = await page.evaluate(() => window.__socketEvents.slice());
+  await waitFor(() => page.evaluate(() => document.querySelector('[data-portal]').dataset.runtimeState === 'ready'), 'emp-one revision 2 ready');
+  // Terminal revocation closes the (poll-driven) reattached socket immediately.
+  await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: { id: 'emp-one', runtime: { hostOwned: true }, terminal: { available: false, url: null } } },
+  )));
+  await sleep(50);
+  const terminalEvents = await page.evaluate(() => window.__socketEvents.slice());
   record('same employee URL change or terminal revocation closes the old socket immediately',
-    terminalEvents.filter((event) => event.startsWith('close:1000:employee-terminal-target-changed')).length === 2,
-    { terminalEvents });
+    afterUrlChange.filter((event) => event === 'close:1000:employee-terminal-target-changed').length === 1
+      && terminalEvents.filter((event) => event === 'close:1000:employee-terminal-target-changed').length === 2,
+    { afterUrlChange, terminalEvents });
+
+  // ---- 15. retained fast selection waits for terminal construction --------
+  const orderingPage = await context.newPage();
+  await orderingPage.goto(`${base}/?initial-employee=1`, { waitUntil: 'domcontentloaded' });
+  await waitFor(async () => (await orderingPage.evaluate(() => window.__terminalEvents.includes('socket-opened:ws://127.0.0.1:' + location.port + '/terminal?employeeId=emp-fast'))), 'fast retained employee socket');
+  const ordering = await orderingPage.evaluate(() => ({
+    events: window.__terminalEvents,
+    connection: document.querySelector('[data-field="connection"]')?.textContent,
+  }));
+  const terminalCreatedAt = ordering.events.indexOf('terminal-created');
+  const terminalOpenedAt = ordering.events.indexOf('terminal-opened');
+  const socketCreatedAt = ordering.events.findIndex((event) => event.startsWith('socket-created:'));
+  record('retained fast employee selection creates and opens xterm before opening its socket',
+    terminalCreatedAt >= 0 && terminalOpenedAt > terminalCreatedAt && socketCreatedAt > terminalOpenedAt
+      && ordering.connection === 'Attached', ordering);
+  await orderingPage.close();
+
+  // ---- 16. poll responses are bound to their request target ----------------
+  let releaseHostPoll;
+  let hostPollStartedResolve;
+  const hostPollStarted = new Promise((resolve) => { hostPollStartedResolve = resolve; });
+  await page.route('**/api/control', async (route) => {
+    const response = await route.fetch();
+    hostPollStartedResolve();
+    await new Promise((resolve) => { releaseHostPoll = resolve; });
+    await route.fulfill({ response, json: {
+      ...state.control,
+      state: 'faulted', sessionId: 'stale-host-session', model: 'stale/host-model',
+      terminalReady: false, canControl: false, error: 'stale host error',
+    } });
+  });
+  const hostRaceNavigation = page.goto(`${base}/?initial-host=1`, { waitUntil: 'domcontentloaded' });
+  await hostPollStarted;
+  const remoteRace = {
+    id: 'emp-race-remote', availability: 'ready',
+    runtime: { hostOwned: false, controlStatus: 'ready', nativeSessionId: 'remote-race-session', controlModel: 'remote/race-model', sanitizedError: 'safe remote warning' },
+    terminal: { available: true, url: '/terminal?employeeId=emp-race-remote' },
+  };
+  await page.evaluate((employee) => {
+    const root = document.querySelector('[data-portal]');
+    root.dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail: employee }));
+    window.__terminalEvents.length = 0;
+  }, remoteRace);
+  await waitFor(async () => (await page.locator('[data-field="sessionId"]').innerText()) === 'remote-race-session', 'remote selection before stale host release');
+  releaseHostPoll();
+  await hostRaceNavigation;
+  await sleep(250);
+  const hostRace = await page.evaluate(() => ({
+    session: document.querySelector('[data-field="sessionId"]')?.textContent,
+    model: document.querySelector('[data-field="model"]')?.textContent,
+    state: document.querySelector('[data-field="state-detail"]')?.textContent,
+    error: document.querySelector('[data-field="error"]')?.textContent,
+    events: window.__terminalEvents,
+  }));
+  record('a delayed host poll cannot overwrite a newly selected remote employee or close its socket',
+    hostRace.session === 'remote-race-session' && hostRace.model === 'remote/race-model'
+      && hostRace.state === 'ready' && hostRace.error === 'safe remote warning'
+      && !hostRace.events.some((event) => event.startsWith('socket-closed:')), hostRace);
+  await page.unroute('**/api/control');
+
+  const delayedRemote = {
+    id: 'emp-race-delayed', availability: 'quarantined', __delayMs: 0,
+    runtime: { hostOwned: false, controlStatus: 'authenticated', nativeSessionId: 'stale-remote-session', controlModel: 'stale/remote-model', sanitizedError: 'stale remote error' },
+    terminal: { available: false, url: null },
+  };
+  await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ employees: { 'emp-race-delayed': delayedRemote }, controlDelayMs: 0, control: {
+    state: 'ready', sessionId: 'fresh-host-session', model: 'fresh/host-model', terminalReady: true,
+    canControl: true, error: null, modelSyncSupported: true, models: CATALOG,
+  } }) });
+  let releaseRemotePoll;
+  let remotePollStartedResolve;
+  const remotePollStarted = new Promise((resolve) => { remotePollStartedResolve = resolve; });
+  await page.route('**/api/employees/emp-race-delayed', async (route) => {
+    const response = await route.fetch();
+    remotePollStartedResolve();
+    await new Promise((resolve) => { releaseRemotePoll = resolve; });
+    await route.fulfill({ response });
+  });
+  await page.evaluate((employee) => {
+    const root = document.querySelector('[data-portal]');
+    root.dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail: employee }));
+  }, {
+    ...delayedRemote,
+    availability: 'ready',
+    runtime: { ...delayedRemote.runtime, sanitizedError: null },
+    terminal: { available: true, url: '/terminal?employeeId=emp-race-delayed' },
+  });
+  await remotePollStarted;
+  await page.evaluate(() => {
+    document.querySelector('[data-portal]').dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail: {
+      id: 'host-race', runtime: { hostOwned: true }, terminal: { available: true, url: '/terminal?employeeId=emp-race-delayed' },
+    } }));
+    // Keep the existing attached transport as the sentinel. If the stale remote
+    // response is applied, its unavailable terminal will close this socket.
+    window.__terminalEvents.length = 0;
+  });
+  releaseRemotePoll();
+  await sleep(250);
+  const inverseBeforeHostPoll = await page.evaluate(() => ({
+    hostOwned: document.querySelector('[data-portal]').dataset.hostOwned,
+    events: window.__terminalEvents,
+    error: document.querySelector('[data-field="error"]')?.textContent,
+  }));
+  await waitFor(async () => (await page.locator('[data-field="sessionId"]').innerText()) === 'fresh-host-session', 'host poll after stale remote discard', 5000);
+  const inverseAfterHostPoll = {
+    session: await page.locator('[data-field="sessionId"]').innerText(),
+    model: await headerModel(),
+    error: await errorBanner(),
+  };
+  record('a delayed remote poll cannot overwrite a newly selected host or close its socket',
+    inverseBeforeHostPoll.hostOwned === 'true'
+      && !inverseBeforeHostPoll.events.some((event) => event.startsWith('socket-closed:'))
+      && inverseBeforeHostPoll.error !== 'stale remote error'
+      && inverseAfterHostPoll.session === 'fresh-host-session'
+      && inverseAfterHostPoll.model === 'fresh/host-model'
+      && inverseAfterHostPoll.error.hidden, { inverseBeforeHostPoll, inverseAfterHostPoll });
+  await page.unroute('**/api/employees/emp-race-delayed');
+
+  // ---- 18. remote -> host clears stale telemetry before the host poll ------
+  await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    employees: {
+      'emp-clear': {
+        id: 'emp-clear', availability: 'ready',
+        runtime: { hostOwned: false, controlStatus: 'ready', nativeSessionId: 'remote-clear-session', controlModel: 'remote/clear-model' },
+        terminal: { available: false, url: null },
+      },
+    },
+    control: {
+      state: 'ready', organizationName: 'Stub harness', sessionId: 'host-after-clear', model: 'fresh/host-model',
+      transport: 'ACP', terminalReady: true, sessionState: 'idle', canControl: true, error: null,
+      modelSyncSupported: true, models: CATALOG,
+    },
+    controlDelayMs: 0,
+  }) });
+  await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: {
+      id: 'emp-clear', availability: 'ready',
+      runtime: { hostOwned: false, controlStatus: 'ready', nativeSessionId: 'remote-clear-session', controlModel: 'remote/clear-model' },
+      terminal: { available: false, url: null },
+    } },
+  )));
+  await waitFor(async () => (await page.locator('[data-field="sessionId"]').innerText()) === 'remote-clear-session', 'remote telemetry before host swap');
+
+  let releaseHostClear;
+  let hostClearStartedResolve;
+  const hostClearStarted = new Promise((resolve) => { hostClearStartedResolve = resolve; });
+  await page.route('**/api/control', async (route) => {
+    const response = await route.fetch();
+    hostClearStartedResolve();
+    await new Promise((resolve) => { releaseHostClear = resolve; });
+    await route.fulfill({ response });
+  });
+  await page.evaluate(() => document.querySelector('[data-portal]').dispatchEvent(new CustomEvent(
+    'agentcontrol:employee-selected',
+    { detail: { id: 'host-clear', runtime: { hostOwned: true }, terminal: { available: true, url: '/terminal?employeeId=host-clear' } } },
+  )));
+  await hostClearStarted;
+  const duringHostGap = await page.evaluate(() => ({
+    state: document.querySelector('[data-field="state-detail"]')?.textContent.trim(),
+    session: document.querySelector('[data-field="sessionId"]')?.textContent.trim(),
+    model: document.querySelector('[data-field="model"]')?.textContent.trim(),
+    syncedAt: document.querySelector('[data-field="syncedAt"]')?.textContent.trim(),
+  }));
+  releaseHostClear();
+  await waitFor(async () => (await page.locator('[data-field="sessionId"]').innerText()) === 'host-after-clear', 'host telemetry after delayed poll', 5000);
+  const afterHostClear = {
+    session: await page.locator('[data-field="sessionId"]').innerText(),
+    model: await headerModel(),
+  };
+  record('a remote -> host selection clears stale remote telemetry to Synchronizing / em-dash before the host poll',
+    duringHostGap.state === 'Synchronizing' && duringHostGap.session === '\u2014'
+      && duringHostGap.model === '\u2014' && duringHostGap.syncedAt === '\u2014'
+      && afterHostClear.session === 'host-after-clear' && afterHostClear.model === 'fresh/host-model',
+    { duringHostGap, afterHostClear });
+  await page.unroute('**/api/control');
+
+  // ---- 17. visible errors do not repeatedly move the viewport -------------
+  await page.evaluate(() => { window.__errorScrolls = 0; });
+  await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ control: { error: 'persistent poll error' } }) });
+  await waitFor(async () => (await errorBanner()).text === 'persistent poll error', 'persistent error appears');
+  await sleep(2300);
+  const errorScrolls = await page.evaluate(() => window.__errorScrolls);
+  record('repeated polls of the same visible error scroll only on hidden-to-visible transition',
+    errorScrolls === 1, { errorScrolls, banner: await errorBanner() });
+
+  // ---- 19. bfcache pagehide/pageshow resumes polling and reattaches -------
+  // Close the busy main page first so the shared /api/control request counter
+  // measures only this page's activity.
+  await page.close();
+  await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    control: {
+      state: 'ready', organizationName: 'Stub harness', sessionId: 'resume-session-1', model: 'openai/gpt-5',
+      transport: 'ACP', terminalReady: true, sessionState: 'idle', canControl: true, error: null,
+      modelSyncSupported: true, models: CATALOG,
+    },
+    controlDelayMs: 0, resetPollRequests: true,
+  }) });
+  const resumePage = await context.newPage();
+  await resumePage.goto(`${base}/?initial-host=1`, { waitUntil: 'domcontentloaded' });
+  await waitFor(async () => (await resumePage.locator('[data-field="sessionId"]').innerText()) === 'resume-session-1', 'initial resume telemetry');
+  await waitFor(async () => resumePage.evaluate(() => window.__terminalEvents.some((event) => event.startsWith('socket-opened:'))), 'initial resume socket');
+  const pollsBeforeHide = state.controlRequests;
+  await resumePage.evaluate(() => {
+    window.__terminalEvents.length = 0;
+    window.dispatchEvent(new PageTransitionEvent('pagehide'));
+  });
+  await sleep(100);
+  const hidden = await resumePage.evaluate(() => ({
+    events: window.__terminalEvents,
+  }));
+  record('pagehide closes the transport while retaining the selection',
+    hidden.events.some((event) => event.startsWith('socket-closed:1000:pagehide')), hidden);
+
+  // Change authority while the page is hidden; the bfcache restore must not
+  // trust the pre-hide snapshot.
+  await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    control: { sessionId: 'resume-session-2', model: 'anthropic/claude' },
+  }) });
+  await resumePage.evaluate(() => {
+    window.__terminalEvents.length = 0;
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  await waitFor(async () => (await resumePage.locator('[data-field="sessionId"]').innerText()) === 'resume-session-2', 'pageshow refreshes telemetry');
+  await waitFor(async () => resumePage.evaluate(() => window.__terminalEvents.some((event) => event.startsWith('socket-opened:'))), 'pageshow reopens socket');
+  const resumed = await resumePage.evaluate(() => ({
+    session: document.querySelector('[data-field="sessionId"]')?.textContent.trim(),
+    model: document.querySelector('[data-field="model"]')?.textContent.trim(),
+    state: document.querySelector('[data-field="state-detail"]')?.textContent.trim(),
+    events: window.__terminalEvents,
+  }));
+  record('a persisted pageshow polls again, refreshes telemetry, and reopens the ready socket',
+    state.controlRequests > pollsBeforeHide && resumed.session === 'resume-session-2'
+      && resumed.model === 'anthropic/claude' && resumed.state === 'ready'
+      && resumed.events.some((event) => event.startsWith('socket-opened:')),
+    { pollsBeforeHide, pollsAfterShow: state.controlRequests, resumed });
+  await resumePage.close();
 
   record('no uncaught page errors during the model sync suite', pageErrors.length === 0, { pageErrors });
 } catch (error) {

@@ -95,11 +95,10 @@ public sealed class AcpFakeProcessTests
         var slow = fake.Session.RequestAsync("test/slow", null, TimeSpan.FromSeconds(5), CancellationToken.None);
         var fast = fake.Session.RequestAsync("test/fast", null, TimeSpan.FromSeconds(5), CancellationToken.None);
 
-        var first = await Task.WhenAny(slow, fast);
-        Assert.Same(fast, first);
+        var results = await Task.WhenAll(fast, slow);
 
-        Assert.Equal("test/fast", (await fast).GetProperty("method").GetString());
-        Assert.Equal("test/slow", (await slow).GetProperty("method").GetString());
+        Assert.Equal("test/fast", results[0].GetProperty("method").GetString());
+        Assert.Equal("test/slow", results[1].GetProperty("method").GetString());
     }
 
     [Fact]

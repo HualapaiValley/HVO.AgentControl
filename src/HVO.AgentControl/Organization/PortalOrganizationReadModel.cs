@@ -81,6 +81,27 @@ public sealed record PendingApprovalsSummary(
     IReadOnlyList<object> Items,
     string Reason);
 
+/// <summary>
+/// One authoritative department: identity and revision, the persisted standing
+/// instructions when a department orientation fragment exists, the roles
+/// assigned to it, and the scoped employee roster with host-computed
+/// availability. The roster is the department hierarchy, not an employee-filter
+/// view.
+/// </summary>
+public sealed record PortalDepartmentDetail(
+    string Id,
+    string Slug,
+    string DisplayName,
+    string OrganizationId,
+    string OrganizationDisplayName,
+    int Revision,
+    string? StandingInstructions,
+    string HireUrl,
+    IReadOnlyList<RoleSummary> Roles,
+    IReadOnlyList<PortalEmployeeDetail> Employees,
+    IReadOnlyList<AvailabilityCount> Availability,
+    IReadOnlyList<OwnerAttentionItem> FailuresNeedingAttention);
+
 public sealed record PortalOrganizationOverview(
     string Id,
     string Slug,
@@ -93,6 +114,7 @@ public sealed record PortalOrganizationOverview(
     IReadOnlyList<PortalDepartmentSummary> Departments,
     IReadOnlyList<RoleSummary> Roles,
     IReadOnlyList<PortalEmployeeDetail> Employees,
+    IReadOnlyList<HireRequestSummary> HireRequests,
     IReadOnlyList<AvailabilityCount> Availability,
     PendingApprovalsSummary PendingApprovals,
     PendingApprovalsSummary PendingWorkerPermissions,
@@ -118,7 +140,8 @@ public static class PortalOrganizationReadModel
         OrganizationOverview overview,
         OrganizationRuntimeIdentity? identity,
         ControlStatus status,
-        IRemoteWorkerStatusProvider? remoteProvider = null)
+        IRemoteWorkerStatusProvider? remoteProvider = null,
+        IReadOnlyList<HireRequestSummary>? hireRequests = null)
     {
         ArgumentNullException.ThrowIfNull(overview);
         ArgumentNullException.ThrowIfNull(status);
@@ -142,7 +165,7 @@ public static class PortalOrganizationReadModel
                 employee.DisplayName,
                 employee.Availability,
                 AttentionSummary(employee),
-                $"/#employee/{Uri.EscapeDataString(employee.Id)}"))
+                $"/employees/{Uri.EscapeDataString(employee.Id)}"))
             .ToArray();
 
         return new PortalOrganizationOverview(
@@ -157,12 +180,13 @@ public static class PortalOrganizationReadModel
             departments,
             overview.Roles,
             employees,
+            hireRequests ?? [],
             Counts(employees),
             new PendingApprovalsSummary(
-                Supported: false,
-                Count: 0,
-                Items: [],
-                Reason: "Owner approval workflow is not implemented; issue #219 is outside this baseline."),
+                Supported: true,
+                Count: (hireRequests ?? []).Count(request => request.State == HireRequestStates.Requested),
+                Items: (hireRequests ?? []).Where(request => request.State == HireRequestStates.Requested).Cast<object>().ToArray(),
+                Reason: "Hire requests can be requested or rejected. Approval and provisioning remain gated by #217 two-host operational acceptance."),
             new PendingApprovalsSummary(
                 Supported: employees.Any(x => x.PendingWorkerPermissions.Supported),
                 Count: employees.Sum(x => x.PendingWorkerPermissions.Items.Count),
@@ -182,6 +206,58 @@ public static class PortalOrganizationReadModel
         if (employee is null) return null;
         var remote = remoteProvider?.Snapshot(overview).GetValueOrDefault(employeeId);
         return BuildEmployee(employee, identity, status, remote);
+    }
+
+    /// <summary>
+    /// Builds the authoritative detail for one department selected by stable id,
+    /// or null when no department carries that id. The roster, role summaries,
+    /// scoped availability counts and attention items are computed from the same
+    /// single store snapshot and exact host status as the overview.
+    /// </summary>
+    public static PortalDepartmentDetail? FindDepartment(
+        OrganizationOverview overview,
+        OrganizationRuntimeIdentity? identity,
+        ControlStatus status,
+        string departmentId,
+        IRemoteWorkerStatusProvider? remoteProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(overview);
+        ArgumentNullException.ThrowIfNull(status);
+
+        var department = overview.Departments.SingleOrDefault(item => item.Id == departmentId);
+        if (department is null) return null;
+
+        var remote = remoteProvider?.Snapshot(overview) ?? new Dictionary<string, RemoteWorkerSnapshot>(StringComparer.Ordinal);
+        var employees = overview.Employees
+            .Where(employee => employee.DepartmentId == departmentId)
+            .Select(employee => BuildEmployee(employee, identity, status, remote.GetValueOrDefault(employee.Id)))
+            .ToArray();
+        var roles = overview.Roles
+            .Where(role => role.DepartmentId == departmentId)
+            .ToArray();
+        var failures = employees
+            .Where(NeedsAttention)
+            .Select(employee => new OwnerAttentionItem(
+                employee.Id,
+                employee.DisplayName,
+                employee.Availability,
+                AttentionSummary(employee),
+                $"/employees/{Uri.EscapeDataString(employee.Id)}"))
+            .ToArray();
+
+        return new PortalDepartmentDetail(
+            department.Id,
+            department.Slug,
+            department.DisplayName,
+            overview.Id,
+            overview.DisplayName,
+            department.Revision,
+            department.StandingInstructions,
+            $"/hiring?departmentId={Uri.EscapeDataString(department.Id)}",
+            roles,
+            employees,
+            Counts(employees),
+            failures);
     }
 
     public static string Classify(EmployeeSummary employee, bool hostOwned, ControlStatus status)

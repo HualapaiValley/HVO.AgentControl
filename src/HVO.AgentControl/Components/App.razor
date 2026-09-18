@@ -10,25 +10,15 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <HeadOutlet />
 
-    @* xterm.js is pinned and served from wwwroot/vendor/xterm (see README there).
-       No CDN is used at runtime. Load the classic UMD builds before the module. *@
-    <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+    @* The shared routed shell and owner-page design system. xterm.js is route
+       specific: only the EmployeeDetail page declares its stylesheet and UMD
+       scripts through HeadContent, so landing/other routes never fetch them. *@
     <link rel="stylesheet" href="/css/portal.css" />
-    @* CSS-isolation bundle for Components/Pages/Home.razor.css. Fingerprinted
-       through MapStaticAssets; the global stylesheet above carries the full
-       design so the shell still renders if isolated assets are unavailable. *@
-    <link rel="stylesheet" href="@Assets["HVO.AgentControl.styles.css"]" />
-
-    <script src="/vendor/xterm/xterm.js" defer></script>
-    <script src="/vendor/xterm/addon-fit.js" defer></script>
 </head>
 
 <body>
     <Routes />
 
-    @* External ES module. Status polling, WebSocket framing and xterm wiring live
-       here; the server render above stays static and does not require SignalR. *@
-    <script type="module" src="/js/terminal.js"></script>
 </body>
 
 </html>

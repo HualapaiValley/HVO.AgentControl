@@ -28,8 +28,17 @@ Controller-private state lives in the `/control-data` volume (controller UID
 1001); the agent-owned `/data` volume (UID 1000) holds the OpenCode home,
 workspace and conversation history.
 
-This is a development slice. The #217 hermetic controller core now includes
-schema-v6 enrollment/cursor/event/request/cancellation/recovery APIs, durable
+This is a development slice. The owner portal now uses real SSR routes for
+`/organization`, `/organization/departments`, `/organization/departments/{id}`,
+`/employees`, `/employees/{id}`, `/hiring`, and `/system`; the organization
+section is a hierarchy whose cards link departments by stable ID and whose detail
+shows roles, roster, scoped availability, standing instructions and a
+department-scoped request-employee path. Control schema v7 adds durable,
+idempotent hire requests with append-only hashed
+state events and owner rejection; a request does **not** create an employee.
+Approval, provisioning and orientation remain gated by #217 two-host operational
+acceptance. The #217 hermetic controller records are retained in the current
+schema-v7 store, including enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
 minimal same-origin owner control routes. The fixed SSH/Docker adapter and hosted
@@ -340,10 +349,10 @@ because actual two-way TUI synchronization is not available; an acknowledged ACP
 model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/control.db` is the authoritative schema-v3 SQLite store for organization,
-department, role, employee, runtime-binding and session identity plus versioned
-orientation fragments/facts/assignments/evidence, layered permission policy/grants/audit and
-dispatch holds in the
+`/control-data/control.db` is the authoritative schema-v7 SQLite store for organization,
+department, role, employee, runtime-binding and session identity; versioned
+orientation fragments/facts/assignments/evidence; layered permission policy/grants/audit;
+dispatch holds; remote-worker controller records; and durable hire requests in the
 controller-private volume; `/control-data/runtime.json` is retained as adoption
 evidence only. The database, its WAL/SHM sidecars and the writer lock are
 controller-only `0600`, and a fresh database is seed-published atomically so an

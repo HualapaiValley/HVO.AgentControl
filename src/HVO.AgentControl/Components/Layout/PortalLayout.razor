@@ -1,0 +1,44 @@
+@inherits LayoutComponentBase
+@namespace HVO.AgentControl.Components.Layout
+@inject NavigationManager Navigation
+
+@{
+    // Static SSR renders once per request, so the active organization group and
+    // every active link are server-computed. NavLink cannot emit aria-current,
+    // so links are plain anchors whose exact active state is resolved here.
+    var currentPath = "/" + new Uri(Navigation.Uri).AbsolutePath.Trim('/');
+    string PathOf(string href) => "/" + href.Trim('/');
+    bool IsActive(string href, bool prefix) => prefix
+        ? currentPath.Equals(PathOf(href), StringComparison.OrdinalIgnoreCase)
+            || currentPath.StartsWith(PathOf(href) + "/", StringComparison.OrdinalIgnoreCase)
+        : currentPath.Equals(PathOf(href), StringComparison.OrdinalIgnoreCase);
+    var organizationActive = IsActive("organization", false) || IsActive("organization/departments", true);
+}
+
+<div class="portal-shell" data-portal-shell>
+    <a class="skip-link" href="#page-content">Skip to page content</a>
+    <header class="shell-header">
+        <a class="shell-brand" href="/organization" aria-label="AgentControl organization overview">
+            <span class="brand-mark" aria-hidden="true"><span class="brand-led"></span></span>
+            <span><strong>AgentControl V2</strong><small>Owner workspace</small></span>
+        </a>
+        <button class="nav-toggle" type="button" data-nav-toggle aria-controls="primary-nav" aria-expanded="false">Menu</button>
+    </header>
+    <div class="shell-grid">
+        <nav id="primary-nav" class="primary-nav" aria-label="Owner pages" data-primary-nav>
+            <div class="nav-group@(organizationActive ? " active" : string.Empty)" data-nav-group="organization" data-nav-group-active="@(organizationActive ? "true" : "false")">
+                <span class="nav-group-label">Organization</span>
+                <div class="nav-sublinks">
+                    <a href="/organization" class="@(IsActive("organization", false) ? "active" : null)" aria-current="@(IsActive("organization", false) ? "page" : null)">Overview</a>
+                    <a href="/organization/departments" class="@(IsActive("organization/departments", true) ? "active" : null)" aria-current="@(IsActive("organization/departments", true) ? "page" : null)">Departments</a>
+                </div>
+            </div>
+            <a href="/employees" class="@(IsActive("employees", true) ? "active" : null)" aria-current="@(IsActive("employees", true) ? "page" : null)">Employees</a>
+            <a href="/hiring" class="@(IsActive("hiring", false) ? "active" : null)" aria-current="@(IsActive("hiring", false) ? "page" : null)">Hiring</a>
+            <a href="/system" class="@(IsActive("system", false) ? "active" : null)" aria-current="@(IsActive("system", false) ? "page" : null)">System</a>
+        </nav>
+        <main id="page-content" class="page-content" tabindex="-1">@Body</main>
+    </div>
+    <footer class="shell-footer">AgentControl V2 · @HVO.AgentControl.ApplicationVersion.Current · owner-authenticated workspace</footer>
+</div>
+<script type="module" src="/js/shell.js"></script>
