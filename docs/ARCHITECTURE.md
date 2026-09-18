@@ -228,7 +228,43 @@ atomically invalidate old permissions, clear ownership/permission holds and reta
 `process-exited` hold. ACP process exit is not itself a bridge transport failure:
 status, replay, hold and exact recovery operations remain available on the same
 healthy owner connection, while submit/cancel/permission continue to enforce their
-own running-process and hold gates. Submit receipt is deliberately split from prompt
+own running-process and hold gates.
+
+The worker retains two distinct bounded views of a permission request in the existing
+`option_ids_json` column: offered IDs for diagnostics and a versioned
+`safeRejectIds` list derived while the full option objects and their `kind` fields
+are still available. Only exact fixed IDs `reject_once`, `reject`, and
+`reject_always` can enter that safe list, in that priority order. A missing `kind`
+permits ID-only compatibility; a present string must be exactly compatible
+(`reject_once` or `reject_always` as appropriate). Allow, unknown, malformed, and
+contradictory kinds make the option ineligible. A reject kind never authorizes an
+arbitrary vendor ID. Names, substrings, and case folding are never authorization
+inputs. Options are grouped by exact ordinal `optionId`; a repeated ID is a
+protocol violation that vetoes that ID entirely, even when every occurrence was
+individually eligible, so a duplicate allow/reject collision can never widen the
+reject allowlist. Offered IDs are deduplicated for diagnostics only and are never
+authorization evidence. Legacy stored arrays preserve offered IDs but produce an
+empty safe list, so they fail closed rather than reconstructing lost kind
+evidence.
+
+The owner rejection decision is chosen only from the controller's projected
+`SafeRejectOptionIds`, never from offered IDs. Pinned OpenCode 1.18.30 with
+`permission` configured to `ask` for broad `read`/`edit`/`bash` classes emits the
+generic IDs `once`, `always`, and `reject`; the exact generic `reject` remains
+supported when its kind is absent or compatible. The worker also validates the
+submitted decision against its own durable safe list before writing ACP. Local ACP
+handling uses the same full-object selector. An unbound callback is stricter:
+`oneShotOnly` excludes both the `reject_always` ID and `reject_always` kind, then
+selects only eligible exact `reject_once` or `reject`; otherwise it cancels. A bound
+owner decision may retain exact eligible `reject_always` as the last fallback after
+the request/session/lease/turn invariant is validated. If that exact binding is
+valid but the safe list is empty, the pending permission remains held and the API
+returns the dedicated sanitized 409 compatibility diagnostic; offered IDs are not
+disclosed or used to decide. The prior vendor-ID kind fallback was intentionally
+removed because it allowed model/vendor-controlled identifiers to cross the reject
+authorization boundary.
+
+Submit receipt is deliberately split from prompt
 completion: registration and the ACP frame write complete the controller-facing call
 with durable `forwarded` state, while a bridge-owned operation continues waiting for
 the correlated response, retains the active prompt and prompt lock, and records the

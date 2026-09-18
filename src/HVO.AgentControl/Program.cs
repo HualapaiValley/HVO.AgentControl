@@ -1624,6 +1624,10 @@ public partial class Program
             statusCode: StatusCodes.Status409Conflict,
             title: "Remote resource is not owned by this controller.",
             detail: "A resource with the expected name exists but does not carry this controller's exact labels."),
+        HVO.AgentControl.RemoteWorker.WorkerPermissionOptionsUnsupportedException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Worker permission cannot be rejected safely.",
+            detail: "The worker offered no recognized reject option; dispatch remains held. Update compatibility before retrying."),
         HVO.AgentControl.Organization.OrganizationConcurrencyException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
             title: "Remote worker request conflicted.",

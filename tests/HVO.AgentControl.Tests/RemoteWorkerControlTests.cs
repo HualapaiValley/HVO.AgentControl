@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using HVO.AgentControl.Organization;
 using HVO.AgentControl.RemoteWorker;
+using HVO.AgentControl.Runtime;
 using HVO.AgentControl.Worker;
 using Microsoft.Data.Sqlite;
 using Xunit;
@@ -606,11 +607,24 @@ public sealed class RemoteWorkerControlTests
     public void PendingPermissionProjectionUpsertsExactBoundedOptionsWithoutPayload()
     {
         using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
-        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["allow_once", "reject_once"], "pending");
+        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["allow_once", "reject_once"], "pending", ["reject_once"]);
         fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []);
         fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []);
         var item = Assert.Single(fixture.Store.ListWorkerPendingPermissions(enrollment.WorkerId));
-        Assert.Equal("pending", item.State); Assert.Equal(["allow_once", "reject_once"], item.OptionIds); Assert.DoesNotContain("raw", JsonSerializer.Serialize(item), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("pending", item.State); Assert.Equal(["allow_once", "reject_once"], item.OptionIds); Assert.Equal(["reject_once"], item.SafeRejectOptionIds); Assert.DoesNotContain("raw", JsonSerializer.Serialize(item), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LegacyPendingPermissionArrayPreservesOfferedIdsButHasNoSafeRejectEvidence()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["reject"], "pending", ["reject"]);
+        fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []);
+        using (var connection = Open(fixture.DatabasePath)) connection.Execute("UPDATE worker_pending_permissions SET options_json='[\"reject\"]'");
+
+        var item = Assert.Single(fixture.Store.ListWorkerPendingPermissions(enrollment.WorkerId));
+        Assert.Equal(["reject"], item.OptionIds);
+        Assert.Empty(item.SafeRejectOptionIds!);
     }
 
     [Fact]
@@ -669,6 +683,22 @@ public sealed class RemoteWorkerControlTests
     {
         using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
         var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["reject_once", "reject_once"], "pending");
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []));
+    }
+
+    [Fact]
+    public void PendingPermissionDuplicateSafeRejectOptionsAreRejected()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["reject_once", "reject"], "pending", ["reject_once", "reject_once"]);
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []));
+    }
+
+    [Fact]
+    public void PendingPermissionSafeRejectOptionOutsideOfferedIdsIsRejected()
+    {
+        using var fixture = new RemoteStoreFixture(); var enrollment = fixture.CreateEnrolled();
+        var pending = new ControllerPendingPermission(1, 1, "req-test", "turn-test", "perm-test", "sha256:" + new string('7', 64), ["once", "always"], "pending", ["reject"]);
         Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerStatusAndEvents(enrollment.WorkerId, fixture.Status() with { PendingPermissionHash = pending.PayloadHash, PendingPermission = pending }, []));
     }
 
@@ -739,8 +769,8 @@ public sealed class RemoteWorkerControlTests
     public void PermissionRejectPreferenceNeverSelectsAllow()
     {
         var choices = new[] { "allow_once", "reject_always", "allow_always", "reject_once" };
-        var selected = choices.Contains("reject_once", StringComparer.Ordinal) ? "reject_once" : choices.Contains("reject_always", StringComparer.Ordinal) ? "reject_always" : null;
-        Assert.Equal("reject_once", selected); Assert.DoesNotContain("allow", selected!, StringComparison.Ordinal);
+        var selected = PermissionPolicy.SelectRejectPermissionOption(choices);
+        Assert.Equal("reject_once", selected); Assert.DoesNotContain("allow", selected, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1663,15 +1693,17 @@ public sealed class RemoteWorkerControlTests
         var request = fixture.CreateEligibleRequest();
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
-        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-exact", "sha256:" + new string('7', 64), ["reject_once"], "pending", null);
+        // Unsupported options must not mask a stale exact binding tuple.
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-exact", "sha256:" + new string('7', 64), ["once", "always"], "pending", null);
         var session = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] });
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
         await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
         var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
         using (var c = Open(fixture.DatabasePath)) c.Execute($"UPDATE runtime_bindings SET session_ref=NULL WHERE id='{fixture.BindingId}'");
 
-        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
+        var exception = await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
 
+        Assert.Contains("exact durable request", exception.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(session.Invocations, x => x.Operation == "permission");
     }
 
@@ -1682,7 +1714,7 @@ public sealed class RemoteWorkerControlTests
         var request = fixture.CreateEligibleRequest();
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
-        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-reject", "sha256:" + new string('7', 64), ["reject_once"], "pending", null);
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-reject", "sha256:" + new string('7', 64), ["reject_once"], "pending", null, ["reject_once"]);
         var status = fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] };
         var session = new FakeBridgeSession("controller-a", status) { ReconcileRequestState = "forwarded" };
         await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
@@ -1697,6 +1729,97 @@ public sealed class RemoteWorkerControlTests
         Assert.Equal("decided", fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!.State);
         Assert.Equal("Forwarded", fixture.Store.GetWorkerRequest(request.Id)!.State);
         Assert.Single(session.Invocations, x => x.Operation == "permission");
+    }
+
+    [Fact]
+    public async Task RejectPermissionUsesGenericRejectForPinnedRealShapeAndTransitionsDecided()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        // Pinned OpenCode 1.18.30 emits generic IDs for read/edit/bash=ask.
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-generic", "sha256:" + new string('7', 64), ["once", "always", "reject"], "pending", null, ["reject"]);
+        var status = fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] };
+        var session = new FakeBridgeSession("controller-a", status) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
+
+        await manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None);
+
+        var permission = Assert.Single(session.Invocations, x => x.Operation == "permission");
+        using var payload = JsonDocument.Parse(permission.Payload);
+        Assert.Equal("reject", payload.RootElement.GetProperty("decision").GetString());
+        Assert.Equal(authoritative.DecisionId, payload.RootElement.GetProperty("decisionId").GetString());
+        Assert.Equal("decided", fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!.State);
+    }
+
+    [Fact]
+    public async Task RejectPermissionLegacyStoredArrayFailsClosedDespiteOfferedRejectId()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-legacy", "sha256:" + new string('7', 64), ["reject"], "pending", null, ["reject"]);
+        var session = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] });
+        var statusCalls = 0;
+        session.OnInvoke = operation =>
+        {
+            if (operation == "status" && ++statusCalls == 2)
+                using (var connection = Open(fixture.DatabasePath)) connection.Execute("UPDATE worker_pending_permissions SET options_json='[\"reject\"]'");
+        };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
+
+        await Assert.ThrowsAsync<WorkerPermissionOptionsUnsupportedException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
+
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "permission");
+    }
+
+    [Fact]
+    public async Task RejectPermissionDuplicateFrameWithEmptySafeListFailsClosed()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        // The worker deduplicates offered IDs for diagnostics but persists no safe
+        // reject evidence for a repeated reject ID, so the projection must hold.
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-duplicate", "sha256:" + new string('7', 64), ["once", "reject"], "pending", null, []);
+        var status = fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] };
+        var session = new FakeBridgeSession("controller-a", status) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
+        Assert.Empty(authoritative.SafeRejectOptionIds!);
+
+        await Assert.ThrowsAsync<WorkerPermissionOptionsUnsupportedException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
+
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "permission");
+        Assert.Equal("pending", fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!.State);
+    }
+
+    [Fact]
+    public async Task RejectPermissionWithoutAnyRejectOptionFailsClosed()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var request = fixture.CreateEligibleRequest();
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        var pending = new BridgePendingPermission(1, 1, request.Id, request.TurnId, "perm-allow-only", "sha256:" + new string('7', 64), ["once", "always"], "pending", null);
+        var status = fixture.BridgeStatus() with { ActiveRequestId = request.Id, PendingPermission = pending, DispatchHeld = true, HoldReason = "permission-pending", HoldReasons = ["permission-pending"] };
+        var session = new FakeBridgeSession("controller-a", status) { ReconcileRequestState = "forwarded" };
+        await using var manager = fixture.CreateManager(new FakeBridgeSessionFactory(session));
+        await manager.ConnectAndSynchronizeAsync(request.WorkerId, CancellationToken.None);
+        var authoritative = fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!;
+
+        await Assert.ThrowsAsync<WorkerPermissionOptionsUnsupportedException>(() => manager.RejectPermissionAsync(new(request.WorkerId, authoritative.DecisionId, authoritative.Revision), CancellationToken.None));
+
+        Assert.DoesNotContain(session.Invocations, x => x.Operation == "permission");
+        Assert.Equal("pending", fixture.Store.GetWorkerPendingPermission(request.WorkerId, pending.DecisionId)!.State);
     }
 
     [Fact]

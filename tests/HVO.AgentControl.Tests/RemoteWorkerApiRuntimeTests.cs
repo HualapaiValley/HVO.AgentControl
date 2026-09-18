@@ -72,6 +72,7 @@ public static class RemoteWorkerApi
         { new HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException(SecretDetail), 502, "Remote worker reconciliation is invalid" },
         { new HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException(SecretDetail, "replay-gap"), 409, "Remote worker recovery is required." },
         { new HVO.AgentControl.RemoteWorker.ForeignResourceException(SecretDetail), 409, "Remote resource is not owned by this controller." },
+        { new HVO.AgentControl.RemoteWorker.WorkerPermissionOptionsUnsupportedException(), 409, "Worker permission cannot be rejected safely." },
         { new HVO.AgentControl.Organization.OrganizationValidationException(SecretDetail), 400, "Remote worker request is invalid." },
         { new HVO.AgentControl.Organization.OrganizationConcurrencyException(SecretDetail), 409, "Remote worker request conflicted." },
         { new HVO.AgentControl.Organization.OrganizationNotFoundException(SecretDetail), 404, "Remote worker record not found." },
@@ -130,6 +131,19 @@ public sealed class RemoteWorkerProblemMappingTests
     public void GenericLocalProtocolInvariantIsNotMappedAsARemoteFailure()
     {
         Assert.False(Program.IsRemoteWorkerFailure(new HVO.AgentControl.Worker.WorkerProtocolException(RemoteWorkerApi.SecretDetail)));
+    }
+
+    [Fact]
+    public async Task UnsupportedPermissionOptionsProblemUsesFixedSanitizedDetail()
+    {
+        var exception = new HVO.AgentControl.RemoteWorker.WorkerPermissionOptionsUnsupportedException();
+        var problem = await ExecuteAsync(Program.RemoteWorkerProblem(exception));
+
+        Assert.Equal(409, problem.GetProperty("status").GetInt32());
+        Assert.Equal("Worker permission cannot be rejected safely.", problem.GetProperty("title").GetString());
+        Assert.Equal("The worker offered no recognized reject option; dispatch remains held. Update compatibility before retrying.", problem.GetProperty("detail").GetString());
+        Assert.DoesNotContain("vendor-deny-secret", problem.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain(RemoteWorkerApi.SecretDetail, problem.GetRawText(), StringComparison.Ordinal);
     }
 
     [Fact]
