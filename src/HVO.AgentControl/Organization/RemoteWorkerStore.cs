@@ -13,7 +13,7 @@ public sealed record WorkerEnrollmentRecord(string WorkerId, string RuntimeBindi
 public sealed record RemoteWorkerSessionRecord(string Id, string NativeSessionId);
 public sealed record RemoteBindingSessionRecord(string BindingId, string EmployeeId, string Placement, string? SessionRecordId, string? NativeSessionId);
 public sealed record WorkerCursorRecord(string WorkerId, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, long ObservedWorkerGeneration, long ObservedProcessGeneration, long ObservedOwnershipEpoch, string Status, string? HoldSummary, string? ActiveRequestId, string? PendingPermissionHash, bool ViewerSupported, bool ViewerAvailable, string ConnectionState, DateTimeOffset? ObservedAt, int Revision);
-public sealed record WorkerPendingPermissionRecord(string WorkerId, string DecisionId, long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string PayloadHash, IReadOnlyList<string> OptionIds, string State, DateTimeOffset ObservedAt, int Revision);
+public sealed record WorkerPendingPermissionRecord(string WorkerId, string DecisionId, long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string PayloadHash, IReadOnlyList<string> OptionIds, string State, DateTimeOffset ObservedAt, int Revision, IReadOnlyList<string>? SafeRejectOptionIds = null);
 public sealed record WorkerEventRecord(string WorkerId, long WorkerGeneration, long Sequence, string Kind, string PayloadHash, int PayloadBytes, DateTimeOffset CommittedAt);
 public sealed record WorkerTaskRecord(string Id, string EmployeeId, string RuntimeBindingId, string WorkerId, string DescriptionHash, string State, int Revision);
 public sealed record WorkerRequestRecord(string Id, string TaskId, string SessionRecordId, string NativeSessionId, string EmployeeId, string RuntimeBindingId, string WorkerId, string PayloadHash, string State, long OwnershipEpoch, long ProcessGeneration, string TurnId, string? OutcomeHash, string? OutcomeCategory, int? OutcomeBytes, string IdempotencyKey, int Revision)
@@ -35,7 +35,7 @@ public sealed record WorkerRecoveryAuditRecord(string Id, string ObligationId, s
 public sealed record WorkerEventRetentionRecord(string WorkerId, long DroppedCount, long DroppedBytes, long FirstRetainedGeneration, long FirstRetainedSequence, int Revision);
 public sealed record RemoteTerminalViewerRecord(string Id, string WorkerId, string SessionRecordId, long OwnershipEpoch, string State, long InputBytes, long OutputBytes, int? Rows, int? Columns, int Revision);
 public sealed record ControllerWorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
-public sealed record ControllerPendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId, string PayloadHash, IReadOnlyList<string> OptionIds, string State);
+public sealed record ControllerPendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId, string PayloadHash, IReadOnlyList<string> OptionIds, string State, IReadOnlyList<string>? SafeRejectOptionIds = null);
 public sealed record ControllerWorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? ActiveRequestId, string? PendingPermissionHash, long OwnershipEpoch, bool DispatchHeld, IReadOnlyList<string> HoldReasons, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, string? ReplayLossMarker = null, IReadOnlyList<string>? ReplayGapMarkers = null, string? JournalFailureMarker = null, ControllerPendingPermission? PendingPermission = null, bool ViewerSupported = false, bool ViewerAvailable = false);
 public sealed record BeginWorkerRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string PayloadHash, string DescriptionHash, long ExpectedOwnershipEpoch = 0, long ExpectedProcessGeneration = 0, string? TurnId = null);
 
@@ -435,7 +435,22 @@ public sealed partial class OrganizationStore
     private static WorkerEnrollmentRecord ReadEnrollment(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), N(r, 5), r.GetString(6), N(r, 7), r.GetString(8), N(r, 9), r.GetString(10), N(r, 11), r.GetString(12), N(r, 13), r.GetString(14), r.GetString(15), r.GetString(16), r.GetString(17), r.GetString(18), r.GetString(19), r.GetString(20), r.GetString(21), r.GetInt64(22), r.GetInt64(23), r.GetInt64(24), r.GetBoolean(25), r.GetInt32(26));
     private static WorkerCursorRecord ReadCursor(SqliteDataReader r) => new(r.GetString(0), r.GetInt64(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4), r.GetInt64(5), r.GetString(6), N(r, 7), N(r, 8), N(r, 9), r.GetBoolean(10), r.GetBoolean(11), r.GetString(12), N(r, 13) is { } d ? DateTimeOffset.Parse(d, CultureInfo.InvariantCulture) : null, r.GetInt32(14));
     private static WorkerEventRecord ReadEvent(SqliteDataReader r) => new(r.GetString(0), r.GetInt64(1), r.GetInt64(2), r.GetString(3), r.GetString(4), r.GetInt32(5), DateTimeOffset.Parse(r.GetString(6), CultureInfo.InvariantCulture));
-    private static WorkerPendingPermissionRecord ReadPendingPermission(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetString(4), r.GetString(5), r.GetString(6), JsonSerializer.Deserialize<string[]>(r.GetString(7)) ?? [], r.GetString(8), DateTimeOffset.Parse(r.GetString(9), CultureInfo.InvariantCulture), r.GetInt32(10));
+    private static WorkerPendingPermissionRecord ReadPendingPermission(SqliteDataReader r)
+    {
+        var (offeredIds, safeRejectIds) = ReadPendingPermissionOptions(r.GetString(7));
+        return new(r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetString(4), r.GetString(5), r.GetString(6), offeredIds, r.GetString(8), DateTimeOffset.Parse(r.GetString(9), CultureInfo.InvariantCulture), r.GetInt32(10), safeRejectIds);
+    }
+    private static (IReadOnlyList<string> OfferedIds, IReadOnlyList<string> SafeRejectIds) ReadPendingPermissionOptions(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+            return (document.RootElement.EnumerateArray().Select(x => x.GetString()!).ToArray(), []);
+        var envelope = JsonSerializer.Deserialize<PendingPermissionOptionsEnvelope>(json)
+            ?? throw new OrganizationStoreCorruptException("Pending worker permission options are invalid.");
+        if (envelope.Version != 1) throw new OrganizationStoreCorruptException("Pending worker permission options version is unsupported.");
+        return (envelope.OfferedIds ?? [], envelope.SafeRejectIds ?? []);
+    }
+    private sealed record PendingPermissionOptionsEnvelope(int Version, IReadOnlyList<string> OfferedIds, IReadOnlyList<string> SafeRejectIds);
     private static WorkerRequestRecord ReadRequest(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), r.GetString(7), r.GetString(8), r.GetInt64(9), r.GetInt64(10), r.GetString(11), N(r, 12), N(r, 13), I(r, 14), r.GetString(15), r.GetInt32(16));
     private static ExecutionHostRecord ReadHost(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetInt32(5), r.GetString(6), "configured", N(r, 8), N(r, 9), N(r, 10), N(r, 11), N(r, 12), r.GetString(13), N(r, 14), N(r, 15), N(r, 16), B(r, 17), L(r, 18), L(r, 19), I(r, 20), B(r, 21), N(r, 22), r.GetString(23), N(r, 24) is { } d ? DateTimeOffset.Parse(d, CultureInfo.InvariantCulture) : null, r.GetBoolean(25), r.GetBoolean(26), r.GetString(27), r.GetInt32(28));
     private static WorkerRequestRecord GetWorkerRequestIn(SqliteConnection c, SqliteTransaction tx, string id) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,revision FROM worker_requests WHERE id=$id"; q.Parameters.AddWithValue("$id", id); using var r = q.ExecuteReader(); if (!r.Read()) throw new OrganizationNotFoundException("Worker request not found."); return ReadRequest(r); }
@@ -458,9 +473,19 @@ public sealed partial class OrganizationStore
             AddRecovery(c, tx, worker, "controller", "ownership-changed", Hash(pending.DecisionId + ":" + pending.OwnershipEpoch), status.WorkerGeneration, 0, Hash(pending.RequestId));
             return;
         }
-        if (!IsHash(pending.PayloadHash) || pending.OptionIds.Count is < 1 or > 16 || pending.OptionIds.Distinct(StringComparer.Ordinal).Count() != pending.OptionIds.Count) throw new OrganizationValidationException("Pending worker permission is invalid.");
+        var safeRejectOptionIds = pending.SafeRejectOptionIds ?? [];
+        if (!IsHash(pending.PayloadHash)
+            || pending.OptionIds.Count is < 1 or > 16
+            || pending.OptionIds.Distinct(StringComparer.Ordinal).Count() != pending.OptionIds.Count
+            || safeRejectOptionIds.Count > 3
+            || safeRejectOptionIds.Distinct(StringComparer.Ordinal).Count() != safeRejectOptionIds.Count
+            || safeRejectOptionIds.Any(option => !pending.OptionIds.Contains(option, StringComparer.Ordinal))
+            || !safeRejectOptionIds.SequenceEqual(HVO.AgentControl.Worker.WorkerProtocol.RejectPermissionOptionIds.Where(id => safeRejectOptionIds.Contains(id, StringComparer.Ordinal)), StringComparer.Ordinal))
+            throw new OrganizationValidationException("Pending worker permission is invalid.");
         foreach (var option in pending.OptionIds) ValidateIdentifier(option, "permission option id");
-        var optionsJson = JsonSerializer.Serialize(pending.OptionIds);
+        foreach (var option in safeRejectOptionIds) ValidateIdentifier(option, "safe reject permission option id");
+        var optionsJson = JsonSerializer.Serialize(new PendingPermissionOptionsEnvelope(1, pending.OptionIds, safeRejectOptionIds));
+        var legacyOptionsJson = JsonSerializer.Serialize(pending.OptionIds);
         if (Encoding.UTF8.GetByteCount(optionsJson) > 4096) throw new OrganizationValidationException("Pending worker permission options are too large.");
 
         // Re-observing the identical pending tuple refreshes only observed_at. The
@@ -472,8 +497,8 @@ public sealed partial class OrganizationStore
         // only explicit recovery may resolve that. Re-reporting is therefore an
         // observation refresh, never a silent return to a decidable state.
         using var upsert = c.CreateCommand(); upsert.Transaction = tx;
-        upsert.CommandText = "INSERT INTO worker_pending_permissions VALUES($w,$d,$p,$e,$r,$t,$h,$o,'pending',$now,$now,1) ON CONFLICT(worker_id,decision_id) DO UPDATE SET observed_at=$now WHERE process_generation=$p AND ownership_epoch=$e AND request_id=$r AND turn_id=$t AND payload_hash=$h AND options_json=$o AND state IN('pending','uncertain')";
-        Add(upsert, ("$w", worker), ("$d", pending.DecisionId), ("$p", pending.ProcessGeneration), ("$e", pending.OwnershipEpoch), ("$r", pending.RequestId), ("$t", pending.TurnId), ("$h", pending.PayloadHash), ("$o", optionsJson), ("$now", now));
+        upsert.CommandText = "INSERT INTO worker_pending_permissions VALUES($w,$d,$p,$e,$r,$t,$h,$o,'pending',$now,$now,1) ON CONFLICT(worker_id,decision_id) DO UPDATE SET observed_at=$now WHERE process_generation=$p AND ownership_epoch=$e AND request_id=$r AND turn_id=$t AND payload_hash=$h AND (options_json=$o OR options_json=$legacy) AND state IN('pending','uncertain')";
+        Add(upsert, ("$w", worker), ("$d", pending.DecisionId), ("$p", pending.ProcessGeneration), ("$e", pending.OwnershipEpoch), ("$r", pending.RequestId), ("$t", pending.TurnId), ("$h", pending.PayloadHash), ("$o", optionsJson), ("$legacy", legacyOptionsJson), ("$now", now));
         if (upsert.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Pending worker permission identity changed.");
     }
     /// <summary>

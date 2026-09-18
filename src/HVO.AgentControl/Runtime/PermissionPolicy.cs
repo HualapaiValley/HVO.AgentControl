@@ -1,4 +1,6 @@
 using System.Text.Json;
+using HVO.AgentControl.RemoteWorker;
+using HVO.AgentControl.Worker;
 
 namespace HVO.AgentControl.Runtime;
 
@@ -66,54 +68,37 @@ public static class PermissionPolicy
     }
 
     /// <summary>
-    /// Picks a reject option if one exists. Prefers reject_once, then
-    /// reject_always, then any option whose id/name mentions reject.
+    /// Selects the reject option from the exact offered option IDs, preferring the
+    /// one-shot <c>reject_once</c>, then generic <c>reject</c>, then
+    /// <c>reject_always</c>. IDs are compared with ordinal equality against the
+    /// fixed reject allowlist, so <c>once</c>, <c>always</c>, <c>allow</c> and any
+    /// other unknown or malicious name are never selected.
     /// </summary>
-    public static string? SelectRejectOption(JsonElement? parameters)
+    /// <exception cref="WorkerPermissionOptionsUnsupportedException">
+    /// No offered option ID is a known reject option.
+    /// </exception>
+    public static string SelectRejectPermissionOption(IReadOnlyList<string> optionIds)
     {
-        if (parameters is not { } root
-            || root.ValueKind != JsonValueKind.Object
-            || !root.TryGetProperty("options", out var options)
-            || options.ValueKind != JsonValueKind.Array)
+        ArgumentNullException.ThrowIfNull(optionIds);
+        if (!WorkerProtocol.TrySelectRejectOption(optionIds, out var optionId))
         {
-            return null;
+            throw new WorkerPermissionOptionsUnsupportedException();
         }
 
-        string? fallback = null;
-        string? rejectAlways = null;
-        foreach (var option in options.EnumerateArray())
-        {
-            if (option.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
-
-            var optionId = ReadBounded(option, "optionId");
-            var kind = ReadBounded(option, "kind");
-            var name = ReadBounded(option, "name");
-            if (string.Equals(kind, "reject_once", StringComparison.OrdinalIgnoreCase))
-            {
-                return optionId;
-            }
-
-            if (string.Equals(kind, "reject_always", StringComparison.OrdinalIgnoreCase))
-            {
-                rejectAlways ??= optionId;
-                continue;
-            }
-
-            if (optionId is not null && optionId.Contains("reject", StringComparison.OrdinalIgnoreCase))
-            {
-                fallback ??= optionId;
-            }
-            else if (name is not null && name.Contains("reject", StringComparison.OrdinalIgnoreCase))
-            {
-                fallback ??= optionId;
-            }
-        }
-
-        return rejectAlways ?? fallback;
+        return optionId!;
     }
+
+    /// <summary>
+    /// Picks a reject option from a local ACP frame using the shared full-object
+    /// selector. Only exact fixed reject IDs are eligible, in one-shot-to-persistent
+    /// priority. A missing kind permits compatibility matching; a present kind must
+    /// be exactly compatible. Allow, unknown, malformed, and contradictory kinds
+    /// make the option ineligible, and kind never authorizes a vendor ID.
+    /// </summary>
+    public static string? SelectRejectOption(JsonElement? parameters) =>
+        parameters is { } root
+            ? WorkerProtocol.SelectRejectOptionFromPermissionFrame(root, oneShotOnly: false)
+            : null;
 
     private static string? ReadBounded(JsonElement value, string property)
     {

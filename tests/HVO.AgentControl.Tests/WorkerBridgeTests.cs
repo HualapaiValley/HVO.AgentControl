@@ -344,6 +344,43 @@ public sealed class WorkerBridgeTests
         Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision("decision", generation, "req", "turn", "reject_once"));
         Assert.Equal("uncertain", store.Status().PendingPermission!.State);
         Assert.Contains("allow_once", pending.OptionIds);
+        Assert.Equal(["reject_once"], pending.SafeRejectOptionIds);
+    }
+
+    [Fact]
+    public void LegacyStoredPermissionArrayRetainsOfferedIdsButCannotAuthorizeDecision()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options());
+        var generation = store.BeginProcessStart(); store.CompleteProcessStart("handle", 1); var lease = store.AcquireLease("controller-test", Nonce(1));
+        using var frame = JsonDocument.Parse("{\"options\":[{\"optionId\":\"reject\"}]}");
+        store.AddPermission("req", "turn", "decision", frame.RootElement);
+        using (var connection = Open(System.IO.Path.Combine(temp.Path, "bridge.db"))) connection.Execute("UPDATE pending_permissions SET option_ids_json='[\"reject\"]'");
+        var pending = store.Status().PendingPermission!;
+
+        Assert.Equal(["reject"], pending.OptionIds);
+        Assert.Empty(pending.SafeRejectOptionIds!);
+        Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision(lease.Epoch, "decision", generation, "req", "turn", "reject"));
+    }
+
+    [Theory]
+    // A repeated optionId is persisted only as diagnostics; the safe reject list
+    // is empty, so no owner decision for it can be authorized.
+    [InlineData("{\"options\":[{\"optionId\":\"reject_once\",\"kind\":\"reject_once\"},{\"optionId\":\"reject_once\",\"kind\":\"reject_once\"}]}")]
+    [InlineData("{\"options\":[{\"optionId\":\"reject\",\"kind\":\"allow_once\"},{\"optionId\":\"reject\",\"kind\":\"reject_once\"}]}")]
+    [InlineData("{\"options\":[{\"optionId\":\"reject\",\"kind\":\"reject_once\"},{\"optionId\":\"reject\",\"kind\":\"allow_once\"}]}")]
+    public void DuplicatePermissionOptionPersistsEmptySafeListAndRejectsDecision(string frameJson)
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options());
+        var generation = store.BeginProcessStart(); store.CompleteProcessStart("handle", 1); var lease = store.AcquireLease("controller-test", Nonce(1));
+        using var frame = JsonDocument.Parse(frameJson);
+        var pending = store.AddPermission("req", "turn", "decision", frame.RootElement);
+
+        Assert.Empty(pending.SafeRejectOptionIds!);
+        var durable = store.Status().PendingPermission!;
+        Assert.Empty(durable.SafeRejectOptionIds!);
+        Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision(lease.Epoch, "decision", generation, "req", "turn", "reject_once"));
+        Assert.Throws<WorkerProtocolException>(() => store.BeginPermissionDecision(lease.Epoch, "decision", generation, "req", "turn", "reject"));
+        Assert.Equal("pending", store.Status().PendingPermission!.State);
     }
 
     [Fact]
@@ -512,6 +549,82 @@ public sealed class WorkerBridgeTests
         var promptFrame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptFrame.RootElement.GetProperty("id").GetInt64()},\"result\":{{}}}}\n");
         await submit.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task UnboundGenericPermissionFrameSelectsExactRejectOption()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        // No active prompt, so the permission is unbound. The pinned real shape
+        // offers generic IDs; the worker must answer with the exact `reject`
+        // optionId, not cancel and not select an allow-like `once`/`always`.
+        input.Enqueue("""{"jsonrpc":"2.0","id":8001,"method":"session/request_permission","params":{"options":[{"optionId":"once"},{"optionId":"always"},{"optionId":"reject"}]}}""" + "\n");
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
+        Assert.Null(store.Status().PendingPermission);
+        using var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        Assert.Equal(8001, frame.RootElement.GetProperty("id").GetInt64());
+        var outcome = frame.RootElement.GetProperty("result").GetProperty("outcome");
+        Assert.Equal("selected", outcome.GetProperty("outcome").GetString());
+        Assert.Equal("reject", outcome.GetProperty("optionId").GetString());
+        Assert.Equal("running", store.Status().ProcessState);
+    }
+
+    [Fact]
+    public async Task UnboundPermissionCancelsVendorRejectKindAndContradictoryKnownId()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        input.Enqueue("""{"jsonrpc":"2.0","id":8002,"method":"session/request_permission","params":{"options":[{"optionId":"reject","kind":"allow_once"},{"optionId":"vendor-once","kind":"reject_once"},{"optionId":"allow_once","kind":"reject_once"}]}}""" + "\n");
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
+        using var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        var outcome = frame.RootElement.GetProperty("result").GetProperty("outcome");
+        Assert.Equal("cancelled", outcome.GetProperty("outcome").GetString());
+        Assert.False(outcome.TryGetProperty("optionId", out _));
+    }
+
+    [Theory]
+    [InlineData("""{"optionId":"reject_once","kind":"reject_once"},{"optionId":"reject_once","kind":"reject_once"}""")]
+    [InlineData("""{"optionId":"reject","kind":"reject_once"},{"optionId":"reject","kind":"allow_once"}""")]
+    [InlineData("""{"optionId":"reject","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}""")]
+    public async Task UnboundPermissionWithDuplicateRejectOptionIsCancelled(string optionsJson)
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        // A duplicated option ID is a protocol violation; the unbound fallback
+        // must not select it even when every occurrence was individually eligible.
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":8004,\"method\":\"session/request_permission\",\"params\":{{\"options\":[{optionsJson}]}}}}\n");
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
+        Assert.Null(store.Status().PendingPermission);
+        using var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        Assert.Equal(8004, frame.RootElement.GetProperty("id").GetInt64());
+        var outcome = frame.RootElement.GetProperty("result").GetProperty("outcome");
+        Assert.Equal("cancelled", outcome.GetProperty("outcome").GetString());
+        Assert.False(outcome.TryGetProperty("optionId", out _));
+        Assert.Equal("running", store.Status().ProcessState);
+    }
+
+    [Theory]
+    [InlineData("{\"optionId\":\"once\"}")]
+    [InlineData("{\"optionId\":\"reject_always\"}")]
+    [InlineData("{\"optionId\":\"vendor-always\",\"kind\":\"reject_always\"}")]
+    [InlineData("{\"optionId\":\"reject\",\"kind\":\"reject_always\"}")]
+    [InlineData("{\"optionId\":\"reject_once\",\"kind\":\"allow_once\"}")]
+    [InlineData("{\"optionId\":\"reject_once\",\"kind\":17}")]
+    public async Task UnboundPermissionWithoutOneShotRejectOptionIsCancelled(string optionJson)
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        // An unbound callback has no exact active prompt whose future policy may be
+        // changed. Allow-like and persistent reject options therefore both cancel.
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":8003,\"method\":\"session/request_permission\",\"params\":{{\"options\":[{optionJson}]}}}}\n");
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
+        Assert.Null(store.Status().PendingPermission);
+        using var frame = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]);
+        Assert.Equal(8003, frame.RootElement.GetProperty("id").GetInt64());
+        var outcome = frame.RootElement.GetProperty("result").GetProperty("outcome");
+        Assert.Equal("cancelled", outcome.GetProperty("outcome").GetString());
+        Assert.Equal("running", store.Status().ProcessState);
     }
 
     [Fact]
@@ -909,6 +1022,37 @@ public sealed class WorkerBridgeTests
         var promptId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
         await Eventually(() => store.GetRequest("req-permission")?.State == "completed");
+
+        shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task RealUnixSocketDecidesGenericRejectBeforePromptCompletion()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store);
+        await using var input = new GateStream(); await using var output = new CaptureStream(); var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
+        using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(14));
+        using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-permission-generic", turnId = "turn-permission-generic", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        using (var submitted = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", submitted!.RootElement.GetProperty("result").GetProperty("state").GetString());
+        // The pinned real shape offers generic IDs; the worker retains the exact IDs.
+        input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"once"},{"optionId":"always"},{"optionId":"reject"}]}}""" + "\n");
+        await Eventually(() => store.Status().PendingPermission is not null);
+
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "status" }, CancellationToken.None);
+        using var status = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        var pending = status!.RootElement.GetProperty("result").GetProperty("pendingPermission");
+        Assert.Equal(["once", "always", "reject"], pending.GetProperty("optionIds").EnumerateArray().Select(x => x.GetString()!).ToArray());
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "permission", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), decisionId = pending.GetProperty("decisionId").GetString(), processGeneration = pending.GetProperty("processGeneration").GetInt64(), requestId = pending.GetProperty("requestId").GetString(), turnId = pending.GetProperty("turnId").GetString(), decision = "reject" }, CancellationToken.None);
+        using (var decided = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("decided", decided!.RootElement.GetProperty("result").GetProperty("state").GetString());
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        // The same connection's active prompt still completes after the reject.
+        var promptId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{promptId},\"result\":{{}}}}\n");
+        await Eventually(() => store.GetRequest("req-permission-generic")?.State == "completed");
 
         shutdown.Cancel(); await run.WaitAsync(TimeSpan.FromSeconds(3));
     }

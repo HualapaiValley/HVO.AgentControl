@@ -913,17 +913,27 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         {
             if (optionIds.Count >= 32 || option.ValueKind != JsonValueKind.Object || !option.TryGetProperty("optionId", out var id) || id.ValueKind != JsonValueKind.String) throw new WorkerProtocolException("Permission options are invalid or too numerous.");
             var value = id.GetString()!; WorkerProtocol.ValidateIdentifier(value, WorkerProtocol.MaxIdentifierLength, "permission option id");
+            // Offered IDs are diagnostics only and deduplicated by ordinal value.
+            // A repeated ID is never trusted: the full-object selector vetoes it,
+            // so a duplicate frame persists an empty safe-reject list and any
+            // owner decision for it is rejected. Deduplication here must not be
+            // mistaken for authorization evidence.
             if (!optionIds.Contains(value, StringComparer.Ordinal)) optionIds.Add(value);
         }
         if (optionIds.Count == 0) throw new WorkerProtocolException("Permission frame has no offered options.");
+        var safeRejectOptionIds = WorkerProtocol.SelectSafeRejectOptionsFromPermissionFrame(parameters, oneShotOnly: false);
         var payloadHash = Convert.ToHexString(WorkerProtocol.CanonicalPayloadHash(parameters)).ToLowerInvariant();
         var existing = GetPermissionLocked(decisionId);
         if (existing is not null)
         {
-            if (existing.RequestId == requestId && existing.TurnId == turnId && existing.PayloadHash == payloadHash && existing.OptionIds.SequenceEqual(optionIds, StringComparer.Ordinal)) return existing;
+            if (existing.RequestId == requestId
+                && existing.TurnId == turnId
+                && existing.PayloadHash == payloadHash
+                && existing.OptionIds.SequenceEqual(optionIds, StringComparer.Ordinal)
+                && (existing.SafeRejectOptionIds ?? []).SequenceEqual(safeRejectOptionIds, StringComparer.Ordinal)) return existing;
             throw new WorkerProtocolException("Permission correlation conflicts with durable state.");
         }
-        var optionJson = JsonSerializer.Serialize(optionIds, WorkerProtocol.JsonOptions);
+        var optionJson = JsonSerializer.Serialize(new PermissionOptionsEnvelope(1, optionIds, safeRejectOptionIds), WorkerProtocol.JsonOptions);
         var byteCount = Encoding.UTF8.GetByteCount(optionJson) + payloadHash.Length + requestId.Length + turnId.Length + decisionId.Length;
         using var tx = _connection.BeginTransaction();
         var generation = Convert.ToInt64(Scalar("SELECT value FROM meta WHERE key='process_generation'", tx), CultureInfo.InvariantCulture);
@@ -933,7 +943,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         if (ownershipEpoch != currentEpoch) throw new WorkerProtocolException("Permission request ownership epoch is stale.");
         if (pendingCount >= _options.PendingPermissionLimit || pendingBytes + byteCount > _options.PendingPermissionByteLimit) throw new WorkerProtocolException("Pending permission capacity is exhausted.");
         Execute("INSERT INTO pending_permissions VALUES($d,$g,$e,$r,$t,$h,$o,$b,'pending',NULL,$u)", tx, ("$d", decisionId), ("$g", generation), ("$e", ownershipEpoch), ("$r", requestId), ("$t", turnId), ("$h", payloadHash), ("$o", optionJson), ("$b", byteCount), ("$u", Now())); tx.Commit();
-        return new PendingPermission(generation, ownershipEpoch, requestId, turnId, decisionId, payloadHash, optionIds, "pending", null);
+        return new PendingPermission(generation, ownershipEpoch, requestId, turnId, decisionId, payloadHash, optionIds, "pending", null, safeRejectOptionIds);
     }
 
     public PendingPermission BeginPermissionDecision(string decisionId, long generation, string requestId, string turnId, string decision) => BeginPermissionDecision(Status().OwnershipEpoch, decisionId, generation, requestId, turnId, decision);
@@ -948,7 +958,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         var currentEpoch = Convert.ToInt64(Scalar("SELECT epoch FROM lease WHERE singleton=1"), CultureInfo.InvariantCulture);
         if (ownershipEpoch != currentEpoch) throw new WorkerProtocolException("Permission decision ownership epoch is stale.");
         if (pending.ProcessGeneration == generation && pending.OwnershipEpoch == ownershipEpoch && pending.RequestId == requestId && pending.TurnId == turnId && pending.State == "decided" && pending.Decision == decision) return pending;
-        if (pending.ProcessGeneration != generation || pending.OwnershipEpoch != ownershipEpoch || pending.RequestId != requestId || pending.TurnId != turnId || pending.State != "pending" || !pending.OptionIds.Contains(decision, StringComparer.Ordinal))
+        if (pending.ProcessGeneration != generation || pending.OwnershipEpoch != ownershipEpoch || pending.RequestId != requestId || pending.TurnId != turnId || pending.State != "pending" || !(pending.SafeRejectOptionIds ?? []).Contains(decision, StringComparer.Ordinal))
             throw new WorkerProtocolException("Permission decision conflicts with durable pending state.");
         Execute("UPDATE pending_permissions SET state='deciding',decision=$v WHERE decision_id=$d AND state='pending'", null, ("$d", decisionId), ("$v", decision));
         return pending with { State = "deciding", Decision = decision };
@@ -1078,7 +1088,22 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
 
     private PendingPermission? CurrentPermissionLocked() { using var command = _connection.CreateCommand(); command.CommandText = "SELECT process_generation,ownership_epoch,request_id,turn_id,decision_id,payload_hash,option_ids_json,state,decision FROM pending_permissions WHERE state IN('pending','deciding','uncertain') ORDER BY created_utc LIMIT 1"; using var reader = command.ExecuteReader(); return !reader.Read() ? null : ReadPermission(reader); }
     private PendingPermission? GetPermissionLocked(string id) { using var command = _connection.CreateCommand(); command.CommandText = "SELECT process_generation,ownership_epoch,request_id,turn_id,decision_id,payload_hash,option_ids_json,state,decision FROM pending_permissions WHERE decision_id=$d"; command.Parameters.AddWithValue("$d", id); using var reader = command.ExecuteReader(); return !reader.Read() ? null : ReadPermission(reader); }
-    private static PendingPermission ReadPermission(SqliteDataReader reader) => new(reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), JsonSerializer.Deserialize<string[]>(reader.GetString(6), WorkerProtocol.JsonOptions)!, reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8));
+    private static PendingPermission ReadPermission(SqliteDataReader reader)
+    {
+        var (offeredIds, safeRejectIds) = ReadPermissionOptions(reader.GetString(6));
+        return new(reader.GetInt64(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), offeredIds, reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8), safeRejectIds);
+    }
+    private static (IReadOnlyList<string> OfferedIds, IReadOnlyList<string> SafeRejectIds) ReadPermissionOptions(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+            return (document.RootElement.EnumerateArray().Select(x => x.GetString()!).ToArray(), []);
+        var envelope = JsonSerializer.Deserialize<PermissionOptionsEnvelope>(json, WorkerProtocol.JsonOptions)
+            ?? throw new WorkerStoreException("Pending permission options are invalid.");
+        if (envelope.Version != 1) throw new WorkerStoreException("Pending permission options version is unsupported.");
+        return (envelope.OfferedIds ?? [], envelope.SafeRejectIds ?? []);
+    }
+    private sealed record PermissionOptionsEnvelope(int Version, IReadOnlyList<string> OfferedIds, IReadOnlyList<string> SafeRejectIds);
     private ReplayLoss? CurrentReplayLossLocked() { using var command = _connection.CreateCommand(); command.CommandText = "SELECT worker_generation,marker_sequence,dropped_count,dropped_bytes FROM replay_loss WHERE reconciled=0 ORDER BY worker_generation LIMIT 1"; using var reader = command.ExecuteReader(); return !reader.Read() ? null : new ReplayLoss(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3)); }
     private JournalFailure? CurrentJournalFailureLocked() { using var command = _connection.CreateCommand(); command.CommandText = "SELECT operation_id,worker_generation,error_category FROM journal_failures WHERE reconciled=0 ORDER BY created_utc,operation_id LIMIT 1"; using var reader = command.ExecuteReader(); return !reader.Read() ? null : new JournalFailure(reader.GetString(0), reader.GetInt64(1), reader.GetString(2)); }
     private IReadOnlyList<ReplayGap> CurrentReplayGapsLocked() { using var command = _connection.CreateCommand(); command.CommandText = "SELECT id,kind,worker_generation,after_sequence,first_retained,last_sequence,loss_marker_generation,loss_marker_sequence FROM replay_gaps WHERE reconciled=0 ORDER BY rowid LIMIT 128"; using var reader = command.ExecuteReader(); var gaps = new List<ReplayGap>(); while (reader.Read()) gaps.Add(new ReplayGap(reader.GetString(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.IsDBNull(6) ? null : reader.GetInt64(6), reader.IsDBNull(7) ? null : reader.GetInt64(7))); return gaps; }

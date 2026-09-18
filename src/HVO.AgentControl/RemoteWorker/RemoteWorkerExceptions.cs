@@ -35,5 +35,12 @@ public sealed class WorkerRecoveryRequiredException(string message, string kind)
     public string Kind { get; } = kind;
 }
 
+/// <summary>
+/// The worker's exact offered option IDs contain no recognized safe rejection.
+/// The pending permission remains held for compatibility remediation. Maps to 409.
+/// </summary>
+public sealed class WorkerPermissionOptionsUnsupportedException()
+    : RemoteWorkerException("The worker offered no recognized reject permission option.");
+
 /// <summary>A remote resource with the expected name is not exactly owned by this controller. Maps to 409.</summary>
 public sealed class ForeignResourceException(string message) : RemoteWorkerException(message);

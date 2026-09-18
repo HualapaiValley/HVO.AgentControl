@@ -33,7 +33,7 @@ public sealed record WorkerStatus(long WorkerGeneration, long ProcessGeneration,
     int ReplayGapCount, IReadOnlyList<ReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false,
     bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null);
 public sealed record PendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId,
-    string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision);
+    string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision, IReadOnlyList<string>? SafeRejectOptionIds = null);
 public sealed record StoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson,
     long ProcessGeneration, long OwnershipEpoch, string TurnId, string SessionId);
 public sealed record StoredCancellation(string CancellationId, string TargetRequestId, string PayloadHash,

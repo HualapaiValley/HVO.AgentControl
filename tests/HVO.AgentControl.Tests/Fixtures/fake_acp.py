@@ -209,7 +209,21 @@ for line in sys.stdin:
             # usable (and cancellable) afterwards.
             pass
         else:
-            send({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission", "params": {"sessionId": SESSION_ID, "toolCall": {"toolCallId": "tc-1", "title": "Read secret", "kind": "read", "status": "pending"}, "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}, {"optionId": "reject_once", "name": "Reject once", "kind": "reject_once"}]}})
+            # Pinned OpenCode 1.18.30 emits generic option IDs for read/edit/bash
+            # permission classes. The default scenario keeps the older suffixed
+            # shape so both the legacy and the live pinned shapes stay covered.
+            if SCENARIO == "permission_generic":
+                options = [
+                    {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "always", "name": "Allow always", "kind": "allow_always"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                ]
+            else:
+                options = [
+                    {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject_once", "name": "Reject once", "kind": "reject_once"},
+                ]
+            send({"jsonrpc": "2.0", "id": 9001, "method": "session/request_permission", "params": {"sessionId": SESSION_ID, "toolCall": {"toolCallId": "tc-1", "title": "Read secret", "kind": "read", "status": "pending"}, "options": options}})
             permission_response = None
             while True:
                 raw = sys.stdin.readline()

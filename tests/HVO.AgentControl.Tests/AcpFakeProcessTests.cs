@@ -73,6 +73,49 @@ public sealed class AcpFakeProcessTests
     }
 
     [Fact]
+    public async Task PromptRoundTripsGenericPermissionRejection()
+    {
+        // Pinned OpenCode 1.18.30 offers generic IDs for read/edit/bash=ask. The
+        // host must select `reject` (not `once`/`always`) and the same connection's
+        // prompt must still complete.
+        await using var fake = FakeSession.Start("permission_generic");
+        var captured = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fake.Session.IncomingRequestHandler = (request, _) =>
+        {
+            captured.TrySetResult(request.Params!.Value);
+            return Task.FromResult(AcpResponse.Ok(PermissionPolicy.BuildRejection(request.Params)));
+        };
+
+        var result = await fake.Session.RequestAsync(
+            "session/prompt",
+            new Dictionary<string, object?>
+            {
+                ["sessionId"] = AcpFakeServer.DefaultSessionId,
+                ["prompt"] = new object[]
+                {
+                    new Dictionary<string, object?> { ["type"] = "text", ["text"] = "hello" },
+                },
+            },
+            TimeSpan.FromSeconds(5),
+            CancellationToken.None);
+
+        Assert.Equal("end_turn", result.GetProperty("stopReason").GetString());
+
+        var permissionRequest = await captured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var optionIds = permissionRequest.GetProperty("options").EnumerateArray().Select(x => x.GetProperty("optionId").GetString()!).ToArray();
+        Assert.Equal(["once", "always", "reject"], optionIds);
+
+        var optionId = result
+            .GetProperty("permissionResponse")
+            .GetProperty("result")
+            .GetProperty("outcome")
+            .GetProperty("optionId")
+            .GetString();
+        Assert.Equal("reject", optionId);
+    }
+
+    [Fact]
     public async Task RemoteErrorIsSurfaced()
     {
         await using var fake = FakeSession.Start("init_error");

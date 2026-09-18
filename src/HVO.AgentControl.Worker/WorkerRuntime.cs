@@ -397,23 +397,12 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private async Task RejectUnboundPermissionAsync(JsonElement root, JsonElement parameters)
     {
         object result = new { outcome = new { outcome = "cancelled" } };
-        if (parameters.ValueKind == JsonValueKind.Object && TrySelectRejectOption(parameters) is { } optionId)
+        if (parameters.ValueKind == JsonValueKind.Object
+            && WorkerProtocol.SelectRejectOptionFromPermissionFrame(parameters, oneShotOnly: true) is { } optionId)
             result = new { outcome = new { outcome = "selected", optionId } };
         var response = new Dictionary<string, object?> { ["jsonrpc"] = "2.0", ["id"] = root.GetProperty("id").Clone(), ["result"] = result };
         try { await WriteAcpObjectAsync(response, _lifetime.Token).ConfigureAwait(false); }
         catch { _store.SetProcessFailure("transport-uncertain", "permission-binding-uncertain"); }
-    }
-
-    private static string? TrySelectRejectOption(JsonElement parameters)
-    {
-        if (!parameters.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Array) return null;
-        foreach (var option in options.EnumerateArray())
-        {
-            if (option.ValueKind != JsonValueKind.Object || !option.TryGetProperty("optionId", out var id) || id.ValueKind != JsonValueKind.String) continue;
-            var value = id.GetString();
-            if (value is "reject_once") return value;
-        }
-        return null;
     }
 
     private static string CreateDecisionId() => "perm:" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();

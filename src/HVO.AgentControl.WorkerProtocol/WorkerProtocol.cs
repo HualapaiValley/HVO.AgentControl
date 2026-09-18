@@ -25,6 +25,142 @@ public static class WorkerProtocol
 
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false, MaxDepth = MaxControlJsonDepth };
 
+    /// <summary>
+    /// The only option IDs the host will ever select to reject a permission, in
+    /// selection-priority order.
+    /// </summary>
+    /// <remarks>
+    /// Pinned OpenCode 1.18.30 can emit generic IDs (<c>once</c>, <c>always</c>,
+    /// <c>reject</c>) instead of the older suffixed IDs. An allow and a reject
+    /// option can therefore share the same word bound, so matching substrings is
+    /// unsafe. This is the exact, ordinal reject-semantic allowlist; nothing else
+    /// is ever selected.
+    /// </remarks>
+    public static readonly IReadOnlyList<string> RejectPermissionOptionIds = ["reject_once", "reject", "reject_always"];
+
+    private static readonly IReadOnlyList<string> OneShotRejectPermissionOptionIds = ["reject_once", "reject"];
+
+    /// <summary>
+    /// Selects a reject option from the exact offered option IDs by ordinal
+    /// equality, preferring one-shot <c>reject_once</c>, then generic
+    /// <c>reject</c>, then <c>reject_always</c>. Returns <see langword="false"/>
+    /// and a null selection when no offered ID is on the allowlist; <c>once</c>,
+    /// <c>always</c>, <c>allow</c> and any unknown or malicious name are never
+    /// selected.
+    /// </summary>
+    public static bool TrySelectRejectOption(IEnumerable<string>? optionIds, out string? optionId) =>
+        TrySelectOption(optionIds, RejectPermissionOptionIds, out optionId);
+
+    /// <summary>
+    /// Selects a rejection from complete ACP permission option objects. Only the
+    /// fixed reject IDs can be returned. A missing kind preserves ID-only
+    /// compatibility; a present kind must be the exact compatible reject kind.
+    /// Allow, unknown, malformed, and contradictory kinds make an option
+    /// ineligible. The one-shot selector excludes both persistent IDs and
+    /// persistent kinds.
+    /// </summary>
+    public static string? SelectRejectOptionFromPermissionFrame(JsonElement parameters, bool oneShotOnly) =>
+        SelectSafeRejectOptionsFromPermissionFrame(parameters, oneShotOnly).FirstOrDefault();
+
+    /// <summary>
+    /// Returns every eligible fixed reject ID in canonical selection-priority
+    /// order. The returned values are safe to persist as authorization evidence;
+    /// arbitrary vendor IDs and raw option objects are never retained.
+    /// </summary>
+    /// <remarks>
+    /// Options are grouped by exact ordinal <c>optionId</c>. A repeated ID is a
+    /// protocol violation and vetoes that ID entirely, even when every occurrence
+    /// was individually eligible: only IDs offered exactly once and eligible are
+    /// returned. A duplicate can therefore never widen the reject allowlist, and
+    /// the result is empty rather than partially trusting a contradictory frame.
+    /// </remarks>
+    public static IReadOnlyList<string> SelectSafeRejectOptionsFromPermissionFrame(JsonElement parameters, bool oneShotOnly)
+    {
+        if (parameters.ValueKind != JsonValueKind.Object
+            || !parameters.TryGetProperty("options", out var options)
+            || options.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+        var eligible = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var option in options.EnumerateArray())
+        {
+            if (option.ValueKind != JsonValueKind.Object || !TryReadBoundedOptionId(option, out var optionId)) continue;
+            seen[optionId!] = seen.TryGetValue(optionId!, out var count) ? count + 1 : 1;
+            var kind = ReadPermissionOptionKind(option);
+            if (IsSafeRejectOption(optionId!, kind, oneShotOnly)) eligible.Add(optionId!);
+        }
+
+        var candidates = oneShotOnly ? OneShotRejectPermissionOptionIds : RejectPermissionOptionIds;
+        return candidates.Where(id => eligible.Contains(id) && seen[id] == 1).ToArray();
+    }
+
+    private static bool IsSafeRejectOption(string optionId, PermissionOptionKind kind, bool oneShotOnly)
+    {
+        if (oneShotOnly && (optionId == "reject_always" || kind == PermissionOptionKind.RejectAlways)) return false;
+        return optionId switch
+        {
+            "reject_once" => kind is PermissionOptionKind.Missing or PermissionOptionKind.RejectOnce,
+            "reject" => kind is PermissionOptionKind.Missing or PermissionOptionKind.RejectOnce or PermissionOptionKind.RejectAlways,
+            "reject_always" => !oneShotOnly && kind is PermissionOptionKind.Missing or PermissionOptionKind.RejectAlways,
+            _ => false,
+        };
+    }
+
+    private static bool TryReadBoundedOptionId(JsonElement option, out string? optionId)
+    {
+        optionId = null;
+        if (!option.TryGetProperty("optionId", out var id)
+            || id.ValueKind != JsonValueKind.String
+            || id.GetString() is not { Length: > 0 and <= 512 } value
+            || value.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        optionId = value;
+        return true;
+    }
+
+    private static PermissionOptionKind ReadPermissionOptionKind(JsonElement option)
+    {
+        if (!option.TryGetProperty("kind", out var kind)) return PermissionOptionKind.Missing;
+        if (kind.ValueKind != JsonValueKind.String) return PermissionOptionKind.Ineligible;
+        return kind.GetString() switch
+        {
+            "reject_once" => PermissionOptionKind.RejectOnce,
+            "reject_always" => PermissionOptionKind.RejectAlways,
+            _ => PermissionOptionKind.Ineligible,
+        };
+    }
+
+    private enum PermissionOptionKind
+    {
+        Missing,
+        RejectOnce,
+        RejectAlways,
+        Ineligible,
+    }
+
+    private static bool TrySelectOption(IEnumerable<string>? optionIds, IReadOnlyList<string> candidates, out string? optionId)
+    {
+        optionId = null;
+        if (optionIds is null) return false;
+        var offered = optionIds as ICollection<string> ?? optionIds.ToList();
+        foreach (var candidate in candidates)
+        {
+            if (offered.Contains(candidate, StringComparer.Ordinal))
+            {
+                optionId = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public static byte[] CanonicalPayloadHash(JsonElement payload)
     {
         var buffer = new ArrayBufferWriter<byte>();
