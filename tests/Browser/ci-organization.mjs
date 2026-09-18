@@ -42,8 +42,9 @@ try {
     ['/organization', 'organization', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-department-detail', 'data-organization-departments-page']],
     ['/organization/departments', 'organization-departments', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-department-detail', 'data-employee-directory']],
     ['/employees', 'employees', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-department-detail', 'data-organization-page']],
-    ['/hiring', 'hiring', ['data-terminal', 'data-system-forms', 'data-employee-directory', 'data-department-detail']],
-    ['/system', 'system', ['data-hire-form', 'data-terminal', 'data-employee-directory', 'data-department-detail']],
+    ['/hiring', 'hiring', ['data-terminal', 'data-system-forms', 'data-employee-directory', 'data-department-detail', 'data-profile-form']],
+    ['/profiles', 'profiles', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-employee-directory', 'data-department-detail']],
+    ['/system', 'system', ['data-hire-form', 'data-terminal', 'data-employee-directory', 'data-department-detail', 'data-profile-form']],
   ];
   for (const [path, marker, absent] of routeCases) {
     const response = await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' });
@@ -166,6 +167,7 @@ try {
   const employeeId = await page.locator('[data-employee-detail]').getAttribute('data-employee-id');
   record('detail loads exact URL employee and terminal module', await page.locator('[data-selected-employee-name]').first().innerText() !== '—' && await page.locator('[data-terminal]').count() === 1, { employeeId });
   record('detail selection event targets exact employee', await page.locator('[data-portal]').getAttribute('data-selected-employee-id') === employeeId);
+
 
   // Enabled-fixture terminal surface: exact route assets, restored mount class,
   // CSS geometry that fills the stage, focus affordance, and live regions.
@@ -397,8 +399,8 @@ try {
   const approvalText = await page.locator('.request-card').first().innerText();
   const hiringHeading = await page.locator('[data-hiring-page] .page-heading').innerText();
   const hiringPageText = await page.locator('[data-hiring-page]').innerText();
-  record('approval is disabled pending #219 discussion and owner approval', await page.locator('.request-card button:text("Approve")').first().isDisabled() && approvalText.includes('#219 discussion and owner approval') && !approvalText.includes('#217'), { approvalText });
-  record('hiring heading and card body carry no superseded #217 gate', !hiringHeading.includes('#217') && !approvalText.includes('#217') && hiringHeading.includes('#219 discussion and owner approval'), { hiringHeading });
+  record('approval is disabled until a verified profile build exists (#259/#260)', await page.locator('.request-card button:text("Approve")').first().isDisabled() && approvalText.includes('verified container profile build') && approvalText.includes('No request auto-creates an employee') && !approvalText.includes('#217'), { approvalText });
+  record('hiring heading and card body carry no superseded #217 gate', !hiringHeading.includes('#217') && !approvalText.includes('#217') && hiringHeading.includes('explicit owner approval bound to a verified container profile revision'), { hiringHeading });
   record('hiring page-wide copy carries no superseded #217 gate', !hiringPageText.includes('#217'), { hiringPageText });
 
   await page.addInitScript(() => {
@@ -443,15 +445,40 @@ try {
     { authorityChange, dirtyStyle, conflictStyle });
   await page.click('[data-reset-org-name]'); record('system conflict draft can reset to new authority', await page.inputValue('[data-org-name-input]') === `${original} authoritative` && await page.getAttribute('[data-org-name-input]', 'aria-invalid') === null);
 
+  // Container profiles: seeded generic-employee, create, detail, immutable revision, retire, friendly errors.
+  await page.goto(`${base}/profiles`); await page.waitForSelector('[data-profile-list]:not([hidden])');
+  record('profiles page lists the seeded generic-employee profile', await page.locator('[data-profile-list] .request-card').count() === 1 && (await page.locator('[data-profile-list] .request-card p').first().innerText()).includes('generic-employee · active · revision 1 (unbuilt)'));
+  await page.fill('#profile-slug', 'browser-profile'); await page.fill('#profile-name', 'Browser profile'); await page.fill('#profile-description', 'Created by the routed browser suite.');
+  await page.fill('#profile-definition', '{"image":"agentcontrol-worker-base","privileged":true}');
+  await page.click('[data-profile-submit]'); await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').dataset.status === 'error');
+  record('profiles create rejects a forbidden devcontainer key with the server reason', (await page.locator('[data-profile-receipt]').innerText()).includes("'privileged' is not allowed"));
+  await page.fill('#profile-definition', '{"name":"Browser profile","image":"agentcontrol-worker-base","containerEnv":{"TZ":"UTC"}}');
+  await page.click('[data-profile-submit]'); await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').dataset.status === 'ok');
+  record('profiles create records revision 1 and states nothing was built or hired', (await page.locator('[data-profile-receipt]').innerText()).includes('No image was built and no employee was created') && await page.locator('[data-profile-list] .request-card').count() === 2);
+  const profileDetailPath = await page.locator('[data-profile-list] .request-card a[href^="/profiles/prof-"]').first().getAttribute('href');
+  await page.goto(`${base}${profileDetailPath}`); await page.waitForSelector('[data-profile-content]:not([hidden])');
+  record('profile detail loads the exact profile with one revision and a prefilled editor', await page.locator('[data-profile-revisions] .request-card').count() === 1 && (await page.inputValue('#revision-definition')).includes('agentcontrol-worker-base') && await page.locator('.primary-nav a.active').count() === 1);
+  await page.fill('#revision-definition', '{"build":{"dockerfile":"Dockerfile"},"name":"Browser profile"}'); await page.fill('#revision-fragment', 'FROM agentcontrol-worker-base\nRUN true\n');
+  await page.click('[data-revision-submit]'); await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').dataset.status === 'ok');
+  record('profile detail appends revision 2 without rebuilding employees', (await page.locator('[data-profile-receipt]').innerText()).includes('Created revision 2') && await page.locator('[data-profile-revisions] .request-card').count() === 2 && (await page.locator('[data-profile-revisions] .request-card h3').first().innerText()).includes('Revision 2 (current)'));
+  await page.click('[data-profile-retire]'); await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').textContent.includes('Profile retired'));
+  record('profile retire disables new revisions and keeps history readable', await page.locator('[data-profile-retire]').isHidden() && await page.locator('[data-revision-submit]').isDisabled() && await page.locator('[data-profile-revisions] .request-card').count() === 2);
+  await page.goto(`${base}/profiles/prof-doesnotexist`); await page.waitForFunction(() => document.querySelector('[data-page-status]').dataset.status === 'error');
+  record('unknown profile id reports a friendly not-found status', (await page.locator('[data-page-status]').innerText()).includes('Profile not found'));
+  await page.goto(`${base}/profiles/not-a-profile`); await page.waitForFunction(() => document.querySelector('[data-page-status]').dataset.status === 'error');
+  record('malformed profile id reports a friendly invalid-id status', (await page.locator('[data-page-status]').innerText()).includes('Invalid profile id'));
+
   // Responsive navigation and overflow across the hierarchy routes.
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
-    for (const path of ['/organization', '/organization/departments', detailPath, '/hiring', '/employees', '/system', employeeDetailPath]) {
+    for (const path of ['/organization', '/organization/departments', detailPath, '/hiring', '/profiles', profileDetailPath, '/employees', '/system', employeeDetailPath]) {
       await page.goto(`${base}${path}`);
       if (path === '/organization') await page.waitForSelector('[data-org-department-cards]:not([hidden])');
       else if (path === '/organization/departments') await page.waitForSelector('[data-department-directory]:not([hidden])');
       else if (path === detailPath) await page.waitForSelector('[data-department-content]:not([hidden])');
       else if (path === '/hiring') await page.waitForSelector('[data-hire-requests]:not([hidden])');
+      else if (path === '/profiles') await page.waitForSelector('[data-profile-list]:not([hidden])');
+      else if (path === profileDetailPath) await page.waitForSelector('[data-profile-content]:not([hidden])');
       else if (path === '/employees') await page.waitForSelector('[data-employee-directory]:not([hidden])');
       else if (path === '/system') await page.waitForSelector('[data-system-forms]:not([hidden])');
       else await page.waitForSelector('[data-employee-content]:not([hidden])');

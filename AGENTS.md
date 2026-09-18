@@ -11,10 +11,13 @@ Build a Docker-native controller for self-contained OpenCode workers using ACP.
 No Fleet dependency, Claude-specific adapter, shared worker checkout, or
 implicit reuse of existing infrastructure. The active baseline implements a
 single control-host portal plus a disabled-by-default hermetic remote-worker
-controller slice: schema-v7 records, approved-host validation, fixed SSH/Docker
+controller slice: schema-v8 records, approved-host validation, fixed SSH/Docker
 command construction and shared bridge protocol code. Durable hire request and
-revision-bound rejection are shipped; approval and worker provisioning remain
-future work pending discussion and owner approval (#219). Live provisioning and
+revision-bound rejection are shipped, as are immutable container profiles with
+a constrained devcontainer subset (#258); approval and worker provisioning
+remain future work under the owner-accepted profile design (epic #257: #259
+build/verify, #260 approve/provision/orient, #261 rebuild). No request may
+auto-create an employee and profile updates never auto-rebuild employees. Live provisioning and
 task routing are implemented hermetically, as are the viewer protocol and fixed
 production worker PTY backend. The first managed disposable two-host path is now
 live-accepted on an authorized disposable topology: pinned ED25519/strict SSH to

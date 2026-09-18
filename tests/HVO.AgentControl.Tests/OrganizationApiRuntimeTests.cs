@@ -298,6 +298,113 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
     }
 
     [Fact]
+    public async Task ContainerProfileEndpointsAreOwnerOnlySameOriginIdempotentRevisionBoundAndNeverProvision()
+    {
+        using var client = await CreateReadyClientAsync();
+        var origin = _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority);
+        HttpRequestMessage Post(string path, object body, string? key = null)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create(body) };
+            request.Headers.Add("Origin", origin);
+            if (key is not null) request.Headers.Add("Idempotency-Key", key);
+            return request;
+        }
+
+        // The seeded generic-employee profile is listed and readable with its single unbuilt revision.
+        using var list = await client.GetAsync("/api/profiles");
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+        using var listDocument = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
+        var seeded = listDocument.RootElement.EnumerateArray().Single(p => p.GetProperty("slug").GetString() == ContainerProfileSeed.GenericEmployeeSlug);
+        var seededId = seeded.GetProperty("id").GetString()!;
+        Assert.Equal(ContainerProfileBuildStatuses.Unbuilt, seeded.GetProperty("currentBuildStatus").GetString());
+
+        using var detail = await client.GetAsync($"/api/profiles/{seededId}");
+        Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+        using var detailDocument = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
+        var revision = Assert.Single(detailDocument.RootElement.GetProperty("revisions").EnumerateArray());
+        Assert.Equal("seed", revision.GetProperty("createdBy").GetString());
+        Assert.Equal(ContainerProfileDefinition.BaseImageReference, revision.GetProperty("baseImageReference").GetString());
+
+        using var malformed = await client.GetAsync("/api/profiles/not-a-profile");
+        Assert.Equal(HttpStatusCode.BadRequest, malformed.StatusCode);
+        Assert.Equal("Invalid container profile id.", (await ReadProblemAsync(malformed)).GetProperty("title").GetString());
+        using var unknown = await client.GetAsync("/api/profiles/prof-doesnotexist");
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+
+        var payload = new { idempotencyKey = "api-profile-1", slug = "api-team", displayName = "API Team", description = "Created through the API.", definition = """{"image":"agentcontrol-worker-base","name":"API Team"}""", dockerfileFragment = (string?)null };
+        using var unauthenticated = _factory.CreateClient();
+        using var unauthenticatedResponse = await unauthenticated.PostAsJsonAsync("/api/profiles", payload);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResponse.StatusCode);
+
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/profiles") { Content = JsonContent.Create(payload) };
+        crossOrigin.Headers.Add("Origin", "https://other.example");
+        using var crossOriginResponse = await client.SendAsync(crossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        using var createResponse = await client.SendAsync(Post("/api/profiles", payload));
+        Assert.Equal(HttpStatusCode.OK, createResponse.StatusCode);
+        using var createdDocument = JsonDocument.Parse(await createResponse.Content.ReadAsStringAsync());
+        var created = createdDocument.RootElement;
+        var id = created.GetProperty("id").GetString()!;
+        var profileRevision = created.GetProperty("revision").GetInt32();
+        Assert.Equal(1, created.GetProperty("currentRevisionNumber").GetInt32());
+
+        using var replay = await client.SendAsync(Post("/api/profiles", payload, "api-profile-1"));
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        using var replayDocument = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+        Assert.Equal(id, replayDocument.RootElement.GetProperty("id").GetString());
+
+        using var keyConflict = await client.SendAsync(Post("/api/profiles", payload with { displayName = "Changed" }, "api-profile-1"));
+        Assert.Equal(HttpStatusCode.Conflict, keyConflict.StatusCode);
+        using var slugConflict = await client.SendAsync(Post("/api/profiles", payload with { idempotencyKey = "api-profile-2" }));
+        Assert.Equal(HttpStatusCode.Conflict, slugConflict.StatusCode);
+        Assert.Contains("already exists", (await ReadProblemAsync(slugConflict)).GetProperty("detail").GetString(), StringComparison.Ordinal);
+
+        using var forbiddenKey = await client.SendAsync(Post("/api/profiles", payload with { idempotencyKey = "api-profile-3", slug = "api-priv", definition = """{"image":"agentcontrol-worker-base","privileged":true}""" }));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, forbiddenKey.StatusCode);
+        Assert.Contains("'privileged' is not allowed", (await ReadProblemAsync(forbiddenKey)).GetProperty("detail").GetString(), StringComparison.Ordinal);
+
+        using var fragmentRevision = await client.SendAsync(Post($"/api/profiles/{id}/revisions", new { expectedProfileRevision = profileRevision, definition = """{"build":{"dockerfile":"Dockerfile"}}""", dockerfileFragment = "FROM agentcontrol-worker-base\nRUN true\n" }));
+        Assert.Equal(HttpStatusCode.OK, fragmentRevision.StatusCode);
+        using var revisionDocument = JsonDocument.Parse(await fragmentRevision.Content.ReadAsStringAsync());
+        Assert.Equal(2, revisionDocument.RootElement.GetProperty("revisionNumber").GetInt32());
+
+        using var staleRevision = await client.SendAsync(Post($"/api/profiles/{id}/revisions", new { expectedProfileRevision = profileRevision, definition = """{"image":"agentcontrol-worker-base","name":"stale"}""", dockerfileFragment = (string?)null }));
+        Assert.Equal(HttpStatusCode.Conflict, staleRevision.StatusCode);
+        using var badFragment = await client.SendAsync(Post($"/api/profiles/{id}/revisions", new { expectedProfileRevision = profileRevision + 1, definition = """{"build":{"dockerfile":"Dockerfile"}}""", dockerfileFragment = "FROM ubuntu\n" }));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, badFragment.StatusCode);
+        using var missingRevisionTarget = await client.SendAsync(Post("/api/profiles/prof-missing/revisions", new { expectedProfileRevision = 1, definition = """{"image":"agentcontrol-worker-base"}""", dockerfileFragment = (string?)null }));
+        Assert.Equal(HttpStatusCode.NotFound, missingRevisionTarget.StatusCode);
+
+        using var retireStale = await client.SendAsync(Post($"/api/profiles/{id}/retire", new { expectedRevision = profileRevision }));
+        Assert.Equal(HttpStatusCode.Conflict, retireStale.StatusCode);
+        using var retire = await client.SendAsync(Post($"/api/profiles/{id}/retire", new { expectedRevision = profileRevision + 1 }));
+        Assert.Equal(HttpStatusCode.OK, retire.StatusCode);
+        using var retiredDocument = JsonDocument.Parse(await retire.Content.ReadAsStringAsync());
+        Assert.Equal(ContainerProfileStatuses.Retired, retiredDocument.RootElement.GetProperty("status").GetString());
+
+        // Nothing in the profile slice creates employees, hosts or enrollments.
+        using var organization = await client.GetAsync("/api/organization");
+        using var organizationDocument = JsonDocument.Parse(await organization.Content.ReadAsStringAsync());
+        Assert.Single(organizationDocument.RootElement.GetProperty("employees").EnumerateArray());
+        using var hosts = await client.GetAsync("/api/execution-hosts");
+        Assert.Equal(HttpStatusCode.OK, hosts.StatusCode);
+        using var hostsDocument = JsonDocument.Parse(await hosts.Content.ReadAsStringAsync());
+        Assert.Empty(hostsDocument.RootElement.EnumerateArray());
+
+        // Portal route contract: the pages exist for GET and the wrong method is a truthful 405.
+        using var page = await client.GetAsync("/profiles");
+        Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+        Assert.Contains("data-page=\"profiles\"", await page.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var detailPage = await client.GetAsync($"/profiles/{id}");
+        Assert.Equal(HttpStatusCode.OK, detailPage.StatusCode);
+        Assert.Contains("data-page=\"profile-detail\"", await detailPage.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        using var wrongMethod = await client.SendAsync(new HttpRequestMessage(HttpMethod.Delete, "/profiles"));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, wrongMethod.StatusCode);
+        Assert.Equal("GET", wrongMethod.Content.Headers.Allow.Single());
+    }
+
+    [Fact]
     public async Task PatchRenamesUnderTheCurrentRevision()
     {
         using var client = await CreateReadyClientAsync();

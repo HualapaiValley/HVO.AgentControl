@@ -37,8 +37,12 @@ from the `generation = 2` identity.
   and discussion (the #217 two-host dependency is satisfied) and are never
   represented as completed employee creation.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
-  Schema v7 migrates only the exact released v6 signature after creating and
-  verifying immutable `control.schema-v6.db` and SHA-256 evidence. It adds
+  Schema v8 migrates only the exact released v7 signature after creating and
+  verifying immutable `control.schema-v7.db` and SHA-256 evidence. It adds
+  immutable container profiles and their append-only revision chain and seeds
+  the `generic-employee` profile (see `docs/PHASE-1-CONTRACTS.md` §10.1); the
+  seed never overwrites an existing slug. Schema v7 migrated only the exact
+  released v6 signature after verified `control.schema-v6.db` evidence. It added
   idempotent hire requests (bounded requested identity/purpose/placement/resources,
   immutable request-version hash, optimistic revision) and append-only state events
   containing hashes rather than raw secrets. The schema reserves later lifecycle
@@ -313,7 +317,7 @@ reject pending→decided and prompt completion (compatibility fix PR #255).
 Cleanup was exact: zero labeled containers, volumes or tags, and the local key
 was removed. Cancellation limitation: OpenCode reported the cancelled turn
 completed, so cancellation cleared the active request but was not rollback.
-The `home-docker` control portal was deployed with separate schema-v7 UI and is
+The `home-docker` control portal was deployed with separate schema-v7 UI (schema v8 is not yet deployed) and is
 irrelevant to worker flags except portal inspection.
 
 **Still not implemented or operationally validated:** key rotation/compromise
@@ -539,12 +543,12 @@ The pre-isolation image understands only `runtime.json`, so republishing it
 would run old JSON-only code against stale session identity while the database
 held the real state. No compatible downgrade is provided; restoring a verified
 backup of the whole controller-private volume is the owner-run recovery path.
-Before the first live deployment of schema v7, stop/quiesce the controller and
+Before the first live deployment of schema v8, stop/quiesce the controller and
 snapshot the current private volume (including `control.db` and any SQLite
 sidecars) through the deployment's existing backup workflow, then verify that
-snapshot before starting the new image. The automatic schema-v6 backup is
-pre-migration evidence only; it is not a current schema-v7 recovery point and
-cannot recover hires or other writes made after migration.
+snapshot before starting the new image. The automatic schema-v7 backup is
+pre-migration evidence only; it is not a current schema-v8 recovery point and
+cannot recover container profiles or other writes made after migration.
 `prepare-layout.py` likewise treats a JSON-only divergence as evidence rather
 than blocking the database-era start.
 

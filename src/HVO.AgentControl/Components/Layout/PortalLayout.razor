@@ -35,6 +35,7 @@
             </div>
             <a href="/employees" class="@(IsActive("employees", true) ? "active" : null)" aria-current="@(IsActive("employees", true) ? "page" : null)">Employees</a>
             <a href="/hiring" class="@(IsActive("hiring", false) ? "active" : null)" aria-current="@(IsActive("hiring", false) ? "page" : null)">Hiring</a>
+            <a href="/profiles" class="@(IsActive("profiles", true) ? "active" : null)" aria-current="@(IsActive("profiles", true) ? "page" : null)">Profiles</a>
             <a href="/system" class="@(IsActive("system", false) ? "active" : null)" aria-current="@(IsActive("system", false) ? "page" : null)">System</a>
         </nav>
         <main id="page-content" class="page-content" tabindex="-1">@Body</main>

@@ -33,12 +33,17 @@ This is a development slice. The owner portal now uses real SSR routes for
 `/employees`, `/employees/{id}`, `/hiring`, and `/system`; the organization
 section is a hierarchy whose cards link departments by stable ID and whose detail
 shows roles, roster, scoped availability, standing instructions and a
-department-scoped request-employee path. Control schema v7 adds durable,
+department-scoped request-employee path. Control schema v7 added durable,
 idempotent hire requests with append-only hashed
 state events and owner rejection; a request does **not** create an employee.
-Approval, provisioning and orientation remain gated by #219 owner approval and
-discussion; the #217 two-host dependency is now satisfied. The #217 hermetic
-controller records are retained in the current schema-v7 store, including
+Control schema v8 adds immutable, content-addressed container profiles
+(`/profiles`, `/profiles/{id}`, `/api/profiles`) with a constrained
+devcontainer subset and the seeded `generic-employee` profile; recording a
+profile does **not** build an image or create an employee. The owner accepted
+the profile-based employee-creation design (epic #257): image build and
+verification (#259), owner approval/provisioning/orientation (#260) and the
+explicit data-preserving rebuild (#261) are the remaining #219 slices. The #217 hermetic
+controller records are retained in the current schema-v8 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
@@ -62,7 +67,7 @@ permission handling covered `[once, always, reject]` and safe-reject
 `[reject]`, with a same-lease reject moving pending→decided and the prompt
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
-control portal on `home-docker` was deployed with separate schema-v7 UI and is
+control portal on `home-docker` was deployed with separate schema-v7 UI (schema v8 not yet deployed) and is
 irrelevant to worker flags except portal inspection.
 
 This path remains disabled by default. `/api/info` now reports
@@ -387,10 +392,10 @@ because actual two-way TUI synchronization is not available; an acknowledged ACP
 model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/control.db` is the authoritative schema-v7 SQLite store for organization,
+`/control-data/control.db` is the authoritative schema-v8 SQLite store for organization,
 department, role, employee, runtime-binding and session identity; versioned
 orientation fragments/facts/assignments/evidence; layered permission policy/grants/audit;
-dispatch holds; remote-worker controller records; and durable hire requests in the
+dispatch holds; remote-worker controller records; durable hire requests; and immutable container profiles in the
 controller-private volume; `/control-data/runtime.json` is retained as adoption
 evidence only. The database, its WAL/SHM sidecars and the writer lock are
 controller-only `0600`, and a fresh database is seed-published atomically so an

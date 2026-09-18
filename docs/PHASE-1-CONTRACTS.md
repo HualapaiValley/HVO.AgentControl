@@ -523,6 +523,51 @@ Ready -> Degraded / Stopped / Orienting
   effects before continuing. No automatic retry of an uncertain create or tool.
 - Provisioning has no privileged authority until Section 6 is satisfied.
 
+### 10.1 Container profiles (#257, slice #258 implemented)
+
+Every managed employee is built from a **container profile revision**: an
+immutable, content-addressed template that extends the approved worker base
+image. The owner accepted this design on 2026-09-18.
+
+- A profile (`prof-<hex>`) is a mutable label (slug, display name, description,
+  `active|retired` status, optimistic revision) over an append-only chain of
+  revisions (`prev-<hex>`, `revision_number` 1..n). Revision content columns are
+  never updated; a change always appends the next number, and identical content
+  cannot be re-recorded for the same profile (`UNIQUE (profile_id, content_hash)`).
+- A revision is a **constrained `devcontainer.json` subset** plus an optional
+  Dockerfile fragment. Accepted keys: `name`, `image` (exactly the symbolic
+  `agentcontrol-worker-base`) or `build.dockerfile` (`"Dockerfile"` with a
+  fragment whose first instruction is `FROM agentcontrol-worker-base`),
+  allowlisted `features` with only a `version` option, allowlisted
+  `containerEnv`/`remoteEnv` names, `postCreateCommand`/`postStartCommand`
+  (string without shell metacharacters or an argument array), and
+  `customizations.agentcontrol.{summary,tags}`. Everything else fails closed
+  with a key-specific reason: `runArgs`, `mounts`, `workspaceMount`,
+  `forwardPorts`/`appPort`, `privileged`, `capAdd`, `securityOpt`, `init`,
+  `initializeCommand` and the other lifecycle hooks, `remoteUser`/`containerUser`,
+  `overrideCommand`, Compose keys, `hostRequirements`, unknown keys, duplicate
+  keys, comments/trailing commas, nesting deeper than 6, or more than 64 KiB.
+  Fragments may only use `RUN`, `ENV`, `ARG`, `LABEL` and `WORKDIR` (under
+  `/workspace`); `USER`, `ENTRYPOINT`, `CMD`, `VOLUME`, `EXPOSE`, `COPY`, `ADD`,
+  `HEALTHCHECK`, `SHELL`, `STOPSIGNAL`, `ONBUILD`, a second `FROM`, parser
+  directives, `RUN --mount/--network/--security`, the Docker socket path and
+  replacing `PATH` are rejected.
+- The canonical form (compact JSON, ordinal-sorted keys, LF fragment) is what is
+  hashed and stored, so key order and line endings never create a new revision.
+- The base is referenced symbolically. The concrete approved digest is pinned per
+  host when a revision is built (#259) and frozen again at hire approval (#260);
+  the revision itself stays immutable and hermetically validatable without
+  deployment configuration.
+- `generic-employee` revision 1 is seeded on fresh stores and on the v7→v8
+  migration, never overwriting an existing slug.
+- Owner routes: `GET/POST /api/profiles`, `GET /api/profiles/{id}` (profile plus
+  full revision chain), `POST /api/profiles/{id}/revisions`,
+  `POST /api/profiles/{id}/retire`; portal pages `/profiles` and `/profiles/{id}`.
+  These record definitions only. **Nothing in this slice builds an image,
+  approves a hire, creates an employee or rebuilds an existing employee**;
+  `build_status` stays `unbuilt` until #259 and profile updates never
+  auto-rebuild employees (#261 adds the explicit data-preserving rebuild).
+
 ## 11. Orientation composition and versioning
 
 - Orientation is a deterministic, ordered composition of versioned fragments:

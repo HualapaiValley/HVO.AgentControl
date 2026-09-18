@@ -1,6 +1,6 @@
 // Deterministic route-module receipt/status test against a LOCAL STUB ONLY.
 //
-// Serves the real wwwroot/js/employee-detail.js, hiring.js and page-common.js
+// Serves the real wwwroot/js/employee-detail.js, hiring.js, profiles.js and page-common.js
 // behind minimal harnesses that mirror EmployeeDetail.razor and Hiring.razor,
 // and stubs the APIs so no .NET process, provider, or container is involved. It
 // pins the cross-module status contract the review called out:
@@ -13,6 +13,10 @@
 //   7. an in-flight hire create reports a pending receipt
 //   8. a failed hire create reports an error receipt, and a later success ok
 //   9. a failed hiring load reports a visible page-status error
+//  10. a successful profiles load clears any stale page-status error
+//  11. an in-flight profile create reports a pending receipt
+//  12. a failed profile create reports an error receipt, and a later success ok
+//  13. a failed profiles load reports a visible page-status error
 //
 // Usage: node tests/Browser/route-receipts.mjs
 import { chromium } from 'playwright';
@@ -75,14 +79,32 @@ const HIRING_HARNESS = `<!doctype html><html lang="en"><head><meta charset="utf-
 </section>
 <script type="module" src="/js/hiring.js"></script></body></html>`;
 
+const PROFILES_HARNESS = `<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="/css/portal.css"></head><body>
+<section class="page" data-page="profiles" data-profiles-page>
+  <form class="panel-form" data-profile-form>
+    <input id="profile-slug" name="slug" required /><input id="profile-name" name="displayName" required />
+    <textarea id="profile-description" name="description"></textarea>
+    <textarea id="profile-definition" name="definition" required>{"image":"agentcontrol-worker-base"}</textarea>
+    <textarea id="profile-fragment" name="dockerfileFragment"></textarea>
+    <button class="btn btn-primary" type="submit" data-profile-submit>Create profile</button>
+    <p class="receipt" data-profile-receipt role="status"></p>
+  </form>
+  <p class="page-status" data-page-status role="status">Loading profiles…</p>
+  <div class="request-list" data-profile-list hidden></div>
+</section>
+<script type="module" src="/js/profiles.js"></script></body></html>`;
+
 const state = {
   employeePlans: [],
   mutationPlans: [],
   hirePlans: [],
   createPlans: [],
   rejectPlans: [],
+  profilePlans: [],
+  profileCreatePlans: [],
   mutationDelayMs: 0,
   createDelayMs: 0,
+  profileCreateDelayMs: 0,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -94,6 +116,7 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   if (url.pathname === '/employee') return send(res, 200, EMPLOYEE_HARNESS, 'text/html; charset=utf-8');
   if (url.pathname === '/hiring') return send(res, 200, HIRING_HARNESS, 'text/html; charset=utf-8');
+  if (url.pathname === '/profiles') return send(res, 200, PROFILES_HARNESS, 'text/html; charset=utf-8');
   if (url.pathname === '/css/portal.css') return send(res, 200, readFileSync(PORTAL_CSS, 'utf8'), 'text/css; charset=utf-8');
   if (url.pathname.startsWith('/js/')) {
     try { return send(res, 200, read(url.pathname.slice('/js/'.length)), 'text/javascript; charset=utf-8'); }
@@ -101,11 +124,12 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/__stub' && req.method === 'POST') {
     const patch = JSON.parse((await readBody(req)) || '{}');
-    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans'];
+    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'profilePlans', 'profileCreatePlans'];
     if (patch.resetPlans) for (const key of keys) state[key].length = 0;
     for (const key of keys) if (patch[key]) state[key].push(...patch[key]);
     if (typeof patch.mutationDelayMs === 'number') state.mutationDelayMs = patch.mutationDelayMs;
     if (typeof patch.createDelayMs === 'number') state.createDelayMs = patch.createDelayMs;
+    if (typeof patch.profileCreateDelayMs === 'number') state.profileCreateDelayMs = patch.profileCreateDelayMs;
     return send(res, 200, { ok: true });
   }
   if (url.pathname === '/api/employees/emp-1' && req.method === 'GET') {
@@ -127,6 +151,16 @@ const server = createServer(async (req, res) => {
   if (url.pathname.startsWith('/api/hire-requests/') && url.pathname.endsWith('/reject')) {
     const plan = consume(state.rejectPlans, null);
     return plan ? send(res, plan.status || 200, plan.body || {}) : send(res, 200, { state: 'Rejected' });
+  }
+  if (url.pathname === '/api/profiles' && req.method === 'GET') {
+    const plan = consume(state.profilePlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || []) : send(res, 200, []);
+  }
+  if (url.pathname === '/api/profiles' && req.method === 'POST') {
+    if (state.profileCreateDelayMs) await sleep(state.profileCreateDelayMs);
+    const plan = consume(state.profileCreatePlans, null);
+    if (plan) return send(res, plan.status || 200, plan.body || {});
+    return send(res, 200, { id: 'prof-created', slug: 'stub', displayName: 'Stub', status: 'active', currentRevisionNumber: 1, currentBuildStatus: 'unbuilt', currentContentHash: 'sha256:0' });
   }
   if (url.pathname.startsWith('/api/orientation') && req.method !== 'GET') {
     if (state.mutationDelayMs) await sleep(state.mutationDelayMs);
@@ -239,6 +273,43 @@ try {
   await page.waitForSelector('[data-hire-requests]:not([hidden])');
   record('a successful hiring reload clears a prior error page status',
     (await statusAttr('[data-page-status]')) === null, { status: await statusAttr('[data-page-status]') });
+
+  // ---- profiles -------------------------------------------------------
+  await page.goto(`${base}/profiles`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-profile-list]:not([hidden])');
+  record('a successful profiles load leaves the page status neutral',
+    (await statusAttr('[data-page-status]')) === null, { status: await statusAttr('[data-page-status]') });
+
+  await page.fill('#profile-slug', 'stub'); await page.fill('#profile-name', 'Stub');
+  await stub({ resetPlans: true, profileCreateDelayMs: 400 });
+  await page.click('[data-profile-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').dataset.status === 'pending');
+  record('an in-flight profile create reports a pending receipt',
+    (await statusAttr('[data-profile-receipt]')) === 'pending' && (await page.locator('[data-profile-receipt]').innerText()).includes('Creating profile'),
+    { receipt: await page.locator('[data-profile-receipt]').innerText() });
+  await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').dataset.status === 'ok');
+
+  await page.fill('#profile-slug', 'stub'); await page.fill('#profile-name', 'Stub'); await page.fill('#profile-definition', '{"image":"agentcontrol-worker-base"}');
+  await stub({ resetPlans: true, profileCreateDelayMs: 0, profileCreatePlans: [{ status: 422, body: { title: 'Invalid container profile.', detail: "Key 'privileged' is not allowed" } }] });
+  await page.click('[data-profile-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').textContent.includes('Create failed'));
+  record('a failed profile create reports an error receipt with the server detail',
+    (await statusAttr('[data-profile-receipt]')) === 'error' && (await page.locator('[data-profile-receipt]').innerText()).includes("'privileged' is not allowed"),
+    { status: await statusAttr('[data-profile-receipt]'), receipt: await page.locator('[data-profile-receipt]').innerText() });
+
+  await page.fill('#profile-slug', 'stub'); await page.fill('#profile-name', 'Stub'); await page.fill('#profile-definition', '{"image":"agentcontrol-worker-base"}');
+  await stub({ resetPlans: true });
+  await page.click('[data-profile-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-profile-receipt]').textContent.includes('Created profile'));
+  record('a successful profile create after a failure clears the receipt to ok',
+    (await statusAttr('[data-profile-receipt]')) === 'ok' && (await page.locator('[data-profile-receipt]').innerText()).includes('No image was built and no employee was created.'),
+    { status: await statusAttr('[data-profile-receipt]') });
+
+  await stub({ resetPlans: true, profilePlans: [{ status: 503, body: { title: 'profile store down' } }] });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => document.querySelector('[data-page-status]').textContent.includes('Container profiles unavailable'));
+  record('a failed profiles list load reports a visible error page status',
+    (await statusAttr('[data-page-status]')) === 'error', { status: await statusAttr('[data-page-status]'), text: await pageStatusText() });
 
   record('no uncaught page errors during the route receipts suite', pageErrors.length === 0, { pageErrors });
 } catch (error) {

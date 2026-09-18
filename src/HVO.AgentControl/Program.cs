@@ -707,6 +707,147 @@ app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHo
     .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+app.MapGet("/api/profiles", (AcpControlHost host) =>
+{
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(store.ListContainerProfiles()); }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Container profiles unavailable.", detail: "The authoritative store could not be read.");
+    }
+})
+    .WithName("ListContainerProfiles").WithTags("Profiles")
+    .WithSummary("Lists container profiles with their current immutable revision. Profiles are build templates; listing them does not build or provision anything.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.ContainerProfileSummary>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/profiles/{id}", (AcpControlHost host, string id) =>
+{
+    if (!Program.IsValidContainerProfileId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile id.", detail: "A bounded stable container profile id is required.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var profile = store.GetContainerProfile(id);
+        return profile is null
+            ? Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile not found.")
+            : Results.Ok(profile);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Container profile unavailable.");
+    }
+})
+    .WithName("GetContainerProfile").WithTags("Profiles")
+    .WithSummary("Returns one container profile with its full immutable revision chain, newest first.")
+    .Produces<HVO.AgentControl.Organization.ContainerProfileDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles", (HttpContext context, AcpControlHost host, HVO.AgentControl.Organization.ContainerProfileCreate request) =>
+{
+    if (Program.RejectCrossOrigin(context, "Container profile creation") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var headerIdempotencyKey = context.Request.Headers.TryGetValue("Idempotency-Key", out var values)
+        && !string.IsNullOrEmpty(values.ToString())
+        ? values.ToString()
+        : null;
+    try { return Results.Ok(store.CreateContainerProfile(request, headerIdempotencyKey)); }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid container profile.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Container profile conflict.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Container profile unavailable.");
+    }
+})
+    .WithName("CreateContainerProfile").WithTags("Profiles")
+    .WithSummary("Creates a profile with its immutable first revision from a validated devcontainer subset. It does not build an image, approve a hire, or create an employee.")
+    .Produces<HVO.AgentControl.Organization.ContainerProfileSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/revisions", (HttpContext context, AcpControlHost host, string id, HVO.AgentControl.Organization.ContainerProfileRevisionCreate request) =>
+{
+    if (!Program.IsValidContainerProfileId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile id.", detail: "A bounded stable container profile id is required.");
+    if (Program.RejectCrossOrigin(context, "Container profile revision") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(store.CreateContainerProfileRevision(id, request)); }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid container profile revision.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Container profile revision conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Container profile unavailable.");
+    }
+})
+    .WithName("CreateContainerProfileRevision").WithTags("Profiles")
+    .WithSummary("Appends the next immutable revision. Existing revisions and employees built from them are never changed.")
+    .Produces<HVO.AgentControl.Organization.ContainerProfileRevisionSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/retire", (HttpContext context, AcpControlHost host, string id, HVO.AgentControl.Organization.ContainerProfileRetire request) =>
+{
+    if (!Program.IsValidContainerProfileId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile id.", detail: "A bounded stable container profile id is required.");
+    if (Program.RejectCrossOrigin(context, "Container profile retirement") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(store.RetireContainerProfile(id, request.ExpectedRevision)); }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid container profile retirement.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Container profile retirement conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Container profile unavailable.");
+    }
+})
+    .WithName("RetireContainerProfile").WithTags("Profiles")
+    .WithSummary("Retires a profile so it cannot receive new revisions or be selected for new approvals. Existing revisions remain readable.")
+    .Produces<HVO.AgentControl.Organization.ContainerProfileSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapPatch("/api/organization", (HttpContext context, AcpControlHost host, OrganizationUpdate update) =>
 {
     if (!TerminalProtocol.IsSameOrigin(context.Request.Headers.Origin.ToString(),
@@ -1393,6 +1534,7 @@ public partial class Program
 
     /// <summary>Maximum length accepted for a stable hire request id on the wire.</summary>
     public const int MaximumHireRequestIdLength = 64;
+    public const int MaximumContainerProfileIdLength = 64;
 
     /// <summary>
     /// Exact, stable scope label reported by <c>/api/info</c> for the worker-control
@@ -1429,13 +1571,14 @@ public partial class Program
             value = "/";
         }
 
-        if (value is "/" or "/organization" or "/organization/departments" or "/employees" or "/hiring" or "/system")
+        if (value is "/" or "/organization" or "/organization/departments" or "/employees" or "/hiring" or "/profiles" or "/system")
         {
             return true;
         }
 
         return HasSingleRouteValue(value, "/organization/departments/")
-            || HasSingleRouteValue(value, "/employees/");
+            || HasSingleRouteValue(value, "/employees/")
+            || HasSingleRouteValue(value, "/profiles/");
     }
 
     private static bool HasSingleRouteValue(string path, string prefix) =>
@@ -1801,6 +1944,10 @@ public partial class Program
     /// <summary>Validates the bounded stable ID used by hire request read/reject routes.</summary>
     public static bool IsValidHireRequestId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.HireRequestPrefix, MaximumHireRequestIdLength);
+
+    /// <summary>Validates the bounded stable ID used by container profile routes.</summary>
+    public static bool IsValidContainerProfileId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfilePrefix, MaximumContainerProfileIdLength);
 
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {

@@ -92,11 +92,12 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 7 adds durable owner hire requests and append-only request events.
-    /// Migration accepts only the exact released schema-v6 signature and creates
-    /// verified, immutable source evidence before changing the authoritative store.
+    /// Schema 8 adds immutable container profiles and their revision chain and
+    /// seeds the <c>generic-employee</c> profile. Migration accepts only the exact
+    /// released schema-v7 signature and creates verified, immutable source
+    /// evidence before changing the authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 7;
+    public const int CurrentSchemaVersion = 8;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -114,6 +115,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV5BackupHashFileName = "control.schema-v5.sha256";
     public const string SchemaV6BackupFileName = "control.schema-v6.db";
     public const string SchemaV6BackupHashFileName = "control.schema-v6.sha256";
+    public const string SchemaV7BackupFileName = "control.schema-v7.db";
+    public const string SchemaV7BackupHashFileName = "control.schema-v7.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -501,6 +504,9 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV7Statements =
         [.. SchemaV6Statements, .. HireRequestSchemaV7Statements];
 
+    private static readonly string[] SchemaV8Statements =
+        [.. SchemaV7Statements, .. ContainerProfileSchemaV8Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -513,8 +519,11 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV6 =
         BuildExpectedSchema(SchemaV6Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV7 =
         BuildExpectedSchema(SchemaV7Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV8Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1492,6 +1501,17 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV6ToV7(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV7);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 7)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV7);
+            EnsureSchemaV7Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV7ToV8(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -1909,6 +1929,22 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV7Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 7, SchemaV7BackupFileName, SchemaV7BackupHashFileName, ExpectedSchemaV7);
+
+    private void MigrateV7ToV8(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in ContainerProfileSchemaV8Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        SeedContainerProfilesV8(connection, transaction);
+        Execute(connection, transaction, "UPDATE schema_version SET version = 8 WHERE version = 7");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1920,7 +1956,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v6 file is pre-migration evidence only and restoring it would lose hires recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v7 file is pre-migration evidence only and restoring it would lose container profiles recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2062,7 +2098,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV7Statements)
+        foreach (var statement in SchemaV8Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -2180,6 +2216,7 @@ public sealed partial class OrganizationStore : IDisposable
             ? "Fresh organization seed: exactly one combined Operations/IT employee bound to the internal shared control runtime."
             : "Adopted the existing persisted control runtime identity without forging a historical hire transition.";
         SeedOrientationV3(connection, transaction);
+        SeedContainerProfilesV8(connection, transaction);
 
         Execute(
             connection,

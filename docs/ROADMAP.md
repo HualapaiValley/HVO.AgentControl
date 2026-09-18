@@ -9,13 +9,17 @@ Status reflects the active code, not the standalone POC.
    portal, owner Basic auth, embedded terminal, one owned OpenCode ACP runtime,
    loopback native HTTP, and an authoritative SQLite organization/session store
    at `/control-data/control.db` (with `runtime.json` retained as evidence).
-3. **Durable controller — partial:** schema v7 preserves organization/session
+3. **Durable controller — partial:** schema v8 preserves organization/session
    and #213 policy identity and adds remote host/enrollment, cursor, task/request,
    provisioning/resource and recovery-obligation records with exact-signature
    chained migration and verified v3/v4 backups. Durable hire request creation
    and revision-bound rejection are shipped; durable pending requested hires and
-   the requested count are supported. Approval action and provisioning are not
-   implemented and remain pending #219 owner discussion and approval. The schema
+   the requested count are supported. Immutable container profiles with the
+   constrained devcontainer subset and the seeded `generic-employee` profile are
+   shipped (#258). Approval action and provisioning are not implemented; the
+   owner accepted the profile-based design on 2026-09-18 and the remaining
+   slices are #259 (build/verify), #260 (approve/provision/orient) and #261
+   (rebuild). The schema
    also has a sanitized deduplicated controller event inbox, conditional
    request/cancellation/provisioning transitions, exact recovery markers and
    restart reconciliation. The first managed disposable two-host path was
