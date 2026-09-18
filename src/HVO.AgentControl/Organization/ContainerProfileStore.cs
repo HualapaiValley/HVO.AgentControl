@@ -29,7 +29,7 @@ public sealed partial class OrganizationStore
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE (organization_id, slug)
-        )
+        ) WITHOUT ROWID
         """,
         """
         CREATE TABLE container_profile_revisions (
@@ -47,7 +47,7 @@ public sealed partial class OrganizationStore
             created_at TEXT NOT NULL,
             UNIQUE (profile_id, revision_number),
             UNIQUE (profile_id, content_hash)
-        )
+        ) WITHOUT ROWID
         """,
     ];
 
@@ -59,8 +59,11 @@ public sealed partial class OrganizationStore
     /// with an implicit delete that skips delete triggers unless the
     /// connection-local <c>recursive_triggers</c> pragma is on, so BEFORE INSERT
     /// guards abort any insert that would conflict with an existing row before
-    /// the conflict resolution can run. Triggers are part of the exact schema
-    /// signature, so removing one fails the store closed.
+    /// the conflict resolution can run. Both tables are <c>WITHOUT ROWID</c> so
+    /// no implicit rowid key exists for a conflict to target, and profile
+    /// identity columns plus unique-key updates are guarded the same way.
+    /// Triggers are part of the exact schema signature, so removing one fails
+    /// the store closed.
     /// </summary>
     private static string[] ContainerProfileImmutabilityV8Statements =>
     [
@@ -96,6 +99,24 @@ public sealed partial class OrganizationStore
                    OR (profile_id = NEW.profile_id AND content_hash = NEW.content_hash))
         BEGIN
             SELECT RAISE(ABORT, 'container profile revisions are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER container_profiles_identity_immutable
+            BEFORE UPDATE OF id, organization_id, idempotency_key, created_at
+            ON container_profiles
+        BEGIN
+            SELECT RAISE(ABORT, 'container profile identity is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER container_profiles_no_update_replace
+            BEFORE UPDATE OF slug ON container_profiles
+            WHEN EXISTS (
+                SELECT 1 FROM container_profiles
+                WHERE id <> OLD.id AND organization_id = NEW.organization_id AND slug = NEW.slug)
+        BEGIN
+            SELECT RAISE(ABORT, 'container profiles are never replaced');
         END
         """,
         """

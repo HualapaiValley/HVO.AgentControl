@@ -534,10 +534,12 @@ image. The owner accepted this design on 2026-09-18.
   revisions (`prev-<hex>`, `revision_number` 1..n). Immutability is enforced at
   the database boundary, not only by the store API: triggers abort any UPDATE
   of a revision's identity/content columns, any DELETE of a revision or
-  profile, and any INSERT that conflicts with an existing row (so
-  `INSERT OR REPLACE`, whose implicit delete bypasses delete triggers, cannot
-  replace a revision or profile); only the reserved build-lifecycle columns
-  stay writable for #259,
+  profile, any INSERT that conflicts with an existing row, and any UPDATE of a
+  profile's identity columns or slug that would collide with another profile
+  (so `INSERT OR REPLACE`/`UPDATE OR REPLACE`, whose implicit delete bypasses
+  delete triggers, cannot replace a revision or profile); both tables are
+  `WITHOUT ROWID` so no implicit rowid key exists for a conflict to target;
+  only the reserved build-lifecycle columns stay writable for #259,
   and identical content cannot be re-recorded for the same profile
   (`UNIQUE (profile_id, content_hash)`). The triggers are part of the exact
   schema signature.

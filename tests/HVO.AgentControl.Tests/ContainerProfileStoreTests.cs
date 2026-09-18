@@ -77,8 +77,10 @@ public sealed class ContainerProfileStoreTests : IDisposable
     [Fact]
     public void RevisionsAreAppendOnlyImmutableRevisionBoundAndContentUnique()
     {
-        var profile = _store.ListContainerProfiles().Single();
+        var profile = _store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
         var first = _store.GetContainerProfile(profile.Id)!.Revisions.Single();
+        // A second profile gives UPDATE OR REPLACE a slug to collide with.
+        _store.CreateContainerProfile(new ContainerProfileCreate("victim-key", "victim", "Victim", null, """{"image":"agentcontrol-worker-base","name":"Victim"}""", null), null);
 
         var second = _store.CreateContainerProfileRevision(profile.Id, new ContainerProfileRevisionCreate(profile.Revision, """{"build":{"dockerfile":"Dockerfile"},"name":"Rev 2"}""", "FROM agentcontrol-worker-base\nRUN true\n"));
         Assert.Equal(2, second.RevisionNumber);
@@ -108,8 +110,13 @@ public sealed class ContainerProfileStoreTests : IDisposable
         // columns reserved for #259 remain writable.
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _store.DatabasePath, Mode = SqliteOpenMode.ReadWrite }.ToString());
         connection.Open();
-        var beforeRows = Raw(connection, "SELECT group_concat(id || ':' || content_hash || ':' || definition_json, '|') FROM container_profile_revisions ORDER BY revision_number");
-        var beforeProfiles = Raw(connection, "SELECT group_concat(id || ':' || slug || ':' || display_name || ':' || current_revision_number, '|') FROM container_profiles");
+        const string profileSnapshot = "SELECT group_concat(line, '|') FROM (SELECT id || ':' || slug || ':' || display_name || ':' || current_revision_number AS line FROM container_profiles ORDER BY id)";
+        const string revisionSnapshot = "SELECT group_concat(line, '|') FROM (SELECT id || ':' || content_hash || ':' || definition_json AS line FROM container_profile_revisions ORDER BY revision_number)";
+        var beforeProfiles = Raw(connection, profileSnapshot);
+        var beforeRows = Raw(connection, revisionSnapshot);
+        // Neither table carries an implicit rowid key for a REPLACE conflict to target.
+        foreach (var table in new[] { "container_profiles", "container_profile_revisions" })
+            Assert.Contains("WITHOUT ROWID", Raw(connection, $"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'"), StringComparison.Ordinal);
         foreach (var sql in new[]
         {
             "INSERT INTO container_profile_revisions SELECT 'prev-copy', profile_id, 3, base_image_reference, definition_json, dockerfile_fragment, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 2",
@@ -128,20 +135,29 @@ public sealed class ContainerProfileStoreTests : IDisposable
             "REPLACE INTO container_profile_revisions SELECT 'prev-replaced', profile_id, 1, base_image_reference, '{}', NULL, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 2",
             "INSERT OR REPLACE INTO container_profiles SELECT id, organization_id, slug, 'Replaced', description, status, idempotency_key, 1, revision, created_at, updated_at FROM container_profiles",
             "INSERT OR REPLACE INTO container_profiles SELECT 'prof-replaced', organization_id, slug, display_name, description, status, idempotency_key, current_revision_number, revision, created_at, updated_at FROM container_profiles",
+            // Profile identity columns and unique-key updates are guarded, so UPDATE OR REPLACE
+            // can never reach an implicit delete of another profile.
+            "UPDATE OR REPLACE container_profiles SET idempotency_key = 'other-key'",
+            "UPDATE container_profiles SET id = 'prof-renamed'",
+            "UPDATE container_profiles SET created_at = '2000-01-01T00:00:00.0000000+00:00'",
+            "UPDATE OR REPLACE container_profiles SET slug = 'victim' WHERE slug = 'generic-employee'",
+            "UPDATE OR REPLACE container_profiles SET slug = 'generic-employee' WHERE slug = 'victim'",
         })
         {
             using var command = connection.CreateCommand();
             command.CommandText = sql;
             var exception = Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
             var expected = sql.Contains("REPLACE INTO container_profiles ", StringComparison.Ordinal) ? "never replaced"
+                : sql.StartsWith("UPDATE OR REPLACE container_profiles SET slug", StringComparison.Ordinal) ? "never replaced"
+                : sql.Contains("container_profiles SET", StringComparison.Ordinal) ? "identity is immutable"
                 : sql.Contains("REPLACE", StringComparison.Ordinal) ? "immutable"
                 : sql.StartsWith("INSERT", StringComparison.Ordinal) ? "immutable"
                 : sql.StartsWith("DELETE", StringComparison.Ordinal) ? "never deleted"
                 : "immutable";
             Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
         }
-        Assert.Equal(beforeRows, Raw(connection, "SELECT group_concat(id || ':' || content_hash || ':' || definition_json, '|') FROM container_profile_revisions ORDER BY revision_number"));
-        Assert.Equal(beforeProfiles, Raw(connection, "SELECT group_concat(id || ':' || slug || ':' || display_name || ':' || current_revision_number, '|') FROM container_profiles"));
+        Assert.Equal(beforeRows, Raw(connection, revisionSnapshot));
+        Assert.Equal(beforeProfiles, Raw(connection, profileSnapshot));
 
         // The reserved build lifecycle columns stay writable for #259.
         using (var lifecycle = connection.CreateCommand())

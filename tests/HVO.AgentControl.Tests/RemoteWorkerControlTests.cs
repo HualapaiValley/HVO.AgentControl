@@ -72,7 +72,7 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var trigger in new[] { "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
+            foreach (var trigger in new[] { "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
             foreach (var table in new[] { "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
             connection.Execute("UPDATE schema_version SET version=3");
         }

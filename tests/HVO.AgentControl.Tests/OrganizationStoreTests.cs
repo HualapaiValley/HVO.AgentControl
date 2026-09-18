@@ -1418,7 +1418,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM hire_request_events WHERE hire_request_id = '{hireId}';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'container_profile_revision_id';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_list('hire_requests') WHERE \"table\" = 'container_profile_revisions';"));
-        Assert.Equal(5, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'container_profile%';"));
+        Assert.Equal(7, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'container_profile%';"));
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV7BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV7BackupHashFileName);
         Assert.True(File.Exists(backup));
@@ -1546,6 +1546,8 @@ public sealed class OrganizationStoreTests
             DROP TRIGGER container_profiles_no_delete;
             DROP TRIGGER container_profile_revisions_no_replace;
             DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
             DROP TABLE container_profile_revisions;
@@ -1619,6 +1621,8 @@ public sealed class OrganizationStoreTests
             DROP TRIGGER container_profiles_no_delete;
             DROP TRIGGER container_profile_revisions_no_replace;
             DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             ALTER TABLE hire_request_events RENAME TO hire_request_events_v8;
             ALTER TABLE hire_requests RENAME TO hire_requests_v8;
             CREATE TABLE hire_requests (
@@ -1677,6 +1681,8 @@ public sealed class OrganizationStoreTests
             DROP TRIGGER container_profiles_no_delete;
             DROP TRIGGER container_profile_revisions_no_replace;
             DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
             DROP TABLE container_profile_revisions;
@@ -1697,6 +1703,8 @@ public sealed class OrganizationStoreTests
             DROP TRIGGER container_profiles_no_delete;
             DROP TRIGGER container_profile_revisions_no_replace;
             DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
             DROP TABLE container_profile_revisions;
@@ -1719,6 +1727,8 @@ public sealed class OrganizationStoreTests
             DROP TRIGGER container_profiles_no_delete;
             DROP TRIGGER container_profile_revisions_no_replace;
             DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
             DROP TABLE container_profile_revisions;
