@@ -139,8 +139,9 @@ public sealed class PortalOrganizationReadModelTests
         Assert.True(portal.PendingApprovals.Supported);
         Assert.Equal(0, portal.PendingApprovals.Count);
         Assert.Empty(portal.PendingApprovals.Items);
-        Assert.Contains("#219", portal.PendingApprovals.Reason);
+        Assert.Contains("#260", portal.PendingApprovals.Reason);
         Assert.Contains("#217 two-host dependency is satisfied", portal.PendingApprovals.Reason);
+        Assert.Contains("no request auto-creates an employee", portal.PendingApprovals.Reason);
         // The reason must not retain the superseded gate phrasing. Assert the
         // actual historical phrase that this change replaced.
         Assert.DoesNotContain("gated by #217", portal.PendingApprovals.Reason, StringComparison.OrdinalIgnoreCase);

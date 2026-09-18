@@ -27,6 +27,8 @@ public static class OrganizationIds
     public const string PermissionRequestPrefix = "preq-";
     public const string HireRequestPrefix = "hire-";
     public const string HireRequestEventPrefix = "hevt-";
+    public const string ContainerProfilePrefix = "prof-";
+    public const string ContainerProfileRevisionPrefix = "prev-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -46,6 +48,8 @@ public static class OrganizationIds
     public static string NewPermissionRequestId() => NewId(PermissionRequestPrefix);
     public static string NewHireRequestId() => NewId(HireRequestPrefix);
     public static string NewHireRequestEventId() => NewId(HireRequestEventPrefix);
+    public static string NewContainerProfileId() => NewId(ContainerProfilePrefix);
+    public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -265,7 +269,104 @@ public sealed record HireRequestSummary(
     string? OwnerApproval,
     int Revision,
     DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    string? ContainerProfileRevisionId = null);
+
+public static class ContainerProfileStatuses
+{
+    public const string Active = "active";
+    public const string Retired = "retired";
+}
+
+/// <summary>Build state of one immutable profile revision. Only #259 moves a revision past <see cref="Unbuilt"/>.</summary>
+public static class ContainerProfileBuildStatuses
+{
+    public const string Unbuilt = "unbuilt";
+    public const string Building = "building";
+    public const string Built = "built";
+    public const string Failed = "failed";
+    public const string Rejected = "rejected";
+}
+
+/// <summary>The seeded first profile: the approved worker base plus the standard toolchain, no project content.</summary>
+public static class ContainerProfileSeed
+{
+    public const string GenericEmployeeSlug = "generic-employee";
+    public const string GenericEmployeeDisplayName = "Generic employee";
+    public const string GenericEmployeeDescription = "Approved worker base image with the standard development toolchain. No project-specific content; the first profile every managed employee is built from.";
+    public const string GenericEmployeeDefinition =
+        """
+        {
+          "name": "Generic employee",
+          "image": "agentcontrol-worker-base",
+          "features": {
+            "ghcr.io/devcontainers/features/dotnet:2": { "version": "10.0" },
+            "ghcr.io/devcontainers/features/node:1": { "version": "22" },
+            "ghcr.io/devcontainers/features/python:1": { "version": "3.12" },
+            "ghcr.io/devcontainers/features/github-cli:1": {}
+          },
+          "containerEnv": {
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+            "DOTNET_NOLOGO": "1",
+            "NPM_CONFIG_UPDATE_NOTIFIER": "false"
+          },
+          "customizations": {
+            "agentcontrol": {
+              "summary": "Standard .NET 10, Node 22, Python 3.12 and GitHub CLI toolchain on the approved worker base.",
+              "tags": ["generic", "development"]
+            }
+          }
+        }
+        """;
+}
+
+public sealed record ContainerProfileCreate(
+    string? IdempotencyKey,
+    string? Slug,
+    string? DisplayName,
+    string? Description,
+    string? Definition,
+    string? DockerfileFragment);
+
+public sealed record ContainerProfileRevisionCreate(
+    int ExpectedProfileRevision,
+    string? Definition,
+    string? DockerfileFragment);
+
+public sealed record ContainerProfileRetire(int ExpectedRevision);
+
+public sealed record ContainerProfileSummary(
+    string Id,
+    string OrganizationId,
+    string Slug,
+    string DisplayName,
+    string Description,
+    string Status,
+    int CurrentRevisionNumber,
+    string CurrentRevisionId,
+    string CurrentContentHash,
+    string CurrentBuildStatus,
+    int Revision,
+    DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
+
+public sealed record ContainerProfileRevisionSummary(
+    string Id,
+    string ProfileId,
+    int RevisionNumber,
+    string BaseImageReference,
+    string Definition,
+    string? DockerfileFragment,
+    string ContentHash,
+    string BuildStatus,
+    string? BuiltImageDigest,
+    bool Verified,
+    string CreatedBy,
+    DateTimeOffset CreatedAt);
+
+public sealed record ContainerProfileDetail(
+    ContainerProfileSummary Profile,
+    IReadOnlyList<ContainerProfileRevisionSummary> Revisions);
 
 /// <summary>
 /// A department, its current employee count and its authoritative revision. The

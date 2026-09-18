@@ -19,7 +19,7 @@ try {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 900, height: 700 },
     { width: 390, height: 844 }, { width: 320, height: 720 }]) {
     await page.setViewportSize(viewport);
-    for (const route of ['/organization', '/employees', '/hiring', '/system']) {
+    for (const route of ['/organization', '/employees', '/hiring', '/profiles', '/system']) {
       const response = await page.goto(`${base}${route}`, { waitUntil: 'domcontentloaded' });
       const measurement = await page.evaluate(() => {
         const shell = document.querySelector('[data-portal-shell]');

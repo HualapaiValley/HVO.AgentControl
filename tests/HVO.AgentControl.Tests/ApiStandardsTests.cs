@@ -270,11 +270,14 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
         AssertProblem(await ReadProblemAsync(response), 404, path, "Not Found");
     }
 
-    [Fact]
-    public async Task PortalMethodRejectionAdvertisesOnlyImplementedGet()
+    [Theory]
+    [InlineData("/organization")]
+    [InlineData("/profiles")]
+    [InlineData("/profiles/prof-example")]
+    public async Task PortalMethodRejectionAdvertisesOnlyImplementedGet(string path)
     {
         using var client = _factory.CreateClient();
-        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Put, "/organization"));
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Put, path));
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
         Assert.Equal("GET", string.Join(", ", response.Content.Headers.Allow));

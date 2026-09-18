@@ -1,0 +1,27 @@
+@page "/profiles"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Profiles · AgentControl V2</PageTitle>
+<section class="page" data-page="profiles" data-profiles-page>
+    <header class="page-heading"><div><p class="eyebrow">Profiles</p><h1>Container profiles</h1><p>Versioned, immutable build templates that extend the approved worker base image. Creating or revising a profile records a definition only: it does not build an image, approve a hire, create an employee, or rebuild any existing employee.</p></div></header>
+    <div class="hiring-grid">
+        <form class="panel-form" data-profile-form>
+            <h2>Create profile</h2>
+            <label for="profile-slug">Slug<input id="profile-slug" name="slug" required maxlength="63" pattern="[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?" placeholder="my-team-profile" /></label>
+            <label for="profile-name">Display name<input id="profile-name" name="displayName" required maxlength="128" /></label>
+            <label for="profile-description">Description<textarea id="profile-description" name="description" maxlength="1024" rows="2"></textarea></label>
+            <label for="profile-definition">Definition (devcontainer subset)<textarea id="profile-definition" name="definition" required rows="12" spellcheck="false">{
+  "name": "My profile",
+  "image": "agentcontrol-worker-base",
+  "features": {},
+  "containerEnv": {}
+}</textarea></label>
+            <label for="profile-fragment">Dockerfile fragment (only with <code>build</code>)<textarea id="profile-fragment" name="dockerfileFragment" rows="4" spellcheck="false" placeholder="FROM agentcontrol-worker-base&#10;RUN ..."></textarea></label>
+            <p class="control-note">Allowed keys: name, image or build.dockerfile, features (allowlisted), containerEnv/remoteEnv (allowlisted names), postCreateCommand, postStartCommand, customizations.agentcontrol. Mounts, ports, privileges, users, runArgs and entrypoint changes are rejected.</p>
+            <button class="btn btn-primary" type="submit" data-profile-submit>Create profile</button>
+            <p class="receipt" data-profile-receipt role="status"></p>
+        </form>
+        <section><h2>Profiles</h2><p class="page-status" data-page-status role="status">Loading profiles…</p><div class="request-list" data-profile-list hidden></div></section>
+    </div>
+</section>
+<script type="module" src="/js/profiles.js"></script>

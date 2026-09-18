@@ -162,7 +162,7 @@ public sealed class OrganizationStoreTests
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
         Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(obligation.Id, audit.ObligationId);
         }
 
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_obligations'"), StringComparison.Ordinal);
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var v4Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
@@ -230,7 +230,7 @@ public sealed class OrganizationStoreTests
         using (var migrated = Open(root))
             migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
 
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupHashFileName);
@@ -307,7 +307,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -356,7 +356,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -492,7 +492,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -809,11 +809,11 @@ public sealed class OrganizationStoreTests
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Contains("unexpected table shape", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("current authoritative schema-v7 backup or source", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("No schema-v7 backup is created automatically", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("schema-v6 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("lose hires recorded after migration", exception.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("Restore the verified schema-v6 backup", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("current authoritative schema-v8 backup or source", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("No schema-v8 backup is created automatically", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("schema-v7 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("lose container profiles recorded after migration", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restore the verified schema-v7 backup", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -860,7 +860,7 @@ public sealed class OrganizationStoreTests
             store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         }
 
-        ExecuteRaw(root.Path, "DELETE FROM permission_audit; DELETE FROM permission_requests; DELETE FROM permission_grants; DELETE FROM dispatch_holds; DELETE FROM orientation_evidence; DELETE FROM orientation_assignment_fragments; DELETE FROM orientation_assignments; DELETE FROM permission_restrictions; DELETE FROM permission_policies; DELETE FROM orientation_facts; DELETE FROM orientation_fragments; DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments; DELETE FROM organizations;");
+        ExecuteRaw(root.Path, "DELETE FROM permission_audit; DELETE FROM permission_requests; DELETE FROM permission_grants; DELETE FROM dispatch_holds; DELETE FROM orientation_evidence; DELETE FROM orientation_assignment_fragments; DELETE FROM orientation_assignments; DELETE FROM permission_restrictions; DELETE FROM permission_policies; DELETE FROM orientation_facts; DELETE FROM orientation_fragments; DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments; DROP TRIGGER container_profile_revisions_no_delete; DROP TRIGGER container_profiles_no_delete; DELETE FROM container_profile_revisions; DELETE FROM container_profiles; DELETE FROM organizations; CREATE TRIGGER container_profile_revisions_no_delete BEFORE DELETE ON container_profile_revisions BEGIN SELECT RAISE(ABORT, 'container profile revisions are never deleted'); END; CREATE TRIGGER container_profiles_no_delete BEFORE DELETE ON container_profiles BEGIN SELECT RAISE(ABORT, 'container profiles are retired, never deleted'); END;");
         using var reopened = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromMilliseconds(200));
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
@@ -1370,7 +1370,7 @@ public sealed class OrganizationStoreTests
             Assert.Empty(migrated.ListHireRequests());
         }
 
-        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupHashFileName);
         Assert.True(File.Exists(backup));
@@ -1381,6 +1381,91 @@ public sealed class OrganizationStoreTests
         using var restarted = Open(root);
         restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(retained, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
+    public void ExactSchemaV7MigratesToV8WithVerifiedCreateOnceBackupSeedsGenericProfileAndPreservesHires()
+    {
+        using var root = new TempStore();
+        string hireId;
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            var overview = store.GetOverview();
+            var department = overview.Departments.Single(x => x.Slug == OrganizationSeed.OperationsSlug);
+            hireId = store.CreateHireRequest(new HireRequestCreate("v7-hire", "Kept Hire", "Survives migration.", department.Id, overview.Roles.Single().Id, RuntimePlacements.DeveloperContainer, 2, 2048, 256), null).Id;
+        }
+        DowngradeToCanonicalV7(root.Path);
+        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        var before = SnapshotCoreData(root.Path);
+
+        using (var migrated = Open(root))
+        {
+            migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            Assert.Equal(before, SnapshotCoreData(root.Path));
+            var hire = Assert.Single(migrated.ListHireRequests());
+            Assert.Equal(hireId, hire.Id);
+            Assert.Null(hire.ContainerProfileRevisionId);
+            Assert.Equal(HireRequestStates.Requested, hire.State);
+            var profile = Assert.Single(migrated.ListContainerProfiles());
+            Assert.Equal(ContainerProfileSeed.GenericEmployeeSlug, profile.Slug);
+            Assert.Equal(1, profile.CurrentRevisionNumber);
+            Assert.Equal(ContainerProfileBuildStatuses.Unbuilt, profile.CurrentBuildStatus);
+            Assert.Equal("seed", Assert.Single(migrated.GetContainerProfile(profile.Id)!.Revisions).CreatedBy);
+        }
+
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM hire_request_events WHERE hire_request_id = '{hireId}';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'container_profile_revision_id';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_list('hire_requests') WHERE \"table\" = 'container_profile_revisions';"));
+        Assert.Equal(7, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'container_profile%';"));
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV7BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV7BackupHashFileName);
+        Assert.True(File.Exists(backup));
+        AssertNoBackupSidecars(backup);
+        Assert.Equal(7, RawScalar(backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(0, RawScalar(backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'container_profiles';"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), File.ReadAllText(hash).Trim());
+        var retained = File.ReadAllBytes(backup);
+        using var restarted = Open(root);
+        restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(retained, File.ReadAllBytes(backup));
+        Assert.Single(restarted.ListContainerProfiles());
+    }
+
+    [Fact]
+    public void UnknownSchemaV7ShapeFailsBeforeBackupOrMigration()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        DowngradeToCanonicalV7(root.Path);
+        ExecuteRaw(root.Path, "ALTER TABLE hire_requests ADD COLUMN unknown_v7_value TEXT;");
+        using var reopened = Open(root);
+        Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Equal(7, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV7BackupFileName)));
+    }
+
+    [Fact]
+    public void GenericEmployeeSeedIsIdempotentAndNeverOverwritesAnExistingSlug()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            var seeded = Assert.Single(store.ListContainerProfiles());
+            // An owner revision on the seeded profile must survive a migration re-run.
+            store.CreateContainerProfileRevision(seeded.Id, new ContainerProfileRevisionCreate(seeded.Revision, """{"image":"agentcontrol-worker-base","name":"Owner tweak"}""", null));
+        }
+        // Simulate a v7 store whose v8 tables already exist with the owner's data (crash after migration, before version bump is impossible
+        // transactionally; this instead proves the seed guard itself by re-running the seed against the existing slug).
+        ExecuteRaw(root.Path, "UPDATE schema_version SET version = 7;");
+        using var reopened = Open(root);
+        var exception = Record.Exception(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        // A v7 version with v8 tables present is an unexpected shape and must fail closed, not re-seed.
+        Assert.IsType<OrganizationStoreCorruptException>(exception);
+        Assert.Equal(2, RawScalar(root.Path, "SELECT COUNT(*) FROM container_profile_revisions;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM container_profiles;"));
     }
 
     [Fact]
@@ -1456,8 +1541,17 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER container_profile_revisions_immutable;
+            DROP TRIGGER container_profile_revisions_no_delete;
+            DROP TRIGGER container_profiles_no_delete;
+            DROP TRIGGER container_profile_revisions_no_replace;
+            DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
+            DROP TABLE container_profile_revisions;
+            DROP TABLE container_profiles;
             DROP TABLE worker_event_retention;
             DROP TABLE remote_terminal_viewers;
             DROP TABLE worker_recovery_audit;
@@ -1517,13 +1611,82 @@ public sealed class OrganizationStoreTests
             """);
     }
 
+    private static void DowngradeToCanonicalV7(string path)
+    {
+        ExecuteRaw(path,
+            """
+            PRAGMA foreign_keys = OFF;
+            DROP TRIGGER container_profile_revisions_immutable;
+            DROP TRIGGER container_profile_revisions_no_delete;
+            DROP TRIGGER container_profiles_no_delete;
+            DROP TRIGGER container_profile_revisions_no_replace;
+            DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
+            ALTER TABLE hire_request_events RENAME TO hire_request_events_v8;
+            ALTER TABLE hire_requests RENAME TO hire_requests_v8;
+            CREATE TABLE hire_requests (
+                id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+                requested_by_employee_id TEXT REFERENCES employees(id) ON DELETE RESTRICT,
+                requested_by_kind TEXT NOT NULL CHECK (requested_by_kind IN ('owner')),
+                idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+                requested_display_name TEXT NOT NULL CHECK (length(requested_display_name) BETWEEN 1 AND 128),
+                purpose TEXT NOT NULL CHECK (length(purpose) BETWEEN 1 AND 2048),
+                department_id TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                placement TEXT NOT NULL CHECK (placement IN ('InternalSharedContainer', 'DeveloperContainer')),
+                cpu_limit INTEGER NOT NULL CHECK (cpu_limit BETWEEN 1 AND 64),
+                memory_limit_mib INTEGER NOT NULL CHECK (memory_limit_mib BETWEEN 256 AND 131072),
+                pids_limit INTEGER NOT NULL CHECK (pids_limit BETWEEN 16 AND 4096),
+                state TEXT NOT NULL CHECK (state IN ('Requested', 'Approved', 'Provisioning', 'Orienting', 'Ready', 'Rejected', 'Failed', 'Interrupted', 'Uncertain')),
+                request_version_hash TEXT NOT NULL CHECK (length(request_version_hash) = 71 AND substr(request_version_hash, 1, 7) = 'sha256:'),
+                approved_request_version TEXT,
+                owner_approval TEXT,
+                revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (department_id, organization_id) REFERENCES departments(id, organization_id) ON DELETE RESTRICT,
+                FOREIGN KEY (role_id, department_id) REFERENCES roles(id, department_id) ON DELETE RESTRICT
+            );
+            CREATE TABLE hire_request_events (
+                id TEXT PRIMARY KEY,
+                hire_request_id TEXT NOT NULL REFERENCES hire_requests(id) ON DELETE RESTRICT,
+                state TEXT NOT NULL CHECK (state IN ('Requested', 'Approved', 'Provisioning', 'Orienting', 'Ready', 'Rejected', 'Failed', 'Interrupted', 'Uncertain')),
+                revision INTEGER NOT NULL,
+                detail_hash TEXT NOT NULL CHECK (length(detail_hash) = 71 AND substr(detail_hash, 1, 7) = 'sha256:'),
+                created_at TEXT NOT NULL,
+                UNIQUE (hire_request_id, revision)
+            );
+            INSERT INTO hire_requests SELECT id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                requested_display_name, purpose, department_id, role_id, placement, cpu_limit, memory_limit_mib, pids_limit,
+                state, request_version_hash, approved_request_version, owner_approval, revision, created_at, updated_at FROM hire_requests_v8;
+            INSERT INTO hire_request_events SELECT * FROM hire_request_events_v8;
+            DROP TABLE hire_request_events_v8;
+            DROP TABLE hire_requests_v8;
+            DROP TABLE container_profile_revisions;
+            DROP TABLE container_profiles;
+            UPDATE schema_version SET version = 7;
+            PRAGMA foreign_keys = ON;
+            """);
+    }
+
     private static void DowngradeToCanonicalV6(string path)
     {
         ExecuteRaw(path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER container_profile_revisions_immutable;
+            DROP TRIGGER container_profile_revisions_no_delete;
+            DROP TRIGGER container_profiles_no_delete;
+            DROP TRIGGER container_profile_revisions_no_replace;
+            DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
+            DROP TABLE container_profile_revisions;
+            DROP TABLE container_profiles;
             UPDATE schema_version SET version = 6;
             PRAGMA foreign_keys = ON;
             """);
@@ -1535,8 +1698,17 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER container_profile_revisions_immutable;
+            DROP TRIGGER container_profile_revisions_no_delete;
+            DROP TRIGGER container_profiles_no_delete;
+            DROP TRIGGER container_profile_revisions_no_replace;
+            DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
+            DROP TABLE container_profile_revisions;
+            DROP TABLE container_profiles;
             DROP TABLE worker_recovery_audit;
             CREATE TABLE worker_recovery_audit (id TEXT PRIMARY KEY, obligation_id TEXT NOT NULL REFERENCES worker_recovery_obligations(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK(kind IN('replay-gap','ownership-changed','session-reconciliation')), marker_hash TEXT NOT NULL, evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=71 AND substr(evidence_hash,1,7)='sha256:'), disposition TEXT NOT NULL CHECK(disposition='acknowledged-after-external-reconciliation'), recorded_at TEXT NOT NULL);
             UPDATE schema_version SET version = 5;
@@ -1550,8 +1722,17 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER container_profile_revisions_immutable;
+            DROP TRIGGER container_profile_revisions_no_delete;
+            DROP TRIGGER container_profiles_no_delete;
+            DROP TRIGGER container_profile_revisions_no_replace;
+            DROP TRIGGER container_profiles_no_replace;
+            DROP TRIGGER container_profiles_identity_immutable;
+            DROP TRIGGER container_profiles_no_update_replace;
             DROP TABLE hire_request_events;
             DROP TABLE hire_requests;
+            DROP TABLE container_profile_revisions;
+            DROP TABLE container_profiles;
             DROP TABLE worker_recovery_audit;
             DROP TABLE worker_recovery_obligations;
             CREATE TABLE worker_recovery_obligations (id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, source TEXT NOT NULL CHECK(source IN('controller','worker')), kind TEXT NOT NULL CHECK(kind IN('replay-gap','replay-loss','replay-ack-uncertain','journal-failure','request-uncertain','permission-pending','process-interrupted','ownership-changed')), marker_hash TEXT NOT NULL, worker_generation INTEGER NOT NULL CHECK(worker_generation>=0), sequence INTEGER NOT NULL CHECK(sequence>=0), active INTEGER NOT NULL CHECK(active IN(0,1)), detail_hash TEXT, marker_json TEXT CHECK(marker_json IS NULL OR length(marker_json)<=8192), created_at TEXT NOT NULL, cleared_at TEXT, revision INTEGER NOT NULL, UNIQUE(worker_id,kind,marker_hash));

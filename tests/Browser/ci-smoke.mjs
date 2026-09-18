@@ -351,6 +351,8 @@ try {
     ['/organization/departments', 'Departments'],
     ['/employees', 'Employees'],
     ['/hiring', 'Hiring'],
+    ['/profiles', 'Profiles'],
+    ['/profiles/prof-example', 'Profiles'],
     ['/system', 'System'],
   ];
   for (const [path, expected] of navCases) {
@@ -387,7 +389,7 @@ try {
   // ---- 11. distinct DOM and overflow across routes ----------------------
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
-    for (const path of ['/organization', '/organization/departments', '/employees', '/hiring', '/system', '/employees/emp-disabled']) {
+    for (const path of ['/organization', '/organization/departments', '/employees', '/hiring', '/profiles', '/profiles/prof-disabled', '/system', '/employees/emp-disabled']) {
       await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' });
       const widths = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: innerWidth }));
       record(`${path} has no horizontal overflow at ${viewport.width}px`, widths.document <= widths.viewport + 1, widths);

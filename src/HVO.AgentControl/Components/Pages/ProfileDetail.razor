@@ -1,0 +1,29 @@
+@page "/profiles/{Id}"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Profile · AgentControl V2</PageTitle>
+<section class="page profile-detail" data-page="profile-detail" data-profile-detail data-profile-id="@Id">
+    <header class="page-heading page-heading--actions">
+        <div><p class="eyebrow"><a href="/profiles">Profiles</a></p><h1 data-profile-name>Profile</h1><p class="department-subtitle" data-profile-subtitle>Loading exact profile…</p></div>
+        <button class="btn" type="button" data-profile-retire hidden>Retire profile</button>
+    </header>
+    <p class="page-status" data-page-status role="status">Loading exact profile…</p>
+    <p class="receipt" data-profile-receipt role="status"></p>
+    <div data-profile-content hidden>
+        <div class="detail-grid">
+            <article><h2>Identity</h2><dl data-profile-identity></dl></article>
+            <article><h2>Current revision</h2><dl data-profile-current></dl><p class="control-note">Build and verification are recorded per revision by the profile build slice (#259); nothing here builds an image.</p></article>
+        </div>
+        <form class="panel-form" data-revision-form>
+            <h2>New revision</h2>
+            <p class="control-note">Revisions are immutable. Saving creates the next revision number; existing revisions and employees built from them are never changed and never rebuilt automatically.</p>
+            <label for="revision-definition">Definition (devcontainer subset)<textarea id="revision-definition" name="definition" required rows="12" spellcheck="false"></textarea></label>
+            <label for="revision-fragment">Dockerfile fragment (only with <code>build</code>)<textarea id="revision-fragment" name="dockerfileFragment" rows="4" spellcheck="false"></textarea></label>
+            <button class="btn btn-primary" type="submit" data-revision-submit>Create revision</button>
+        </form>
+        <article class="department-roster"><h2>Revision history</h2><div class="request-list" data-profile-revisions></div></article>
+    </div>
+</section>
+<script type="module" src="/js/profile-detail.js"></script>
+
+@code { [Parameter] public string? Id { get; set; } }
