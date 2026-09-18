@@ -14,9 +14,18 @@ single control-host portal plus a disabled-by-default hermetic remote-worker
 controller slice: schema-v7 records, approved-host validation, fixed SSH/Docker
 command construction and shared bridge protocol code. Durable hire request and
 revision-bound rejection are shipped; approval and worker provisioning remain
-future work. Live provisioning and task routing are implemented hermetically, as
-are the viewer protocol and fixed production worker PTY backend; live remote
-operation and two-host evidence remain unavailable and are not authorized.
+future work pending discussion and owner approval (#219). Live provisioning and
+task routing are implemented hermetically, as are the viewer protocol and fixed
+production worker PTY backend. The first managed disposable two-host path is now
+live-accepted on an authorized disposable topology: pinned ED25519/strict SSH to
+`home-dev-02`, enrolled isolated labeled worker, ACP session lifecycle, anonymous
+provider prompt/tool streaming, real tool side effect, cancellation, forwarded
+receipt, disconnect/reconnect epoch advance, exact reconcile completion,
+idempotent resubmit, stale-lease rejection, bounded replay, worker restart, and
+viewer attach were exercised, and the disposable resources were removed. This
+path stays disabled by default; `WorkerControl:Enabled` remains the deployment
+gate and is false by default. Key rotation and compromise re-enrollment, and
+production managed hires/provisioning, are **not** validated by this evidence.
 Distinguish code capability from operationally tested behavior.
 
 ## Repository layout

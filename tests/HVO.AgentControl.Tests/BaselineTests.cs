@@ -7,6 +7,11 @@ namespace HVO.AgentControl.Tests;
 
 public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>>
 {
+    private const string AcceptanceDate = "2026-09-18";
+    private const string AcceptancePhrase = "first managed disposable two-host path";
+    private const string KeyRotationExclusion = "does not validate key rotation or compromise re-enrollment";
+    private const string ProductionHiringExclusion = "does not authorize production managed hiring/provisioning";
+
     private readonly HttpClient _client;
 
     public BaselineTests(WebApplicationFactory<Program> application)
@@ -15,14 +20,26 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
     }
 
     [Fact]
-    public async Task RootReportsBaselineRatherThanClaimingWorkerReadiness()
+    public async Task RootReportsBaselineWorkerCapabilityFlagsExactly()
     {
         using var response = await _client.GetAsync("/api/info");
         response.EnsureSuccessStatusCode();
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Equal(2, body.RootElement.GetProperty("generation").GetInt32());
         Assert.Equal("control-portal", body.RootElement.GetProperty("status").GetString());
-        Assert.False(body.RootElement.GetProperty("workerControlImplemented").GetBoolean());
+        // #217 operational acceptance: the first managed disposable two-host path
+        // is implemented and validated. Enabled stays the separate config gate and
+        // is false by default, so it must not be asserted true here.
+        Assert.True(body.RootElement.GetProperty("workerControlImplemented").GetBoolean());
+        Assert.True(body.RootElement.GetProperty("workerControlCodeAvailable").GetBoolean());
+        Assert.True(body.RootElement.GetProperty("workerControlOperationallyValidated").GetBoolean());
+        Assert.False(body.RootElement.GetProperty("workerControlEnabled").GetBoolean());
+        // The in-band scope bound is exact and stable so clients can distinguish the
+        // accepted path from key rotation and production provisioning.
+        Assert.Equal(
+            Program.WorkerControlValidatedScope,
+            body.RootElement.GetProperty("workerControlValidatedScope").GetString());
+        Assert.Equal("first-managed-disposable-two-host", Program.WorkerControlValidatedScope);
     }
 
     [Fact]
@@ -96,6 +113,31 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
         Assert.Contains("/employees/${encodeURIComponent(hostEmployee.id)}", script, StringComparison.Ordinal);
         Assert.Contains("[data-field=\"state-detail\"]", script, StringComparison.Ordinal);
         Assert.DoesNotContain("fieldText(page, 'state')", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AcceptanceDocsBoundTheAcceptedPathWithExclusions()
+    {
+        // Capability truth: wherever the 2026-09-18 first managed disposable
+        // two-host path is marked accepted, the same document must also state the
+        // key rotation and production hiring/provisioning exclusions so the
+        // accepted path is never read as broader than it is.
+        var root = FindRepositoryRoot();
+        var docs = new[]
+        {
+            Path.Combine(root, "README.md"),
+            Path.Combine(root, "docs", "ARCHITECTURE.md"),
+            Path.Combine(root, "docs", "ROADMAP.md"),
+        };
+
+        foreach (var path in docs)
+        {
+            var text = File.ReadAllText(path);
+            Assert.Contains("2026-09-18", text, StringComparison.Ordinal);
+            Assert.Contains(AcceptancePhrase, text, StringComparison.Ordinal);
+            Assert.Contains(KeyRotationExclusion, text, StringComparison.Ordinal);
+            Assert.Contains(ProductionHiringExclusion, text, StringComparison.Ordinal);
+        }
     }
 
     private static string FindRepositoryRoot()

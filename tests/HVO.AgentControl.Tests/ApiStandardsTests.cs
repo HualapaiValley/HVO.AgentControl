@@ -379,6 +379,23 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
         Assert.True(readyResponses.TryGetProperty("200", out _));
         Assert.True(readyResponses.TryGetProperty("503", out _));
 
+        // /api/info bounds the worker capability claim in band: the schema exposes
+        // workerControlValidatedScope and the operation description names the scope.
+        Assert.True(paths.TryGetProperty("/api/info", out var info));
+        var infoOperation = info.GetProperty("get");
+        Assert.Contains(
+            Program.WorkerControlValidatedScope,
+            infoOperation.GetProperty("description").GetString(),
+            StringComparison.Ordinal);
+        var infoSchema = infoOperation.GetProperty("responses").GetProperty("200")
+            .GetProperty("content").GetProperty("application/json").GetProperty("schema");
+        var schemaRef = infoSchema.GetProperty("$ref").GetString()!;
+        var schemaName = schemaRef[(schemaRef.LastIndexOf('/') + 1)..];
+        var scopeProperty = root.GetProperty("components").GetProperty("schemas")
+            .GetProperty(schemaName).GetProperty("properties")
+            .GetProperty("workerControlValidatedScope");
+        Assert.Equal("string", scopeProperty.GetProperty("type").GetString());
+
         // No owner auth configured, so no security scheme and no global requirement.
         Assert.False(root.TryGetProperty("components", out var components)
             && components.TryGetProperty("securitySchemes", out _));

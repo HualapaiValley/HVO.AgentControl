@@ -144,8 +144,14 @@ intent-first cancellation/provisioning, command-injection rejection, pinned SSH
 flags, resource-label ownership and bounded Linux capability parsing. The bridge,
 connection and provisioning services expose injectable interfaces for deterministic
 fakes. These checks do not access SSH credentials or remote hosts.
-`WorkerControl` and its hosted manager are disabled by default; live adapter
-execution and enrollment require separate owner authorization.
+`WorkerControl` and its hosted manager are disabled by default. The first
+managed disposable two-host path was accepted live on 2026-09-18 under explicit
+owner authorization and the disposable resources were removed; the flags in
+`/api/info` (`WorkerControlImplemented`, `WorkerControlOperationallyValidated`)
+report that first path, with `workerControlValidatedScope` carrying the exact
+`first-managed-disposable-two-host` bound, while `WorkerControlEnabled` remains
+the deployment/configuration gate and is false by default. Production
+provisioning and key rotation remain future work.
 
 The approved-host capability probe is parsed from the real captured output of
 `docker system info`, `docker version` and one `df -B1 --output=avail` of the
@@ -163,11 +169,11 @@ loopback WebSocket check of the browser-facing close handshake, and a Python
 harness against the real supervisor source. Owner viewer input can execute
 employee code, and its framing limits are not a sandbox.
 
-These are descriptor and protocol primitives, not an attached live session:
-the real OpenCode `attach` TUI is only exercised as a CLI contract inside the
-worker image. **Real two-host portal terminal evidence and a real attached
-viewer session remain pending operational validation and are not authorized
-here.**
+These are descriptor and protocol primitives. The real OpenCode `attach` TUI is
+exercised as a CLI contract inside the worker image, and the #217 disposable
+two-host acceptance (2026-09-18) exercised live viewer framing/auth/resize/
+input-output marker and detach/reconnect over pinned strict SSH. Production
+viewer operation at scale remains unvalidated.
 
 Viewer teardown is never silently assumed. An unconfirmed `viewer-stop` is
 retried on bounded fresh supervisor connections, then resolved against the
@@ -413,7 +419,8 @@ unconfirmed upstream change, `503` not ready or cancellation not accepted.
 | OpenAPI | None | JSON contract at `/openapi/v1.json`, owner-auth when configured, no Swagger UI |
 | `/health/live` | Implemented, returns `{ "status": "healthy" }`, process only, unauthenticated | Unchanged: process liveness only |
 | `/health/ready` | Not implemented | Readiness of the exact owned ACP session and attached TUI |
-| `/`, `/api/info`, `/api/control`, `/api/control/model`, `/api/control/cancel`, `/terminal`, `/api/version` | Implemented | Unchanged |
+| `/`, `/api/control`, `/api/control/model`, `/api/control/cancel`, `/terminal`, `/api/version` | Implemented | Unchanged |
+| `/api/info` | Implemented | Adds `workerControlValidatedScope` to bound the accepted capability claim |
 | `/api/organization` | Not implemented | Owner-protected overview plus same-origin revision-guarded rename and basic-instruction update backed by the authoritative SQLite store; employee rows include orientation readiness/holds |
 | `/api/orientation*`, `/api/roles/{id}/instructions`, `/api/permissions/grants*` | Not implemented | Owner-authenticated stale-readable orientation status, host-verified assignment delivery with persisted restart-required generation, authoritative revisioned role-fragment instruction update, assignment-bound owner/live comprehension, manual hold and staged grant/revoke operations; host-started malformed/empty/oversized/non-terminal/ACP-error turns persist live-model failure, timeout/caller cancellation request bounded remote cancellation and fence retries, grants are not ACP-executable in Phase 1, permission callbacks persist synchronous rejection plus every matched restriction ID, and all mutations require same origin and ProblemDetails |
 

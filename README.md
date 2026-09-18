@@ -36,22 +36,56 @@ shows roles, roster, scoped availability, standing instructions and a
 department-scoped request-employee path. Control schema v7 adds durable,
 idempotent hire requests with append-only hashed
 state events and owner rejection; a request does **not** create an employee.
-Approval, provisioning and orientation remain gated by #217 two-host operational
-acceptance. The #217 hermetic controller records are retained in the current
-schema-v7 store, including enrollment/cursor/event/request/cancellation/recovery APIs, durable
+Approval, provisioning and orientation remain gated by #219 owner approval and
+discussion; the #217 two-host dependency is now satisfied. The #217 hermetic
+controller records are retained in the current schema-v7 store, including
+enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
-minimal same-origin owner control routes. The fixed SSH/Docker adapter and hosted
-manager remain disabled by default and no remote host was contacted during this
-work. `/api/info WorkerControlImplemented` remains `false` because the operational
-two-host path has not been authorized or validated; `WorkerControlCodeAvailable=true`
-`WorkerControlEnabled` reports the effective configuration gate, and
-`WorkerControlOperationallyValidated=false` preserves that distinction. The
-key rotation, live enrollment/inference/tools and two-host remote terminal evidence
-remain pending separate work and authorization. The viewer role, fixed production
-worker PTY backend and store-only remote read model are hermetically code-complete;
-viewer input is owner-authorized interactive execution, not a sandbox boundary. Do not expose this portal to untrusted
-networks or the Internet.
+minimal same-origin owner control routes.
+
+**#217 operational acceptance (2026-09-18).** The first managed disposable
+two-host path was accepted on source `main` at `c4a7966` with worker OpenCode
+`1.18.30` and Docker `29.8.0`. The worker host was `home-dev-02`, reached over
+pinned ED25519 strict SSH and provisioned as an isolated labeled container with
+exact latest images. Redacted acceptance evidence: ACP initialize/new/load;
+anonymous provider prompt streaming to completion; a real tool side effect at
+the exact `/workspace/agentcontrol-217-tool.txt` path with bytes `TOOL217_OK\n`
+(SHA-256 `954cf…`); cancellation delivered on the same lease in ~2.5 s with the
+active request cleared; disconnect after a forwarded receipt, reconnect with an
+epoch advance, exact reconcile completion, and idempotent resubmit with no
+duplicate; stale-lease rejection after a competing owner epoch; bounded
+multi-generation replay both hermetic and live; worker restart advancing the
+process generation with no automatic resume and the same native session loaded
+explicitly; and viewer framing/auth/resize/marker plus detach/reconnect. Live
+permission handling covered `[once, always, reject]` and safe-reject
+`[reject]`, with a same-lease reject moving pending→decided and the prompt
+completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
+containers, volumes or tags remained and the local key was removed. The worker
+control portal on `home-docker` was deployed with separate schema-v7 UI and is
+irrelevant to worker flags except portal inspection.
+
+This path remains disabled by default. `/api/info` now reports
+`WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
+and it carries `workerControlValidatedScope="first-managed-disposable-two-host"`
+so clients can see the exact bound in band; `WorkerControlCodeAvailable=true` is
+unchanged, and `WorkerControlEnabled`
+still reports the effective configuration gate and is `false` in the
+deployment/default configuration. Implemented/validated and the scope cover only
+this first managed disposable two-host path — not key rotation or compromise
+re-enrollment, and not production managed hires. Cancellation result limitation:
+OpenCode reported the cancelled turn completed, so cancellation cleared the
+active request but was not a rollback of the partial tool/turn. A
+controller-provisioned worker attaches to Docker's default `bridge`, which
+grants unrestricted outbound egress as documented below. Key rotation,
+production provisioning and fresh re-enrollment remain pending separate work.
+The viewer role, fixed production worker PTY backend and store-only remote read
+model are hermetically code-complete; viewer input is owner-authorized
+interactive execution, not a sandbox boundary. Do not expose this portal to
+untrusted networks or the Internet.
+
+The accepted path does not validate key rotation or compromise re-enrollment and
+does not authorize production managed hiring/provisioning.
 
 ### Run locally
 
@@ -110,8 +144,10 @@ printed. Repeating with the exact same key verifies the existing enrollment; a
 different key, symlink, hard link, wrong owner or wrong mode fails closed and is
 never overwritten. If the key is absent, the supervisor exits with a fixed
 bootstrap-required message instead of starting the bridge or ACP. This is a
-disposable local workflow, not live enrollment. Key delivery and rotation remain
-#217 maintenance work.
+disposable local workflow, not live enrollment. Live disposable enrollment was
+exercised in the #217 acceptance, but key delivery and rotation in production
+remain future work; key rotation and compromise re-enrollment are not covered by
+the `/api/info` flags.
 
 ### Container
 
@@ -318,18 +354,20 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 ## Portal surface
 
 - `/`: authenticated Blazor terminal portal
-- `/api/info`: implementation identity (`generation`, `status`, worker flags)
+- `/api/info`: implementation identity (`generation`, `status`, worker flags,
+  and `workerControlValidatedScope` bounding exactly what
+  `workerControlImplemented`/`workerControlOperationallyValidated` cover)
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, explicit unsupported pending approvals, and actionable safe diagnostics; `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
+- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics; approval action and provisioning remain unimplemented pending #219 owner discussion and approval. `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.
 - `/api/workers/{workerId}/permissions`: safe hash/option-ID projection of remote worker pending permissions; the reject endpoint accepts only decision identity/revision, reloads the authoritative tuple/options, and never offers allow.
 - `/api/workers/{workerId}/recover`: same-origin owner recovery for one exact obligation, identified by obligation ID and revision. It invokes the matching worker-side reconciliation (event acknowledgment, replay loss, replay gap, journal failure) and clears the controller obligation only after the worker accepted it, so clearing a row can never stand in for an unreconciled worker. Obligations whose real outcome cannot be established remotely — an uncertain request, a changed ownership epoch — are refused with 409 and remain open for an operator decision.
 - `/api/workers/status`: enrollments, cursors, pending worker permissions, active recovery obligations and bounded event-retention diagnostics (what was pruned after the controller committed its cursor).
-- `/terminal?employeeId=<stable-id>`: same-origin authenticated terminal WebSocket with exact, non-fallback routing. InternalSharedContainer attaches only the exact host-owned employee/binding/native-session tuple. DeveloperContainer is routed only when the exact enrolled/authenticated/running, hold-free cached owner lease and persisted worker viewer capability are available. The fixed worker supervisor backend launches the pinned loopback OpenCode attach command under the employee UID and passes the PTY descriptor with `SCM_RIGHTS`; two-host portal operation remains unvalidated.
+- `/terminal?employeeId=<stable-id>`: same-origin authenticated terminal WebSocket with exact, non-fallback routing. InternalSharedContainer attaches only the exact host-owned employee/binding/native-session tuple. DeveloperContainer is routed only when the exact enrolled/authenticated/running, hold-free cached owner lease and persisted worker viewer capability are available. The fixed worker supervisor backend launches the pinned loopback OpenCode attach command under the employee UID and passes the PTY descriptor with `SCM_RIGHTS`; two-host viewer framing/auth/resize/marker and detach/reconnect were exercised in the #217 disposable acceptance.
 - `/health/live`: process health, not worker/provider readiness
 - `/api/version`: semantic version and architecture direction
 

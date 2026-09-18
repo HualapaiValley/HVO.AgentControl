@@ -1502,9 +1502,15 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
-    public void ControlHostWorkerFlagRemainsFalseBySourceContract()
+    public void ControlHostWorkerSourceKeepsEnabledAsTheOnlyConfigGate()
     {
-        var source = File.ReadAllText(System.IO.Path.Combine(RepoRoot(), "src/HVO.AgentControl/Program.cs")); Assert.Contains("WorkerControlImplemented: false", source, StringComparison.Ordinal);
+        // Source guard for the disabled-by-default deployment gate. The capability
+        // flag values themselves are asserted exactly over the live /api/info
+        // response in BaselineTests; this check only prevents the deployment gate
+        // from being hardcoded on in source.
+        var source = File.ReadAllText(System.IO.Path.Combine(RepoRoot(), "src/HVO.AgentControl/Program.cs"));
+        Assert.Contains("WorkerControlEnabled: workerControlEnabled", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("WorkerControlEnabled: true", source, StringComparison.Ordinal);
     }
 
     private static async Task<NetworkStream> AuthenticateAsync(WorkerOptions options, byte[] key, string clientNonce)
