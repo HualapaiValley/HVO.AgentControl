@@ -1,0 +1,20 @@
+@page "/organization"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Organization · AgentControl V2</PageTitle>
+<section class="page" data-page="organization" data-organization-page>
+    <header class="page-heading"><div><p class="eyebrow">Organization</p><h1>Overview</h1><p>Authoritative departments, employee availability, pending hire requests, and failures needing owner attention.</p></div></header>
+    <p class="page-status" data-page-status role="status">Loading organization…</p>
+    <div class="summary-grid" data-organization-summary hidden>
+        <article class="summary-card"><h2>Availability</h2><dl data-org-availability></dl></article>
+        <article class="summary-card"><h2>Pending hire requests</h2><p data-pending-approvals>—</p><a href="/hiring">Review hiring</a></article>
+        <article class="summary-card"><h2>Organization hierarchy</h2><p>Departments are authoritative sections of the organization, not an employee filter.</p><a href="/organization/departments">Open department directory</a></article>
+    </div>
+    <section class="department-section" aria-labelledby="department-cards-heading">
+        <h2 id="department-cards-heading">Departments</h2>
+        <p class="page-status">Each card links by stable department ID. The overview never links a mutable slug as identity.</p>
+        <div class="department-cards" data-org-department-cards hidden></div>
+    </section>
+    <article class="attention" data-organization-failures hidden><h2>Failures needing attention</h2><ul data-org-failures></ul></article>
+</section>
+<script type="module" src="/js/organization-page.js"></script>

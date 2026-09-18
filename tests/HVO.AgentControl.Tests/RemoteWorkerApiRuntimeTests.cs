@@ -240,6 +240,7 @@ public sealed class RemoteWorkerApiDisabledRuntimeTests : IClassFixture<Disabled
 /// default). Store reads still work; every execution path fails closed with 409
 /// rather than a raw 500, and cross-origin is rejected first.
 /// </summary>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class RemoteWorkerApiWorkerDisabledTests : IClassFixture<EnabledRuntimeFactory>
 {
     private readonly EnabledRuntimeFactory _factory;
@@ -366,6 +367,7 @@ public sealed class RemoteWorkerApiWorkerDisabledTests : IClassFixture<EnabledRu
 /// approved hosts). Startup does not validate those options, so every execution
 /// endpoint owns a truthful 409 and never leaks configuration detail.
 /// </summary>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class RemoteWorkerApiWorkerInvalidConfigTests : IClassFixture<WorkerControlInvalidConfigFactory>
 {
     private readonly WorkerControlInvalidConfigFactory _factory;

@@ -5,7 +5,8 @@
 //
 // Coverage:
 //   1. unauthenticated GET /api/control -> 401 (and root page -> 401)
-//   2. authenticated root Blazor page loads (title, no console/page errors)
+//   2. authenticated organization API identifies the host-owned employee and
+//      its exact detail route loads (title, state-detail, no console/page errors)
 //   3. GET /api/control -> ready, non-empty sessionId, terminalReady=true
 //   4. xterm renders live OpenCode TUI output
 //   5. browser keyboard submits an arithmetic prompt and the assistant reply
@@ -35,7 +36,7 @@ const EXE = process.env.CHROME_PATH || undefined;
 const DOCKER_CONTEXT = process.env.DOCKER_CONTEXT || 'home-docker';
 const CONTAINER = process.env.CONTROL_CONTAINER || 'agentcontrol-v2-control-1';
 const SECRET_IN_CONTAINER = '/run/agentcontrol-secrets/owner-password';
-const PAGE_TITLE = 'AgentControl V2';
+const PAGE_TITLE = 'Employee · AgentControl V2';
 const OPENCODE_MARKER = /OpenCode Zen|Big Pickle|ctrl\+p commands/;
 
 // The task example is 512+137 -> 649. Fallbacks keep the assertion meaningful
@@ -68,11 +69,15 @@ const password = loadOwnerPassword();
 if (!password) throw new Error('owner password could not be read');
 const basicAuth = 'Basic ' + Buffer.from(`owner:${password}`, 'utf8').toString('base64');
 
-async function getControl() {
-  const response = await fetch(`${BASE}/api/control`, { headers: { Authorization: basicAuth, Accept: 'application/json' } });
+async function getJson(path) {
+  const response = await fetch(`${BASE}${path}`, { headers: { Authorization: basicAuth, Accept: 'application/json' } });
   let body = null;
   try { body = await response.json(); } catch { /* non-JSON */ }
   return { status: response.status, body };
+}
+
+async function getControl() {
+  return getJson('/api/control');
 }
 
 async function waitFor(fn, timeoutMs, label, intervalMs = 500) {
@@ -123,15 +128,20 @@ try {
   const anonRoot = await fetch(`${BASE}/`);
   record('unauthenticated GET / returns 401', anonRoot.status === 401, { status: anonRoot.status });
 
-  // ---- 2. authenticated root page -------------------------------------
-  const response = await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // ---- 2. authenticated exact employee detail -------------------------
+  const organization = await getJson('/api/organization/portal');
+  const hostEmployee = organization.body?.employees?.find((employee) => employee.runtime?.hostOwned === true);
+  if (!hostEmployee?.id) throw new Error('host-owned employee was not found');
+  const detailPath = `/employees/${encodeURIComponent(hostEmployee.id)}`;
+  const response = await page.goto(`${BASE}${detailPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   const title = await page.title();
   await page.waitForSelector('[data-portal]', { timeout: 15000 });
-  record('authenticated root page returns HTTP 200', (response?.status() ?? 0) === 200, { status: response?.status() ?? 0 });
-  record(`root page title is "${PAGE_TITLE}"`, title === PAGE_TITLE, { title });
-  record('portal root and xterm mount exist', await page.evaluate(() =>
-    Boolean(document.querySelector('[data-portal]') && document.querySelector('[data-terminal]'))), {});
-  record('no console errors or page errors on root page',
+  await page.waitForSelector('[data-employee-content]:not([hidden])', { timeout: 15000 });
+  record('authenticated employee detail returns HTTP 200', (response?.status() ?? 0) === 200, { status: response?.status() ?? 0, detailPath });
+  record(`employee detail title is "${PAGE_TITLE}"`, title === PAGE_TITLE, { title });
+  record('employee detail state telemetry and xterm mount exist', await page.evaluate(() =>
+    Boolean(document.querySelector('[data-portal] [data-field="state-detail"]') && document.querySelector('[data-terminal]'))), {});
+  record('no console errors or page errors on employee detail',
     consoleErrors.length === 0 && pageErrors.length === 0,
     { consoleErrors, pageErrors });
 
@@ -148,9 +158,9 @@ try {
   record('/api/control reports terminalReady=true', control.body?.terminalReady === true,
     { terminalReady: control.body?.terminalReady });
   record('UI reflects ready state and attached terminal',
-    (await fieldText(page, 'state'))?.toLowerCase() === 'ready' &&
+    (await fieldText(page, 'state-detail'))?.toLowerCase() === 'ready' &&
     (await fieldText(page, 'connection')) === 'Attached',
-    { state: await fieldText(page, 'state'), connection: await fieldText(page, 'connection') });
+    { state: await fieldText(page, 'state-detail'), connection: await fieldText(page, 'connection') });
 
   // ---- 4. live OpenCode terminal --------------------------------------
   await waitFor(async () => (OPENCODE_MARKER.test(await readTerminal(page)) ? true : null),

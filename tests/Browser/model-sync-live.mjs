@@ -85,11 +85,15 @@ async function waitFor(fn, timeoutMs, label, intervalMs = 250) {
   }
 }
 
-async function getControl() {
-  const response = await fetch(API_CONTROL, { headers: { Authorization: basicAuth, Accept: 'application/json' } });
+async function getJson(url) {
+  const response = await fetch(url, { headers: { Authorization: basicAuth, Accept: 'application/json' } });
   let body = null;
   try { body = await response.json(); } catch { /* non-JSON */ }
   return { status: response.status, body };
+}
+
+async function getControl() {
+  return getJson(API_CONTROL);
 }
 
 async function postControlModel(model, origin) {
@@ -311,7 +315,10 @@ async function waitWebModel(expected, timeoutMs = MODEL_POLL_MS) {
 }
 
 try {
-  await page.goto(`${BASE}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  const organization = await getJson(`${BASE}/api/organization/portal`);
+  const hostEmployee = organization.body?.employees?.find((employee) => employee.runtime?.hostOwned === true);
+  if (!hostEmployee?.id) throw new Error('host-owned employee was not found');
+  await page.goto(`${BASE}/employees/${encodeURIComponent(hostEmployee.id)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForSelector('[data-portal]', { timeout: 15000 });
   await waitFor(async () => {
     const { body } = await getControl();

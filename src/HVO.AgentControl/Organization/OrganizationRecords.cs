@@ -25,6 +25,8 @@ public static class OrganizationIds
     public const string GrantPrefix = "grant-";
     public const string PermissionAuditPrefix = "paud-";
     public const string PermissionRequestPrefix = "preq-";
+    public const string HireRequestPrefix = "hire-";
+    public const string HireRequestEventPrefix = "hevt-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -42,6 +44,8 @@ public static class OrganizationIds
     public static string NewGrantId() => NewId(GrantPrefix);
     public static string NewPermissionAuditId() => NewId(PermissionAuditPrefix);
     public static string NewPermissionRequestId() => NewId(PermissionRequestPrefix);
+    public static string NewHireRequestId() => NewId(HireRequestPrefix);
+    public static string NewHireRequestEventId() => NewId(HireRequestEventPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -213,12 +217,69 @@ public sealed record PermissionDecision(
     string Tool,
     string Resource);
 
-/// <summary>A department and its current employee count.</summary>
+public static class HireRequestStates
+{
+    public const string Requested = "Requested";
+    public const string Approved = "Approved";
+    public const string Provisioning = "Provisioning";
+    public const string Orienting = "Orienting";
+    public const string Ready = "Ready";
+    public const string Rejected = "Rejected";
+    public const string Failed = "Failed";
+    public const string Interrupted = "Interrupted";
+    public const string Uncertain = "Uncertain";
+}
+
+public sealed record HireRequestCreate(
+    string? IdempotencyKey,
+    string? RequestedDisplayName,
+    string? Purpose,
+    string? DepartmentId,
+    string? RoleId,
+    string? Placement,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit);
+
+public sealed record HireRequestReject(int ExpectedRevision);
+
+public sealed record HireRequestSummary(
+    string Id,
+    string OrganizationId,
+    string? RequestedByEmployeeId,
+    string RequestedByKind,
+    string IdempotencyKey,
+    string RequestedDisplayName,
+    string Purpose,
+    string DepartmentId,
+    string DepartmentDisplayName,
+    string RoleId,
+    string RoleDisplayName,
+    string Placement,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string State,
+    string RequestVersionHash,
+    string? ApprovedRequestVersion,
+    string? OwnerApproval,
+    int Revision,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+/// <summary>
+/// A department, its current employee count and its authoritative revision. The
+/// active department orientation fragment, when one exists, is surfaced as
+/// standing instructions; departments without a persisted fragment report null
+/// rather than fabricated text.
+/// </summary>
 public sealed record DepartmentSummary(
     string Id,
     string Slug,
     string DisplayName,
-    int EmployeeCount);
+    int EmployeeCount,
+    int Revision,
+    string? StandingInstructions);
 
 /// <summary>A role definition with its department and versioned profile references.</summary>
 public sealed record RoleSummary(

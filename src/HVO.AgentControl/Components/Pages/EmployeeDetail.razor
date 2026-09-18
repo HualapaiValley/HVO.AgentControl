@@ -1,0 +1,39 @@
+@page "/employees/{Id}"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Employee · AgentControl V2</PageTitle>
+<HeadContent>
+    @* xterm.js is pinned and served locally. Only this route declares the
+       stylesheet and the classic UMD builds; both are deferred ahead of the
+       terminal.js ES module so the constructors exist when it boots. *@
+    <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+    <script src="/vendor/xterm/xterm.js" defer></script>
+    <script src="/vendor/xterm/addon-fit.js" defer></script>
+</HeadContent>
+<section class="page employee-detail" data-page="employee-detail" data-employee-detail data-employee-id="@Id">
+    <header class="page-heading"><div><p class="eyebrow"><a href="/employees">Employees</a></p><h1 data-employee-name>Employee</h1><p><span class="availability-pill" data-employee-availability data-availability="unknown">Loading</span></p></div></header>
+    <p class="page-status" data-page-status role="status">Loading exact employee…</p>
+    <div data-employee-content hidden>
+        <div class="detail-grid">
+            <article><h2>Identity and instructions</h2><dl data-employee-identity></dl></article>
+            <article><h2>Runtime binding</h2><dl data-employee-runtime></dl></article>
+            <article><h2>Orientation</h2><dl data-employee-orientation></dl></article>
+            <article><h2>Safe diagnostics</h2><dl data-employee-diagnostics></dl></article>
+        </div>
+        <div class="orientation-actions">
+            <button type="button" class="btn" data-orientation-deliver disabled>Recompose &amp; deliver</button>
+            <button type="button" class="btn" data-orientation-comprehension disabled>Run comprehension</button>
+            <button type="button" class="btn" data-orientation-hold disabled>Set manual hold</button>
+        </div>
+        <p class="receipt" data-orientation-receipt role="status" aria-live="polite"></p>
+        <section class="control-deck" data-portal data-runtime-state="unknown">
+            <p class="error-banner" data-field="error-banner" role="alert" hidden><span class="error-tag">Runtime fault</span><span class="error-text" data-field="error"></span></p>
+            <section class="telemetry"><h2 class="panel-title">Exact employee control</h2><dl class="telemetry-grid"><div class="telemetry-row"><dt>Employee</dt><dd data-selected-employee-name>—</dd></div><div class="telemetry-row"><dt>Runtime state</dt><dd><span class="state-pill" data-field="state-detail" data-state="unknown">Synchronizing</span></dd></div><div class="telemetry-row"><dt>Native session</dt><dd><code data-field="sessionId">—</code></dd></div><div class="telemetry-row telemetry-row--model"><dt><label for="model-select">Host session model</label></dt><dd><select id="model-select" data-model-select disabled><option value="">Synchronizing…</option></select><p data-model-receipt role="status" aria-live="polite" hidden></p><p data-model-host-note hidden>Model selection controls only the control host session and is unavailable for a remote employee.</p><p data-model-sync-note hidden>OpenCode's TUI picker is client-local; web selection remains unavailable until synchronization is supported.</p></dd></div><div class="telemetry-row"><dt>Last sync</dt><dd><time data-field="syncedAt">—</time></dd></div></dl><div class="controls" role="group" aria-label="Terminal controls"><button type="button" class="btn btn-primary" data-action="reconnect" disabled>Reconnect terminal</button><button type="button" class="btn" data-action="detach" disabled>Detach</button><button type="button" class="btn" data-action="clear" disabled>Clear view</button><button type="button" class="btn btn-interrupt" data-action="interrupt" disabled>Interrupt turn</button></div><p class="control-note" data-remote-cancel-note hidden>Remote turn cancellation is unavailable from this console.</p><p data-field="receipt" role="status" aria-live="polite"></p></section>
+            <section class="terminal-surface" id="terminal-surface" aria-labelledby="terminal-title"><div class="terminal-head"><div class="terminal-heading"><span class="terminal-lamp" data-connection-led aria-hidden="true"></span><h2 id="terminal-title" class="terminal-title">Selected employee native terminal</h2><span class="terminal-link-state" data-field="connection" aria-live="polite">Idle</span></div></div><div class="terminal-stage" data-field="terminal-stage"><div id="terminal" class="terminal-mount" data-terminal tabindex="0" role="application" aria-label="Interactive selected employee terminal session"></div><div class="terminal-overlay" data-field="terminal-overlay" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span data-field="overlay-text">Loading employee</span></div></div></section>
+        </section>
+    </div>
+</section>
+<script type="module" src="/js/employee-detail.js"></script>
+<script type="module" src="/js/terminal.js"></script>
+
+@code { [Parameter] public string? Id { get; set; } }

@@ -1,0 +1,23 @@
+@page "/organization/departments/{Id}"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Department · AgentControl V2</PageTitle>
+<section class="page department-detail" data-page="department-detail" data-department-detail data-department-id="@Id">
+    <header class="page-heading page-heading--actions">
+        <div><p class="eyebrow"><a href="/organization/departments">Departments</a></p><h1 data-department-name>Department</h1><p class="department-subtitle" data-department-subtitle>Loading exact department…</p></div>
+        <a class="btn btn-primary" data-department-hire href="/hiring" hidden>Request employee for this department</a>
+    </header>
+    <p class="page-status" data-page-status role="status">Loading exact department…</p>
+    <div data-department-content hidden>
+        <div class="detail-grid">
+            <article><h2>Identity and instructions</h2><dl data-department-identity></dl></article>
+            <article><h2>Availability</h2><dl data-department-availability></dl></article>
+        </div>
+        <article class="department-roles"><h2>Roles assigned</h2><div class="role-summary-list" data-department-roles></div></article>
+        <article class="department-roster"><h2>Employee roster</h2><p class="empty-state" data-department-empty hidden>No employees are assigned to this department yet. Requesting one creates a durable request, not an employee.</p><ul class="directory-list" data-department-roster></ul></article>
+        <article class="attention" data-department-failures hidden><h2>Failures needing attention</h2><ul data-department-failure-list></ul></article>
+    </div>
+</section>
+<script type="module" src="/js/department-detail.js"></script>
+
+@code { [Parameter] public string? Id { get; set; } }

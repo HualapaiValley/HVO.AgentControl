@@ -20,6 +20,7 @@ namespace HVO.AgentControl.Tests;
 /// call and never prints the key. The assertions then inspect the captured
 /// request mapping instead of relying on a live timeout.
 /// </remarks>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class CliProxyRequestCaptureTests
 {
     private const string DisposableKey = "disposable-capture-key-0000";

@@ -85,4 +85,32 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
         using var response = await _client.SendAsync(request);
         Assert.Equal(expected, response.StatusCode);
     }
+
+    [Fact]
+    public void LivePortalSmokeTargetsCurrentEmployeeDetailSelectors()
+    {
+        var root = FindRepositoryRoot();
+        var script = File.ReadAllText(Path.Combine(root, "tests", "Browser", "portal-smoke.mjs"));
+
+        Assert.Contains("/api/organization/portal", script, StringComparison.Ordinal);
+        Assert.Contains("/employees/${encodeURIComponent(hostEmployee.id)}", script, StringComparison.Ordinal);
+        Assert.Contains("[data-field=\"state-detail\"]", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("fieldText(page, 'state')", script, StringComparison.Ordinal);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "HVO.AgentControl.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate the repository root.");
+    }
 }

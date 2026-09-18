@@ -18,9 +18,8 @@
 //   5. POST /api/control/model and /api/control/cancel: cross-origin -> 403,
 //      same-origin -> 409 (runtime not ready); no owner password is configured
 //      so no 401 challenge is expected
-//   6. layout fills the viewport with the footer pinned to the bottom at
-//      desktop (1440x900) and mobile (390x844), with and without the error
-//      banner
+//   6. the routed shell fills the viewport with its footer at the bottom on
+//      desktop (1440x900) and mobile (390x844), without horizontal overflow
 //
 // Usage: npm run ci --prefix tests/Browser
 //        (or) node tests/Browser/ci-smoke.mjs
@@ -116,64 +115,35 @@ function postJson(base, path, origin, body = '{}') {
 
 const approx = (a, b) => Math.abs(a - b) <= 2;
 
-async function measureLayout(page) {
+async function measureShellLayout(page) {
   return page.evaluate(() => {
     const rect = (selector) => {
       const r = document.querySelector(selector).getBoundingClientRect();
       return { top: r.top, bottom: r.bottom, height: r.height };
     };
     return {
-        viewportHeight: window.innerHeight,
-        viewportWidth: window.innerWidth,
-        documentHeight: document.documentElement.scrollHeight,
-        documentWidth: document.documentElement.scrollWidth,
-        header: rect('.app-bar'),
-        footer: rect('.app-foot'),
-        workspace: rect('.workspace'),
-        terminal: rect('.terminal-surface'),
-        stage: rect('.terminal-stage'),
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+      documentHeight: document.documentElement.scrollHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      header: rect('.shell-header'),
+      content: rect('.page-content'),
+      footer: rect('.shell-footer'),
     };
-
   });
 }
 
-async function runLayoutChecks(page, viewports) {
+async function runShellLayoutChecks(page, viewports) {
   for (const viewport of viewports) {
-    await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    await sleep(400);
-    for (const bannerVisible of [false, true]) {
-      await page.evaluate((visible) => {
-        const banner = document.querySelector('.error-banner');
-        const text = banner.querySelector('.error-text');
-        if (text) text.textContent = visible ? 'CI layout probe.' : '';
-        banner.hidden = !visible;
-        document.querySelector('.workspace').scrollTop = 0;
-      }, bannerVisible);
-      await sleep(150);
-      const m = await measureLayout(page);
-      const terminalWithinViewport = viewport.width <= 720
-        ? m.terminal.height > 0
-        : m.terminal.top >= m.workspace.top && m.terminal.bottom <= m.workspace.bottom + 1;
-      const passed = approx(m.footer.bottom, viewport.height)
-        && approx(m.footer.height, viewport.width <= 720 ? 60 : 40)
-        && approx(m.workspace.bottom, m.footer.top)
-        && terminalWithinViewport
-        && m.stage.height > 0
-        && m.documentHeight <= viewport.height + 1
-        && m.documentWidth <= viewport.width;
-      record(
-        `layout fills viewport with pinned footer ${viewport.width}x${viewport.height} banner=${bannerVisible}`,
-        passed,
-        {
-          footerBottom: Math.round(m.footer.bottom),
-          footerHeight: Math.round(m.footer.height),
-          viewportHeight: m.viewportHeight,
-          documentHeight: m.documentHeight,
-          documentWidth: m.documentWidth,
-          terminalHeight: Math.round(m.terminal.height),
-        },
-      );
-    }
+    await page.setViewportSize(viewport);
+    await sleep(300);
+    const layout = await measureShellLayout(page);
+    const passed = approx(layout.footer.bottom, Math.max(viewport.height, layout.documentHeight))
+      && layout.content.top >= layout.header.bottom - 1
+      && layout.content.bottom <= layout.footer.top + 1
+      && layout.documentHeight >= viewport.height
+      && layout.documentWidth <= viewport.width + 1;
+    record(`routed shell fills viewport with footer at bottom ${viewport.width}x${viewport.height}`, passed, layout);
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   await sleep(200);
@@ -240,41 +210,37 @@ try {
   });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   page = await context.newPage();
+  // The disabled runtime intentionally answers some portal reads with 404/503
+  // so the suite can prove safe in-page failure. The browser mirrors each such
+  // response as a generic "Failed to load resource" console entry; that status
+  // is already asserted explicitly (and transport failures captured below), so
+  // only genuine script console errors count here.
+  const resourceNoise = /^Failed to load resource: the server responded with a status of \d+/;
   page.on('console', (message) => {
-    if (message.type() === 'error') consoleErrors.push(message.text());
+    if (message.type() === 'error' && !resourceNoise.test(message.text())) consoleErrors.push(message.text());
   });
   page.on('pageerror', (error) => pageErrors.push(String(error && error.message ? error.message : error)));
   page.on('requestfailed', (req) => failedRequests.push(`${req.method()} ${req.url()} ${req.failure()?.errorText}`));
   page.on('response', (response) => {
     const path = new URL(response.url()).pathname;
-    if (path === '/js/terminal.js' || path === '/css/portal.css' || path === '/vendor/xterm/xterm.js') {
+    if (path === '/js/terminal.js' || path === '/js/employee-detail.js' || path === '/css/portal.css'
+      || path === '/vendor/xterm/xterm.js' || path === '/vendor/xterm/xterm.css' || path === '/vendor/xterm/addon-fit.js') {
       assetResponses[path] = response.status();
     }
   });
 
-  // ---- 1. Blazor root ----------------------------------------------------
+  // ---- 1. routed Blazor landing -----------------------------------------
   const response = await page.goto(`${base}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   const title = await page.title();
-  await page.waitForSelector('[data-portal]', { timeout: 15000 });
+  await page.waitForSelector('[data-page="landing"]', { timeout: 15000 });
   record('root page returns HTTP 200', (response?.status() ?? 0) === 200, { status: response?.status() ?? 0 });
   record(`root page title is "${PAGE_TITLE}"`, title === PAGE_TITLE, { title });
-  record(
-    'real Blazor root renders [data-portal] and [data-terminal]',
-    await page.evaluate(() => Boolean(document.querySelector('[data-portal]') && document.querySelector('[data-terminal]'))),
-    {},
-  );
+  record('real Blazor root renders the shared shell and concise landing', await page.evaluate(() => Boolean(document.querySelector('[data-portal-shell]') && document.querySelector('[data-page="landing"]'))), {});
 
-  // ---- 2. frontend module runs ------------------------------------------
-  await page.waitForSelector('[data-runtime-state="idle"]', { timeout: 10000 });
-  const stateText = await page.$eval('[data-field="state"]', (el) => el.textContent.trim().toLowerCase());
-  record('frontend module applies /api/control and shows the disabled runtime', stateText === 'disabled', { stateText });
-  record(
-    'required JS/CSS assets load with HTTP 200',
-    assetResponses['/js/terminal.js'] === 200
-      && assetResponses['/css/portal.css'] === 200
-      && assetResponses['/vendor/xterm/xterm.js'] === 200,
-    assetResponses,
-  );
+  // ---- 2. route-specific assets -----------------------------------------
+  const landingHtml = await page.content();
+  record('landing does not load employee terminal DOM', !landingHtml.includes('data-terminal') && !landingHtml.includes('data-employee-detail'));
+  record('required routed CSS loads with HTTP 200', assetResponses['/css/portal.css'] === 200, assetResponses);
 
   // ---- 3. disabled control status ---------------------------------------
   const controlResponse = await fetch(`${base}/api/control`, { headers: { Accept: 'application/json' } });
@@ -308,17 +274,118 @@ try {
   record('POST /api/control/cancel cross-origin is 403', cancelCross === 403, { status: cancelCross });
   record('POST /api/control/cancel same-origin on disabled runtime is 409', cancelSame === 409, { status: cancelSame });
 
-  // ---- 6. responsive layout ---------------------------------------------
-  await runLayoutChecks(page, [
-    { width: 1440, height: 900 },
-    { width: 390, height: 844 },
-  ]);
+  // ---- 6. responsive routed layout --------------------------------------
+  await runShellLayoutChecks(page, [{ width: 1440, height: 900 }, { width: 390, height: 844 }]);
   await page.screenshot({ path: join(OUT_DIR, 'portal-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
   await sleep(200);
   await page.screenshot({ path: join(OUT_DIR, 'portal-mobile.png') });
 
-  // ---- 7. no browser errors ---------------------------------------------
+  // ---- 7. global [hidden] guard -----------------------------------------
+  // A hidden element whose class sets display (like .system-forms) must be
+  // non-rendered even before the owning module toggles visibility.
+  const hiddenGuard = await page.evaluate(() => {
+    const probe = document.createElement('div');
+    probe.className = 'system-forms';
+    probe.hidden = true;
+    probe.textContent = 'guard probe';
+    document.body.append(probe);
+    const display = getComputedStyle(probe).display;
+    const box = probe.getBoundingClientRect();
+    probe.remove();
+    return { display, height: box.height };
+  });
+  record('global [hidden] guard suppresses a display:grid container', hiddenGuard.display === 'none' && hiddenGuard.height === 0, hiddenGuard);
+
+  // ---- 8. route-specific xterm assets -----------------------------------
+  // The landing route must not fetch any xterm asset; the employee detail
+  // route declares them through HeadContent and must.
+  const landingXtermRequests = Object.keys(assetResponses).filter((path) => path.startsWith('/vendor/xterm/'));
+  record('landing route fetches no xterm asset', landingXtermRequests.length === 0, { assetResponses });
+
+  // Stall the employee read so the pre-load, non-interactive state is stable,
+  // then let it fail safely: hidden content must stay hidden and inert.
+  await page.route('**/api/employees/**', async (route) => {
+    await sleep(1200);
+    await route.continue();
+  });
+  const employeeResponse = await page.goto(`${base}/employees/emp-disabled`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-page="employee-detail"]');
+  const employeePreLoad = await page.evaluate(() => {
+    const content = document.querySelector('[data-employee-content]');
+    const terminal = document.querySelector('[data-terminal]');
+    return {
+      hidden: content.hidden,
+      display: getComputedStyle(content).display,
+      terminalHeight: terminal.getBoundingClientRect().height,
+      status: document.querySelector('[data-page-status]').textContent,
+    };
+  });
+  record('employee detail renders the owned page and loads xterm route assets',
+    employeeResponse.status() === 200
+      && assetResponses['/vendor/xterm/xterm.css'] === 200
+      && assetResponses['/vendor/xterm/xterm.js'] === 200
+      && assetResponses['/vendor/xterm/addon-fit.js'] === 200,
+    { status: employeeResponse.status(), assetResponses });
+  record('employee detail mounts the terminal with the terminal-mount class',
+    await page.locator('#terminal.terminal-mount[data-terminal]').count() === 1);
+  record('employee content is hidden and non-rendered while the read is pending',
+    employeePreLoad.hidden && employeePreLoad.display === 'none' && /Loading/.test(employeePreLoad.status),
+    employeePreLoad);
+  await page.unroute('**/api/employees/**');
+
+  // ---- 9. nav aria-current ----------------------------------------------
+  const navCases = [
+    ['/organization', 'Overview'],
+    ['/organization/departments', 'Departments'],
+    ['/employees', 'Employees'],
+    ['/hiring', 'Hiring'],
+    ['/system', 'System'],
+  ];
+  for (const [path, expected] of navCases) {
+    await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' });
+    const nav = await page.evaluate(() => {
+      const current = [...document.querySelectorAll('.primary-nav a[aria-current="page"]')];
+      const active = [...document.querySelectorAll('.primary-nav a.active')];
+      return {
+        currentCount: current.length,
+        activeCount: active.length,
+        currentText: current.map((node) => node.textContent.trim()),
+        activeText: active.map((node) => node.textContent.trim()),
+        matchesActive: current.every((node) => node.classList.contains('active')),
+      };
+    });
+    record(`${path} has exactly one aria-current=page link and it is the active link`,
+      nav.currentCount === 1 && nav.activeCount === 1
+        && nav.currentText[0] === expected && nav.activeText[0] === expected && nav.matchesActive,
+      nav);
+  }
+
+  // ---- 10. friendly 404 --------------------------------------------------
+  const notFound = await page.goto(`${base}/this/route/does/not/exist`, { waitUntil: 'domcontentloaded' });
+  record('unknown portal route returns a friendly HTTP 404 page',
+    notFound.status() === 404 && await page.locator('[data-page="not-found"]').count() === 1,
+    { status: notFound.status() });
+  const unknownApi = await fetch(`${base}/api/this-does-not-exist`, { headers: { Accept: 'application/json' } });
+  record('unknown API route keeps the ProblemDetails 404 contract',
+    unknownApi.status === 404 && (unknownApi.headers.get('content-type') || '').includes('problem+json'),
+    { status: unknownApi.status, contentType: unknownApi.headers.get('content-type') });
+  const notFoundNav = await page.locator('.primary-nav a[aria-current="page"]').count();
+  record('404 page has no falsely active navigation link', notFoundNav === 0, { notFoundNav });
+
+  // ---- 11. distinct DOM and overflow across routes ----------------------
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    for (const path of ['/organization', '/organization/departments', '/employees', '/hiring', '/system', '/employees/emp-disabled']) {
+      await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' });
+      const widths = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: innerWidth }));
+      record(`${path} has no horizontal overflow at ${viewport.width}px`, widths.document <= widths.viewport + 1, widths);
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await sleep(200);
+
+  // ---- 12. no browser errors --------------------------------------------
   record('no page errors and no console errors', pageErrors.length === 0 && consoleErrors.length === 0, {
     pageErrors,
     consoleErrors,

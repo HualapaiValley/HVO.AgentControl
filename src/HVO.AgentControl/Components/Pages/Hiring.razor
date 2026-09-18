@@ -1,0 +1,23 @@
+@page "/hiring"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Hiring · AgentControl V2</PageTitle>
+<section class="page" data-page="hiring" data-hiring-page>
+    <header class="page-heading"><div><p class="eyebrow">Hiring</p><h1>Employee requests</h1><p>Create a durable owner request. This first #219 slice does not create or provision an employee; #217 two-host operational acceptance must complete before approval or provisioning.</p></div></header>
+    <div class="hiring-grid">
+        <form class="panel-form" data-hire-form>
+            <h2>Request employee</h2>
+            <label for="hire-name">Requested display name<input id="hire-name" name="requestedDisplayName" required maxlength="128" /></label>
+            <label for="hire-purpose">Purpose<textarea id="hire-purpose" name="purpose" required maxlength="2048" rows="4"></textarea></label>
+            <label for="hire-department">Department<select id="hire-department" name="departmentId" required></select></label>
+            <label for="hire-role">Role<select id="hire-role" name="roleId" required></select></label>
+            <p class="control-note" data-no-hire-roles role="alert" hidden>This department has no staffable roles. Choose another department before creating a request.</p>
+            <label for="hire-placement">Placement<select id="hire-placement" name="placement" required><option value="InternalSharedContainer">Internal shared container</option><option value="DeveloperContainer">Developer container</option></select></label>
+            <div class="resource-grid"><label for="hire-cpu">CPU cores<input id="hire-cpu" name="cpuLimit" type="number" min="1" max="64" value="2" required /></label><label for="hire-memory">Memory MiB<input id="hire-memory" name="memoryLimitMiB" type="number" min="256" max="131072" value="2048" required /></label><label for="hire-pids">PID limit<input id="hire-pids" name="pidsLimit" type="number" min="16" max="4096" value="256" required /></label></div>
+            <button class="btn btn-primary" type="submit" data-hire-submit disabled>Create hire request</button>
+            <p class="receipt" data-hire-receipt role="status"></p>
+        </form>
+        <section><h2>Durable requests</h2><p class="page-status" data-page-status role="status">Loading requests…</p><div class="request-list" data-hire-requests hidden></div></section>
+    </div>
+</section>
+<script type="module" src="/js/hiring.js"></script>

@@ -87,23 +87,43 @@ OpenCode process is launched.
 
 ### Browser checks
 
-CI runs two hermetic browser suites plus a terminal wire unit check. The browser
-suites spawn the locally built app on a free loopback port; all three need no
-Docker, credentials, or model provider and perform no inference.
+CI runs four hermetic browser suites plus two terminal unit checks. The
+app-backed suites spawn the locally built app on a free loopback port; the
+loopback-stub suites serve the real route modules with no app process. All need
+no Docker, credentials, or model provider and perform no inference.
 
 - `ci-smoke.mjs` (`npm run ci`) covers the disabled-runtime portal shell, status,
   terminal/model/cancel gates and responsive layout.
 - `terminal-wire.mjs` (`npm run terminal-wire`) covers local text/base64 decoding
   and decoder isolation across terminal attachments.
+- `state-kind.mjs` (`npm run state-kind`) independently enumerates the reachable
+  server state vocabulary, grouped by its owning C# source (control wire,
+  session, employee availability, remote connection, process and session
+  operation), and asserts each value's presentation kind plus the
+  availability-over-control precedence for held/faulted remote states.
+- `system-drafts.mjs` (`npm run ci-system-drafts`) serves the real `system.js`
+  behind a loopback stub and covers role-select retention, per-role
+  draft/conflict/dirty cues, a failed save followed by a successful `ok` save,
+  and recovery from a failed authority reload.
+- `route-receipts.mjs` (`npm run ci-route-receipts`) serves the real
+  `employee-detail.js` and `hiring.js` behind loopback stubs and covers neutral
+  load success, visible load-failure page status, and pending/error/ok
+  orientation and hire receipts.
 - `ci-organization.mjs` (`npm run ci-organization`) runs with
   `Control__Enabled=true`, a disposable owner password and the checked-in fake
   ACP fixture (`tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`). It asserts
-  the enabled runtime reaches ready; all five navigation items render; Overview
-  reports exact department/availability counts and unsupported pending approvals;
-  Operations selects the one persisted Operations/IT employee by stable ID;
-  Development/QA show empty states; safe detail and orientation actions render;
-  and desktop/mobile layouts expose no owner password, tmux owner token or
-  horizontal overflow. It is intentionally separate from the disabled smoke.
+  the enabled runtime reaches ready; every routed page (including the grouped
+  organization directory and department detail) ships only its own DOM and one
+  active link; the overview and directory render exactly the authoritative
+  departments and link them by stable ID; Operations detail shows its single
+  authoritative role, one-employee roster with an availability badge and stable
+  employee link, scoped availability counts and a department-scoped hiring CTA;
+  Development/QA render real empty states with their own CTA; hiring preselects
+  only an authoritative `departmentId` and filters roles to it, ignoring a forged
+  value; invalid/unknown department ids fail safely in-page; a legacy slug hash
+  resolves to the stable department id; and desktop/mobile layouts expose no owner
+  password, tmux owner token or horizontal overflow. It is intentionally separate
+  from the disabled smoke.
 
 ```bash
 npm ci --prefix tests/Browser
@@ -299,10 +319,12 @@ or styles:
 - `Foo.razor.css` — CSS isolation for styles scoped to that component.
 
 A markup-only static component may omit the code-behind when it truly has no
-server logic. In the current `0.1.0` baseline, `Home.razor` is static SSR whose
-behavior lives in the external `/js/terminal.js` module, so only
-`Home.razor.css` exists as a sibling. New interactive components must follow the
-three-file triad.
+server logic. In the routed owner portal, page markup is static SSR and behavior
+lives in external modules under `wwwroot/js`, so the baseline ships no
+`.razor.css` bundle: shared styles belong in `wwwroot/css/portal.css` and
+route-specific third-party assets are declared per page via `HeadContent`. New
+interactive components that carry server logic or component-scoped styles must
+follow the three-file triad.
 
 Additional Blazor rules:
 

@@ -1,12 +1,9 @@
 @* Static SSR routing. No interactive render mode is requested, so the page is
-   rendered on the server and hydrated by the external terminal module only. *@
+   rendered on the server and hydrated by the external terminal module only.
+   Unknown paths resolve to the NotFoundPage catch-all, which sets HTTP 404. *@
 <Router AppAssembly="typeof(App).Assembly">
     <Found Context="routeData">
         <RouteView RouteData="routeData" />
         <FocusOnNavigate RouteData="routeData" Selector="h1" />
     </Found>
-    <NotFound>
-        <PageTitle>Not found</PageTitle>
-        <p class="route-fallback" role="alert">No AgentControl page matches this address.</p>
-    </NotFound>
 </Router>

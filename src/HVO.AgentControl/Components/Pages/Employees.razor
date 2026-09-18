@@ -1,0 +1,15 @@
+@page "/employees"
+@namespace HVO.AgentControl.Components.Pages
+
+<PageTitle>Employees · AgentControl V2</PageTitle>
+<section class="page" data-page="employees" data-employees-page>
+    <header class="page-heading page-heading--actions"><div><p class="eyebrow">Employees</p><h1>Employee directory</h1><p>Search every persisted employee independently of department tabs. A request is not an employee until approval, provisioning, and orientation complete.</p></div><a class="btn btn-primary" href="/hiring">Request employee</a></header>
+    <form class="filter-bar" data-directory-filters>
+        <label>Search employees<input type="search" data-employee-search autocomplete="off" placeholder="Name, ID, purpose, or role" /></label>
+        <label>Department<select data-department-filter><option value="">All departments</option></select></label>
+        <label>Availability<select data-availability-filter><option value="">All availability</option></select></label>
+    </form>
+    <p class="page-status" data-page-status role="status">Loading employees…</p>
+    <ul class="directory-list" data-employee-directory hidden></ul>
+</section>
+<script type="module" src="/js/employees.js"></script>

@@ -1,27 +1,4 @@
-// AgentControl V2 hermetic enabled-runtime organization browser check.
-//
-// Spawns the locally built .NET app (src/HVO.AgentControl/bin/Release/net10.0)
-// on a free loopback port with Control:Enabled=true, a disposable owner
-// password file and the checked-in fake ACP fixture as the OpenCode executable.
-// The fake ACP is deterministic and makes no provider or inference call. The
-// suite then drives the REAL Blazor portal and asserts that the organization
-// panel fetches and renders the authoritative store read model:
-//
-//   1. the enabled runtime becomes ready and the portal shows it
-//   2. /js/organization.js is served and runs
-//   3. the organization panel is visible and renders exactly the seeded
-//      Development/Operations/QA departments, one Operations/IT employee and
-//      one adoption-audit row
-//   4. no controller secret (owner password, tmux owner token) is present in
-//      the rendered panel or the /api/organization JSON
-//   5. the panel stays visible with no horizontal overflow at desktop (1440x900)
-//      and mobile (390x844)
-//
-// This is separate from ci-smoke.mjs (the disabled runtime smoke) so the
-// disabled baseline keeps running unchanged. No Docker, model provider, or
-// inference credentials are used.
-//
-// Usage: npm run ci-organization --prefix tests/Browser
+// Hermetic enabled-runtime routed owner portal check. No provider or remote host.
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -34,422 +11,459 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = process.env.REPO_ROOT || fileURLToPath(new URL('../../', import.meta.url));
 const PROJECT_DIR = join(ROOT, 'src', 'HVO.AgentControl');
-const OUT_DIR = process.env.ARTIFACTS_DIR || join(ROOT, 'artifacts', 'browser-organization');
 const DLL = process.env.APP_DLL || join(PROJECT_DIR, 'bin', 'Release', 'net10.0', 'HVO.AgentControl.dll');
-const FAKE_ACP_SOURCE = join(ROOT, 'tests', 'HVO.AgentControl.Tests', 'Fixtures', 'fake_acp.py');
-const STARTUP_TIMEOUT_MS = Number(process.env.STARTUP_TIMEOUT_MS || 90000);
-const PAGE_TITLE = 'AgentControl V2';
-const OWNER_PASSWORD = 'organization-browser-owner-password-0000';
-
+const FAKE_ACP = join(ROOT, 'tests', 'HVO.AgentControl.Tests', 'Fixtures', 'fake_acp.py');
+const OUT = process.env.ARTIFACTS_DIR || join(ROOT, 'artifacts', 'browser-organization');
+const PASSWORD = 'organization-browser-owner-password-0000';
 const results = [];
-const record = (name, passed, detail = {}) => {
-  results.push({ name, passed: !!passed, detail });
-  console.log(`${passed ? 'PASS' : 'FAIL'}  ${name}${Object.keys(detail).length ? '  :: ' + JSON.stringify(detail) : ''}`);
-};
+const record = (name, passed, detail = {}) => { results.push({ name, passed: !!passed, detail }); console.log(`${passed ? 'PASS' : 'FAIL'}  ${name}${Object.keys(detail).length ? ' :: ' + JSON.stringify(detail) : ''}`); };
+const freePort = () => new Promise((resolve, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
+async function waitFor(base, timeout = 90000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { if ((await fetch(`${base}/health/live`)).ok) return true; } catch {} await sleep(200); } return false; }
+const departmentIdFromHref = (href, base) => new URL(href, base).searchParams.get('departmentId');
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-async function waitForHealth(base, deadline) {
-  for (;;) {
-    try {
-      const response = await fetch(`${base}/health/live`);
-      if (response.ok) return true;
-    } catch {
-      /* not listening yet */
-    }
-    if (Date.now() >= deadline) return false;
-    await sleep(200);
-  }
-}
-
-// Materialize the checked-in fake ACP fixture as an executable plus the
-// non-executable scenario sidecar it reads. The fixture is copied, never run
-// from the source tree, so the workspace stays clean.
-function createFakeAcp(root) {
-  if (!existsSync(FAKE_ACP_SOURCE)) {
-    throw new Error(`fake ACP fixture not found at ${FAKE_ACP_SOURCE}`);
-  }
-  const executable = join(root, 'fake_acp.py');
-  copyFileSync(FAKE_ACP_SOURCE, executable);
-  chmodSync(executable, 0o755);
-  writeFileSync(join(root, 'scenario'), 'prompt_fast');
-  return executable;
-}
-
-function readRows(page, selector) {
-  return page.$$eval(`${selector} dt, ${selector} dd`, (nodes) => {
-    const pairs = [];
-    for (let i = 0; i < nodes.length; i += 2) {
-      pairs.push([nodes[i].textContent.trim(), nodes[i + 1]?.textContent.trim() ?? null]);
-    }
-    return pairs;
-  });
-}
-
-async function measurePanel(page, viewport) {
-  await page.setViewportSize(viewport);
-  await sleep(300);
-  return page.evaluate(() => {
-    const panel = document.querySelector('[data-org-overview]');
-    const rect = panel.getBoundingClientRect();
-    return {
-      hidden: panel.hidden,
-      top: rect.top,
-      bottom: rect.bottom,
-      width: rect.width,
-      viewportWidth: window.innerWidth,
-      documentWidth: document.documentElement.scrollWidth,
-    };
-  });
-}
-
-mkdirSync(OUT_DIR, { recursive: true });
-const startedAt = new Date().toISOString();
-const consoleErrors = [];
-const pageErrors = [];
-let child = null;
-let browser = null;
-let page = null;
-let port = null;
-let fatal = null;
-let runtimeRoot = null;
-
+mkdirSync(OUT, { recursive: true });
+let child; let browser; let fatal;
 try {
-  if (!existsSync(DLL)) {
-    throw new Error(
-      `Built app not found at ${DLL}. Build first: dotnet build HVO.AgentControl.slnx --no-restore -c Release`,
-    );
-  }
+  if (!existsSync(DLL)) throw new Error(`Build first: ${DLL}`);
+  const port = await freePort(); const base = `http://127.0.0.1:${port}`;
+  const runtime = join(tmpdir(), `agentcontrol-routes-${randomBytes(8).toString('hex')}`);
+  mkdirSync(join(runtime, 'data'), { recursive: true }); mkdirSync(join(runtime, 'private'), { recursive: true });
+  const passwordPath = join(runtime, 'owner-password'); writeFileSync(passwordPath, PASSWORD);
+  const fake = join(runtime, 'fake_acp.py'); copyFileSync(FAKE_ACP, fake); chmodSync(fake, 0o755); writeFileSync(join(runtime, 'scenario'), 'prompt_fast');
+  const env = { ...process.env }; for (const key of Object.keys(env)) if (/^Control__/i.test(key)) delete env[key];
+  Object.assign(env, { Control__Enabled: 'true', Control__DataDirectory: join(runtime, 'data'), Control__PrivateDataDirectory: join(runtime, 'private'), Control__OpenCodeExecutable: fake, Control__OwnerPasswordFile: passwordPath, Control__EnableTerminal: 'false', Control__NativePort: String(port + 1), ASPNETCORE_URLS: base, ASPNETCORE_ENVIRONMENT: 'Development' });
+  const log = createWriteStream(join(OUT, 'app.log')); child = spawn('dotnet', [DLL], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] }); child.stdout.pipe(log); child.stderr.pipe(log);
+  const healthy = await waitFor(base); record('enabled app starts hermetically', healthy, { base }); if (!healthy) throw new Error('app did not start');
+  browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, httpCredentials: { username: 'owner', password: PASSWORD } });
+  const page = await context.newPage(); const pageErrors = []; page.on('pageerror', (error) => pageErrors.push(error.message));
 
-  port = await freePort();
-  const base = `http://127.0.0.1:${port}`;
-  runtimeRoot = join(tmpdir(), `agentcontrol-org-browser-${randomBytes(8).toString('hex')}`);
-  mkdirSync(join(runtimeRoot, 'data'), { recursive: true });
-  mkdirSync(join(runtimeRoot, 'private'), { recursive: true });
-  const passwordPath = join(runtimeRoot, 'owner-password');
-  writeFileSync(passwordPath, OWNER_PASSWORD);
-  const fakeAcp = createFakeAcp(runtimeRoot);
-
-  // Hermetic child environment: drop every inherited Control__* value (including
-  // a real Control__OwnerPasswordFile or DatabasePath override), then opt into
-  // the enabled runtime with the disposable fixture and fixed store layout.
-  const childEnv = { ...process.env };
-  for (const key of Object.keys(childEnv)) {
-    if (/^Control__/i.test(key)) delete childEnv[key];
-  }
-  childEnv.Control__Enabled = 'true';
-  childEnv.Control__DataDirectory = join(runtimeRoot, 'data');
-  childEnv.Control__PrivateDataDirectory = join(runtimeRoot, 'private');
-  childEnv.Control__OpenCodeExecutable = fakeAcp;
-  childEnv.Control__OwnerPasswordFile = passwordPath;
-  childEnv.Control__EnableTerminal = 'false';
-  childEnv.Control__NativePort = String(port + 1);
-  childEnv.Control__StartupTimeoutSeconds = '20';
-  childEnv.Control__PromptTimeoutSeconds = '20';
-  childEnv.ASPNETCORE_ENVIRONMENT = process.env.ASPNETCORE_ENVIRONMENT || 'Development';
-  childEnv.DOTNET_ENVIRONMENT = childEnv.ASPNETCORE_ENVIRONMENT;
-  childEnv.ASPNETCORE_URLS = base;
-
-  const logPath = join(OUT_DIR, 'app.log');
-  const logStream = createWriteStream(logPath);
-  child = spawn('dotnet', [DLL], { cwd: PROJECT_DIR, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
-  child.stdout.pipe(logStream);
-  child.stderr.pipe(logStream);
-  let childExit = null;
-  child.on('exit', (code, signal) => {
-    childExit = { code, signal };
-  });
-
-  const ready = await waitForHealth(base, Date.now() + STARTUP_TIMEOUT_MS);
-  if (childExit) {
-    throw new Error(`app exited during startup (code=${childExit.code} signal=${childExit.signal}); see ${logPath}`);
-  }
-  record(`enabled app responds on /health/live within ${STARTUP_TIMEOUT_MS}ms`, ready, { base, log: logPath });
-  if (!ready) throw new Error(`app did not become healthy within ${STARTUP_TIMEOUT_MS}ms; see ${logPath}`);
-
-  browser = await chromium.launch({
-    ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
-    headless: true,
-    args: ['--no-sandbox'],
-  });
-  const context = await browser.newContext({
-    viewport: { width: 1440, height: 900 },
-    httpCredentials: { username: 'owner', password: OWNER_PASSWORD },
-  });
-  page = await context.newPage();
-  page.on('console', (message) => {
-    if (message.type() === 'error') consoleErrors.push(message.text());
-  });
-  page.on('pageerror', (error) => pageErrors.push(String(error && error.message ? error.message : error)));
-
-  const assetResponses = {};
-  page.on('response', (response) => {
-    const path = new URL(response.url()).pathname;
-    if (path === '/js/organization.js' || path === '/css/portal.css') {
-      assetResponses[path] = response.status();
-    }
-  });
-
-  const response = await page.goto(`${base}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  const title = await page.title();
-  await page.waitForSelector('[data-portal]', { timeout: 15000 });
-  record('authenticated root page returns HTTP 200', (response?.status() ?? 0) === 200, { status: response?.status() ?? 0 });
-  record(`root page title is "${PAGE_TITLE}"`, title === PAGE_TITLE, { title });
-
-  // The enabled runtime reaches ready once the fake ACP handshake completes.
-  await page.waitForSelector('[data-runtime-state="ready"]', { timeout: STARTUP_TIMEOUT_MS });
-  record('enabled runtime reaches ready in the portal', true, {});
-
-  record(
-    '/js/organization.js is served with HTTP 200',
-    assetResponses['/js/organization.js'] === 200,
-    assetResponses,
-  );
-
-  // The store opens before ready, so the panel should load immediately; give it
-  // a bounded window in case the first fetch races the state transition.
-  await page.waitForSelector('[data-organization-loaded]', { timeout: 30000 });
-  const panelVisible = await page.evaluate(() => {
-    const panel = document.querySelector('[data-org-overview]');
-    return !panel.hidden && panel.getBoundingClientRect().height > 0;
-  });
-  record('organization panel is visible after the store-backed fetch', panelVisible, {});
-
-  // Exact departments: Development (0), Operations (1), QA (0).
-  const departments = await readRows(page, '[data-org-departments]');
-  const expectedDepartments = [
-    ['Development', '0 employees'],
-    ['Operations', '1 employee'],
-    ['QA', '0 employees'],
+  const routeCases = [
+    ['/organization', 'organization', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-department-detail', 'data-organization-departments-page']],
+    ['/organization/departments', 'organization-departments', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-department-detail', 'data-employee-directory']],
+    ['/employees', 'employees', ['data-hire-form', 'data-terminal', 'data-system-forms', 'data-department-detail', 'data-organization-page']],
+    ['/hiring', 'hiring', ['data-terminal', 'data-system-forms', 'data-employee-directory', 'data-department-detail']],
+    ['/system', 'system', ['data-hire-form', 'data-terminal', 'data-employee-directory', 'data-department-detail']],
   ];
-  record(
-    'organization panel renders exactly the seeded departments and counts',
-    JSON.stringify(departments) === JSON.stringify(expectedDepartments),
-    { departments, expectedDepartments },
-  );
+  for (const [path, marker, absent] of routeCases) {
+    const response = await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' });
+    const html = await page.content();
+    record(`${path} returns its routed SSR page`, response.status() === 200 && html.includes(`data-page=\"${marker}\"`), { status: response.status() });
+    record(`${path} has persistent active navigation`, await page.locator('.primary-nav a.active').count() === 1);
+    const aria = await page.evaluate(() => {
+      const current = [...document.querySelectorAll('.primary-nav a[aria-current="page"]')];
+      return { count: current.length, text: current.map((node) => node.textContent.trim()), matchesActive: current.every((node) => node.classList.contains('active')) };
+    });
+    record(`${path} sets aria-current=page on its single active link`,
+      aria.count === 1 && aria.matchesActive, aria);
+    record(`${path} omits other page DOM`, absent.every((value) => !html.includes(value)), { absent });
+  }
 
-  const navItems = await page.$$eval('[data-nav]', (nodes) => nodes.map((node) => node.textContent.trim()));
-  record(
-    'portal renders all five organization navigation items',
-    JSON.stringify(navItems) === JSON.stringify(['Overview', 'Operations', 'Development', 'QA', 'System configuration']),
-    { navItems },
-  );
-  const availability = await readRows(page, '[data-org-availability]');
-  const expectedAvailability = [
-    ['ready', '0'], ['provisioning', '0'], ['held', '1'], ['reconciliation required', '0'],
-    ['interrupted', '0'], ['reload required', '0'], ['orientation failed', '0'],
-    ['orientation stale', '0'], ['runtime unavailable', '0'],
-  ];
-  record('portal renders authoritative availability counts for every supported category',
-    JSON.stringify(availability) === JSON.stringify(expectedAvailability), { availability, expectedAvailability });
-  const pending = await page.textContent('[data-pending-approvals]');
-  record('pending approvals are explicitly unsupported with count zero', pending.startsWith('Unsupported (0):'), { pending });
+  await page.goto(`${base}/organization`); await page.waitForSelector('[data-org-department-cards]:not([hidden])');
+  record('organization renders dashboard cards and failures', await page.locator('.summary-card').count() === 3 && await page.locator('[data-organization-failures]').isVisible());
 
-  await page.click('[data-nav="operations"]');
-  const employees = await page.$$eval('[data-department-employees="operations"] .employee-card', (nodes) => nodes.map((node) => node.textContent.trim()));
-  record('Operations renders exactly the actual seeded employee', employees.length === 1 && employees[0].startsWith('Operations / IT'), { employees });
-  await page.click('[data-department-employees="operations"] .employee-card');
-  await page.waitForSelector('[data-view="employee"]:not([hidden])');
-  const selectedId = await page.getAttribute('[data-portal]', 'data-selected-employee-id');
-  const detailText = await page.textContent('[data-view="employee"]');
-  record('employee selection opens exact safe detail by stable id', /^emp-/.test(selectedId || '') && detailText.includes(selectedId), { selectedId });
+  // Organization nav is a grouped parent with Overview/Departments children and
+  // the correct parent active state on both child routes.
+  const groupLinks = await page.locator('[data-nav-group="organization"] .nav-sublinks a').allTextContents();
+  record('organization nav is a grouped parent with Overview and Departments', groupLinks.join('|') === 'Overview|Departments', { groupLinks });
+  record('organization group is active on overview', await page.getAttribute('[data-nav-group="organization"]', 'data-nav-group-active') === 'true');
+  await page.goto(`${base}/organization/departments`); await page.waitForSelector('[data-department-directory]:not([hidden])');
+  record('organization group is active on departments', await page.getAttribute('[data-nav-group="organization"]', 'data-nav-group-active') === 'true');
+  record('departments child link is the single active link', await page.locator('.primary-nav a.active').innerText() === 'Departments');
+  await page.goto(`${base}/employees`); await page.waitForSelector('[data-employee-directory]:not([hidden])');
+  record('organization group is inactive outside organization routes', await page.getAttribute('[data-nav-group="organization"]', 'data-nav-group-active') === 'false');
 
-  await page.click('[data-nav="development"]');
-  record('Development shows an explicit empty state', (await page.textContent('[data-view="development"]')).includes('No employees'), {});
-  await page.click('[data-nav="qa"]');
-  record('QA shows an explicit empty state', (await page.textContent('[data-view="qa"]')).includes('No employees'), {});
-  await page.click('[data-nav="system"]');
-  await page.fill('[data-org-instructions]', 'Browser fixture organization instructions.');
-  await page.click('[data-org-instructions-form] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent === 'Saved organization instructions. Orientation is stale.');
-  const orgInstructionStatus = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()).state);
-  record('System configuration saves organization basic instructions and exposes stale orientation', orgInstructionStatus === 'Stale', { orgInstructionStatus });
+  // Overview: authoritative department cards link by stable id.
+  await page.goto(`${base}/organization`); await page.waitForSelector('[data-org-department-cards]:not([hidden])');
+  const cards = await page.$$eval('[data-org-department-cards] .department-card', (nodes) => nodes.map((node) => ({ id: node.dataset.departmentId, slug: node.dataset.departmentSlug, href: node.getAttribute('href') })));
+  record('overview renders exactly the three authoritative department cards', cards.length === 3 && cards.map((card) => card.slug).join(',') === 'development,operations,qa', { cards });
+  record('overview department cards link by stable department id', cards.every((card) => card.id?.startsWith('dept-') && card.href === `/organization/departments/${card.id}`), { cards });
+  const bySlug = Object.fromEntries(cards.map((card) => [card.slug, card.id]));
+  const operationsId = bySlug.operations; const developmentId = bySlug.development; const qaId = bySlug.qa;
 
-  await page.click('[data-nav="system"]');
-  await page.fill('[data-role-instructions]', 'Browser fixture Operations standing instructions.');
-  await page.click('[data-role-instructions-form] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-config-receipt]')?.textContent === 'Saved role instructions. Orientation is stale.');
-  const roleInstructionEvidence = await page.evaluate(async () => {
-    const organization = await (await fetch('/api/organization')).json();
+  // Department detail route is distinct DOM and resolves the exact department.
+  const detailPath = `/organization/departments/${operationsId}`;
+  const detailResponse = await page.goto(`${base}${detailPath}`, { waitUntil: 'domcontentloaded' });
+  const detailHtml = await page.content();
+  record('department detail returns its routed SSR page', detailResponse.status() === 200 && detailHtml.includes('data-page="department-detail"') && detailHtml.includes(`data-department-id="${operationsId}"`), { status: detailResponse.status() });
+  record('department detail omits other page DOM', ['data-employee-directory', 'data-hire-form', 'data-system-forms'].every((value) => !detailHtml.includes(value)));
+  record('department detail has persistent active navigation', await page.locator('.primary-nav a.active').innerText() === 'Departments');
+  await page.waitForSelector('[data-department-content]:not([hidden])');
+
+  // Directory: exactly the authoritative departments, in authoritative order.
+  await page.goto(`${base}/organization/departments`); await page.waitForSelector('[data-department-directory]:not([hidden])');
+  const directory = await page.$$eval('[data-department-directory] .department-directory-card', (nodes) => nodes.map((node) => ({ id: node.dataset.departmentId, slug: node.dataset.departmentSlug })));
+  record('department directory is exactly the authoritative hierarchy', directory.length === 3 && directory.map((item) => item.slug).join(',') === 'development,operations,qa' && !directory.some((item) => item.slug === 'finance'), { directory });
+  const directoryStyle = await page.locator('[data-department-directory]').evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { listStyleType: style.listStyleType, padding: style.padding, display: style.display, className: node.className };
+  });
+  record('department directory is an unstyled grid list with the directory-list class',
+    directoryStyle.className.includes('directory-list') && directoryStyle.listStyleType === 'none'
+      && directoryStyle.padding === '0px' && directoryStyle.display === 'grid',
+    directoryStyle);
+
+  // Operations detail: authoritative identity, role, roster and CTA.
+  await page.goto(`${base}${detailPath}`); await page.waitForSelector('[data-department-content]:not([hidden])');
+  const operationsName = await page.locator('[data-department-name]').innerText();
+  const identity = await page.locator('[data-department-identity]').innerText();
+  const roleSummaries = await page.locator('[data-department-roles] .role-summary').count();
+  const roleText = await page.locator('[data-department-roles]').innerText();
+  const roster = await page.locator('[data-department-roster] .department-roster-card').count();
+  const rosterLink = await page.locator('[data-department-roster] .department-roster-card a').first().getAttribute('href');
+  const rosterBadge = await page.locator('[data-department-roster] .availability-pill').first().getAttribute('data-availability');
+  const hireHref = await page.getAttribute('[data-department-hire]', 'href');
+  record('operations detail shows authoritative identity and revision', operationsName === 'Operations' && identity.includes(operationsId) && identity.includes('operations') && /revision/i.test(identity), { operationsName, identity });
+  record('operations detail lists its single authoritative role', roleSummaries === 1 && roleText.includes('Operations / IT'), { roleSummaries });
+  record('operations detail roster has one employee with an availability badge and stable link', roster === 1 && rosterLink?.startsWith('/employees/') && Boolean(rosterBadge), { roster, rosterLink, rosterBadge });
+  record('operations detail CTA targets hiring with the exact department id', departmentIdFromHref(hireHref, base) === operationsId, { hireHref });
+  record('operations detail reports availability counts for the department', await page.locator('[data-department-availability] dt').count() >= 1 && (await page.locator('[data-department-availability]').innerText()).trim().length > 0);
+
+  // Development and QA are real empty departments with their own request CTA.
+  for (const [slug, id] of [['development', developmentId], ['qa', qaId]]) {
+    await page.goto(`${base}/organization/departments/${id}`); await page.waitForSelector('[data-department-content]:not([hidden])');
+    const emptyVisible = await page.locator('[data-department-empty]').isVisible();
+    const emptyRoster = await page.locator('[data-department-roster] .department-roster-card').count();
+    const emptyHire = await page.getAttribute('[data-department-hire]', 'href');
+    record(`${slug} empty department renders an empty state and request CTA`, emptyVisible && emptyRoster === 0 && departmentIdFromHref(emptyHire, base) === id, { id, emptyHire });
+  }
+
+  // A legacy mutable-slug hash on the overview resolves to the stable department id.
+  await page.goto(`${base}/organization#qa`);
+  await page.waitForURL(`**/organization/departments/${qaId}`);
+  record('legacy department hash resolves to the stable department id after data load', page.url().endsWith(`/organization/departments/${qaId}`), { url: page.url() });
+
+  // Invalid and unknown ids fail safely in-page with no exception.
+  const invalid = await page.goto(`${base}/organization/departments/dept-`);
+  await page.waitForFunction(() => document.querySelector('[data-page-status]').textContent.includes('Invalid department id'));
+  record('invalid department id fails safely in-page', invalid.status() === 200 && await page.locator('[data-department-content]').isHidden() && (await page.locator('[data-page-status]').innerText()).includes('Invalid department id'));
+  const unknown = await page.goto(`${base}/organization/departments/dept-does-not-exist`);
+  await page.waitForFunction(() => document.querySelector('[data-page-status]').textContent.includes('not found'));
+  record('unknown department id fails safely in-page', unknown.status() === 200 && await page.locator('[data-department-content]').isHidden() && (await page.locator('[data-page-status]').innerText()).includes('not found'));
+
+  // Hiring query preselects only an authoritative department and filters roles.
+  await page.goto(`${base}/hiring?departmentId=${developmentId}`); await page.waitForSelector('[data-hire-requests]:not([hidden])');
+  record('hiring preselects the exact requested department', await page.inputValue('#hire-department') === developmentId, { developmentId });
+  record('hiring explains zero roles and disables submission for Development', await page.locator('#hire-role option').count() === 0 && await page.locator('#hire-role').isDisabled() && await page.locator('[data-hire-submit]').isDisabled() && await page.locator('[data-no-hire-roles]').isVisible());
+  await page.goto(`${base}/hiring?departmentId=${qaId}`); await page.waitForSelector('[data-hire-requests]:not([hidden])');
+  record('hiring explains zero roles and disables submission for QA', await page.inputValue('#hire-department') === qaId && await page.locator('#hire-role option').count() === 0 && await page.locator('[data-hire-submit]').isDisabled() && await page.locator('[data-no-hire-roles]').isVisible());
+  await page.goto(`${base}/hiring?departmentId=${operationsId}`); await page.waitForSelector('[data-hire-requests]:not([hidden])');
+  const selectedDepartment = await page.inputValue('#hire-department');
+  const roleLabels = await page.locator('#hire-role option').allTextContents();
+  record('hiring preselects Operations, lists its roles, and re-enables submission', selectedDepartment === operationsId && roleLabels.join('|') === 'Operations / IT' && !(await page.locator('[data-hire-submit]').isDisabled()) && await page.locator('[data-no-hire-roles]').isHidden(), { selectedDepartment, roleLabels });
+  await page.goto(`${base}/hiring?departmentId=dept-forged`); await page.waitForSelector('[data-hire-requests]:not([hidden])');
+  record('hiring ignores a forged department query and never trusts it', await page.inputValue('#hire-department') === operationsId, { forged: true });
+
+  // Employee directory and exact detail remain routed and safe.
+  await page.goto(`${base}/employees?department=operations`); await page.waitForSelector('[data-employee-directory]:not([hidden])');
+  const links = await page.locator('[data-employee-directory] a').count(); record('directory lists employees with stable detail links', links === 1 && (await page.locator('[data-employee-directory] a').first().getAttribute('href')).startsWith('/employees/'), { links });
+  await page.fill('[data-employee-search]', 'no matching employee'); record('directory search has an accessible empty state', (await page.locator('[data-employee-directory]').innerText()).includes('No employees match'));
+  const directoryUrl = page.url();
+  await page.press('[data-employee-search]', 'Enter');
+  record('pressing Enter in employee filters preserves URL, state, and results', page.url() === directoryUrl && await page.inputValue('[data-employee-search]') === 'no matching employee' && (await page.locator('[data-employee-directory]').innerText()).includes('No employees match'), { directoryUrl, currentUrl: page.url() });
+  await page.fill('[data-employee-search]', ''); const employeeDetailPath = await page.locator('[data-employee-directory] a').first().getAttribute('href');
+  await page.goto(`${base}${employeeDetailPath}`); await page.waitForSelector('[data-employee-content]:not([hidden])');
+  const employeeId = await page.locator('[data-employee-detail]').getAttribute('data-employee-id');
+  record('detail loads exact URL employee and terminal module', await page.locator('[data-selected-employee-name]').first().innerText() !== '—' && await page.locator('[data-terminal]').count() === 1, { employeeId });
+  record('detail selection event targets exact employee', await page.locator('[data-portal]').getAttribute('data-selected-employee-id') === employeeId);
+
+  // Enabled-fixture terminal surface: exact route assets, restored mount class,
+  // CSS geometry that fills the stage, focus affordance, and live regions.
+  const terminalRoles = await page.evaluate(() => {
+    const stage = document.querySelector('.terminal-stage').getBoundingClientRect();
+    const mount = document.querySelector('#terminal.terminal-mount').getBoundingClientRect();
+    const controls = document.querySelector('.controls');
+    const alert = document.querySelector('[data-field="error-banner"]');
     return {
-      instructions: organization.roles.find((role) => role.slug === 'operations-it')?.standingInstructions,
-      orientation: await (await fetch('/api/orientation')).json(),
+      stage: { width: Math.round(stage.width), height: Math.round(stage.height) },
+      mount: { width: Math.round(mount.width), height: Math.round(mount.height), top: Math.round(mount.top - stage.top), left: Math.round(mount.left - stage.left) },
+      controlsRole: controls?.getAttribute('role'),
+      controlsLabel: controls?.getAttribute('aria-label'),
+      alertRole: alert?.getAttribute('role'),
+      modelReceiptLive: document.querySelector('[data-model-receipt]')?.getAttribute('aria-live'),
+      connectionLive: document.querySelector('[data-field="connection"]')?.getAttribute('aria-live'),
+      overlayLive: document.querySelector('[data-field="terminal-overlay"]')?.getAttribute('aria-live'),
     };
   });
-  record(
-    'System configuration saves role standing instructions with revision validation',
-    roleInstructionEvidence.instructions === 'Browser fixture Operations standing instructions.'
-      && roleInstructionEvidence.orientation.state === 'Stale',
-    roleInstructionEvidence,
-  );
-  await page.click('[data-nav="overview"]');
+  record('terminal mount is the restored .terminal-mount element inside .terminal-stage',
+    terminalRoles.mount.width > 0 && terminalRoles.mount.height > 0
+      && Math.abs(terminalRoles.mount.width - terminalRoles.stage.width) <= 1
+      && Math.abs(terminalRoles.mount.height - terminalRoles.stage.height) <= 1
+      && Math.abs(terminalRoles.mount.top) <= 1 && Math.abs(terminalRoles.mount.left) <= 1,
+    terminalRoles);
+  record('terminal controls expose role=group with an accessible label',
+    terminalRoles.controlsRole === 'group' && terminalRoles.controlsLabel === 'Terminal controls', terminalRoles);
+  record('terminal error banner is a role=alert live surface',
+    terminalRoles.alertRole === 'alert', terminalRoles);
+  record('model receipt, connection and overlay status are polite live regions',
+    terminalRoles.modelReceiptLive === 'polite'
+      && terminalRoles.connectionLive === 'polite'
+      && terminalRoles.overlayLive === 'polite', terminalRoles);
 
-  // Rename through the same API the browser uses, then prove orientation stays
-  // readable as Stale until the portal creates and delivers a fresh assignment.
-  const renameEvidence = await page.evaluate(async () => {
-    const organization = await (await fetch('/api/organization')).json();
-    const before = await (await fetch('/api/orientation')).json();
-    const renamed = await fetch('/api/organization', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Origin: location.origin },
-      body: JSON.stringify({ organizationId: organization.id, displayName: 'Browser Renamed Organization', revision: organization.revision }),
+  await page.route('**/api/control', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, error: 'browser injected runtime fault' } });
+  });
+  await page.waitForFunction(() => {
+    const banner = document.querySelector('[data-portal] [data-field="error-banner"]');
+    return banner && !banner.hidden && banner.textContent.includes('browser injected runtime fault');
+  });
+  const faultGeometry = await page.evaluate(() => {
+    const deck = document.querySelector('[data-portal]').getBoundingClientRect();
+    const banner = document.querySelector('[data-portal] [data-field="error-banner"]').getBoundingClientRect();
+    return { deck: { left: deck.left, right: deck.right, width: deck.width }, banner: { top: banner.top, left: banner.left, right: banner.right, width: banner.width }, viewportHeight: innerHeight };
+  });
+  record('control response fault is visible across the terminal deck within the viewport',
+    await page.locator('[data-portal] [data-field="error-banner"]').isVisible()
+      && (await page.locator('[data-portal] [data-field="error-banner"]').innerText()).includes('browser injected runtime fault')
+      && faultGeometry.banner.top >= 0 && faultGeometry.banner.top < faultGeometry.viewportHeight
+      && Math.abs(faultGeometry.banner.left - faultGeometry.deck.left) <= 1
+      && Math.abs(faultGeometry.banner.right - faultGeometry.deck.right) <= 1,
+    faultGeometry);
+  await page.unroute('**/api/control');
+
+  const authoritativeEmployee = await page.evaluate((id) => fetch(`/api/employees/${encodeURIComponent(id)}`, {
+    credentials: 'same-origin', cache: 'no-store',
+  }).then((response) => response.json()), employeeId);
+  let remoteReads = 0;
+  let hostControlPosts = 0;
+  await page.route('**/api/control/**', async (route) => {
+    if (route.request().method() === 'POST') hostControlPosts += 1;
+    await route.continue();
+  });
+  await page.route(`**/api/employees/${employeeId}`, async (route) => {
+    remoteReads += 1;
+    const changed = true;
+    await route.fulfill({
+      contentType: 'application/json',
+      json: {
+        ...authoritativeEmployee,
+        availability: changed ? 'reconciliation-required' : 'ready',
+        runtime: {
+          ...authoritativeEmployee.runtime,
+          hostOwned: false,
+          remoteOwned: true,
+          nativeSessionId: changed ? 'remote-session-refreshed' : 'remote-session-initial',
+          controlStatus: changed ? 'held' : 'authenticated',
+          sessionState: changed ? 'stopped' : 'running',
+          controlModel: null,
+        },
+        terminal: { ...authoritativeEmployee.terminal, available: false, url: null, reason: 'Remote fixture unavailable.' },
+      },
     });
-    const staleResponse = await fetch('/api/orientation');
-    return { renameStatus: renamed.status, before, staleStatus: staleResponse.status, stale: await staleResponse.json() };
   });
-  record(
-    'browser rename changes the organization fragment and exposes readable stale orientation',
-    renameEvidence.renameStatus === 200
-      && renameEvidence.staleStatus === 200
-      && renameEvidence.stale.state === 'Stale'
-      && renameEvidence.stale.ready === false
-      && renameEvidence.stale.assignmentId === renameEvidence.before.assignmentId,
-    renameEvidence,
-  );
-  const loadedRevisionBeforeRefresh = Number(await page.getAttribute('[data-portal]', 'data-organization-loaded'));
-  await page.evaluate(async () => {
+  await page.reload();
+  await page.waitForSelector('[data-employee-content]:not([hidden])');
+  await page.waitForFunction(() => document.querySelector('[data-portal]')?.dataset.portalActive === 'true');
+  // Both route modules are independent. Dispatch the authoritative employee
+  // selection after the page content is ready so this fixture tests terminal
+  // behavior, not ES-module evaluation timing.
+  const remoteEmployee = {
+    ...authoritativeEmployee,
+    availability: 'reconciliation-required',
+    runtime: {
+      ...authoritativeEmployee.runtime,
+      hostOwned: false,
+      remoteOwned: true,
+      nativeSessionId: 'remote-session-refreshed',
+      controlStatus: 'held',
+      sessionState: 'stopped',
+      controlModel: null,
+    },
+    terminal: { ...authoritativeEmployee.terminal, available: false, url: null, reason: 'Remote fixture unavailable.' },
+  };
+  await page.evaluate((employee) => {
     const portal = document.querySelector('[data-portal]');
-    portal.dataset.runtimeState = 'degraded';
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    portal.dataset.runtimeState = 'ready';
+    portal.agentControlSelectedEmployee = employee;
+    portal.dispatchEvent(new CustomEvent('agentcontrol:employee-selected', { detail: employee }));
+  }, remoteEmployee);
+  const firstRemoteSync = await page.locator('[data-field="syncedAt"]').innerText();
+  const readyAvailability = await page.locator('[data-employee-availability]').evaluate((node) => ({ dataset: node.dataset.availability, className: node.className, color: getComputedStyle(node).color }));
+  await page.waitForFunction(() => document.querySelector('[data-field="sessionId"]')?.textContent === 'remote-session-refreshed');
+  const refreshedRemote = {
+    state: await page.locator('[data-field="state-detail"]').innerText(),
+    sessionId: await page.locator('[data-field="sessionId"]').innerText(),
+    syncedAt: await page.locator('[data-field="syncedAt"]').innerText(),
+  };
+  record('remote employee telemetry renders the authoritative employee endpoint',
+    remoteReads >= 1 && refreshedRemote.state.toLowerCase() === 'reconciliation required'
+      && refreshedRemote.sessionId === 'remote-session-refreshed'
+      && firstRemoteSync !== '—',
+    { remoteReads, firstRemoteSync, refreshedRemote });
+  const heldStateDetail = await page.locator('[data-field="state-detail"]').evaluate((node) => ({ tag: node.tagName, className: node.className, dataset: node.dataset.state, color: getComputedStyle(node).color }));
+  record('employee availability carries the availability-pill class and authoritative dataset',
+    readyAvailability.className.includes('availability-pill') && readyAvailability.dataset === 'reconciliation-required',
+    readyAvailability);
+  record('runtime state detail is a held state-pill distinct from the critical availability badge',
+    heldStateDetail.tag === 'SPAN' && heldStateDetail.className.includes('state-pill')
+      && heldStateDetail.dataset === 'held' && heldStateDetail.color !== readyAvailability.color,
+    { heldStateDetail, availabilityColor: readyAvailability.color });
+  const remoteModel = await page.locator('[data-model-select]').evaluate((node) => ({ disabled: node.disabled, text: node.options[0]?.textContent || '', count: node.options.length }));
+  record('remote employee model control shows an explicit Unavailable placeholder and stays disabled',
+    remoteModel.disabled && remoteModel.text === 'Unavailable', remoteModel);
+  await page.evaluate(() => {
+    document.querySelector('[data-action="interrupt"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const select = document.querySelector('[data-model-select]');
+    const option = document.createElement('option');
+    option.value = 'forged/remote-model';
+    option.textContent = option.value;
+    select.appendChild(option);
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   });
-  await page.waitForFunction((revision) => Number(document.querySelector('[data-portal]')?.dataset.organizationLoaded) > revision,
-    loadedRevisionBeforeRefresh);
-  await page.click('[data-nav="overview"]');
-  await page.click('[data-org-failures] a');
-  await page.waitForSelector('[data-view="employee"]:not([hidden])');
-  record('actionable failure link navigates to the exact employee',
-    (await page.getAttribute('[data-portal]', 'data-selected-employee-id')) === selectedId, { selectedId });
+  await sleep(100);
+  record('programmatic remote interrupt and model events never POST host control endpoints',
+    hostControlPosts === 0
+      && (await page.locator('[data-field="receipt"]').innerText()).includes('remote turn cancellation is unavailable')
+      && (await page.locator('[data-model-receipt]').innerText()).includes('remote employee'),
+    { hostControlPosts });
+  await page.unroute(`**/api/employees/${employeeId}`);
+  await page.unroute('**/api/control/**');
 
-  // Exercise the owner controls on the explicitly selected host-owned employee.
-  await page.click('[data-nav="operations"]');
-  await page.click('[data-department-employees="operations"] .employee-card');
-  await page.click('[data-orientation-hold]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent.startsWith('Manual hold set. State:'));
-  await page.waitForFunction(() => document.querySelector('[data-orientation-hold]')?.dataset.held === 'true');
-  record('manual hold button mutates and reloads orientation state', true, {});
-
-  await page.click('[data-orientation-deliver]');
-  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]')?.textContent === 'Delivered. Runtime restart required.');
-  const deliveredAfterRename = await page.evaluate(async () => (await (await fetch('/api/orientation')).json()));
-  record(
-    'deliver button creates a fresh delivered assignment after rename',
-    deliveredAfterRename.state === 'Delivered'
-      && deliveredAfterRename.restartRequired === true
-      && deliveredAfterRename.ready === false
-      && deliveredAfterRename.holdReasons.includes('orientation-reload-required')
-      && deliveredAfterRename.assignmentId !== renameEvidence.before.assignmentId
-      && deliveredAfterRename.orientationVersion !== renameEvidence.before.orientationVersion,
-    { before: renameEvidence.before, after: deliveredAfterRename },
-  );
-
-  // No secret fields in the rendered panel or the JSON payload.
-  const panelText = await page.$eval('[data-org-overview]', (element) => element.textContent || '');
-  const basic = Buffer.from(`owner:${OWNER_PASSWORD}`, 'utf8').toString('base64');
-  const orgResponse = await fetch(`${base}/api/organization`, {
-    headers: { Authorization: `Basic ${basic}`, Accept: 'application/json' },
+  await page.locator('#terminal').focus();
+  const focusRing = await page.evaluate(() => {
+    const mount = document.querySelector('#terminal.terminal-mount');
+    return { focused: document.activeElement === mount, boxShadow: getComputedStyle(mount).boxShadow };
   });
-  const orgJson = await orgResponse.text();
-  const secretAbsent = orgResponse.status === 200
-    && !panelText.includes(OWNER_PASSWORD)
-    && !orgJson.includes(OWNER_PASSWORD)
-    && !/tmuxOwnerToken|ownerToken|"password"|ownerPassword/i.test(orgJson + panelText);
-  record(
-    'no owner password or controller secret is exposed by the panel or /api/organization',
-    secretAbsent,
-    { status: orgResponse.status, containsTokenField: /tmuxOwnerToken|ownerToken/i.test(orgJson) },
-  );
+  record('terminal mount shows a focus affordance when the session is focused',
+    focusRing.focused && /inset/.test(focusRing.boxShadow), focusRing);
 
-  // Desktop and mobile layout: the panel stays visible with no horizontal overflow.
+  // Delayed authoritative read: system forms stay hidden and every control
+  // disabled until the response arrives, then become visible and enabled.
+  await page.route('**/api/organization/portal', async (route) => { await sleep(1200); await route.continue(); });
+  const systemPending = page.goto(`${base}/system`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-system-page]');
+  const systemPre = await page.evaluate(() => {
+    const forms = document.querySelector('[data-system-forms]');
+    const controls = [...document.querySelectorAll('[data-system-control]')];
+    return { hidden: forms.hidden, display: getComputedStyle(forms).display, disabled: controls.length > 0 && controls.every((node) => node.disabled), count: controls.length };
+  });
+  record('system controls are hidden and disabled before the authoritative read resolves',
+    systemPre.hidden && systemPre.display === 'none' && systemPre.disabled, systemPre);
+  await systemPending;
+  await page.waitForSelector('[data-system-forms]:not([hidden])');
+  const systemPost = await page.evaluate(() => {
+    const forms = document.querySelector('[data-system-forms]');
+    const controls = [...document.querySelectorAll('[data-system-control]')];
+    return { hidden: forms.hidden, display: getComputedStyle(forms).display, enabled: controls.length > 0 && controls.every((node) => !node.disabled) };
+  });
+  record('system controls become visible and enabled after the authoritative read resolves',
+    !systemPost.hidden && systemPost.display !== 'none' && systemPost.enabled, systemPost);
+  await page.unroute('**/api/organization/portal');
+  const bad = await page.goto(`${base}/employees/emp-does-not-exist`); await page.waitForFunction(() => document.querySelector('[data-page-status]').textContent.includes('not found'));
+  record('unknown employee detail route fails safely in-page', bad.status() === 200 && (await page.locator('[data-page-status]').innerText()).includes('not found'));
+
+  // Hiring lifecycle remains truthful. Capture the authoritative pre-submit
+  // state so a created request is proven additive rather than assumed to be the
+  // only row, and wait for the exact created id instead of racing the async
+  // list reload that the receipt is written before.
+  await page.goto(`${base}/hiring`); await page.waitForSelector('[data-hire-requests]:not([hidden])');
+  const beforeRequests = await page.evaluate(() => fetch('/api/hire-requests', { credentials: 'same-origin', cache: 'no-store' }).then((response) => response.json()));
+  const beforeIds = beforeRequests.map((request) => request.id);
+  const beforeCardIds = await page.$$eval('.request-card', (nodes) => nodes.map((node) => node.dataset.requestId));
+  record('hiring pre-submit list is authoritative and consistent', Array.isArray(beforeRequests) && beforeCardIds.join('|') === beforeIds.join('|'), { beforeCount: beforeIds.length });
+  await page.fill('#hire-name', 'Browser Developer'); await page.fill('#hire-purpose', 'Validate durable request lifecycle.');
+  const [createResponse] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/hire-requests') && response.request().method() === 'POST'),
+    page.click('[data-hire-form] button[type="submit"]'),
+  ]);
+  let created = null; try { created = await createResponse.json(); } catch { created = null; }
+  const createdId = typeof created?.id === 'string' ? created.id : null;
+  record('hiring POST returns 200 with a new Requested durable request',
+    createResponse.status() === 200 && createdId?.startsWith('hire-') && created.state === 'Requested'
+      && !beforeIds.includes(createdId) && typeof created.requestedDisplayName === 'string',
+    { status: createResponse.status(), createdId, state: created?.state });
+  if (!createdId) {
+    record('hiring list count increments by exactly one', false, { reason: 'no created id' });
+    record('hiring card shows the exact created name and Requested state', false, { reason: 'no created id' });
+    record('hiring receipt truthfully reports the created id and no employee', false, { reason: 'no created id' });
+  } else {
+    await page.waitForFunction((id) => document.querySelectorAll(`.request-card[data-request-id="${id}"]`).length === 1, createdId);
+    const afterCardIds = await page.$$eval('.request-card', (nodes) => nodes.map((node) => node.dataset.requestId));
+    const createdCard = page.locator(`.request-card[data-request-id="${createdId}"]`);
+    const createdText = await createdCard.innerText();
+    const receiptText = await page.locator('[data-hire-receipt]').innerText();
+    record('hiring list count increments by exactly one',
+      afterCardIds.length === beforeIds.length + 1 && afterCardIds.filter((id) => id === createdId).length === 1,
+      { beforeCount: beforeIds.length, afterCount: afterCardIds.length, createdId });
+    record('hiring card shows the exact created name and Requested state',
+      createdText.includes('Browser Developer') && createdText.includes('Requested'),
+      { heading: await createdCard.locator('h3').innerText(), meta: await createdCard.locator('p').first().innerText() });
+    record('hiring receipt truthfully reports the created id and no employee',
+      receiptText.includes(`Created request ${createdId}.`) && receiptText.includes('No employee has been created.'),
+      { receipt: receiptText });
+  }
+  record('approval is disabled with #217 explanation', await page.locator('.request-card button:text("Approve")').first().isDisabled() && (await page.locator('.request-card').first().innerText()).includes('#217 operational acceptance'));
+
+  await page.addInitScript(() => {
+    try { Object.defineProperty(Crypto.prototype, 'randomUUID', { configurable: true, value: undefined }); } catch {}
+  });
+  await page.reload(); await page.waitForSelector('[data-hire-requests]:not([hidden])');
+  await page.fill('#hire-name', 'Fallback UUID Developer'); await page.fill('#hire-purpose', 'Verify secure UUID fallback.');
+  const [fallbackResponse] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/hire-requests') && response.request().method() === 'POST'),
+    page.click('[data-hire-form] button[type="submit"]'),
+  ]);
+  const fallbackRequest = fallbackResponse.request();
+  const fallbackKey = fallbackRequest.headers()['idempotency-key'];
+  record('secure UUID fallback submits when randomUUID is unavailable', fallbackResponse.status() === 200 && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fallbackKey || ''), { status: fallbackResponse.status(), fallbackKey });
+  await page.reload(); await page.waitForSelector(`.request-card[data-request-id="${createdId}"]`); const browserCard = page.locator(`.request-card[data-request-id="${createdId}"]`); record('hire request survives reload', (await browserCard.innerText()).includes('Browser Developer'));
+  await browserCard.locator('button:text("Reject")').click(); await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').textContent.includes('Rejected'));
+  record('requested hire can be revision-bound rejected', (await browserCard.innerText()).includes('Rejected'));
+
+  await page.goto(`${base}/system`); await page.waitForSelector('[data-system-forms]:not([hidden])');
+  const original = await page.inputValue('[data-org-name-input]'); await page.fill('[data-org-name-input]', `${original} draft`);
+  const dirtyStyle = await page.locator('[data-org-name-input]').evaluate((node) => ({ borderColor: getComputedStyle(node).borderColor, boxShadow: getComputedStyle(node).boxShadow }));
+  record('system optimistic draft is visibly retained before submit', await page.inputValue('[data-org-name-input]') === `${original} draft` && await page.getAttribute('[data-org-name-input]', 'data-draft-state') === 'dirty' && await page.locator('[data-org-name-draft-state]').isVisible());
+  const authorityChange = await page.evaluate(async (displayName) => {
+    const current = await (await fetch('/api/organization/portal', { cache: 'no-store' })).json();
+    const response = await fetch('/api/organization', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ organizationId: current.id, revision: current.revision, displayName }),
+    });
+    return response.status;
+  }, `${original} authoritative`);
+  await page.click('[data-org-name-form] button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('[data-org-name-input]')?.dataset.draftState === 'conflict');
+  const conflictStyle = await page.locator('[data-org-name-input]').evaluate((node) => ({ borderColor: getComputedStyle(node).borderColor, boxShadow: getComputedStyle(node).boxShadow }));
+  record('authoritative revision change preserves a distinct accessible conflict draft',
+    authorityChange === 200
+      && await page.inputValue('[data-org-name-input]') === `${original} draft`
+      && await page.getAttribute('[data-org-name-input]', 'aria-invalid') === 'true'
+      && await page.locator('[data-org-name-draft-state]').isVisible()
+      && (await page.locator('[data-org-name-draft-state]').innerText()).startsWith('Conflict:')
+      && conflictStyle.borderColor !== dirtyStyle.borderColor,
+    { authorityChange, dirtyStyle, conflictStyle });
+  await page.click('[data-reset-org-name]'); record('system conflict draft can reset to new authority', await page.inputValue('[data-org-name-input]') === `${original} authoritative` && await page.getAttribute('[data-org-name-input]', 'aria-invalid') === null);
+
+  // Responsive navigation and overflow across the hierarchy routes.
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
-    await page.click('[data-nav="overview"]');
-    await page.waitForSelector('[data-view="overview"]:not([hidden])');
-    await page.click('[data-nav="operations"]');
-    await page.waitForSelector('[data-view="operations"]:not([hidden])');
-    const currentEmployees = await page.$$eval('[data-department-employees="operations"] .employee-card', (nodes) => nodes.length);
-    const metric = await measurePanel(page, viewport);
-    const passed = !metric.hidden
-      && metric.width > 0
-      && metric.documentWidth <= metric.viewportWidth + 1
-      && metric.top >= -1
-      && currentEmployees === 1;
-    record(
-      `organization navigation and employee count stay contained at ${viewport.width}x${viewport.height}`,
-      passed,
-      {
-        hidden: metric.hidden,
-        panelWidth: Math.round(metric.width),
-        viewportWidth: metric.viewportWidth,
-        documentWidth: metric.documentWidth,
-        currentEmployees,
-      },
-    );
-    await page.screenshot({ path: join(OUT_DIR, `organization-${viewport.width}x${viewport.height}.png`) });
+    for (const path of ['/organization', '/organization/departments', detailPath, '/hiring', '/employees', '/system', employeeDetailPath]) {
+      await page.goto(`${base}${path}`);
+      if (path === '/organization') await page.waitForSelector('[data-org-department-cards]:not([hidden])');
+      else if (path === '/organization/departments') await page.waitForSelector('[data-department-directory]:not([hidden])');
+      else if (path === detailPath) await page.waitForSelector('[data-department-content]:not([hidden])');
+      else if (path === '/hiring') await page.waitForSelector('[data-hire-requests]:not([hidden])');
+      else if (path === '/employees') await page.waitForSelector('[data-employee-directory]:not([hidden])');
+      else if (path === '/system') await page.waitForSelector('[data-system-forms]:not([hidden])');
+      else await page.waitForSelector('[data-employee-content]:not([hidden])');
+      const widths = await page.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: innerWidth }));
+      record(`${path} has no horizontal overflow at ${viewport.width}px`, widths.document <= widths.viewport + 1, widths);
+    }
+    await page.goto(`${base}/organization`); await page.waitForSelector('[data-org-department-cards]:not([hidden])');
+    const navToggleVisible = await page.locator('[data-nav-toggle]').isVisible();
+    if (viewport.width < 800) {
+      record('mobile nav toggle is reachable and reveals grouped organization links', navToggleVisible && await page.locator('[data-primary-nav]').isHidden() === true);
+      await page.click('[data-nav-toggle]'); await page.waitForSelector('[data-primary-nav][data-open="true"]');
+      record('mobile grouped nav exposes Overview and Departments', await page.locator('[data-primary-nav] a').count() >= 5 && await page.locator('[data-primary-nav] a:text("Overview")').count() === 1 && await page.locator('[data-primary-nav] a:text("Departments")').count() === 1);
+    } else {
+      record('desktop nav is persistent without the toggle', !navToggleVisible && await page.locator('[data-primary-nav]').isVisible() && await page.locator('.primary-nav a.active').count() === 1);
+    }
   }
-  await page.setViewportSize({ width: 1440, height: 900 });
-
-  record('no page errors while rendering the organization panel', pageErrors.length === 0, {
-    pageErrors,
-    consoleErrors,
-  });
-} catch (error) {
-  fatal = String(error && error.stack ? error.stack : error);
-  record('organization browser suite completed without fatal error', false, { fatal });
-} finally {
-  try { if (page && !page.isClosed()) await page.close(); } catch { /* ignore */ }
-  try { if (browser) await browser.close(); } catch { /* ignore */ }
-  try {
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
-      const deadline = Date.now() + 10000;
-      while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
-        await sleep(100);
-      }
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    }
-  } catch { /* ignore */ }
-  try {
-    if (runtimeRoot) {
-      const { rmSync } = await import('node:fs');
-      rmSync(runtimeRoot, { recursive: true, force: true });
-    }
-  } catch { /* ignore */ }
-}
-
-const passed = results.filter((result) => result.passed).length;
-const failed = results.filter((result) => result.passed === false).length;
-const payload = {
-  generatedBy: 'tests/Browser/ci-organization.mjs',
-  startedAt,
-  finishedAt: new Date().toISOString(),
-  environment: {
-    root: ROOT,
-    projectDir: PROJECT_DIR,
-    dll: DLL,
-    baseUrl: port ? `http://127.0.0.1:${port}` : null,
-    chromium: process.env.CHROME_PATH || 'playwright-bundled',
-    node: process.version,
-    fakeAcp: FAKE_ACP_SOURCE,
-  },
-  consoleErrors,
-  pageErrors,
-  totals: { passed, failed, total: results.length },
-  fatal,
-  results,
-};
-writeFileSync(join(OUT_DIR, 'ci-organization-results.json'), JSON.stringify(payload, null, 2));
-console.log('---');
-console.log(`RESULT: ${passed}/${results.length} passed, ${failed} failed`);
-console.log(`ARTIFACTS: ${OUT_DIR}`);
-if (fatal) console.log(`FATAL: ${fatal}`);
-process.exit(failed || fatal ? 1 : 0);
+  record('routed suite has no page errors', pageErrors.length === 0, { pageErrors });
+} catch (error) { fatal = error; record('organization browser suite completed without fatal error', false, { fatal: error.stack || String(error) }); }
+finally { if (browser) await browser.close(); if (child && child.exitCode === null) { child.kill('SIGTERM'); await Promise.race([new Promise((resolve) => child.once('exit', resolve)), sleep(5000)]); if (child.exitCode === null) child.kill('SIGKILL'); } }
+const failed = results.filter((item) => !item.passed); console.log(`---\nRESULT: ${results.length - failed.length}/${results.length} passed, ${failed.length} failed`); if (fatal) console.error(fatal.stack || fatal); if (failed.length) process.exitCode = 1;

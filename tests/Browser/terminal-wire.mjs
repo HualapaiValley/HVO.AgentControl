@@ -3,6 +3,9 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../../src/HVO.AgentControl/wwwroot/js/terminal.js", import.meta.url), "utf8")
+  .replace("export function stateKind", "function stateKind")
+  .replace("export function remoteStatePresentation", "function remoteStatePresentation")
+  .replace("export function remoteStateKind", "function remoteStateKind")
   .replace(/function boot\(\)[\s\S]*$/, "globalThis.TerminalPortal = TerminalPortal;");
 class FakeWebSocket {
   static CONNECTING = 0;

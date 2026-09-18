@@ -8,14 +8,18 @@ dependency or an explicit `CHROME_PATH`; no machine paths are hardcoded.
 
 CI runs two hermetic browser suites against the locally built app
 (`src/HVO.AgentControl/bin/Release/net10.0/HVO.AgentControl.dll`) on a free
-loopback port, plus the local `terminal-wire.mjs` unit check. None needs Docker,
-a model provider, or credentials, and none performs an inference call.
+loopback port, plus two local terminal unit checks (`terminal-wire.mjs` and
+`state-kind.mjs`). None needs Docker, a model provider, or credentials, and none
+performs an inference call.
 
 | Script | Runtime | What it proves |
 | --- | --- | --- |
 | `ci-smoke.mjs` | `Control__Enabled=false`, no owner password | Portal shell, disabled-runtime status, terminal/model/cancel gates, responsive layout |
 | `terminal-wire.mjs` | No app process | Local text/base64 output and UTF-8 decoder isolation across detach/reattach |
-| `ci-organization.mjs` | `Control__Enabled=true`, disposable owner password, checked-in fake ACP fixture | Five-view organization navigation, exact department/availability counts, unsupported approvals, actual Operations employee selection/detail, Development/QA empty states, orientation mutation receipts, no secret field, desktop/mobile layout |
+| `state-kind.mjs` | No app process | Independently enumerated server-state vocabulary (control wire, session, employee availability, remote connection, process, session operation) maps to the expected presentation kind, with availability-over-control precedence for held/faulted remote states |
+| `system-drafts.mjs` | No app process (loopback stub) | System role-select retention, per-role draft/conflict/dirty cues across unrelated organization reloads, reset and clean save, vanished-role fallback, failed-then-successful save receipt (`ok`), failed authority reload recovery, load-failure status |
+| `route-receipts.mjs` | No app process (loopback stub) | Employee-detail and hiring status contract: neutral load success, visible load-failure page status, and pending/error/ok orientation and hire receipts |
+| `ci-organization.mjs` | `Control__Enabled=true`, disposable owner password, checked-in fake ACP fixture | Routed-page DOM isolation and grouped Organization nav, overview/directory department cards by stable ID, directory list styling, Operations department role/roster/availability/CTA, Development/QA empty states and CTA prefill, hiring `departmentId` preselect and role filtering with a forged value ignored, safe invalid/unknown ids, exact employee selection/detail, employee availability/runtime-state datasets, remote model placeholder, orientation mutation receipts, no secret field, desktop/mobile layout |
 
 `ci-organization.mjs` copies `tests/HVO.AgentControl.Tests/Fixtures/fake_acp.py`
 into a temporary directory with a `prompt_fast` scenario sidecar and points
@@ -28,7 +32,7 @@ disabled smoke so the disabled baseline keeps its exact coverage.
 dotnet build HVO.AgentControl.slnx --no-restore -c Release   # or the app test step
 npm ci --prefix tests/Browser
 npx --prefix tests/Browser playwright install --with-deps chromium
-npm run ci-all --prefix tests/Browser            # smoke + wire + organization
+npm run ci-all --prefix tests/Browser            # smoke + wire + state-kind + system drafts + receipts + organization
 ```
 
 Artifacts are written to `artifacts/browser-ci/` and
@@ -48,7 +52,7 @@ They are not run by `npm run ci` and must not run in CI.
 | --- | --- |
 | `model-sync.mjs` | UI-only model dropdown test against a local stub server (hermetic, no container). |
 | `portal-layout.mjs` | Read-only layout regression against a live deployment. |
-| `portal-smoke.mjs` | Full live portal smoke (auth, terminal, prompt). `run-portal-smoke.sh` opens the tunnel. |
+| `portal-smoke.mjs` | Full live exact-employee portal smoke (authenticates the organization API, selects the host-owned employee, verifies detail telemetry/terminal, then submits a prompt). `run-portal-smoke.sh` opens the tunnel. |
 | `model-sync-live.mjs` | Live model-sync contract in both directions; restores the original model. |
 
 `CHROME_PATH` is optional everywhere. When unset, the Chromium bundled by the

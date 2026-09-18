@@ -4,6 +4,7 @@ using Xunit;
 
 namespace HVO.AgentControl.Tests;
 
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class TmuxAttachLauncherTests
 {
     [Fact]

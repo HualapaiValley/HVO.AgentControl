@@ -131,23 +131,65 @@ public sealed class PortalOrganizationReadModelTests
     }
 
     [Fact]
-    public void PortalSummaryHasHonestUnsupportedApprovalsAndFailureLink()
+    public void PortalSummaryHasHonestHireRequestSupportAndRoutedFailureLink()
     {
         var failed = Employee(Orientation(OrientationStates.Stale, false, true, "instructions changed"));
         var portal = PortalOrganizationReadModel.Build(Overview(failed), Identity(), Status());
 
-        Assert.False(portal.PendingApprovals.Supported);
+        Assert.True(portal.PendingApprovals.Supported);
         Assert.Equal(0, portal.PendingApprovals.Count);
         Assert.Empty(portal.PendingApprovals.Items);
         var failure = Assert.Single(portal.FailuresNeedingAttention);
         Assert.Equal("emp-test", failure.EmployeeId);
-        Assert.Contains("#employee/emp-test", failure.Url, StringComparison.Ordinal);
+        Assert.Equal("/employees/emp-test", failure.Url);
+    }
+
+    [Fact]
+    public void FindDepartmentScopesRolesRosterCountsFailuresAndHireUrlToTheStableId()
+    {
+        var failed = Employee(Orientation(OrientationStates.Stale, restartRequired: false, dispatchHeld: true, error: "instructions changed"));
+        var overview = new OrganizationOverview(
+            "org-test", "org", "Organization", "Description", "Instructions", 1,
+            DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch,
+            [
+                new DepartmentSummary("dept-test", "operations", "Operations", 1, 4, "Operations standing instructions"),
+                new DepartmentSummary("dept-dev", "development", "Development", 0, 1, null),
+            ],
+            [new RoleSummary("role-test", "dept-test", "operations-it", "Operations / IT", "role@1", "policy@1", "Standing", 3)],
+            [failed],
+            []);
+
+        var operations = PortalOrganizationReadModel.FindDepartment(overview, Identity(), Status(), "dept-test");
+        Assert.NotNull(operations);
+        Assert.Equal("dept-test", operations!.Id);
+        Assert.Equal("org-test", operations.OrganizationId);
+        Assert.Equal(4, operations.Revision);
+        Assert.Equal("Operations standing instructions", operations.StandingInstructions);
+        Assert.Equal("/hiring?departmentId=dept-test", operations.HireUrl);
+        Assert.Equal("role-test", Assert.Single(operations.Roles).Id);
+        Assert.Equal("emp-test", Assert.Single(operations.Employees).Id);
+        Assert.Equal(EmployeeAvailabilityCategories.OrientationStale, Assert.Single(operations.Employees).Availability);
+        var failure = Assert.Single(operations.FailuresNeedingAttention);
+        Assert.Equal("emp-test", failure.EmployeeId);
+        Assert.Equal("/employees/emp-test", failure.Url);
+        Assert.Equal(1, operations.Availability.Single(count => count.Category == EmployeeAvailabilityCategories.OrientationStale).Count);
+
+        // The unstaffed department is a real empty state, not a filtered overview.
+        var development = PortalOrganizationReadModel.FindDepartment(overview, Identity(), Status(), "dept-dev");
+        Assert.NotNull(development);
+        Assert.Empty(development!.Roles);
+        Assert.Empty(development.Employees);
+        Assert.Null(development.StandingInstructions);
+        Assert.All(development.Availability, count => Assert.Equal(0, count.Count));
+        Assert.Empty(development.FailuresNeedingAttention);
+
+        Assert.Null(PortalOrganizationReadModel.FindDepartment(overview, Identity(), Status(), "dept-missing"));
     }
 
     private static OrganizationOverview Overview(params EmployeeSummary[] employees) => new(
         "org-test", "org", "Organization", "Description", "Instructions", 1,
         DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch,
-        [new DepartmentSummary("dept-test", "operations", "Operations", employees.Length)],
+        [new DepartmentSummary("dept-test", "operations", "Operations", employees.Length, 1, "Operations standing instructions")],
         [new RoleSummary("role-test", "dept-test", "operations-it", "Operations / IT", "role@1", "policy@1", "Standing", 1)],
         employees, []);
 

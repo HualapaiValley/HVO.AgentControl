@@ -37,6 +37,28 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
     }
 
     [Fact]
+    public async Task HeadLivenessIsSuccessfulAndBodyless()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Head, "/health/live");
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task HeadIsNotSynthesizedForMapGetRoute()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Head, "/api/info");
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+        Assert.Equal("GET", string.Join(", ", response.Content.Headers.Allow));
+    }
+
+    [Fact]
     public async Task ReadinessIs503ProblemDetailsWhenRuntimeDisabled()
     {
         using var client = _factory.CreateClient();
@@ -99,12 +121,17 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
         Assert.False(string.IsNullOrWhiteSpace(problem.GetProperty("traceId").GetString()));
     }
 
-    [Fact]
-    public async Task UnknownRouteIs404ProblemDetails()
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("POST")]
+    [InlineData("PUT")]
+    [InlineData("PATCH")]
+    [InlineData("DELETE")]
+    public async Task UnknownApiRouteIs404ProblemDetailsForCommonMethods(string method)
     {
         using var client = _factory.CreateClient();
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/not-a-real-endpoint");
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        using var request = new HttpRequestMessage(new HttpMethod(method), "/api/not-a-real-endpoint");
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
 
         using var response = await client.SendAsync(request);
 
@@ -113,6 +140,174 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
         Assert.Equal(404, problem.GetProperty("status").GetInt32());
         Assert.Equal("/api/not-a-real-endpoint", problem.GetProperty("instance").GetString());
         Assert.False(string.IsNullOrWhiteSpace(problem.GetProperty("traceId").GetString()));
+    }
+
+    [Theory]
+    [InlineData("/api/info", "GET")]
+    [InlineData("/health/live", "GET, HEAD")]
+    public async Task KnownGetOnlyRouteWithPostIs405ProblemDetailsAndAllow(string path, string expectedAllow)
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, path);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+        Assert.Equal(expectedAllow, string.Join(", ", response.Content.Headers.Allow));
+        var problem = await ReadProblemAsync(response);
+        AssertProblem(problem, 405, path, "Method Not Allowed");
+    }
+
+    [Fact]
+    public async Task UnknownHealthRouteIs404ProblemDetails()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/health/nope");
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 404, "/health/nope", "Not Found");
+    }
+
+    [Fact]
+    public async Task KnownJsonRouteWithWrongContentTypeIs415ProblemDetails()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/control/model");
+        request.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+        request.Content = new StringContent("model=opencode%2Fbig-pickle", Encoding.UTF8, "application/x-www-form-urlencoded");
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 415, "/api/control/model", "Unsupported Media Type");
+    }
+
+    [Theory]
+    [InlineData("POST", "/api/control/model")]
+    [InlineData("PATCH", "/api/organization")]
+    public async Task ChunkedWrongContentTypeOnKnownJsonRouteIs415Not404(string method, string path)
+    {
+        using var client = _factory.CreateClient();
+        using var request = UnknownLengthRequest(method, path, "model=wrong", "application/x-www-form-urlencoded");
+        request.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 415, path, "Unsupported Media Type");
+    }
+
+    [Fact]
+    public async Task ExplicitlyEmptyWrongContentTypeOnKnownJsonRouteIs415()
+    {
+        using var client = _factory.CreateClient();
+        using var request = UnknownLengthRequest("POST", "/api/control/model", string.Empty, "text/plain");
+        request.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 415, "/api/control/model", "Unsupported Media Type");
+    }
+
+    [Fact]
+    public async Task ChunkedBodyWithoutContentTypeOnKnownJsonRouteIs415()
+    {
+        using var client = _factory.CreateClient();
+        using var request = UnknownLengthRequest("POST", "/api/control/model", "{}", contentType: null);
+        request.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 415, "/api/control/model", "Unsupported Media Type");
+    }
+
+    [Theory]
+    [InlineData("POST", "/api/control/model")]
+    [InlineData("PATCH", "/api/organization")]
+    public async Task EmptyBodyOnBodyRequiredJsonRouteIs400Not404(string method, string path)
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        request.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 400, path, "Bad Request");
+    }
+
+    [Theory]
+    [InlineData("POST", "/api/control/model", "{\"model\":\"opencode/big-pickle\"}")]
+    [InlineData("PATCH", "/api/organization", "{\"organizationId\":\"org-test\",\"displayName\":\"Test\",\"revision\":1}")]
+    public async Task ChunkedJsonOnKnownRouteReachesEndpointBusinessResponse(string method, string path, string json)
+    {
+        using var client = _factory.CreateClient();
+        using var request = UnknownLengthRequest(method, path, json, "application/json");
+        request.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.NotEqual(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.NotEqual(HttpStatusCode.UnsupportedMediaType, response.StatusCode);
+        Assert.Contains(response.StatusCode, new[] { HttpStatusCode.Conflict, HttpStatusCode.ServiceUnavailable });
+    }
+
+    [Theory]
+    [InlineData("/openapi/not-a-document")]
+    [InlineData("/openapi/v9.json")]
+    public async Task UnknownOpenApiRouteIs404ProblemDetails(string path)
+    {
+        using var client = _factory.CreateClient();
+        using var response = await client.GetAsync(path);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        AssertProblem(await ReadProblemAsync(response), 404, path, "Not Found");
+    }
+
+    [Fact]
+    public async Task PortalMethodRejectionAdvertisesOnlyImplementedGet()
+    {
+        using var client = _factory.CreateClient();
+        using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Put, "/organization"));
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+        Assert.Equal("GET", string.Join(", ", response.Content.Headers.Allow));
+        Assert.DoesNotContain("HEAD", response.Content.Headers.Allow, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InvalidTerminalRequestWithHtmlAcceptIs400ProblemDetails()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/terminal");
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await ReadProblemAsync(response);
+        Assert.Equal(400, problem.GetProperty("status").GetInt32());
+        Assert.Equal("/terminal", problem.GetProperty("instance").GetString());
+    }
+
+    [Fact]
+    public async Task UnknownPortalRouteWithHtmlAcceptKeepsFriendly404Document()
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/not-a-real-portal-page");
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains("Page not found", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -223,6 +418,46 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
 
     private static AuthenticationHeaderValue Basic(string user, string password) =>
         new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{password}")));
+
+    private static HttpRequestMessage UnknownLengthRequest(string method, string path, string body, string? contentType)
+    {
+        var request = new HttpRequestMessage(new HttpMethod(method), path)
+        {
+            Version = HttpVersion.Version11,
+            VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+            Content = new UnknownLengthContent(body),
+        };
+        if (contentType is not null)
+        {
+            request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+        }
+
+        request.Headers.TransferEncodingChunked = true;
+        return request;
+    }
+
+    private sealed class UnknownLengthContent(string body) : HttpContent
+    {
+        private readonly byte[] _body = Encoding.UTF8.GetBytes(body);
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(_body).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    private static void AssertProblem(JsonElement problem, int status, string instance, string title)
+    {
+        Assert.Equal(status, problem.GetProperty("status").GetInt32());
+        Assert.Equal(instance, problem.GetProperty("instance").GetString());
+        Assert.Equal(title, problem.GetProperty("title").GetString());
+        Assert.StartsWith("https://", problem.GetProperty("type").GetString(), StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(problem.GetProperty("traceId").GetString()));
+    }
 
     private static async Task<JsonElement> ReadProblemAsync(HttpResponseMessage response)
     {
@@ -342,10 +577,10 @@ public sealed class ReadinessPredicateTests
 }
 
 /// <summary>
-/// Disabled runtime with a test-only middleware that throws. The middleware is
-/// injected through an <see cref="IStartupFilter"/> and appended after the
-/// application pipeline so the failure is handled by the registered
-/// ProblemDetails exception handler. No test-only route is added to production.
+/// Disabled runtime in the dedicated <c>ExceptionPathTests</c> environment.
+/// Program maps one environment-only throwing endpoint there; the endpoint is
+/// absent from every normal environment and is handled by the registered
+/// ProblemDetails exception handler.
 /// </summary>
 public sealed class ExceptionPathFactory : WebApplicationFactory<Program>
 {
@@ -353,26 +588,8 @@ public sealed class ExceptionPathFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.UseEnvironment("ExceptionPathTests");
         builder.UseSetting("Control:Enabled", "false");
-        builder.ConfigureServices(services =>
-            services.AddSingleton<IStartupFilter>(new ThrowingStartupFilter()));
-    }
-
-    private sealed class ThrowingStartupFilter : IStartupFilter
-    {
-        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
-        {
-            next(app);
-            app.Use(async (context, nextMiddleware) =>
-            {
-                if (context.Request.Path.Equals("/__test/fault", StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(InjectedFailure);
-                }
-
-                await nextMiddleware(context);
-            });
-        };
     }
 }
 

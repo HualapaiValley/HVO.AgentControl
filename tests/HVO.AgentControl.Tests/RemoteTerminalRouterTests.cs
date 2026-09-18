@@ -20,6 +20,7 @@ namespace HVO.AgentControl.Tests;
 /// loopback WebSocket so the close handshake the browser actually observes is
 /// asserted rather than simulated.
 /// </summary>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class RemoteTerminalRouterTests
 {
     /// <summary>

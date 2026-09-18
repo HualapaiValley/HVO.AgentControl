@@ -15,6 +15,7 @@ namespace HVO.AgentControl.Tests;
 /// AGENTCONTROL_OPENCODE_WIRE_REQUIRED=1 so absence, wrong version, timeout, or a
 /// request-shape mismatch is a failure rather than a false green.
 /// </summary>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class OpenCodeOutboundIntegrationTests
 {
     private const string DisposableKey = "disposable-opencode-wire-key-243";

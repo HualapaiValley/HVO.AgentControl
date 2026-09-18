@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -20,6 +21,7 @@ namespace HVO.AgentControl.Tests;
 /// exercise the real endpoint pipeline (owner Basic auth, same-origin checks and
 /// RFC 9457 ProblemDetails). No provider or credential is touched.
 /// </summary>
+[Collection(LocalPortBindingCollection.Name)]
 public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFactory>
 {
     private readonly EnabledRuntimeFactory _factory;
@@ -78,8 +80,11 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         var portalBody = await portalResponse.Content.ReadAsStringAsync();
         using var portalDocument = JsonDocument.Parse(portalBody);
         var portal = portalDocument.RootElement;
-        Assert.False(portal.GetProperty("pendingApprovals").GetProperty("supported").GetBoolean());
-        Assert.Equal(0, portal.GetProperty("pendingApprovals").GetProperty("count").GetInt32());
+        var pendingApprovals = portal.GetProperty("pendingApprovals");
+        Assert.True(pendingApprovals.GetProperty("supported").GetBoolean());
+        Assert.Equal(
+            pendingApprovals.GetProperty("items").GetArrayLength(),
+            pendingApprovals.GetProperty("count").GetInt32());
         var employee = Assert.Single(portal.GetProperty("employees").EnumerateArray());
         var employeeId = employee.GetProperty("id").GetString()!;
 
@@ -103,6 +108,47 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         using var client = await CreateReadyClientAsync();
         using var response = await client.GetAsync("/api/employees/emp-does-not-exist");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DepartmentEndpointReturnsScopedAuthoritativeDetailAndSafeErrors()
+    {
+        using var client = await CreateReadyClientAsync();
+        var overview = await ReadOrganizationAsync(client);
+        var departments = overview.GetProperty("departments").EnumerateArray().ToArray();
+        var operations = departments.Single(x => x.GetProperty("slug").GetString() == OrganizationSeed.OperationsSlug);
+        var operationsId = operations.GetProperty("id").GetString()!;
+        var developmentId = departments.Single(x => x.GetProperty("slug").GetString() == OrganizationSeed.DevelopmentSlug)
+            .GetProperty("id").GetString()!;
+
+        using var response = await client.GetAsync($"/api/departments/{operationsId}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root = document.RootElement;
+        Assert.Equal(operationsId, root.GetProperty("id").GetString());
+        Assert.Equal(OrganizationSeed.OperationsSlug, root.GetProperty("slug").GetString());
+        Assert.Equal(overview.GetProperty("displayName").GetString(), root.GetProperty("organizationDisplayName").GetString());
+        Assert.Equal(1, root.GetProperty("revision").GetInt32());
+        Assert.Equal(OrganizationSeed.DepartmentOrientation, root.GetProperty("standingInstructions").GetString());
+        Assert.Equal($"/hiring?departmentId={operationsId}", root.GetProperty("hireUrl").GetString());
+        Assert.Equal("operations-it", Assert.Single(root.GetProperty("roles").EnumerateArray()).GetProperty("slug").GetString());
+        var roster = Assert.Single(root.GetProperty("employees").EnumerateArray());
+        Assert.StartsWith("emp-", roster.GetProperty("id").GetString()!, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(roster.GetProperty("availability").GetString()));
+
+        using var emptyResponse = await client.GetAsync($"/api/departments/{developmentId}");
+        Assert.Equal(HttpStatusCode.OK, emptyResponse.StatusCode);
+        using var emptyDocument = JsonDocument.Parse(await emptyResponse.Content.ReadAsStringAsync());
+        var empty = emptyDocument.RootElement;
+        Assert.Empty(empty.GetProperty("roles").EnumerateArray());
+        Assert.Empty(empty.GetProperty("employees").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, empty.GetProperty("standingInstructions").ValueKind);
+        Assert.Equal($"/hiring?departmentId={developmentId}", empty.GetProperty("hireUrl").GetString());
+
+        using var invalid = await client.GetAsync("/api/departments/dept-");
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        using var unknown = await client.GetAsync("/api/departments/dept-does-not-exist");
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
     }
 
     [Fact]
@@ -132,6 +178,123 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         using var unready = await client.GetAsync(
             $"/terminal?employeeId={Uri.EscapeDataString(employeeId)}");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, unready.StatusCode);
+    }
+
+    [Fact]
+    public async Task HireRequestApiEnforcesOriginIdempotencyRelationshipsBoundsAndRevisionRejection()
+    {
+        using var client = await CreateReadyClientAsync();
+        var overview = await ReadOrganizationAsync(client);
+        var department = overview.GetProperty("departments").EnumerateArray().Single(x => x.GetProperty("slug").GetString() == OrganizationSeed.OperationsSlug);
+        var role = Assert.Single(overview.GetProperty("roles").EnumerateArray());
+        var payload = new
+        {
+            idempotencyKey = "api-hire-key-1",
+            requestedDisplayName = "API Developer",
+            purpose = "Exercise the first durable hiring slice.",
+            departmentId = department.GetProperty("id").GetString(),
+            roleId = role.GetProperty("id").GetString(),
+            placement = RuntimePlacements.DeveloperContainer,
+            cpuLimit = 2,
+            memoryLimitMiB = 2048,
+            pidsLimit = 256,
+        };
+
+        using var unauthenticated = _factory.CreateClient();
+        using var unauthenticatedResponse = await unauthenticated.PostAsJsonAsync("/api/hire-requests", payload);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResponse.StatusCode);
+
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(payload) };
+        crossOrigin.Headers.Add("Origin", "https://other.example");
+        using var crossOriginResponse = await client.SendAsync(crossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        // A body key is sufficient when the header is absent.
+        using var create = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(payload) };
+        create.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var createdResponse = await client.SendAsync(create);
+        Assert.Equal(HttpStatusCode.OK, createdResponse.StatusCode);
+        using var createdDocument = JsonDocument.Parse(await createdResponse.Content.ReadAsStringAsync());
+        var created = createdDocument.RootElement;
+        var id = created.GetProperty("id").GetString()!;
+        var revision = created.GetProperty("revision").GetInt32();
+        Assert.Equal(HireRequestStates.Requested, created.GetProperty("state").GetString());
+
+        using var duplicate = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(payload) };
+        duplicate.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        duplicate.Headers.Add("Idempotency-Key", "api-hire-key-1");
+        using var duplicateResponse = await client.SendAsync(duplicate);
+        Assert.Equal(HttpStatusCode.OK, duplicateResponse.StatusCode);
+        using var duplicateDocument = JsonDocument.Parse(await duplicateResponse.Content.ReadAsStringAsync());
+        Assert.Equal(id, duplicateDocument.RootElement.GetProperty("id").GetString());
+
+        // A header key is also sufficient when the nullable body field is omitted.
+        var headerOnlyPayload = new
+        {
+            requestedDisplayName = "Header-only Developer",
+            payload.purpose,
+            payload.departmentId,
+            payload.roleId,
+            payload.placement,
+            payload.cpuLimit,
+            payload.memoryLimitMiB,
+            payload.pidsLimit,
+        };
+        using var headerOnly = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(headerOnlyPayload) };
+        headerOnly.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        headerOnly.Headers.Add("Idempotency-Key", "api-hire-header-only");
+        using var headerOnlyResponse = await client.SendAsync(headerOnly);
+        Assert.Equal(HttpStatusCode.OK, headerOnlyResponse.StatusCode);
+
+        using var mismatch = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(payload with { idempotencyKey = "body-key" }) };
+        mismatch.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        mismatch.Headers.Add("Idempotency-Key", "header-key");
+        using var mismatchResponse = await client.SendAsync(mismatch);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, mismatchResponse.StatusCode);
+        Assert.Contains("must match exactly", (await ReadProblemAsync(mismatchResponse)).GetProperty("detail").GetString(), StringComparison.Ordinal);
+
+        using var conflict = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(payload with { purpose = "Different payload" }) };
+        conflict.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        conflict.Headers.Add("Idempotency-Key", "api-hire-key-1");
+        using var conflictResponse = await client.SendAsync(conflict);
+        Assert.Equal(HttpStatusCode.Conflict, conflictResponse.StatusCode);
+
+        using var missing = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(headerOnlyPayload with { requestedDisplayName = "Missing Key" }) };
+        missing.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var missingResponse = await client.SendAsync(missing);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, missingResponse.StatusCode);
+        Assert.Contains("is required", (await ReadProblemAsync(missingResponse)).GetProperty("detail").GetString(), StringComparison.Ordinal);
+
+        foreach (var (resourcePayload, expectedDetail) in new[]
+        {
+            (payload with { idempotencyKey = "api-hire-cpu-bounds", cpuLimit = 0 }, "CPU limit"),
+            (payload with { idempotencyKey = "api-hire-memory-bounds", memoryLimitMiB = 0 }, "Memory limit"),
+            (payload with { idempotencyKey = "api-hire-pids-bounds", pidsLimit = 0 }, "PID limit"),
+        })
+        {
+            using var bounded = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests") { Content = JsonContent.Create(resourcePayload) };
+            bounded.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+            using var boundedResponse = await client.SendAsync(bounded);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, boundedResponse.StatusCode);
+            Assert.Contains(expectedDetail, (await ReadProblemAsync(boundedResponse)).GetProperty("detail").GetString(), StringComparison.Ordinal);
+        }
+
+        using var malformedGet = await client.GetAsync("/api/hire-requests/not-a-hire-id");
+        Assert.Equal(HttpStatusCode.BadRequest, malformedGet.StatusCode);
+        Assert.Equal("Invalid hire request id.", (await ReadProblemAsync(malformedGet)).GetProperty("title").GetString());
+
+        using var malformedReject = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests/not-a-hire-id/reject") { Content = JsonContent.Create(new { expectedRevision = revision }) };
+        malformedReject.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var malformedRejectResponse = await client.SendAsync(malformedReject);
+        Assert.Equal(HttpStatusCode.BadRequest, malformedRejectResponse.StatusCode);
+        Assert.Equal("Invalid hire request id.", (await ReadProblemAsync(malformedRejectResponse)).GetProperty("title").GetString());
+
+        using var reject = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/reject") { Content = JsonContent.Create(new { expectedRevision = revision }) };
+        reject.Headers.Add("Origin", _factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var rejectResponse = await client.SendAsync(reject);
+        Assert.Equal(HttpStatusCode.OK, rejectResponse.StatusCode);
+        using var rejectedDocument = JsonDocument.Parse(await rejectResponse.Content.ReadAsStringAsync());
+        Assert.Equal(HireRequestStates.Rejected, rejectedDocument.RootElement.GetProperty("state").GetString());
     }
 
     [Fact]

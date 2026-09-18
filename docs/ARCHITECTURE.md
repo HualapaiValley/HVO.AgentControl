@@ -15,15 +15,36 @@ from the `generation = 2` identity.
   requested stable employee ID, authoritative runtime binding, persisted native
   session and current host `ControlStatus` all match exactly; one viewer at a
   time and no fallback. The TUI is a human view, not a second engine.
-- **Owner read model:** `/api/organization/portal` and `/api/employees/{id}` join
-  one authoritative store snapshot with the exact host status. Availability wire
+- **Owner routed UI/read model:** a shared static-SSR layout serves distinct
+  `/organization`, `/organization/departments`, `/organization/departments/{id}`,
+  `/employees`, `/employees/{id}`, `/hiring`, and `/system` components under a
+  grouped Organization navigation. Each route renders only its own page sections;
+  route-specific ES modules enhance the server response, and terminal/model code
+  is loaded only by employee detail. The organization section is the authoritative
+  hierarchy: the overview and directory link each department by stable ID, and the
+  department detail exposes the stored revision, the active department orientation
+  fragment as standing instructions when one exists, the roles assigned to the
+  department, the scoped roster with host-computed availability, scoped
+  attention items and a department-scoped `Request employee` link.
+  `/api/organization/portal`, `/api/employees/{id}` and `/api/departments/{id}`
+  join one authoritative store snapshot with the exact host status. Availability wire
   values describe host readiness/orientation conditions, not worker lifecycle.
   For the exact host-owned employee the current sanitized runtime error
   (`ControlStatus.Error`) is exposed. Recent logs are explicitly unsupported
   because no employee-scoped safe log contract exists, so neither bulk logs nor
-  another employee's logs are returned. Pending approvals are explicitly
-  unsupported rather than fabricated.
-- **Persistence:** `/control-data/control.db` is the authoritative SQLite store. Schema v4 migrates only the exact released v3 signature after creating and verifying an immutable `control.schema-v3.db` backup plus SHA-256 evidence. It preserves the #213/#216 organization and policy records and adds stable execution-host, enrollment, cursor, task/request, provisioning/resource, recovery-obligation and terminal-viewer metadata. Key bytes and active connection nonces are never stored there. Semantic release `0.1.0` remains unreleased and has not been published or deployed as a release.
+  another employee's logs are returned. Pending hire requests are real durable
+  records; approval/provisioning remain unavailable until #217 operational
+  acceptance and are never represented as completed employee creation.
+- **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
+  Schema v7 migrates only the exact released v6 signature after creating and
+  verifying immutable `control.schema-v6.db` and SHA-256 evidence. It adds
+  idempotent hire requests (bounded requested identity/purpose/placement/resources,
+  immutable request-version hash, optimistic revision) and append-only state events
+  containing hashes rather than raw secrets. The schema reserves later lifecycle
+  states, while this slice exposes only request and reject transitions. Existing
+  organization, policy, worker and recovery records are preserved. Key bytes and
+  active connection nonces are never stored there. Semantic release `0.1.0`
+  remains unreleased and has not been published or deployed as a release.
   It stores organization, department, role, employee, runtime-binding and ACP-session
   identity, plus versioned orientation, dispatch-hold and permission-policy records,
   in the controller-private volume. `/control-data/runtime.json` is
@@ -38,8 +59,8 @@ from the `generation = 2` identity.
   proxy needs explicit trusted forwarded-header support, not yet implemented.
 
 The runtime is disabled by default for host development; Compose enables it.
-This slice does not provision developers, route tasks, or implement the full
-organization lifecycle.
+This slice records and rejects owner hire requests but does not approve or
+provision developers, route tasks, or implement the full organization lifecycle.
 Remote-worker reconciliation-integrity failures return a sanitized `502`
 ProblemDetails response titled `Remote worker reconciliation is invalid`; the
 detail states that correlation failed and dispatch remains held.
@@ -450,6 +471,12 @@ The pre-isolation image understands only `runtime.json`, so republishing it
 would run old JSON-only code against stale session identity while the database
 held the real state. No compatible downgrade is provided; restoring a verified
 backup of the whole controller-private volume is the owner-run recovery path.
+Before the first live deployment of schema v7, stop/quiesce the controller and
+snapshot the current private volume (including `control.db` and any SQLite
+sidecars) through the deployment's existing backup workflow, then verify that
+snapshot before starting the new image. The automatic schema-v6 backup is
+pre-migration evidence only; it is not a current schema-v7 recovery point and
+cannot recover hires or other writes made after migration.
 `prepare-layout.py` likewise treats a JSON-only divergence as evidence rather
 than blocking the database-era start.
 
