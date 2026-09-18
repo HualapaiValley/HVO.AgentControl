@@ -19,7 +19,7 @@ Changes after the first portal release are collected here.
 
 ### Changed
 
-- Repository transferred to `HualapaiValley/HVO.AgentControl` (2026-09-18) and made public; branch protection, secret scanning/push protection and Dependabot security updates were re-applied after the move. In-repo references (CI badge, GHCR image name `ghcr.io/hualapaivalley/hvo.agentcontrol` in the never-dispatched release workflow, sibling HVO repository links, repository-admin notes) now point at the organization. No image has ever been published under the old name.
+- Repository transferred to `HualapaiValley/HVO.AgentControl` (2026-09-18) and made public; branch protection, secret scanning/push protection and Dependabot security updates were re-applied after the move. In-repo references (CI badge, GHCR image name `ghcr.io/hualapaivalley/hvo.agentcontrol` in the never-dispatched release workflow, sibling HVO repository links, repository-admin notes) now point at the organization. No image has ever been published under the old name. GitHub Actions are pinned to full-length commit SHAs (with version comments) to satisfy the organization's actions policy; the resolved versions are unchanged (`checkout` v7.0.1, `setup-dotnet` v6.0.0, `setup-node` v7.0.0, `setup-python` v7.0.0, `upload-artifact` v7.0.1, `setup-buildx-action` v4.4.1, `build-push-action` v7.4.0, `login-action` v4.6.0).
 
 ### Added
 

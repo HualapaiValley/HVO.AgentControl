@@ -21,6 +21,10 @@
 - Automatically delete merged feature branches. No automatic merging enabled.
 - Actions defaults remain read-only and cannot approve PRs. Only the manual
   release publishing job requests `contents: write` and `packages: write`.
+- The HualapaiValley organization requires every `uses:` action to be pinned
+  to a full-length commit SHA (a tag such as `@v7` is rejected at job setup).
+  Workflows pin `<owner>/<action>@<sha> # <version>`; Dependabot's
+  `github-actions` group updates the SHA and the version comment together.
 - Secret scanning, push protection, dependency vulnerability alerts and
   Dependabot security updates are enabled (re-applied after the transfer, when
   the public visibility made them available). Weekly grouped Dependabot updates
