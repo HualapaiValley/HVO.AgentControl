@@ -306,8 +306,12 @@ try {
   // Stall the employee read so the pre-load, non-interactive state is stable,
   // then let it fail safely: hidden content must stay hidden and inert.
   await page.route('**/api/employees/**', async (route) => {
+    // Own the intercepted request through completion. Delaying and then calling
+    // continue() can race a navigation/unroute on fast CI runners and produce
+    // "Route is already handled" even though the product page is healthy.
+    const upstream = await route.fetch();
     await sleep(1200);
-    await route.continue();
+    await route.fulfill({ response: upstream });
   });
   const employeeResponse = await page.goto(`${base}/employees/emp-disabled`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-page="employee-detail"]');
