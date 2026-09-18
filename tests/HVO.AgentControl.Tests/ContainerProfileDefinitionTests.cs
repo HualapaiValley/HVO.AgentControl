@@ -196,6 +196,50 @@ public sealed class ContainerProfileDefinitionTests
         Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Docker joins backslash continuations before tokenizing, so the validator
+    /// must see the joined logical instruction. Each case would be accepted by a
+    /// physical-line checker and is exactly what Docker would execute.
+    /// </summary>
+    [Theory]
+    [InlineData("FROM agentcontrol-worker-base\nRUN true \\\n  --mou\\\nnt=type=bind,src=/,dst=/host cat /host/etc/shadow\n", "RUN flags")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN --net\\\nwork=host curl x\n", "RUN flags")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN --secur\\\nity=insecure true\n", "RUN flags")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN \\\n--mount=type=secret,id=x cat /run/secrets/x\n", "RUN flags")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN ls /var/run/dock\\\ner.sock\n", "Docker socket")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN ls /var/run/DOCKER.SOCK\n", "Docker socket")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN true \\\n\n# comment inside continuation\n  && --mount=type=cache,target=/x true\n", "RUN flags")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN <<EOF\nrm -rf /\nEOF\n", "heredoc")]
+    [InlineData("FROM agentcontrol-worker-base\nRUN true \\\n<<'EOF'\nEOF\n", "heredoc")]
+    [InlineData("FROM agentcontrol-worker-base\nUS\\\nER root\n", "'USER' is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nENTRY\\\nPOINT [\"/bin/sh\"]\n", "'ENTRYPOINT' is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nWORKDIR /work\\\nspaces\n", "WORKDIR must stay under /workspace")]
+    [InlineData("FROM agentcontrol-worker-base\nENV PA\\\nTH=/evil\n", "replacing PATH is not allowed")]
+    [InlineData("FROM \\\nubuntu\n", "FROM must be exactly")]
+    [InlineData("FROM agentcontrol-worker-base \\\nAS stage\n", "FROM must be exactly")]
+    public void HazardsSplitAcrossContinuationsAreSeenAsTheJoinedInstruction(string fragment, string expected)
+    {
+        var exception = Assert.Throws<OrganizationValidationException>(() => ContainerProfileDefinition.Parse("""{"build":{"dockerfile":"Dockerfile"}}""", fragment));
+        Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ContinuationJoiningMatchesDockerSemantics()
+    {
+        // A backslash escaped by a preceding backslash does not continue the line:
+        // "RUN echo a\\" is complete; the next line is a separate instruction.
+        var escaped = Assert.Throws<OrganizationValidationException>(() => ContainerProfileDefinition.Parse("""{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN echo a\\\\\nUSER root\n"));
+        Assert.Contains("Line 3: 'USER' is not allowed", escaped.Message, StringComparison.Ordinal);
+
+        // Errors report the first physical line of the joined instruction.
+        var multiLine = Assert.Throws<OrganizationValidationException>(() => ContainerProfileDefinition.Parse("""{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN a \\\n  b \\\n  --network=none c\n"));
+        Assert.Contains("Line 2:", multiLine.Message, StringComparison.Ordinal);
+
+        // Legitimate multi-line RUN chains still pass and keep their physical shape in storage.
+        var ok = ContainerProfileDefinition.Parse("""{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN apt-get update \\\n    && apt-get install -y \\\n        jq \\\n        ripgrep\n");
+        Assert.Contains("        ripgrep\n", ok.DockerfileFragment, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void FragmentSizeBoundsAreEnforced()
     {

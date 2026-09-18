@@ -747,6 +747,31 @@ app.MapGet("/api/profiles/{id}", (AcpControlHost host, string id) =>
     .ProducesProblem(StatusCodes.Status404NotFound)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+app.MapGet("/api/profiles/{id}/revisions", (AcpControlHost host, string id) =>
+{
+    if (!Program.IsValidContainerProfileId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile id.", detail: "A bounded stable container profile id is required.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        return revisions is null
+            ? Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile not found.")
+            : Results.Ok(revisions);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Container profile revisions unavailable.");
+    }
+})
+    .WithName("ListContainerProfileRevisions").WithTags("Profiles")
+    .WithSummary("Returns the immutable revision chain of one profile, newest first. Revisions are never edited or deleted.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.ContainerProfileRevisionSummary>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapPost("/api/profiles", (HttpContext context, AcpControlHost host, HVO.AgentControl.Organization.ContainerProfileCreate request) =>
 {
     if (Program.RejectCrossOrigin(context, "Container profile creation") is { } rejection) return rejection;

@@ -57,6 +57,46 @@ public sealed partial class OrganizationStore
         """,
     ];
 
+    /// <summary>
+    /// Schema v8 rebuilds <c>hire_requests</c> with a nullable reference to the
+    /// immutable profile revision an approval will freeze (#260 makes it required
+    /// at approval time). The events table is recreated unchanged so its foreign
+    /// key targets the rebuilt table. The v7 statements above stay frozen for
+    /// exact-signature migration.
+    /// </summary>
+    private static string HireRequestsSchemaV8Statement =>
+        """
+        CREATE TABLE hire_requests (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+            requested_by_employee_id TEXT REFERENCES employees(id) ON DELETE RESTRICT,
+            requested_by_kind TEXT NOT NULL CHECK (requested_by_kind IN ('owner')),
+            idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+            requested_display_name TEXT NOT NULL CHECK (length(requested_display_name) BETWEEN 1 AND 128),
+            purpose TEXT NOT NULL CHECK (length(purpose) BETWEEN 1 AND 2048),
+            department_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            placement TEXT NOT NULL CHECK (placement IN ('InternalSharedContainer', 'DeveloperContainer')),
+            cpu_limit INTEGER NOT NULL CHECK (cpu_limit BETWEEN 1 AND 64),
+            memory_limit_mib INTEGER NOT NULL CHECK (memory_limit_mib BETWEEN 256 AND 131072),
+            pids_limit INTEGER NOT NULL CHECK (pids_limit BETWEEN 16 AND 4096),
+            state TEXT NOT NULL CHECK (state IN ('Requested', 'Approved', 'Provisioning', 'Orienting', 'Ready', 'Rejected', 'Failed', 'Interrupted', 'Uncertain')),
+            request_version_hash TEXT NOT NULL CHECK (length(request_version_hash) = 71 AND substr(request_version_hash, 1, 7) = 'sha256:'),
+            approved_request_version TEXT,
+            owner_approval TEXT,
+            container_profile_revision_id TEXT REFERENCES container_profile_revisions(id) ON DELETE RESTRICT,
+            revision INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (department_id, organization_id) REFERENCES departments(id, organization_id) ON DELETE RESTRICT,
+            FOREIGN KEY (role_id, department_id) REFERENCES roles(id, department_id) ON DELETE RESTRICT
+        )
+        """;
+
+    private static string HireRequestEventsSchemaV8Statement => HireRequestSchemaV7Statements[1];
+
+    private static string[] HireRequestSchemaV8Statements => [HireRequestsSchemaV8Statement, HireRequestEventsSchemaV8Statement];
+
     public IReadOnlyList<HireRequestSummary> ListHireRequests()
     {
         return TranslateStoreFaults(() =>
@@ -124,9 +164,9 @@ public sealed partial class OrganizationStore
                         id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
                         requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
                         memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
-                        owner_approval, revision, created_at, updated_at)
+                        owner_approval, container_profile_revision_id, revision, created_at, updated_at)
                     VALUES ($id, $organization, NULL, 'owner', $key, $name, $purpose, $department, $role,
-                        $placement, $cpu, $memory, $pids, 'Requested', $hash, NULL, NULL, 1, $now, $now)
+                        $placement, $cpu, $memory, $pids, 'Requested', $hash, NULL, NULL, NULL, 1, $now, $now)
                     """,
                     ("$id", id), ("$organization", organizationId), ("$key", idempotencyKey),
                     ("$name", displayName), ("$purpose", purpose), ("$department", departmentId),
@@ -238,7 +278,8 @@ public sealed partial class OrganizationStore
                    h.idempotency_key, h.requested_display_name, h.purpose, h.department_id,
                    d.display_name, h.role_id, r.display_name, h.placement, h.cpu_limit,
                    h.memory_limit_mib, h.pids_limit, h.state, h.request_version_hash,
-                   h.approved_request_version, h.owner_approval, h.revision, h.created_at, h.updated_at
+                   h.approved_request_version, h.owner_approval, h.revision, h.created_at, h.updated_at,
+                   h.container_profile_revision_id
             FROM hire_requests h
             JOIN departments d ON d.id = h.department_id
             JOIN roles r ON r.id = h.role_id
@@ -254,7 +295,8 @@ public sealed partial class OrganizationStore
         reader.GetString(15), reader.GetString(16), reader.IsDBNull(17) ? null : reader.GetString(17),
         reader.IsDBNull(18) ? null : reader.GetString(18), reader.GetInt32(19),
         DateTimeOffset.Parse(reader.GetString(20), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-        DateTimeOffset.Parse(reader.GetString(21), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+        DateTimeOffset.Parse(reader.GetString(21), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+        reader.IsDBNull(22) ? null : reader.GetString(22));
 
     private static string ValidateIdempotencyKey(string? header, string? body)
     {

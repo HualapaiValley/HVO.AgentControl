@@ -57,6 +57,12 @@ public sealed class ContainerProfileStoreTests : IDisposable
         Assert.Equal(2, _store.ListContainerProfiles().Count);
 
         Assert.Throws<OrganizationConcurrencyException>(() => _store.CreateContainerProfile(input with { DisplayName = "Team A2" }, "prof-key-1"));
+        // Replay stays bound to the original payload (revision 1) even after the profile gains revisions.
+        _store.CreateContainerProfileRevision(created.Id, new ContainerProfileRevisionCreate(created.Revision, """{"image":"agentcontrol-worker-base","name":"Team A rev 2"}""", null));
+        var replayed = _store.CreateContainerProfile(input, null);
+        Assert.Equal(created.Id, replayed.Id);
+        Assert.Equal(2, replayed.CurrentRevisionNumber);
+        Assert.Throws<OrganizationConcurrencyException>(() => _store.CreateContainerProfile(input with { Definition = """{"image":"agentcontrol-worker-base","name":"Team A rev 2"}""" }, "prof-key-1"));
         Assert.Throws<OrganizationConcurrencyException>(() => _store.CreateContainerProfile(input with { IdempotencyKey = "prof-key-2" }, null));
         Assert.Throws<OrganizationValidationException>(() => _store.CreateContainerProfile(input with { IdempotencyKey = "k3", Slug = "Bad Slug" }, null));
         Assert.Throws<OrganizationValidationException>(() => _store.CreateContainerProfile(input with { IdempotencyKey = "k4", Slug = "team-b", Definition = """{"image":"ubuntu"}""" }, null));
@@ -96,13 +102,48 @@ public sealed class ContainerProfileStoreTests : IDisposable
         Assert.Throws<OrganizationNotFoundException>(() => _store.CreateContainerProfileRevision("prof-doesnotexist", new ContainerProfileRevisionCreate(1, """{"image":"agentcontrol-worker-base","name":"X"}""", null)));
         Assert.Equal(2, _store.GetContainerProfile(profile.Id)!.Revisions.Count);
 
-        // Immutability is enforced by the schema as well as the store: no UPDATE path exists and a
-        // duplicate content hash cannot be inserted for the same profile.
+        // Immutability is enforced at the database boundary, not only by the store API:
+        // duplicate content cannot be inserted, identity/content columns cannot be
+        // updated, and revisions/profiles cannot be deleted. Only the build lifecycle
+        // columns reserved for #259 remain writable.
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _store.DatabasePath, Mode = SqliteOpenMode.ReadWrite }.ToString());
         connection.Open();
+        var beforeRows = Raw(connection, "SELECT group_concat(id || ':' || content_hash || ':' || definition_json, '|') FROM container_profile_revisions ORDER BY revision_number");
+        foreach (var sql in new[]
+        {
+            "INSERT INTO container_profile_revisions SELECT 'prev-copy', profile_id, 3, base_image_reference, definition_json, dockerfile_fragment, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 2",
+            "UPDATE container_profile_revisions SET definition_json = '{\"image\":\"agentcontrol-worker-base\",\"privileged\":true}' WHERE revision_number = 1",
+            "UPDATE container_profile_revisions SET content_hash = 'sha256:' || substr(content_hash, 8, 63) || 'f' WHERE revision_number = 1",
+            "UPDATE container_profile_revisions SET dockerfile_fragment = 'FROM ubuntu' WHERE revision_number = 2",
+            "UPDATE container_profile_revisions SET base_image_reference = 'agentcontrol-worker-base' WHERE revision_number = 2",
+            "UPDATE container_profile_revisions SET created_by = 'owner' WHERE revision_number = 1",
+            "UPDATE container_profile_revisions SET revision_number = 9 WHERE revision_number = 2",
+            "DELETE FROM container_profile_revisions WHERE revision_number = 2",
+            "DELETE FROM container_profiles",
+        })
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            var exception = Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+            Assert.Contains(sql.StartsWith("INSERT", StringComparison.Ordinal) ? "UNIQUE" : sql.StartsWith("DELETE FROM container_profiles", StringComparison.Ordinal) ? "never deleted" : sql.StartsWith("DELETE", StringComparison.Ordinal) ? "never deleted" : "immutable", exception.Message, StringComparison.Ordinal);
+        }
+        Assert.Equal(beforeRows, Raw(connection, "SELECT group_concat(id || ':' || content_hash || ':' || definition_json, '|') FROM container_profile_revisions ORDER BY revision_number"));
+
+        // The reserved build lifecycle columns stay writable for #259.
+        using (var lifecycle = connection.CreateCommand())
+        {
+            lifecycle.CommandText = "UPDATE container_profile_revisions SET build_status = 'building' WHERE revision_number = 2";
+            Assert.Equal(1, lifecycle.ExecuteNonQuery());
+            lifecycle.CommandText = "UPDATE container_profile_revisions SET build_status = 'unbuilt' WHERE revision_number = 2";
+            Assert.Equal(1, lifecycle.ExecuteNonQuery());
+        }
+    }
+
+    private static string Raw(SqliteConnection connection, string sql)
+    {
         using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO container_profile_revisions SELECT 'prev-copy', profile_id, 3, base_image_reference, definition_json, dockerfile_fragment, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 2";
-        Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+        command.CommandText = sql;
+        return Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
     [Fact]
@@ -119,6 +160,18 @@ public sealed class ContainerProfileStoreTests : IDisposable
         // Retired profiles remain readable with their revisions and sort after active ones.
         Assert.Single(_store.GetContainerProfile(created.Id)!.Revisions);
         Assert.Equal([ContainerProfileStatuses.Active, ContainerProfileStatuses.Retired], _store.ListContainerProfiles().Select(p => p.Status).ToArray());
+    }
+
+    [Fact]
+    public void RevisionListingIsNewestFirstAndDistinguishesUnknownFromMalformed()
+    {
+        var profile = _store.ListContainerProfiles().Single();
+        _store.CreateContainerProfileRevision(profile.Id, new ContainerProfileRevisionCreate(profile.Revision, """{"image":"agentcontrol-worker-base","name":"Two"}""", null));
+        var revisions = _store.ListContainerProfileRevisions(profile.Id)!;
+        Assert.Equal([2, 1], revisions.Select(r => r.RevisionNumber).ToArray());
+        Assert.Equal(_store.GetContainerProfile(profile.Id)!.Revisions, revisions);
+        Assert.Null(_store.ListContainerProfileRevisions("prof-doesnotexist"));
+        Assert.Null(_store.ListContainerProfileRevisions("not-a-profile"));
     }
 
     [Fact]

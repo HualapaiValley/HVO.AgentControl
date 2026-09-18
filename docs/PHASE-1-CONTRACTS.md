@@ -531,9 +531,18 @@ image. The owner accepted this design on 2026-09-18.
 
 - A profile (`prof-<hex>`) is a mutable label (slug, display name, description,
   `active|retired` status, optimistic revision) over an append-only chain of
-  revisions (`prev-<hex>`, `revision_number` 1..n). Revision content columns are
-  never updated; a change always appends the next number, and identical content
-  cannot be re-recorded for the same profile (`UNIQUE (profile_id, content_hash)`).
+  revisions (`prev-<hex>`, `revision_number` 1..n). Immutability is enforced at
+  the database boundary, not only by the store API: triggers abort any UPDATE
+  of a revision's identity/content columns and any DELETE of a revision or
+  profile (only the reserved build-lifecycle columns stay writable for #259),
+  and identical content cannot be re-recorded for the same profile
+  (`UNIQUE (profile_id, content_hash)`). The triggers are part of the exact
+  schema signature.
+- `hire_requests` is rebuilt in v8 with a nullable
+  `container_profile_revision_id` reference; existing hires migrate with `NULL`
+  and #260 makes the reference required at approval time.
+- Idempotent create replay is bound to the original payload (revision 1), so a
+  replay after later revisions still returns the same profile.
 - A revision is a **constrained `devcontainer.json` subset** plus an optional
   Dockerfile fragment. Accepted keys: `name`, `image` (exactly the symbolic
   `agentcontrol-worker-base`) or `build.dockerfile` (`"Dockerfile"` with a
@@ -550,8 +559,11 @@ image. The owner accepted this design on 2026-09-18.
   Fragments may only use `RUN`, `ENV`, `ARG`, `LABEL` and `WORKDIR` (under
   `/workspace`); `USER`, `ENTRYPOINT`, `CMD`, `VOLUME`, `EXPOSE`, `COPY`, `ADD`,
   `HEALTHCHECK`, `SHELL`, `STOPSIGNAL`, `ONBUILD`, a second `FROM`, parser
-  directives, `RUN --mount/--network/--security`, the Docker socket path and
-  replacing `PATH` are rejected.
+  directives, heredocs, `RUN --mount/--network/--security`, the Docker socket
+  path and replacing `PATH` are rejected. Checks run on the **joined logical
+  instruction** (backslash continuations joined exactly as BuildKit does), so a
+  token or keyword split across continued lines is seen as Docker would
+  execute it.
 - The canonical form (compact JSON, ordinal-sorted keys, LF fragment) is what is
   hashed and stored, so key order and line endings never create a new revision.
 - The base is referenced symbolically. The concrete approved digest is pinned per
@@ -561,7 +573,7 @@ image. The owner accepted this design on 2026-09-18.
 - `generic-employee` revision 1 is seeded on fresh stores and on the v7→v8
   migration, never overwriting an existing slug.
 - Owner routes: `GET/POST /api/profiles`, `GET /api/profiles/{id}` (profile plus
-  full revision chain), `POST /api/profiles/{id}/revisions`,
+  full revision chain), `GET/POST /api/profiles/{id}/revisions`,
   `POST /api/profiles/{id}/retire`; portal pages `/profiles` and `/profiles/{id}`.
   These record definitions only. **Nothing in this slice builds an image,
   approves a hire, creates an employee or rebuilds an existing employee**;

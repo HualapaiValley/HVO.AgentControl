@@ -331,6 +331,18 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         using var unknown = await client.GetAsync("/api/profiles/prof-doesnotexist");
         Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
 
+        using var revisionsList = await client.GetAsync($"/api/profiles/{seededId}/revisions");
+        Assert.Equal(HttpStatusCode.OK, revisionsList.StatusCode);
+        using var revisionsDocument = JsonDocument.Parse(await revisionsList.Content.ReadAsStringAsync());
+        Assert.Equal(revision.GetProperty("id").GetString(), Assert.Single(revisionsDocument.RootElement.EnumerateArray()).GetProperty("id").GetString());
+        using var malformedRevisions = await client.GetAsync("/api/profiles/not-a-profile/revisions");
+        Assert.Equal(HttpStatusCode.BadRequest, malformedRevisions.StatusCode);
+        using var unknownRevisions = await client.GetAsync("/api/profiles/prof-doesnotexist/revisions");
+        Assert.Equal(HttpStatusCode.NotFound, unknownRevisions.StatusCode);
+        using var revisionsWrongMethod = await client.SendAsync(new HttpRequestMessage(HttpMethod.Delete, $"/api/profiles/{seededId}/revisions"));
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, revisionsWrongMethod.StatusCode);
+        Assert.Equal("GET, POST", string.Join(", ", revisionsWrongMethod.Content.Headers.Allow));
+
         var payload = new { idempotencyKey = "api-profile-1", slug = "api-team", displayName = "API Team", description = "Created through the API.", definition = """{"image":"agentcontrol-worker-base","name":"API Team"}""", dockerfileFragment = (string?)null };
         using var unauthenticated = _factory.CreateClient();
         using var unauthenticatedResponse = await unauthenticated.PostAsJsonAsync("/api/profiles", payload);
@@ -368,6 +380,16 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         Assert.Equal(HttpStatusCode.OK, fragmentRevision.StatusCode);
         using var revisionDocument = JsonDocument.Parse(await fragmentRevision.Content.ReadAsStringAsync());
         Assert.Equal(2, revisionDocument.RootElement.GetProperty("revisionNumber").GetInt32());
+        using var chain = await client.GetAsync($"/api/profiles/{id}/revisions");
+        using var chainDocument = JsonDocument.Parse(await chain.Content.ReadAsStringAsync());
+        Assert.Equal([2, 1], chainDocument.RootElement.EnumerateArray().Select(r => r.GetProperty("revisionNumber").GetInt32()).ToArray());
+
+        // The original create replays to the same profile after it gained a revision.
+        using var lateReplay = await client.SendAsync(Post("/api/profiles", payload, "api-profile-1"));
+        Assert.Equal(HttpStatusCode.OK, lateReplay.StatusCode);
+        using var lateReplayDocument = JsonDocument.Parse(await lateReplay.Content.ReadAsStringAsync());
+        Assert.Equal(id, lateReplayDocument.RootElement.GetProperty("id").GetString());
+        Assert.Equal(2, lateReplayDocument.RootElement.GetProperty("currentRevisionNumber").GetInt32());
 
         using var staleRevision = await client.SendAsync(Post($"/api/profiles/{id}/revisions", new { expectedProfileRevision = profileRevision, definition = """{"image":"agentcontrol-worker-base","name":"stale"}""", dockerfileFragment = (string?)null }));
         Assert.Equal(HttpStatusCode.Conflict, staleRevision.StatusCode);

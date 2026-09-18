@@ -269,7 +269,8 @@ public sealed record HireRequestSummary(
     string? OwnerApproval,
     int Revision,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? ContainerProfileRevisionId = null);
 
 public static class ContainerProfileStatuses
 {

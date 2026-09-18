@@ -504,8 +504,11 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV7Statements =
         [.. SchemaV6Statements, .. HireRequestSchemaV7Statements];
 
+    // v8 = v6 + profile tables (referenced by the rebuilt hire_requests) + the
+    // rebuilt hire tables + immutability triggers. The v7 hire statements stay
+    // frozen in SchemaV7Statements for exact-signature migration.
     private static readonly string[] SchemaV8Statements =
-        [.. SchemaV7Statements, .. ContainerProfileSchemaV8Statements];
+        [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV8Statements, .. ContainerProfileImmutabilityV8Statements];
 
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
@@ -533,13 +536,13 @@ public sealed partial class OrganizationStore : IDisposable
         {
             var match = System.Text.RegularExpressions.Regex.Match(
                 statement,
-                @"^\s*CREATE\s+(?:UNIQUE\s+)?(?<type>TABLE|INDEX)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+                @"^\s*CREATE\s+(?:UNIQUE\s+)?(?<type>TABLE|INDEX|TRIGGER)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase
                 | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
             if (!match.Success)
             {
                 throw new InvalidOperationException(
-                    "Every schema statement must begin with CREATE TABLE or CREATE [UNIQUE] INDEX.");
+                    "Every schema statement must begin with CREATE TABLE, CREATE [UNIQUE] INDEX or CREATE TRIGGER.");
             }
 
             var type = match.Groups["type"].Value.ToLowerInvariant();
@@ -1936,6 +1939,35 @@ public sealed partial class OrganizationStore : IDisposable
     {
         using var transaction = connection.BeginTransaction();
         foreach (var statement in ContainerProfileSchemaV8Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+
+        // Rebuild hire_requests once with the nullable profile-revision reference.
+        // The referencing events table is renamed first so SQLite rewrites its
+        // foreign key to the renamed source, then both are copied into the exact
+        // v8 definitions; every existing hire survives with a NULL revision.
+        Execute(connection, transaction, "ALTER TABLE hire_request_events RENAME TO hire_request_events_v7");
+        Execute(connection, transaction, "ALTER TABLE hire_requests RENAME TO hire_requests_v7");
+        Execute(connection, transaction, HireRequestsSchemaV8Statement);
+        Execute(connection, transaction, HireRequestEventsSchemaV8Statement);
+        Execute(connection, transaction,
+            """
+            INSERT INTO hire_requests (
+                id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
+                memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
+                owner_approval, container_profile_revision_id, revision, created_at, updated_at)
+            SELECT id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                   requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
+                   memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
+                   owner_approval, NULL, revision, created_at, updated_at
+            FROM hire_requests_v7
+            """);
+        Execute(connection, transaction, "INSERT INTO hire_request_events SELECT * FROM hire_request_events_v7");
+        Execute(connection, transaction, "DROP TABLE hire_request_events_v7");
+        Execute(connection, transaction, "DROP TABLE hire_requests_v7");
+        foreach (var statement in ContainerProfileImmutabilityV8Statements)
         {
             Execute(connection, transaction, statement);
         }

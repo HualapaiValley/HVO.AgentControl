@@ -381,68 +381,102 @@ public sealed partial class ContainerProfileDefinition
         if (lines.Length > MaximumDockerfileFragmentLines)
             throw new OrganizationValidationException($"The Dockerfile fragment must be at most {MaximumDockerfileFragmentLines} lines.");
 
+        // Docker joins backslash continuations before it tokenizes an
+        // instruction, so every allowlist and hazard check runs on the joined
+        // logical instruction, never on a physical line. The first physical line
+        // of each instruction is retained for error messages.
         var sawFrom = false;
-        var continuation = false;
-        for (var index = 0; index < lines.Length; index++)
+        foreach (var (instructionText, lineNumber) in JoinLogicalInstructions(lines))
         {
-            var line = lines[index];
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0 || trimmed.StartsWith('#'))
-            {
-                if (trimmed.StartsWith("# syntax", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("# escape", StringComparison.OrdinalIgnoreCase))
-                    throw new OrganizationValidationException($"Line {index + 1}: parser directives are not allowed in a fragment.");
-                continue;
-            }
-
-            if (continuation)
-            {
-                RejectContinuationHazards(trimmed, index + 1);
-                continuation = trimmed.EndsWith('\\');
-                continue;
-            }
-
-            var space = trimmed.IndexOfAny([' ', '\t']);
-            var instruction = (space < 0 ? trimmed : trimmed[..space]).ToUpperInvariant();
-            var arguments = space < 0 ? string.Empty : trimmed[(space + 1)..].Trim();
+            var space = instructionText.IndexOfAny([' ', '\t']);
+            var instruction = (space < 0 ? instructionText : instructionText[..space]).ToUpperInvariant();
+            var arguments = space < 0 ? string.Empty : instructionText[(space + 1)..].Trim();
 
             if (!sawFrom)
             {
                 if (instruction != "FROM")
-                    throw new OrganizationValidationException($"Line {index + 1}: the first instruction must be 'FROM {BaseImageReference}'.");
+                    throw new OrganizationValidationException($"Line {lineNumber}: the first instruction must be 'FROM {BaseImageReference}'.");
                 if (!string.Equals(arguments, BaseImageReference, StringComparison.Ordinal))
-                    throw new OrganizationValidationException($"Line {index + 1}: FROM must be exactly '{BaseImageReference}' without a tag, digest, platform or stage alias.");
+                    throw new OrganizationValidationException($"Line {lineNumber}: FROM must be exactly '{BaseImageReference}' without a tag, digest, platform or stage alias.");
                 sawFrom = true;
                 continue;
             }
 
             if (instruction == "FROM")
-                throw new OrganizationValidationException($"Line {index + 1}: only one FROM is allowed; multi-stage fragments are not supported.");
+                throw new OrganizationValidationException($"Line {lineNumber}: only one FROM is allowed; multi-stage fragments are not supported.");
             if (!AllowedDockerfileInstructionSet.Contains(instruction))
-                throw new OrganizationValidationException($"Line {index + 1}: '{Sanitize(instruction)}' is not allowed in a fragment. Allowed: {string.Join(", ", AllowedDockerfileInstructions)}.");
+                throw new OrganizationValidationException($"Line {lineNumber}: '{Sanitize(instruction)}' is not allowed in a fragment. Allowed: {string.Join(", ", AllowedDockerfileInstructions)}.");
             if (instruction == "RUN")
-                RejectContinuationHazards(arguments, index + 1);
+                RejectRunHazards(arguments, lineNumber);
             if (instruction == "WORKDIR" && !(arguments is "/workspace" || arguments.StartsWith("/workspace/", StringComparison.Ordinal)))
-                throw new OrganizationValidationException($"Line {index + 1}: WORKDIR must stay under /workspace.");
+                throw new OrganizationValidationException($"Line {lineNumber}: WORKDIR must stay under /workspace.");
             if (instruction == "ENV" && PathAssignment().IsMatch(arguments) && !arguments.Contains("$PATH", StringComparison.Ordinal) && !arguments.Contains("${PATH}", StringComparison.Ordinal))
-                throw new OrganizationValidationException($"Line {index + 1}: replacing PATH is not allowed; append with ENV PATH=\"$PATH:...\".");
-            continuation = arguments.EndsWith('\\');
+                throw new OrganizationValidationException($"Line {lineNumber}: replacing PATH is not allowed; append with ENV PATH=\"$PATH:...\".");
         }
 
         if (!sawFrom)
             throw new OrganizationValidationException($"The Dockerfile fragment must begin with 'FROM {BaseImageReference}'.");
-        if (continuation)
-            throw new OrganizationValidationException("The Dockerfile fragment ends inside a line continuation.");
 
         var result = string.Join('\n', lines.Select(line => line.TrimEnd())).TrimEnd('\n') + "\n";
         return result;
     }
 
-    private static void RejectContinuationHazards(string text, int lineNumber)
+    /// <summary>
+    /// Joins physical lines into logical instructions exactly the way the
+    /// BuildKit Dockerfile parser does (default <c>\</c> escape token): a
+    /// trailing unescaped backslash continues the instruction, the backslash is
+    /// removed and the next line's bytes are appended <b>without</b> a separator
+    /// (leading whitespace of continuation lines preserved), blank and comment
+    /// lines inside a continuation are skipped, and an unterminated continuation
+    /// is an error. Checking the joined text means a token split across lines
+    /// (for example <c>--mou\</c> + <c>nt=</c>) is seen as the <c>--mount=</c>
+    /// Docker would execute. Parser directives are refused before joining.
+    /// </summary>
+    private static IEnumerable<(string Instruction, int LineNumber)> JoinLogicalInstructions(string[] lines)
     {
-        if (RunFlagPattern().IsMatch(text))
+        var buffer = new StringBuilder();
+        var startLine = 0;
+        var continuing = false;
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var raw = lines[index];
+            var trimmed = raw.Trim();
+            if (trimmed.StartsWith('#'))
+            {
+                if (trimmed.StartsWith("# syntax", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("# escape", StringComparison.OrdinalIgnoreCase))
+                    throw new OrganizationValidationException($"Line {index + 1}: parser directives are not allowed in a fragment.");
+                continue;
+            }
+            if (trimmed.Length == 0) continue;
+
+            // The first physical line of an instruction is left-trimmed; continuation
+            // lines keep their leading whitespace, matching BuildKit's processLine.
+            var content = continuing ? raw.TrimEnd() : raw.Trim();
+            if (!continuing) startLine = index + 1;
+            var match = ContinuationPattern().Match(content);
+            var endsWithContinuation = match.Success;
+            if (endsWithContinuation) content = content[..match.Index] + match.Groups["keep"].Value;
+            buffer.Append(content);
+            continuing = endsWithContinuation;
+            if (!continuing)
+            {
+                yield return (buffer.ToString().Trim(), startLine);
+                buffer.Clear();
+            }
+        }
+
+        if (continuing)
+            throw new OrganizationValidationException("The Dockerfile fragment ends inside a line continuation.");
+    }
+
+    private static void RejectRunHazards(string joinedArguments, int lineNumber)
+    {
+        if (RunFlagPattern().IsMatch(joinedArguments))
             throw new OrganizationValidationException($"Line {lineNumber}: RUN flags (--mount, --network, --security) are not allowed.");
-        if (text.Contains("/var/run/docker.sock", StringComparison.Ordinal) || text.Contains("docker.sock", StringComparison.Ordinal))
+        if (joinedArguments.Contains("docker.sock", StringComparison.OrdinalIgnoreCase))
             throw new OrganizationValidationException($"Line {lineNumber}: the Docker socket is never available to a profile.");
+        if (HeredocPattern().IsMatch(joinedArguments))
+            throw new OrganizationValidationException($"Line {lineNumber}: heredoc RUN syntax is not allowed in a fragment.");
     }
 
     private static void RejectDuplicateKeys(JsonElement element, string path)
@@ -536,4 +570,12 @@ public sealed partial class ContainerProfileDefinition
 
     [GeneratedRegex("(?:^|\\s)PATH(?:=|\\s)", RegexOptions.CultureInvariant)]
     private static partial Regex PathAssignment();
+
+    [GeneratedRegex("<<-?\\s*['\"]?[A-Za-z_]", RegexOptions.CultureInvariant)]
+    private static partial Regex HeredocPattern();
+
+    // BuildKit: `([^\\])\\[ \t]*$|^\\[ \t]*$` — a trailing backslash continues the
+    // line unless it is itself escaped by a preceding backslash.
+    [GeneratedRegex("(?:(?<keep>[^\\\\])\\\\[ \\t]*$)|(?:^\\\\[ \\t]*$)", RegexOptions.CultureInvariant)]
+    private static partial Regex ContinuationPattern();
 }

@@ -51,6 +51,39 @@ public sealed partial class OrganizationStore
         """,
     ];
 
+    /// <summary>
+    /// Database-boundary immutability. Identity and content columns of a revision
+    /// can never change and revisions are never deleted; only the build lifecycle
+    /// columns (#259) may be updated. Profiles cannot be deleted either, so a
+    /// retired profile keeps its history. Triggers are part of the exact schema
+    /// signature, so removing one fails the store closed.
+    /// </summary>
+    private static string[] ContainerProfileImmutabilityV8Statements =>
+    [
+        """
+        CREATE TRIGGER container_profile_revisions_immutable
+            BEFORE UPDATE OF id, profile_id, revision_number, base_image_reference, definition_json, dockerfile_fragment, content_hash, created_by, created_at
+            ON container_profile_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'container profile revisions are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER container_profile_revisions_no_delete
+            BEFORE DELETE ON container_profile_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'container profile revisions are never deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER container_profiles_no_delete
+            BEFORE DELETE ON container_profiles
+        BEGIN
+            SELECT RAISE(ABORT, 'container profiles are retired, never deleted');
+        END
+        """,
+    ];
+
     public IReadOnlyList<ContainerProfileSummary> ListContainerProfiles()
     {
         return TranslateStoreFaults(() =>
@@ -79,6 +112,21 @@ public sealed partial class OrganizationStore
         });
     }
 
+    /// <summary>Returns the revision chain newest first, or null when no profile carries the id.</summary>
+    public IReadOnlyList<ContainerProfileRevisionSummary>? ListContainerProfileRevisions(string id)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ContainerProfilePrefix)) return null;
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                return ReadProfiles(connection, null, id).Count == 0 ? null : ReadRevisions(connection, null, id);
+            }
+        });
+    }
+
     public ContainerProfileSummary CreateContainerProfile(ContainerProfileCreate request, string? headerIdempotencyKey)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -99,7 +147,10 @@ public sealed partial class OrganizationStore
                 var existing = ReadProfileByKey(connection, transaction, idempotencyKey);
                 if (existing is not null)
                 {
-                    if (!string.Equals(ProfileCreateHash(existing), createHash, StringComparison.Ordinal))
+                    // The key is bound to the original create payload, which is the
+                    // immutable first revision, not whatever revision is current now.
+                    var firstRevisionHash = ReadRevisionContentHash(connection, transaction, existing.Id, 1);
+                    if (!string.Equals(ProfileCreateHash(existing, firstRevisionHash), createHash, StringComparison.Ordinal))
                         throw new OrganizationConcurrencyException("The idempotency key is already bound to a different container profile payload.");
                     transaction.Commit();
                     return existing;
@@ -319,8 +370,19 @@ public sealed partial class OrganizationStore
         return result;
     }
 
-    private static string ProfileCreateHash(ContainerProfileSummary profile) =>
-        HashHireValue(string.Join('\n', profile.Slug, profile.DisplayName, profile.Description, profile.CurrentContentHash));
+    private static string ProfileCreateHash(ContainerProfileSummary profile, string firstRevisionContentHash) =>
+        HashHireValue(string.Join('\n', profile.Slug, profile.DisplayName, profile.Description, firstRevisionContentHash));
+
+    private static string ReadRevisionContentHash(SqliteConnection connection, SqliteTransaction transaction, string profileId, int revisionNumber)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT content_hash FROM container_profile_revisions WHERE profile_id = $profile AND revision_number = $number";
+        command.Parameters.AddWithValue("$profile", profileId);
+        command.Parameters.AddWithValue("$number", revisionNumber);
+        return command.ExecuteScalar() as string
+            ?? throw new OrganizationStoreCorruptException($"Container profile '{profileId}' has no revision {revisionNumber}.");
+    }
 
     private static string ValidateProfileSlug(string? value)
     {
