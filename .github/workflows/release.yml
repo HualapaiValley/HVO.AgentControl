@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/roysalisbury/hvo.agentcontrol
+  IMAGE: ghcr.io/hualapaivalley/hvo.agentcontrol
 
 jobs:
   validate:
@@ -44,11 +44,11 @@ jobs:
         run: |
           echo "::error::Releases must be dispatched from main (got ${GITHUB_REF})."
           exit 1
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       # The version is passed through the environment, never interpolated into
@@ -66,13 +66,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Restore
@@ -86,7 +86,7 @@ jobs:
           --results-directory artifacts/test-results
       - name: Format
         run: dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
       - run: npm ci --prefix tests/Browser
@@ -95,7 +95,7 @@ jobs:
       - run: docker compose config --quiet
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-test-results
           path: artifacts/test-results
@@ -114,7 +114,7 @@ jobs:
       contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -130,9 +130,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
           python3 scripts/check-release.py --version "$VERSION"
           python3 scripts/check-release.py --extract-notes "$VERSION" CHANGELOG.md > /tmp/release-notes.md
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GHCR with the ephemeral workflow token
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -158,15 +158,15 @@ jobs:
       # are the only references created.
       - name: Build and push linux/amd64 image
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/roysalisbury/hvo.agentcontrol:${{ inputs.version }}
-            ghcr.io/roysalisbury/hvo.agentcontrol:sha-${{ steps.sha.outputs.short }}
+            ghcr.io/hualapaivalley/hvo.agentcontrol:${{ inputs.version }}
+            ghcr.io/hualapaivalley/hvo.agentcontrol:sha-${{ steps.sha.outputs.short }}
           labels: |
             org.opencontainers.image.title=HVO.AgentControl
             org.opencontainers.image.version=${{ inputs.version }}
@@ -189,7 +189,7 @@ jobs:
             echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } | tee image-digest.txt
       - name: Upload image digest evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-image-digest-${{ inputs.version }}
           path: image-digest.txt

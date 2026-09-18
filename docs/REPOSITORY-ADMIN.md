@@ -2,7 +2,9 @@
 
 ## Current policy
 
-- Private repository, `main` is the default branch.
+- Repository `HualapaiValley/HVO.AgentControl` (transferred from
+  `RoySalisbury/HVO.AgentControl` on 2026-09-18; GitHub redirects the old name).
+  Public repository, `main` is the default branch.
 - Pull requests required on `main`, including for admins; no force pushes or
   branch deletion. Review conversations must be resolved.
 - Required CI checks: `Build and test`, `Docker config and image`, and
@@ -19,7 +21,13 @@
 - Automatically delete merged feature branches. No automatic merging enabled.
 - Actions defaults remain read-only and cannot approve PRs. Only the manual
   release publishing job requests `contents: write` and `packages: write`.
-- Dependency vulnerability alerts enabled. Weekly grouped Dependabot updates
+- The HualapaiValley organization requires every `uses:` action to be pinned
+  to a full-length commit SHA (a tag such as `@v7` is rejected at job setup).
+  Workflows pin `<owner>/<action>@<sha> # <version>`; Dependabot's
+  `github-actions` group updates the SHA and the version comment together.
+- Secret scanning, push protection, dependency vulnerability alerts and
+  Dependabot security updates are enabled (re-applied after the transfer, when
+  the public visibility made them available). Weekly grouped Dependabot updates
   cover active NuGet, browser npm, Dockerfile and GitHub Actions dependencies.
   Archived projects are excluded from NuGet discovery and are not update targets.
 
@@ -36,11 +44,13 @@ first publish; do not make the package public implicitly. See [RELEASING.md](REL
 
 ## Remaining owner checks
 
-- Verify the existing AgentControl GitHub App installation and repository grants
-  in GitHub Settings. The current CLI token cannot list App installations; no
-  credentials, permissions, installations or collaborators were altered.
-- Review secret scanning/push protection availability for this private repo's
-  plan. Git ignores and manual scans are not equivalent to GitHub secret scanning.
+- The `hvo-agentcontrol` GitHub App is installed on the HualapaiValley
+  organization with access to all repositories; verify its permission grants in
+  the organization settings. No credentials were altered by the transfer.
+- Branch protection was re-applied after the transfer (the private-repo plan had
+  dropped it); recheck it whenever the repository's plan or visibility changes.
+- The `batismal-web` outside collaborator (read) was not carried across the
+  transfer; re-add only if still needed.
 - Select an independent reviewer for the first V2 PR, then revisit required
   approval count if they become a collaborator.
 
