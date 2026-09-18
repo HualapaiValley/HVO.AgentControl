@@ -305,9 +305,19 @@ try {
 
   // Stall the employee read so the pre-load, non-interactive state is stable,
   // then let it fail safely: hidden content must stay hidden and inert.
+  let finishDelayedEmployee;
+  const delayedEmployeeFinished = new Promise((resolve) => { finishDelayedEmployee = resolve; });
   await page.route('**/api/employees/**', async (route) => {
-    await sleep(1200);
-    await route.continue();
+    // Own the intercepted request through completion. The test must also wait
+    // for this handler before unroute(); Playwright resolves pending routes when
+    // a handler is removed, which otherwise races the delayed fulfill.
+    try {
+      const upstream = await route.fetch();
+      await sleep(1200);
+      await route.fulfill({ response: upstream });
+    } finally {
+      finishDelayedEmployee();
+    }
   });
   const employeeResponse = await page.goto(`${base}/employees/emp-disabled`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-page="employee-detail"]');
@@ -332,6 +342,7 @@ try {
   record('employee content is hidden and non-rendered while the read is pending',
     employeePreLoad.hidden && employeePreLoad.display === 'none' && /Loading/.test(employeePreLoad.status),
     employeePreLoad);
+  await delayedEmployeeFinished;
   await page.unroute('**/api/employees/**');
 
   // ---- 9. nav aria-current ----------------------------------------------
