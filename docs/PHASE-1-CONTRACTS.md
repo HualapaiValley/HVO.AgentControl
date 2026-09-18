@@ -229,9 +229,10 @@ with access to `/control-data`, the owner secret or the launcher binary. Do not
 describe the registered-operation surface as preventing code execution.
 
 The separate #213 worker artifact now implements the worker-image bridge/employee
-identity split and fixed-operation supervisor described below. Controller routing,
-provisioning, and per-role UID allocation for additional internal roles remain
-future work (#217+).
+identity split and fixed-operation supervisor described below. Controller routing
+and provisioning were exercised on the first managed disposable two-host path
+accepted on 2026-09-18 (#217); production managed provisioning and per-role UID
+allocation for additional internal roles remain future work.
 
 Concrete separation inside the same container:
 
@@ -651,8 +652,8 @@ These are open and must not be presented as decided or owner-accepted:
   null-safe host validation and a synchronously rejecting ACP permission evaluator
   with revisioned staged owner grants and complete matched-restriction audit IDs.
   General worker delivery/restart/bridge behavior remains unresolved.
-- **Implemented worker artifact (#213):** worker-image bridge/employee UID separation; private `0700` control/home/workspace/session trees; bootstrap-only stdin key creation with duplicate verification and symlink/hard-link refusal; no Docker socket, host checkout or controller secrets; fixed root PID1 supervision; ACP stdio ending at the unprivileged bridge; worker/process generations; and explicit bridge/container interruption behavior. **Still unresolved for #217:** key rotation interruption, compromise re-enrollment and remote custody/delivery.
-- **Implemented worker channel (#213) and hermetic controller foundation (#217 branch):** the worker retains the bounded NDJSON, mutual role-labelled HMAC, lease/epoch fencing, durable request/replay/permission and interruption behavior described above. The protocol framing, canonical hashing and HMAC code is now a storage-independent library referenced by both worker and controller. Control schema v6 retains the exact stable remote host/enrollment/cursor/task/request/provisioning/resource/recovery/viewer and bounded pending-permission metadata, chaining exact released-v3, released-v4 and schema-v5 migrations with verified create-once backups and hashes; v5 added the audited `session-reconciliation` recovery kind and v6 adds audited external disposition for `request-uncertain` obligations. Owner APIs enroll only configured approved-host references; strict SSH vectors pin known_hosts and identity paths and forbid arbitrary command tokens. The disabled-by-default controller now has injectable authenticated synchronization, replay/ACK, request/cancellation/permission, heartbeat, typed provisioning and ownership-checked cleanup coordinators with intent-first durable transitions. No real host was accessed. The role-separated viewer protocol, fixed production PTY/TUI attach backend, exact process-session binding and store-only read model are implemented hermetically; key rotation and two-host operational evidence remain unimplemented and must not be inferred from this core. Owner keystrokes execute with employee authority and are not a sandbox.
+- **Implemented worker artifact (#213) and accepted disposable enrollment (#217):** worker-image bridge/employee UID separation; private `0700` control/home/workspace/session trees; bootstrap-only stdin key creation with duplicate verification and symlink/hard-link refusal; no Docker socket, host checkout or controller secrets; fixed root PID1 supervision; ACP stdio ending at the unprivileged bridge; worker/process generations; and explicit bridge/container interruption behavior. Disposable enrollment over pinned ED25519 strict SSH to `home-dev-02` was accepted on 2026-09-18 and the disposable worker/key were removed. **Still unresolved:** key rotation interruption, compromise re-enrollment and production remote custody/delivery.
+- **Implemented worker channel (#213), hermetic controller foundation and accepted disposable two-host path (#217):** the worker retains the bounded NDJSON, mutual role-labelled HMAC, lease/epoch fencing, durable request/replay/permission and interruption behavior described above. The protocol framing, canonical hashing and HMAC code is a storage-independent library referenced by both worker and controller. Control schema v7 retains the exact stable remote host/enrollment/cursor/task/request/provisioning/resource/recovery/viewer, durable hire-request and bounded pending-permission metadata, chaining exact released-v3/v4/v5/v6 migrations with verified create-once backups and hashes; v5 added the audited `session-reconciliation` recovery kind and v6 adds audited external disposition for `request-uncertain` obligations. Owner APIs enroll only configured approved-host references; strict SSH vectors pin known_hosts and identity paths and forbid arbitrary command tokens. The disabled-by-default controller has injectable authenticated synchronization, replay/ACK, request/cancellation/permission, heartbeat, typed provisioning and ownership-checked cleanup coordinators with intent-first durable transitions. On 2026-09-18 the first managed disposable path was accepted live over pinned ED25519 strict SSH to `home-dev-02`, including ACP session lifecycle, provider prompt/tool, cancellation, disconnect/reconnect reconcile, stale-lease fencing, bounded replay, worker restart and viewer attach; disposable resources and the key were removed. The role-separated viewer protocol, fixed production PTY/TUI attach backend, exact process-session binding and store-only read model are implemented hermetically. **Still unimplemented and not to be inferred:** key rotation/compromise re-enrollment, production managed provisioning, and cancellation-as-rollback (OpenCode reported the cancelled turn completed). Owner keystrokes execute with employee authority and are not a sandbox.
 - Whether the existing authorized SSH/Docker credential can be used without new
   grants; secure key custody/rotation and measured host-adapter restrictions.
 - Implementation and adversarial validation of the specified bridge challenge,
@@ -676,13 +677,20 @@ These are open and must not be presented as decided or owner-accepted:
   future behavior across models and roles; one live demonstration remains an
   explicit operator action and was not run for #216.
 - Reachability and collateral of `home-dev-02`, and whether the disposable
-  worker path can run without touching existing services.
+  worker path can run without touching existing services. **Resolved for the
+  disposable run (2026-09-18):** the isolated labeled worker path ran without
+  touching existing services and all labeled resources were removed; production
+  provisioning and collateral at scale remain unvalidated.
 - Owner review and acceptance of these contracts. This document is a proposal.
+  The #217 first managed disposable two-host acceptance is complete; #219
+  approval/provisioning still requires discussion and owner approval.
 
 ## 15. Non-goals
 
 No full role split, no finance workflows, no container per internal role, no V1
 migration, no release, and no change to the archive. #213 provides the independent
-worker-owned bridge/runtime artifact; #217 now provides the hermetic controller
-binding/routing/provisioning state machines, while viewer/read-model work and
-two-host operational success remain pending.
+worker-owned bridge/runtime artifact; #217 provides the hermetic controller
+binding/routing/provisioning state machines and its first managed disposable
+two-host path was operationally accepted on 2026-09-18. Viewer/read-model work is
+code-complete; key rotation, production provisioning, and #219
+approval/provisioning remain pending discussion and owner approval.

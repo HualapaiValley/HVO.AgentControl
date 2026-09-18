@@ -394,7 +394,12 @@ try {
       receiptText.includes(`Created request ${createdId}.`) && receiptText.includes('No employee has been created.'),
       { receipt: receiptText });
   }
-  record('approval is disabled with #217 explanation', await page.locator('.request-card button:text("Approve")').first().isDisabled() && (await page.locator('.request-card').first().innerText()).includes('#217 operational acceptance'));
+  const approvalText = await page.locator('.request-card').first().innerText();
+  const hiringHeading = await page.locator('[data-hiring-page] .page-heading').innerText();
+  const hiringPageText = await page.locator('[data-hiring-page]').innerText();
+  record('approval is disabled pending #219 discussion and owner approval', await page.locator('.request-card button:text("Approve")').first().isDisabled() && approvalText.includes('#219 discussion and owner approval') && !approvalText.includes('#217'), { approvalText });
+  record('hiring heading and card body carry no superseded #217 gate', !hiringHeading.includes('#217') && !approvalText.includes('#217') && hiringHeading.includes('#219 discussion and owner approval'), { hiringHeading });
+  record('hiring page-wide copy carries no superseded #217 gate', !hiringPageText.includes('#217'), { hiringPageText });
 
   await page.addInitScript(() => {
     try { Object.defineProperty(Crypto.prototype, 'randomUUID', { configurable: true, value: undefined }); } catch {}

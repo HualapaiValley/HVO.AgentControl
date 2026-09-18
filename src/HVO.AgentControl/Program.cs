@@ -248,17 +248,48 @@ if (app.Environment.IsEnvironment("ExceptionPathTests"))
     app.MapGet("/__test/fault", (HttpContext _) => throw new InvalidOperationException("injected-sensitive-failure-detail"));
 }
 
+// Worker-control capability truth (2026-09-18, #217 acceptance). These flags
+// distinguish three different claims and must not be collapsed:
+//   CodeAvailable           - the code exists in this build.
+//   Implemented             - the first managed disposable two-host path is
+//                             implemented end to end: pinned ED25519/strict SSH,
+//                             enrolled worker, ACP session lifecycle, provider
+//                             prompt/tools, cancellation, disconnect/reconnect
+//                             reconciliation, stale-lease fencing, bounded
+//                             replay, worker restart and viewer attach were
+//                             exercised on an authorized disposable topology.
+//   OperationallyValidated  - that same first path was validated live and the
+//                             disposable resources were cleaned up.
+// Implemented/validated cover only that first path. Key rotation and compromise
+// re-enrollment, and production managed hires/provisioning, are NOT validated
+// by these flags. Enabled remains the effective deployment/configuration gate
+// and stays false by default; the live acceptance ran an explicitly enabled,
+// disposable isolation. WorkerControlValidatedScope carries the exact bound in
+// band so a client can distinguish the accepted path from the excluded ones.
 app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     "HVO.AgentControl",
     2,
     "control-portal",
-    WorkerControlImplemented: false,
+    WorkerControlImplemented: true,
     WorkerControlCodeAvailable: true,
     WorkerControlEnabled: workerControlEnabled,
-    WorkerControlOperationallyValidated: false)))
+    WorkerControlOperationallyValidated: true,
+    WorkerControlValidatedScope: Program.WorkerControlValidatedScope)))
     .WithName("GetInfo")
     .WithTags("Control")
     .WithSummary("Describes the control-host baseline.")
+    .WithDescription(
+        "Implementation identity plus worker-control capability truth. " +
+        "workerControlImplemented and workerControlOperationallyValidated " +
+        $"describe only the scope named by workerControlValidatedScope " +
+        $"(\"{Program.WorkerControlValidatedScope}\"): the first managed disposable " +
+        "two-host path (pinned strict SSH, enrolled worker, ACP session lifecycle, " +
+        "provider prompt/tools, cancellation, disconnect/reconnect reconciliation, " +
+        "stale-lease fencing, bounded replay, worker restart and viewer attach on an " +
+        "authorized disposable topology). They explicitly exclude key rotation and " +
+        "compromise re-enrollment and production managed hiring/provisioning. " +
+        "workerControlEnabled is the separate deployment/configuration gate and is " +
+        "false in the default configuration.")
     .Produces<InfoResponse>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
 
@@ -1364,6 +1395,16 @@ public partial class Program
     public const int MaximumHireRequestIdLength = 64;
 
     /// <summary>
+    /// Exact, stable scope label reported by <c>/api/info</c> for the worker-control
+    /// capability that <see cref="InfoResponse.WorkerControlImplemented"/> and
+    /// <see cref="InfoResponse.WorkerControlOperationallyValidated"/> describe. It
+    /// names only the first managed disposable two-host path; it does not include
+    /// key rotation/compromise re-enrollment or production managed
+    /// hiring/provisioning.
+    /// </summary>
+    public const string WorkerControlValidatedScope = "first-managed-disposable-two-host";
+
+    /// <summary>
     /// Returns true for paths whose HTTP error contract is always RFC 9457 JSON
     /// rather than the portal's friendly HTML. Segment-aware prefix matching
     /// keeps unrelated paths such as <c>/apiary</c> in the portal namespace.
@@ -1824,7 +1865,7 @@ public sealed record RoleInstructionsUpdate(string? StandingInstructions, int? R
 public sealed record ManualHoldUpdate(bool Held, string? Detail);
 public sealed record GrantRevokeRequest(int ExpectedRevision);
 
-public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated);
+public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated, string WorkerControlValidatedScope);
 
 public sealed record ModelResponse(string Model);
 

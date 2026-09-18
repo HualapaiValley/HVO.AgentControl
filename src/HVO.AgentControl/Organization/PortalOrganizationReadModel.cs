@@ -186,7 +186,7 @@ public static class PortalOrganizationReadModel
                 Supported: true,
                 Count: (hireRequests ?? []).Count(request => request.State == HireRequestStates.Requested),
                 Items: (hireRequests ?? []).Where(request => request.State == HireRequestStates.Requested).Cast<object>().ToArray(),
-                Reason: "Hire requests can be requested or rejected. Approval and provisioning remain gated by #217 two-host operational acceptance."),
+                Reason: "Hire requests can be requested or rejected. Approval and provisioning remain pending #219 discussion and owner approval; the #217 two-host dependency is satisfied."),
             new PendingApprovalsSummary(
                 Supported: employees.Any(x => x.PendingWorkerPermissions.Supported),
                 Count: employees.Sum(x => x.PendingWorkerPermissions.Items.Count),

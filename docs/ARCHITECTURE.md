@@ -33,8 +33,9 @@ from the `generation = 2` identity.
   (`ControlStatus.Error`) is exposed. Recent logs are explicitly unsupported
   because no employee-scoped safe log contract exists, so neither bulk logs nor
   another employee's logs are returned. Pending hire requests are real durable
-  records; approval/provisioning remain unavailable until #217 operational
-  acceptance and are never represented as completed employee creation.
+  records; approval/provisioning remain unavailable pending #219 owner approval
+  and discussion (the #217 two-host dependency is satisfied) and are never
+  represented as completed employee creation.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
   Schema v7 migrates only the exact released v6 signature after creating and
   verifying immutable `control.schema-v6.db` and SHA-256 evidence. It adds
@@ -291,9 +292,37 @@ remote argv or environment and authentication remains controller-to-bridge.
 The #217 controller core implements disabled-by-default connection, replay,
 dispatch, cancellation, permission rejection, heartbeat, provisioning and cleanup
 coordinators with injectable bridge/provisioner abstractions and intent-first
-SQLite transitions. Schema-v4 also projects bounded pending worker permissions without raw payloads; reject-only decisions reload the authoritative stored tuple/options and require the unchanged cached owner lease. Exact terminal routing has no local/remote fallback, and the viewer role reuses that cached lease without advancing its epoch. The fixed production worker TUI transport/backend is implemented and hermetically validated. **Still not implemented or operationally validated:** key rotation/compromise re-enrollment,
-hiring, and two-host provisioning/success. Consequently control-host
-`/api/info WorkerControlImplemented` remains false. The optional Compose worker profile is disabled by default, has
+SQLite transitions. Schema-v4 also projects bounded pending worker permissions without raw payloads; reject-only decisions reload the authoritative stored tuple/options and require the unchanged cached owner lease. Exact terminal routing has no local/remote fallback, and the viewer role reuses that cached lease without advancing its epoch. The fixed production worker TUI transport/backend is implemented and hermetically validated.
+
+The first managed disposable two-host path was operationally accepted on
+2026-09-18 on an authorized disposable topology: source `main` at `c4a7966`,
+worker OpenCode `1.18.30`, Docker `29.8.0`, worker host `home-dev-02`. Pinned
+ED25519 strict SSH reached an isolated labeled worker with exact latest images.
+Redacted evidence covered ACP initialize/new/load; anonymous provider prompt
+streaming to completion; a real tool side effect at exact
+`/workspace/agentcontrol-217-tool.txt` bytes `TOOL217_OK\n` (SHA-256 `954cf…`);
+cancellation delivered on the same lease in ~2.5 s with the active request
+cleared; disconnect after a forwarded receipt, reconnect epoch advance, exact
+reconcile completion and idempotent resubmit without duplicate; stale-lease
+rejection after a competing owner epoch; bounded multi-generation replay both
+hermetic and live; worker restart advancing the process generation with no
+automatic resume and explicit load of the same native session; and viewer
+framing/auth/resize/marker plus detach/reconnect. Live permission handling
+covered `[once, always, reject]` and safe-reject `[reject]` with a same-lease
+reject pending→decided and prompt completion (compatibility fix PR #255).
+Cleanup was exact: zero labeled containers, volumes or tags, and the local key
+was removed. Cancellation limitation: OpenCode reported the cancelled turn
+completed, so cancellation cleared the active request but was not rollback.
+The `home-docker` control portal was deployed with separate schema-v7 UI and is
+irrelevant to worker flags except portal inspection.
+
+**Still not implemented or operationally validated:** key rotation/compromise
+re-enrollment and production managed hiring/provisioning. `/api/info` reports
+`WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
+covering only the first managed disposable two-host path, and carries
+`workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
+bound on exactly that claim; `WorkerControlEnabled`
+remains the deployment/configuration gate and is false by default. The optional Compose worker profile is disabled by default, has
 no published port or Docker socket, is read-only outside named volumes/tmpfs,
 has process/CPU/memory limits and disables automatic restart. That hermetic
 Compose profile keeps `network_mode: none`. A controller-provisioned worker
@@ -324,7 +353,9 @@ owned runtime/TUI to be ready, and no dispatch hold before Ready or task dispatc
 
 The #213 worker artifact implements durable sequence receipts, ownership leases,
 replay bounds and stale-owner fencing on the worker side. #217 controller
-integration and routing do not yet consume that contract. An operator stop must
+integration and routing consume that contract on the first managed disposable
+two-host path accepted on 2026-09-18; production managed provisioning remains
+pending. An operator stop must
 remain authoritative when models fail.
 
 ## Access and isolation
@@ -341,8 +372,9 @@ The control container runs two unprivileged identities plus one narrow
 privileged launcher. This satisfies the
 [Section 6](PHASE-1-CONTRACTS.md#6-credential-and-process-isolation-prerequisite)
 prerequisite for the control host. The separate #213 worker image now implements
-the worker-image identity split; #217 controller-to-worker integration remains
-future work.
+the worker-image identity split; #217 controller-to-worker integration was
+exercised on the accepted disposable two-host path, while production managed
+provisioning remains future work.
 
 | Identity | UID:GID | Owns | Login shell |
 | --- | --- | --- | --- |
@@ -690,3 +722,5 @@ repository execution.
 
 V1 is reference only. No V1 database migration or runtime compatibility is
 promised. V2 starts with new state and explicitly provisioned environments.
+The accepted path does not validate key rotation or compromise re-enrollment and
+does not authorize production managed hiring/provisioning.
