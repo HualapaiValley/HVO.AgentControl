@@ -55,7 +55,11 @@ public sealed partial class OrganizationStore
     /// Database-boundary immutability. Identity and content columns of a revision
     /// can never change and revisions are never deleted; only the build lifecycle
     /// columns (#259) may be updated. Profiles cannot be deleted either, so a
-    /// retired profile keeps its history. Triggers are part of the exact schema
+    /// retired profile keeps its history. SQLite resolves <c>INSERT OR REPLACE</c>
+    /// with an implicit delete that skips delete triggers unless the
+    /// connection-local <c>recursive_triggers</c> pragma is on, so BEFORE INSERT
+    /// guards abort any insert that would conflict with an existing row before
+    /// the conflict resolution can run. Triggers are part of the exact schema
     /// signature, so removing one fails the store closed.
     /// </summary>
     private static string[] ContainerProfileImmutabilityV8Statements =>
@@ -80,6 +84,30 @@ public sealed partial class OrganizationStore
             BEFORE DELETE ON container_profiles
         BEGIN
             SELECT RAISE(ABORT, 'container profiles are retired, never deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER container_profile_revisions_no_replace
+            BEFORE INSERT ON container_profile_revisions
+            WHEN EXISTS (
+                SELECT 1 FROM container_profile_revisions
+                WHERE id = NEW.id
+                   OR (profile_id = NEW.profile_id AND revision_number = NEW.revision_number)
+                   OR (profile_id = NEW.profile_id AND content_hash = NEW.content_hash))
+        BEGIN
+            SELECT RAISE(ABORT, 'container profile revisions are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER container_profiles_no_replace
+            BEFORE INSERT ON container_profiles
+            WHEN EXISTS (
+                SELECT 1 FROM container_profiles
+                WHERE id = NEW.id
+                   OR (organization_id = NEW.organization_id AND slug = NEW.slug)
+                   OR (NEW.idempotency_key IS NOT NULL AND idempotency_key = NEW.idempotency_key))
+        BEGIN
+            SELECT RAISE(ABORT, 'container profiles are never replaced');
         END
         """,
     ];

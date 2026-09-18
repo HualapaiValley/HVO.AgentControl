@@ -109,6 +109,7 @@ public sealed class ContainerProfileStoreTests : IDisposable
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _store.DatabasePath, Mode = SqliteOpenMode.ReadWrite }.ToString());
         connection.Open();
         var beforeRows = Raw(connection, "SELECT group_concat(id || ':' || content_hash || ':' || definition_json, '|') FROM container_profile_revisions ORDER BY revision_number");
+        var beforeProfiles = Raw(connection, "SELECT group_concat(id || ':' || slug || ':' || display_name || ':' || current_revision_number, '|') FROM container_profiles");
         foreach (var sql in new[]
         {
             "INSERT INTO container_profile_revisions SELECT 'prev-copy', profile_id, 3, base_image_reference, definition_json, dockerfile_fragment, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 2",
@@ -120,14 +121,27 @@ public sealed class ContainerProfileStoreTests : IDisposable
             "UPDATE container_profile_revisions SET revision_number = 9 WHERE revision_number = 2",
             "DELETE FROM container_profile_revisions WHERE revision_number = 2",
             "DELETE FROM container_profiles",
+            // INSERT OR REPLACE resolves the conflict with an implicit delete that skips delete
+            // triggers unless recursive_triggers is on; the BEFORE INSERT guard must stop it.
+            "INSERT OR REPLACE INTO container_profile_revisions SELECT id, profile_id, revision_number, base_image_reference, '{\"image\":\"agentcontrol-worker-base\",\"privileged\":true}', dockerfile_fragment, 'sha256:' || substr(content_hash, 8, 63) || 'e', build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 1",
+            "INSERT OR REPLACE INTO container_profile_revisions SELECT 'prev-replaced', profile_id, revision_number, base_image_reference, definition_json, dockerfile_fragment, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 1",
+            "REPLACE INTO container_profile_revisions SELECT 'prev-replaced', profile_id, 1, base_image_reference, '{}', NULL, content_hash, build_status, built_image_digest, verified, created_by, created_at FROM container_profile_revisions WHERE revision_number = 2",
+            "INSERT OR REPLACE INTO container_profiles SELECT id, organization_id, slug, 'Replaced', description, status, idempotency_key, 1, revision, created_at, updated_at FROM container_profiles",
+            "INSERT OR REPLACE INTO container_profiles SELECT 'prof-replaced', organization_id, slug, display_name, description, status, idempotency_key, current_revision_number, revision, created_at, updated_at FROM container_profiles",
         })
         {
             using var command = connection.CreateCommand();
             command.CommandText = sql;
             var exception = Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
-            Assert.Contains(sql.StartsWith("INSERT", StringComparison.Ordinal) ? "UNIQUE" : sql.StartsWith("DELETE FROM container_profiles", StringComparison.Ordinal) ? "never deleted" : sql.StartsWith("DELETE", StringComparison.Ordinal) ? "never deleted" : "immutable", exception.Message, StringComparison.Ordinal);
+            var expected = sql.Contains("REPLACE INTO container_profiles ", StringComparison.Ordinal) ? "never replaced"
+                : sql.Contains("REPLACE", StringComparison.Ordinal) ? "immutable"
+                : sql.StartsWith("INSERT", StringComparison.Ordinal) ? "immutable"
+                : sql.StartsWith("DELETE", StringComparison.Ordinal) ? "never deleted"
+                : "immutable";
+            Assert.Contains(expected, exception.Message, StringComparison.Ordinal);
         }
         Assert.Equal(beforeRows, Raw(connection, "SELECT group_concat(id || ':' || content_hash || ':' || definition_json, '|') FROM container_profile_revisions ORDER BY revision_number"));
+        Assert.Equal(beforeProfiles, Raw(connection, "SELECT group_concat(id || ':' || slug || ':' || display_name || ':' || current_revision_number, '|') FROM container_profiles"));
 
         // The reserved build lifecycle columns stay writable for #259.
         using (var lifecycle = connection.CreateCommand())
