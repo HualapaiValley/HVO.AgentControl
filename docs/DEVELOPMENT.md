@@ -546,25 +546,25 @@ were intentionally not copied.
 
 - HVO.WebSite `AGENTS.md` — C#/.NET and Blazor review expectations, zero-warning
   gate, code-behind/triad convention:
-  https://github.com/RoySalisbury/HVO.WebSite/blob/main/AGENTS.md
+  https://github.com/HualapaiValley/HVO.WebSite/blob/main/AGENTS.md
 - HVO.WebSite `CONTRIBUTING.md` — branch naming, conventional commits, workflow:
-  https://github.com/RoySalisbury/HVO.WebSite/blob/main/CONTRIBUTING.md
+  https://github.com/HualapaiValley/HVO.WebSite/blob/main/CONTRIBUTING.md
 - HVO.WebSite `.github/copilot-instructions.md` — Blazor component triad, async
   data access, CSS/theme separation:
-  https://github.com/RoySalisbury/HVO.WebSite/blob/main/.github/copilot-instructions.md
+  https://github.com/HualapaiValley/HVO.WebSite/blob/main/.github/copilot-instructions.md
 - HVO.WebSite `docs/CSS_GOVERNANCE.md` — style separation and theme tokens:
-  https://github.com/RoySalisbury/HVO.WebSite/blob/main/docs/CSS_GOVERNANCE.md
+  https://github.com/HualapaiValley/HVO.WebSite/blob/main/docs/CSS_GOVERNANCE.md
 - HVO.RoofController `.github/copilot-instructions.md` — thin controllers,
   DI, XML docs on public APIs:
-  https://github.com/RoySalisbury/HVO.RoofController/blob/main/.github/copilot-instructions.md
+  https://github.com/HualapaiValley/HVO.RoofController/blob/main/.github/copilot-instructions.md
 - HVO.RoofController `CONTRIBUTING.md` — prerequisites, conventional commits:
-  https://github.com/RoySalisbury/HVO.RoofController/blob/main/CONTRIBUTING.md
+  https://github.com/HualapaiValley/HVO.RoofController/blob/main/CONTRIBUTING.md
 - HVO.SDK `CONTRIBUTING.md` — centralized package management, zero-warning
   build, PR checklist:
   https://github.com/RoySalisbury/HVO.SDK/blob/main/CONTRIBUTING.md
 - HVO.SkyMonitor `AGENTS.md` — pinned SDK/global.json, code-behind + scoped CSS
   for Blazor, validation ladder:
-  https://github.com/RoySalisbury/HVO.SkyMonitor/blob/main/AGENTS.md
+  https://github.com/HualapaiValley/HVO.SkyMonitor/blob/main/AGENTS.md
 - HVO.SkyMonitor `.agents/skills/pr-lifecycle/SKILL.md` — exact-SHA review,
   bounded rereviews, per-finding disposition:
-  https://github.com/RoySalisbury/HVO.SkyMonitor/blob/main/.agents/skills/pr-lifecycle/SKILL.md
+  https://github.com/HualapaiValley/HVO.SkyMonitor/blob/main/.agents/skills/pr-lifecycle/SKILL.md

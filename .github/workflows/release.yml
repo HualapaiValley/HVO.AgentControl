@@ -31,7 +31,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/roysalisbury/hvo.agentcontrol
+  IMAGE: ghcr.io/hualapaivalley/hvo.agentcontrol
 
 jobs:
   validate:
@@ -165,8 +165,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/roysalisbury/hvo.agentcontrol:${{ inputs.version }}
-            ghcr.io/roysalisbury/hvo.agentcontrol:sha-${{ steps.sha.outputs.short }}
+            ghcr.io/hualapaivalley/hvo.agentcontrol:${{ inputs.version }}
+            ghcr.io/hualapaivalley/hvo.agentcontrol:sha-${{ steps.sha.outputs.short }}
           labels: |
             org.opencontainers.image.title=HVO.AgentControl
             org.opencontainers.image.version=${{ inputs.version }}

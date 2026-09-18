@@ -1,6 +1,6 @@
 # HVO.AgentControl
 
-[![CI](https://github.com/RoySalisbury/HVO.AgentControl/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/RoySalisbury/HVO.AgentControl/actions/workflows/build.yml)
+[![CI](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/build.yml)
 ![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)
 ![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4)
 [![License: Proprietary](https://img.shields.io/badge/license-Proprietary-red)](LICENSE)
@@ -12,10 +12,9 @@ version: the first portal release is **0.1.0**, and it is **unreleased**: no
 read-only in [archive/v1](archive/v1/); it is not part of the active solution,
 build, CI, or deployment configuration.
 
-> Badge note: this is a private repository, so the GitHub Actions badge may
-> require a signed-in account with access. The badge targets the workflow
-> **file** (`build.yml`), not its display name, and no token or credential is
-> embedded in any badge URL. There is deliberately no release or coverage badge.
+> Badge note: the badge targets the workflow **file** (`build.yml`), not its
+> display name, and no token or credential is embedded in any badge URL. There
+> is deliberately no release or coverage badge.
 
 ## First portal slice
 
@@ -475,7 +474,7 @@ socket or real repository is mounted in this slice.
 ## Release and upstream
 
 The release process (manual GHCR publish to
-`ghcr.io/roysalisbury/hvo.agentcontrol`, `linux/amd64`, no `latest` tag,
+`ghcr.io/hualapaivalley/hvo.agentcontrol`, `linux/amd64`, no `latest` tag,
 `workflow_dispatch` gate) is owned by the release teammate and documented in
 [docs/RELEASING.md](docs/RELEASING.md). Upstream status is tracked canonically in
 [docs/EXTERNAL-ISSUES.md](docs/EXTERNAL-ISSUES.md); filing guidance is in

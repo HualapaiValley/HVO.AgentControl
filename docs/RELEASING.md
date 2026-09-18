@@ -63,7 +63,7 @@ the git tag `v<version>` already exists.
    - re-checks the git tag and (after GHCR login) the image tag, failing
      rather than overwriting either;
    - builds and pushes a `linux/amd64` image to
-     `ghcr.io/roysalisbury/hvo.agentcontrol` tagged with both
+     `ghcr.io/hualapaivalley/hvo.agentcontrol` tagged with both
      `<version>` and `sha-<short-sha>`;
    - applies OCI labels `org.opencontainers.image.version`, `...revision`
      (the tested commit SHA), and `...source`;
@@ -100,10 +100,11 @@ billing plan, so no approval gate beyond manual dispatch is claimed.
   references `environment: release`. Add required reviewers and/or a wait
   timer there for approval. If the environment is not configured, the job
   runs without protection, so configure it before relying on it.
-- **GHCR package visibility.** For a private repository the package defaults
-  to private. Package visibility and access must be **manually confirmed** in
-  the repository/org package settings after the first publish. Do not claim
-  the image is public unless that is verified.
+- **GHCR package visibility.** A first publish creates the package under the
+  `HualapaiValley` organization with its default visibility; package visibility
+  and access must be **manually confirmed** in the organization package
+  settings after the first publish. Do not claim the image is public unless
+  that is verified.
 
 ## Repeat releases
 
@@ -132,8 +133,8 @@ Registry permission/network errors fail closed rather than count as absence.
 4. Pull and inspect the image if needed:
 
    ```bash
-   docker pull ghcr.io/roysalisbury/hvo.agentcontrol:0.1.0
-   docker image inspect ghcr.io/roysalisbury/hvo.agentcontrol:0.1.0 \
+   docker pull ghcr.io/hualapaivalley/hvo.agentcontrol:0.1.0
+   docker image inspect ghcr.io/hualapaivalley/hvo.agentcontrol:0.1.0 \
      --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
    ```
 
