@@ -13,10 +13,10 @@ managed-employee review the AgentControl product implements.
 The shape:
 
 ```text
-claim -> branch -> implement -> local gates -> draft PR
-   -> review body on the branch -> bot posts it -> findings as threads
-   -> corrections -> VERIFIED_* (bot) -> operator resolves -> ready
-   -> required checks -> merge -> close issue -> (nightly) promote
+claim -> branch -> implement -> local gates -> draft PR (Preflight)
+   -> R0 posted by the bot -> findings as bot threads
+   -> corrections -> VERIFIED_* (bot) -> operator resolves -> APPROVE on head
+   -> ready (Build and Unit) -> converged -> merge -> close issue -> (nightly) promote
 ```
 
 Two roles run this, and on a single-operator repository they are two sessions
@@ -96,15 +96,16 @@ happens before the expensive check, not after.
 
 The reviewer works from the exact range, verifies claims against the
 repository and external sources rather than the PR text, and writes the review
-body **as a file on the PR branch**:
+body **outside the repository**. It is never committed to the PR branch:
+committing it would move the head past the reviewed range. The bot posts it:
 
 ```bash
-head=$(git rev-parse HEAD)
-cat > .agentcontrol/reviews/PR-<n>-R0-${head:0:8}.md <<EOF
+head=$(gh pr view <n> --json headRefOid --jq .headRefOid)
+cat > /tmp/PR-<n>-R0.md <<EOF
 REVIEW PR-<n>-R0-${head:0:8}
 Level: Standard
 Mode: Initial
-Range: development/v1..$head (complete PR diff)
+Range: <merge-base>..$head (complete PR diff)
 Reviewer: <identity>, posted as hvo-agentcontrol[bot]
 Provider/model/effort: <actual values>
 
@@ -112,85 +113,95 @@ Verified against the repository and external sources, not the PR text:
 - <one line per verified claim, stating how it was verified>
 
 Findings: <count, or none>
-Verdict: APPROVE | CHANGES_REQUIRED | BLOCKED — CONVERGED at $head
+Verdict: APPROVE | CHANGES_REQUIRED | BLOCKED
 EOF
-git add .agentcontrol/reviews && git commit -m 'Record the R0 review body for AgentControl to post' && git push
-```
-
-Then the bot posts it:
-
-```bash
 gh workflow run agentcontrol.yml --ref development/v1 \
-  -f operation=post-review -f pr=<n> -f body_file=.agentcontrol/reviews/PR-<n>-R0-${head:0:8}.md
+  -f operation=post-review -f pr=<n> -f head="$head" -f body="$(cat /tmp/PR-<n>-R0.md)"
 ```
 
 The comment appears authored by `hvo-agentcontrol[bot]` with a trailer naming
-who dispatched it, the head, and the run. The review file must then be removed
-from the branch (`git rm`) before the PR is marked ready; the posted comment is
-the durable record. Preflight fails a PR that still carries a
-`.agentcontrol/reviews/PR-*.md` file, so this cannot be forgotten.
-
-The first line of the file must be `REVIEW PR-<n>-R<k>-<head8>` or the workflow
-refuses it. `R0` is the initial review; `R1`, `R2`, `R3` are correction reviews
-and the level caps them (Mechanical 1, Standard 2, Deep 3).
+who dispatched it, the bound head, and the run. The workflow refuses the
+dispatch if the first line is not exactly `REVIEW PR-<n>-R<k>-<head8>` for that
+PR and head, or if the PR has moved off `head` since. `R0` is the initial
+review; `R1`, `R2`, `R3` are correction reviews and the level caps them
+(Mechanical 1, Standard 2, Deep 3).
 
 ## 6. Findings
 
 Each finding is one resolvable review thread on a line of the diff, with a
-stable ID and a severity:
+stable ID and a severity, opened by the bot:
 
 ```bash
-gh api repos/HualapaiValley/HVO.AgentControl/pulls/<n>/comments \
-  -f commit_id=$head -f path=<file> -F line=<n> -f side=RIGHT \
-  -f body='F1 (Low) — <one-sentence summary>.
-
-<what was observed, how it was observed, why it matters>
-
-Required: <what would close it>'
+gh workflow run agentcontrol.yml --ref development/v1 \
+  -f operation=post-finding -f pr=<n> -f head="$head" -f path=<file> -f line=<line> \
+  -f body="$(cat /tmp/PR-<n>-F1.md)"
 ```
+
+where the file begins `### F1 - Low - <short title>` and carries the parent
+review ID, the location, the description with how it was observed and why it
+matters, and the required resolution (formats in the rulebook).
 
 Severity sets what happens: Critical and High always block and are never
 deferred; Medium blocks unless the issue owner records a deferral to a linked
 follow-up issue; Low and nits are at the reviewer's discretion but still get a
 thread so the disposition is recorded.
 
-The implementer replies in the thread with exactly one of `CORRECTED at
-<head8>`, `DEFERRED to #<issue>`, `NON_ACTIONABLE because <reason>`, or
-`SUPERSEDED by <what>`, pushes the correction, and the reviewer re-checks the
-delta only (not the whole PR) and replies `VERIFIED_CORRECTED at <head8>`,
-`VERIFIED_DEFERRED`, or `VERIFIED_NON_ACTIONABLE`. A correction review body
-(`R1`) is posted via the bot the same way as `R0`, covering the delta and
-stating each finding's disposition.
+The implementer replies in the thread, under the operator account, with
+exactly one of `CORRECTED at <head8>`, `DEFERRED to #<issue>`,
+`NON_ACTIONABLE because <reason>`, or `SUPERSEDED by <what>`, and pushes the
+correction. The reviewer re-checks the delta only (not the whole PR); the bot
+posts the verification into the thread:
 
-Then the **operator** resolves the thread. This is deliberately not a bot
-operation: GitHub refuses `resolveReviewThread` to App installation tokens.
+```bash
+# the numeric id of the comment that opened the F1 thread:
+cid=$(gh api repos/HualapaiValley/HVO.AgentControl/pulls/<n>/comments --jq '.[]|select(.body|startswith("### F1 "))|.id')
+newhead=$(gh pr view <n> --json headRefOid --jq .headRefOid)
+gh workflow run agentcontrol.yml --ref development/v1 \
+  -f operation=reply-thread -f pr=<n> -f head="$newhead" -f comment_id="$cid" \
+  -f body="$(cat /tmp/PR-<n>-F1-verified.md)"
+```
+
+where that file begins `VERIFIED_CORRECTED at <newhead8>` (or
+`VERIFIED_DEFERRED`, `VERIFIED_NON_ACTIONABLE`, `VERIFIED_SUPERSEDED`). A
+correction review body (`R1`) is posted via `post-review` the same way as
+`R0`, covering the delta and stating each finding's disposition. Then the
+**operator** resolves the thread. This is deliberately not a bot operation:
+GitHub refuses `resolveReviewThread` to App installation tokens.
 
 ```bash
 tid=$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:50){nodes{id comments(first:1){nodes{databaseId}}}}}}}' \
-  -f o=HualapaiValley -f r=HVO.AgentControl -F n=<n> --jq ".data.repository.pullRequest.reviewThreads.nodes[]|select(.comments.nodes[0].databaseId==<F1 comment id>)|.id")
-gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -f t=$tid
+  -f o=HualapaiValley -f r=HVO.AgentControl -F n=<n> --jq ".data.repository.pullRequest.reviewThreads.nodes[]|select(.comments.nodes[0].databaseId==$cid)|.id")
+gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -f t="$tid"
 ```
 
 A thread with no `VERIFIED_*` reply is unresolved, and branch protection will
 not let the PR merge with it open.
 
-## 7. Ready, checks, merge
+## 7. Ready, checks, converged, merge
 
-Only after the latest review verdict is `APPROVE`/`CONVERGED` on the current
-head, every finding has a verified disposition, every thread is resolved, and
-the review file is off the branch:
+Only after the latest review verdict is `APPROVE` on the current head and every
+finding has a verified disposition with its thread resolved:
+
+```bash
+gh pr ready <n>
+gh pr checks <n> --watch
+```
+
+Marking ready starts the self-hosted Build and Unit check on exactly that head.
+When both required checks are green, the reviewer posts the convergence summary
+(via `post-review` as the next `R<k>` with `Mode: Convergence`), the operator
+labels it and merges:
 
 ```bash
 gh pr edit <n> --add-label review:converged
-gh pr ready <n>
-gh pr checks <n> --watch
 gh pr merge <n> --squash --delete-branch
 ```
 
 Squash is right for feature branches into `development/v1`: one commit per
 PR, the PR number in the subject. (Promotion into `main` is the opposite: a
-merge commit, so those squashed SHAs survive.) Pushing after the review
-converged invalidates it; the reviewer must re-verify the new head.
+merge commit, so those squashed SHAs survive.) Pushing after `APPROVE`
+invalidates it; the reviewer must re-verify the new head, and the bot refuses
+to post anything bound to the old one.
 
 Do not post a converged verdict before the required checks have run. On
 HVO.SkyMonitor this was done once (PR #907) and Preflight then failed twice on
@@ -235,7 +246,7 @@ merge commit. That is the only way `main` moves, and a deployment to
 | Local gates | restore clean, both builds warning-clean, format clean, category audit unchanged, Unit 3496/3496, Integration 676/676 across six assemblies |
 | Draft | body listed every version, the CA2025 re-probe, and the Redis release-notes summary |
 | R0 | verified digests against MCR, action SHAs against tag objects, Redis API surface against the source; no findings on the diff; **posted by the bot** |
-| F1 (Low) | the review body was still on the branch; corrected by removing it |
+| F1 (Low) | the review body was still on the branch (SkyMonitor commits it; this repository does not) |
 | R1 | delta only; F1 `VERIFIED_CORRECTED`; **posted by the bot**; operator resolved the thread |
 | Ready | Preflight 9s, Build and Unit 7m18s |
 | Merge | squash, `3932273d` |

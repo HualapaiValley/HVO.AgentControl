@@ -167,12 +167,11 @@ Copy these from `HVO.SkyMonitor` and adjust the marked lines.
 | File | Purpose | Adjust |
 | --- | --- | --- |
 | `.github/workflows/development-v1.yml` | hosted Preflight (whitespace, actionlint) + self-hosted Build and Unit under a 540s deadline with a timing manifest | build/test commands; `runs-on` labels; the stage list if the repo has no ShellCheck or category audit |
-| `.github/workflows/agentcontrol.yml` | `verify-identity`, `post-review` as the App | nothing; it reads owner/repo from context |
+| `.github/workflows/agentcontrol.yml` | `verify-identity`, `post-review`, `post-finding`, `reply-thread` as the App, each bound to a head SHA | nothing; it reads owner/repo from context |
 | `.github/workflows/promote-main.yml` | nightly promotion PR, 02:00 America/Phoenix | the aggregate check name if the green-run check is extended to `main`'s pipeline |
 | `.github/ISSUE_TEMPLATE/development-v1.yml`, `.github/PULL_REQUEST_TEMPLATE/development-v1.md` | issue form and PR template | project-specific fields |
 | `.github/dependabot.yml` | no `target-branch`, so it follows the default | ecosystems |
 | `scripts/review:v1` | emits review request / correction / converged skeletons with exact ranges | nothing |
-| `.agentcontrol/reviews/README.md` | where bot-posted review bodies are staged | nothing |
 | `docs/runbooks/development-v1-review.md` (`docs/REVIEW-PROTOCOL.md` here) | the review process | nothing |
 | `docs/development-v1.md` | landing page with the native workflow badge | badge URL |
 
@@ -192,9 +191,9 @@ In this order, because each step depends on the last:
    waits for a `hvo-linux-x64` runner. Confirm the job's `runner_group_name`.
 2. `gh workflow run agentcontrol.yml -f operation=verify-identity`. The summary
    must show the App slug and that the token sees exactly this repository.
-3. Commit a review body under `.agentcontrol/reviews/PR-<n>-R0-<head8>.md`,
-   dispatch `post-review`, confirm the comment author is `hvo-agentcontrol[bot]`.
-   Delete the file before marking ready.
+3. Dispatch `post-review` with the body as an input bound to the PR head,
+   confirm the comment author is `hvo-agentcontrol[bot]`; then `post-finding`
+   and `reply-thread` once each and confirm the same.
 4. Merge. Wait for the push run on `development/v1` to go green.
 5. `gh workflow run promote-main.yml`. Confirm a promotion PR opens, authored by
    the bot, and that `main`'s full pipeline runs on it. Merge it with a merge
@@ -203,11 +202,11 @@ In this order, because each step depends on the last:
 ## 8. Known follow-ups
 
 - After a merge-commit promotion, `main` is one commit "ahead" of
-  `development/v1` (the merge commit). The promotion workflow's behind-check
-  halts on this until it learns to recognise its own merge commits; tracked on
-  SkyMonitor.
+  `development/v1` (the merge commit). The promotion workflow tolerates exactly
+  that shape (a merge commit every parent of which is on `development/v1`,
+  SkyMonitor #914) and halts on anything else.
 - `resolveReviewThread` is refused for App installation tokens even on threads
-  the App authored. The reviewer's `VERIFIED_*` comment is posted by the bot;
+  the App authored. The reviewer's `VERIFIED_*` reply is posted by the bot;
   the operator resolves the thread.
 - Repositories with private data that must stay private need the org on Team
   before transfer, or they lose branch protection on arrival.
@@ -229,9 +228,23 @@ Done 2026-09-18, after the transfer recorded in `docs/REPOSITORY-ADMIN.md`.
   `hvo-agentcontrol` label (alongside `hvo-skymonitor`) rather than adding a
   fourth machine; `.github/actionlint.yaml` lists only that label. The repository
   was added to runner group 3.
-- **Preflight extra.** Preflight fails a PR that still carries a
-  `.agentcontrol/reviews/PR-*.md` file, so a review body cannot reach the base
-  branch.
+- **Review text is a dispatch input, not a file on the branch.** SkyMonitor
+  commits the review body under `.agentcontrol/reviews/` and removes it after
+  posting; that moves the PR head twice after the reviewed range, which the
+  same rulebook says invalidates the review. Here `post-review`,
+  `post-finding` and `reply-thread` take the text as workflow inputs, are bound
+  to a full head SHA, and refuse to post if the PR has moved. Nothing is
+  committed for a review, so there is no staged-file check in Preflight and no
+  `.agentcontrol/` directory. The finding threads and `VERIFIED_*` replies are
+  therefore bot-authored too, which SkyMonitor's two-operation workflow cannot
+  do.
+- **Ordering.** `APPROVE` on the head permits marking ready; Build and Unit
+  then runs on that head; convergence is asserted only after the checks are
+  green. This removes the deadlock in the SkyMonitor text between "converged
+  before ready" and "no converged verdict before checks".
+- **Python is pinned in the fast gate** (`setup-python` 3.12) because the
+  selected tests execute the Python fake ACP server, worker supervisor and PTY
+  bridge; SkyMonitor's gate has no such dependency.
 - **Branch hygiene at adoption.** 133 V1-era branches (none touched since
   2026-09-12, no open PRs) were bundled to the operator host
   (`~/repo-archives/HVO.AgentControl-pre-v1-branches-2026-09-18.bundle`,

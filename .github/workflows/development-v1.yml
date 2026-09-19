@@ -2,8 +2,9 @@ name: Development v1
 
 # Fast integration gate for feature pull requests into development/v1 and for
 # pushes to that branch. Hosted Preflight is cheap and runs on drafts; the
-# self-hosted Build and Unit job runs only once a PR is marked ready, after
-# review, under a 540 s workload budget with a timing manifest as evidence.
+# self-hosted Build and Unit job runs only once a PR is marked ready, after the
+# initial review has approved the head, under a 540 s workload budget with a
+# timing manifest as evidence.
 #
 # This is deliberately narrower than main's qualification pipeline
 # (build.yml): no Docker image build, no alternate-UID isolation suite, no
@@ -60,17 +61,6 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" .github/workflows/*.yml
 
-      # Review bodies are staged under .agentcontrol/reviews/ for the bot to post
-      # and must not be carried into the base branch.
-      - name: Reject staged review bodies
-        run: |
-          shopt -s nullglob
-          staged=(.agentcontrol/reviews/PR-*.md)
-          if ((${#staged[@]})); then
-            printf '::error::review body still on the branch: %s\n' "${staged[@]}"
-            exit 1
-          fi
-
   build-unit:
     name: Development v1 / Build and Unit
     needs: preflight
@@ -99,6 +89,14 @@ jobs:
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+
+      # The fake ACP server, the worker supervisor and the PTY bridge are Python;
+      # the selection below executes them, so the interpreter is pinned here as
+      # in build.yml rather than taken from whatever the runner host has.
+      - name: Setup pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
 
       - name: Restore solution
         id: restore

@@ -80,7 +80,8 @@ Verified deferred: 0
 Open: 0
 
 Current PR head matches the reviewed head.
-Next: mark ready and run Development v1 CI.
+Required checks: Preflight <t>, Build and Unit <t>, both green on this head.
+Next: merge.
 EOF
         ;;
 esac

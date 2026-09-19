@@ -58,16 +58,17 @@ In short:
 - Claim the issue, pick a review level (`review:mechanical|standard|deep`),
   branch from `development/v1`, open a **draft** PR using the template.
 - An independent reviewer (a different session from the implementer) reviews
-  the exact range and posts the review as `hvo-agentcontrol[bot]` via the
-  `AgentControl` workflow; each finding is one resolvable thread with a stable
+  the exact range; the review, each finding thread and each `VERIFIED_*`
+  reply are posted as `hvo-agentcontrol[bot]` via the `AgentControl` workflow,
+  bound to the head SHA; each finding is one resolvable thread with a stable
   `F<n>` ID and severity.
 - The implementer answers each finding in its thread (`CORRECTED at <head8>`,
   `DEFERRED to #<issue>`, `NON_ACTIONABLE because …`, `SUPERSEDED by …`), the
   reviewer verifies (`VERIFIED_*`), the operator resolves the thread. Critical
   and High are never deferred.
-- Mark ready only when converged on the current head with every thread
-  resolved and the review file off the branch; wait for the required
-  Development v1 checks; squash merge; close the issue with the merge SHA and
+- Mark ready only when the current head has an `APPROVE` verdict with every
+  thread resolved; wait for the required Development v1 checks; the reviewer
+  records convergence; squash merge; close the issue with the merge SHA and
   "Not promoted to main".
 - Do not amend or force-push a reviewed head. Merging is never a release.
 

@@ -143,16 +143,18 @@ Non-negotiables an agent must keep:
   `development/v1` and target it. Never push to `main`.
 - The implementer and the independent reviewer are different sessions. The
   reviewer never edits the branch; the implementer never posts `VERIFIED_*`.
-  The review body is committed under `.agentcontrol/reviews/` and posted by
-  dispatching `agentcontrol.yml`; it is removed from the branch before the PR
-  is marked ready (Preflight enforces this).
+  Review text is never committed to the PR branch: the parent review, each
+  finding thread and each `VERIFIED_*` reply are dispatched through
+  `agentcontrol.yml` (`post-review`, `post-finding`, `reply-thread`) bound to
+  the exact head SHA, and posted as `hvo-agentcontrol[bot]`.
 - Every finding is a thread with a stable `F<n>` ID and a severity. Critical
   and High are never deferred; Medium is deferred only by the issue owner to a
   linked follow-up issue. The reviewer posts the `VERIFIED_*` disposition; the
   operator resolves the thread. Nothing is silently ignored.
-- A verdict is bound to an exact head. Pushing after convergence invalidates
-  it. Do not amend or force-push a reviewed head. Do not post a converged
-  verdict before the required checks have run.
+- A verdict is bound to an exact head; the bot refuses to post against a moved
+  PR. `APPROVE` on the head permits marking ready; the required checks then run
+  on that head; convergence is asserted only after they are green. Pushing
+  after `APPROVE` invalidates it. Do not amend or force-push a reviewed head.
 - Merge into `development/v1` only when converged, all threads resolved, the
   head current, and the required Development v1 checks green; squash, and
   close the issue with the merge SHA and "Not promoted to main". Promotion to

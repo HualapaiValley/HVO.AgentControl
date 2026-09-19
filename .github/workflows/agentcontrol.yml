@@ -8,12 +8,18 @@ name: AgentControl
 # dispatched by someone with write access, and every operation records who
 # dispatched it and what it did on the target PR.
 #
+# Review text is supplied through the dispatch, never committed to the PR
+# branch: a review is a claim about an exact head, and committing it (or
+# removing it afterwards) would move that head past the reviewed range. Every
+# operation that writes to a PR takes the head SHA it is bound to and refuses
+# to run if the PR has moved.
+#
 # Resolving a review thread is deliberately not an operation here. The GraphQL
 # `resolveReviewThread` mutation is refused for App installation tokens
 # ("Resource not accessible by integration") regardless of permission grant and
-# even on a thread the App authored, proven on PR #909. The reviewer's judgement
-# is the VERIFIED_* comment, which the App can post; resolving the thread is the
-# operator's click.
+# even on a thread the App authored (proven on HVO.SkyMonitor PR #909). The
+# reviewer's judgement is the VERIFIED_* reply, which the App posts; resolving
+# the thread is the operator's click.
 
 on:
   workflow_dispatch:
@@ -25,12 +31,30 @@ on:
         options:
           - verify-identity
           - post-review
+          - post-finding
+          - reply-thread
       pr:
-        description: Pull request number (post-review)
+        description: Pull request number (post-review, post-finding, reply-thread)
         type: string
         required: false
-      body_file:
-        description: Path in the repository to a Markdown file holding the review body (post-review); read from the PR head
+      head:
+        description: Full 40-hex PR head SHA the operation is bound to; refused if the PR has moved (post-review, post-finding, reply-thread)
+        type: string
+        required: false
+      body:
+        description: Markdown body. post-review must begin with "REVIEW PR-<pr>-R<n>-<head8>"; reply-thread must begin with "VERIFIED_CORRECTED", "VERIFIED_DEFERRED", "VERIFIED_NON_ACTIONABLE" or "VERIFIED_SUPERSEDED"
+        type: string
+        required: false
+      path:
+        description: File path in the PR diff (post-finding)
+        type: string
+        required: false
+      line:
+        description: Line number on the RIGHT side of the diff (post-finding)
+        type: string
+        required: false
+      comment_id:
+        description: Numeric id of the review comment that starts the finding thread (reply-thread)
         type: string
         required: false
 
@@ -76,20 +100,44 @@ jobs:
             "$APP_SLUG" "$INSTALLATION_ID" "$repos" "$rate" "$ACTOR" | tee -a "$GITHUB_STEP_SUMMARY"
           [[ "$repos" == "$REPOSITORY" ]] || { echo "token sees an unexpected repository set: $repos" >&2; exit 1; }
 
-  post-review:
-    name: Post review
-    if: inputs.operation == 'post-review'
+  write:
+    name: ${{ inputs.operation }}
+    if: inputs.operation == 'post-review' || inputs.operation == 'post-finding' || inputs.operation == 'reply-thread'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Validate inputs
         env:
+          OPERATION: ${{ inputs.operation }}
           PR: ${{ inputs.pr }}
-          BODY_FILE: ${{ inputs.body_file }}
+          HEAD: ${{ inputs.head }}
+          BODY: ${{ inputs.body }}
+          FILE_PATH: ${{ inputs.path }}
+          LINE: ${{ inputs.line }}
+          COMMENT_ID: ${{ inputs.comment_id }}
         run: |
           [[ "$PR" =~ ^[0-9]+$ ]] || { echo "pr must be a number" >&2; exit 2; }
-          [[ -n "$BODY_FILE" && "$BODY_FILE" != *..* && "$BODY_FILE" == .agentcontrol/reviews/* ]] || {
-            echo "body_file must be a path under .agentcontrol/reviews/ on the PR head" >&2; exit 2; }
+          [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "head must be a full lowercase 40-hex SHA" >&2; exit 2; }
+          [[ -n "$BODY" ]] || { echo "body is required" >&2; exit 2; }
+          first="$(printf '%s\n' "$BODY" | head -n1)"
+          case "$OPERATION" in
+            post-review)
+              [[ "$first" == "REVIEW PR-$PR-R"*"-${HEAD:0:8}" && "$first" =~ ^REVIEW\ PR-[0-9]+-R[0-9]+-[0-9a-f]{8}$ ]] || {
+                echo "post-review body must begin with 'REVIEW PR-$PR-R<n>-${HEAD:0:8}' (got: $first)" >&2; exit 2; }
+              ;;
+            post-finding)
+              [[ -n "$FILE_PATH" && "$FILE_PATH" != *..* && "$FILE_PATH" != /* ]] || { echo "path must be a relative repository path" >&2; exit 2; }
+              [[ "$LINE" =~ ^[1-9][0-9]*$ ]] || { echo "line must be a positive integer" >&2; exit 2; }
+              [[ "$first" =~ ^###\ F[0-9]+\ -\ (Critical|High|Medium|Low|Nit)\ -\  ]] || {
+                echo "post-finding body must begin with '### F<n> - <Severity> - <title>' (got: $first)" >&2; exit 2; }
+              ;;
+            reply-thread)
+              [[ "$COMMENT_ID" =~ ^[0-9]+$ ]] || { echo "comment_id must be a number" >&2; exit 2; }
+              [[ "$first" =~ ^(###\ F[0-9]+\ -\ )?VERIFIED_(CORRECTED|DEFERRED|NON_ACTIONABLE|SUPERSEDED)( |$) ]] || {
+                echo "reply-thread body must begin with a VERIFIED_* disposition (got: $first)" >&2; exit 2; }
+              ;;
+          esac
+
       - name: Mint a pull-request write token
         id: token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -99,35 +147,54 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-metadata: read
-          permission-contents: read
           permission-pull-requests: write
-      - name: Read the review body from the PR head
-        id: body
+
+      - name: Require the PR to still be at the bound head
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPOSITORY: ${{ github.repository }}
           PR: ${{ inputs.pr }}
-          BODY_FILE: ${{ inputs.body_file }}
+          HEAD: ${{ inputs.head }}
         run: |
-          head="$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)"
-          gh api "repos/$REPOSITORY/contents/$BODY_FILE?ref=$head" --jq .content | base64 -d > "$RUNNER_TEMP/review.md"
-          [[ -s "$RUNNER_TEMP/review.md" ]] || { echo "review body is empty" >&2; exit 2; }
-          grep -qE "^REVIEW PR-$PR-R[0-9]+-[0-9a-f]{8}\$" "$RUNNER_TEMP/review.md" || {
-            echo "review body must begin with a 'REVIEW PR-$PR-R<n>-<head8>' header" >&2; exit 2; }
-          echo "head=$head" >> "$GITHUB_OUTPUT"
+          actual="$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)"
+          [[ "$actual" == "$HEAD" ]] || {
+            printf '::error::PR #%s head is %s, not the bound %s; the review no longer applies. Re-review the current head.\n' "$PR" "$actual" "$HEAD"
+            exit 1
+          }
+
       - name: Post as hvo-agentcontrol[bot]
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          OPERATION: ${{ inputs.operation }}
           REPOSITORY: ${{ github.repository }}
           PR: ${{ inputs.pr }}
+          HEAD: ${{ inputs.head }}
+          BODY: ${{ inputs.body }}
+          FILE_PATH: ${{ inputs.path }}
+          LINE: ${{ inputs.line }}
+          COMMENT_ID: ${{ inputs.comment_id }}
           ACTOR: ${{ github.actor }}
-          HEAD: ${{ steps.body.outputs.head }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          cp "$RUNNER_TEMP/review.md" "$RUNNER_TEMP/final.md"
+          printf '%s\n' "$BODY" > "$RUNNER_TEMP/final.md"
           # The backticks are literal Markdown in the posted comment; the values are printf arguments.
           # shellcheck disable=SC2016
           printf '\n\n<sub>Posted by `hvo-agentcontrol[bot]` on dispatch by `%s`; head `%s`; run %s</sub>\n' "$ACTOR" "$HEAD" "$RUN_URL" >> "$RUNNER_TEMP/final.md"
-          url="$(gh api "repos/$REPOSITORY/issues/$PR/comments" -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+          case "$OPERATION" in
+            post-review)
+              url="$(gh api "repos/$REPOSITORY/issues/$PR/comments" -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+              ;;
+            post-finding)
+              url="$(gh api "repos/$REPOSITORY/pulls/$PR/comments" \
+                -f commit_id="$HEAD" -f path="$FILE_PATH" -F line="$LINE" -f side=RIGHT \
+                -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+              ;;
+            reply-thread)
+              # The thread must belong to this PR: the reply endpoint is PR-scoped, so a
+              # comment id from another PR is a 404 rather than a cross-post.
+              url="$(gh api "repos/$REPOSITORY/pulls/$PR/comments/$COMMENT_ID/replies" \
+                -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+              ;;
+          esac
           [[ "$url" == https://* ]] || { echo "comment was not created: $url" >&2; exit 1; }
           printf '%s\n' "$url" | tee -a "$GITHUB_STEP_SUMMARY"

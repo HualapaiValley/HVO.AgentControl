@@ -11,19 +11,24 @@ This process applies to feature pull requests targeting `development/v1`. Promot
 ```text
 implement and validate locally
   -> commit and push
-  -> open draft PR
+  -> open draft PR (hosted Preflight runs)
   -> post review request
-  -> post one parent review with one child thread per finding
+  -> R0: one parent review (bot) with one child thread per finding (bot)
   -> resolve findings and commit corrections
-  -> correction review of the exact delta
-  -> repeat within the round limit
-  -> post review convergence
-  -> mark ready
-  -> Development v1 CI
-  -> merge when green and current
+  -> R<n>: correction review of the exact delta; VERIFIED_* replies (bot)
+  -> repeat within the round limit until the verdict on the current head is APPROVE
+  -> mark ready (self-hosted Build and Unit runs on that head)
+  -> post review convergence once the required checks are green on that head
+  -> merge (squash) when converged, green and current
 ```
 
-Hosted Preflight runs on draft and ready PRs. Self-hosted Build and Unit runs only on non-draft PRs and pushes to `development/v1`.
+Hosted Preflight runs on draft and ready PRs. Self-hosted Build and Unit runs
+only on non-draft PRs and pushes to `development/v1`. The ordering is
+deliberate: an `APPROVE` verdict on head `H` permits marking ready; the
+required checks then run on `H`; **convergence** is asserted only after they
+are green. A verdict is a claim about a head, the checks are its evidence, and
+nothing in this process moves the head between the two (review text is never
+committed to the branch).
 
 ## Review Levels And Limits
 
@@ -52,14 +57,27 @@ the permission that operation needs:
 | Operation | Token permissions | What it does |
 | --- | --- | --- |
 | `verify-identity` | metadata, contents read | Proves the key mints an installation token that sees exactly this repository |
-| `post-review` | + pull-requests write | Posts a review body committed under `.agentcontrol/reviews/` on the PR head as the bot, appending who dispatched it and the reviewed head |
+| `post-review` | metadata read, pull-requests write | Posts the parent review body (a dispatch input beginning `REVIEW PR-<n>-R<k>-<head8>`) as a PR comment |
+| `post-finding` | metadata read, pull-requests write | Opens one line-level review thread (`path`, `line`, body beginning `### F<n> - <Severity> - <title>`) |
+| `reply-thread` | metadata read, pull-requests write | Replies in an existing finding thread with a `VERIFIED_*` disposition |
+
+Every writing operation is bound to a full head SHA supplied at dispatch and
+refuses to run if the PR head has moved, so a stale review cannot be posted
+against a newer head. Review text is a dispatch input, never a file on the PR
+branch: committing it would move the head past the reviewed range. Every
+posted comment carries the dispatcher, the bound head and the run URL.
 
 Resolving a finding thread is not an App operation: GitHub refuses the
 `resolveReviewThread` mutation for installation tokens even on a thread the App
 authored (proven on HVO.SkyMonitor PR #909). The reviewer's judgement is the `VERIFIED_*`
-comment, which is posted as the bot; the operator resolves the thread once that
-comment is present. Branch protection's conversation-resolution gate is satisfied
+reply, which is posted as the bot; the operator resolves the thread once that
+reply is present. Branch protection's conversation-resolution gate is satisfied
 either way.
+
+The implementer's own replies in a finding thread (`CORRECTED`, `DEFERRED`,
+`NON_ACTIONABLE`, `SUPERSEDED`) are posted under the operator account: they are
+the implementer speaking, and attributing them to the reviewer identity would be
+wrong.
 
 Merge authority is not delegated to the App. The workflow runs only on manual
 dispatch by a collaborator with write access; it has no push or pull-request
@@ -92,7 +110,7 @@ OPEN -> NON_ACTIONABLE -> VERIFIED_NON_ACTIONABLE -> resolved thread
 OPEN -> SUPERSEDED -> VERIFIED_SUPERSEDED -> resolved thread
 ```
 
-The implementer posts `CORRECTED`, `DEFERRED`, `NON_ACTIONABLE`, or `SUPERSEDED` in the finding thread. Only the independent reviewer posts the verified disposition; the operator resolves the thread after it.
+The implementer posts `CORRECTED`, `DEFERRED`, `NON_ACTIONABLE`, or `SUPERSEDED` in the finding thread under the operator account. Only the independent reviewer posts the verified disposition, as the bot through `reply-thread`; the operator resolves the thread after it.
 
 ## Parent Review Format
 
@@ -183,7 +201,7 @@ A PR is converged only when:
 - the latest verdict is `APPROVE`;
 - the round limit is respected.
 
-Post one convergence summary before marking the PR ready:
+Post one convergence summary after the required checks are green on the reviewed head (the `APPROVE` verdict, not convergence, is what permits marking the PR ready):
 
 ```markdown
 ## Review Converged
@@ -196,7 +214,8 @@ Verified deferred: 1
 Open: 0
 
 Current PR head matches the reviewed head.
-Next: mark ready and run Development v1 CI.
+Required checks: Preflight <t>, Build and Unit <t>, both green on this head.
+Next: merge.
 ```
 
 ## CI And Merge

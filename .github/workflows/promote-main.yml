@@ -1,8 +1,8 @@
 name: Promote to main
 
 # Nightly promotion of development/v1 to main, option (b): this workflow opens or
-# refreshes the promotion pull request as hvo-agentcontrol[bot] and lets the legacy
-# pipeline on main gate it; merging stays with the operator. It never pushes to
+# refreshes the promotion pull request as hvo-agentcontrol[bot] and lets the full
+# pipeline on main (V2 CI) gate it; merging stays with the operator. It never pushes to
 # main and never merges. The App token it mints is pull-requests write only.
 #
 # It refuses to promote a head that has not passed its own Development v1 CI, so
@@ -63,11 +63,26 @@ jobs:
             echo "behind=$behind"
           } >> "$GITHUB_OUTPUT"
           if [[ "$behind" != 0 ]]; then
-            # main has commits v1 does not: the branch model has been violated somewhere
-            # (a hotfix or a mis-targeted PR). Stop rather than open a PR that would merge
-            # main back into v1 by implication; this needs a person.
-            printf '::error::%s is %s commit(s) behind %s; promotion halted until %s is synchronized into %s.\n' "$SOURCE" "$behind" "$TARGET" "$TARGET" "$SOURCE"
-            exit 1
+            # main has commits v1 does not. After a merge-commit promotion that is expected:
+            # the merge commit itself is on main and not on v1, and every parent of it is on
+            # v1. Any other shape (a hotfix, a mis-targeted PR, a squash) is a bypass of the
+            # branch model and needs a person, so halt rather than open a PR that would carry
+            # it back into v1 by implication.
+            stray="$(gh api "repos/$REPOSITORY/compare/$SOURCE...$TARGET" --paginate --jq '.commits[]|"\(.sha) \(.parents|length) \(.parents|map(.sha)|join(" "))"')"
+            while read -r sha parent_count parents; do
+              [[ -n "$sha" ]] || continue
+              if (( parent_count < 2 )); then
+                printf '::error::%s has non-merge commit %s that %s lacks; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
+                exit 1
+              fi
+              for parent in $parents; do
+                if [[ "$(gh api "repos/$REPOSITORY/compare/$SOURCE...$parent" --jq .ahead_by)" != 0 ]]; then
+                  printf '::error::%s has merge commit %s with parent %s that is not on %s; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "${parent:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
+                  exit 1
+                fi
+              done
+              printf 'Tolerating %s merge commit %s: every parent is on %s.\n' "$TARGET" "${sha:0:8}" "$SOURCE" | tee -a "$GITHUB_STEP_SUMMARY"
+            done <<< "$stray"
           fi
           if [[ "$ahead" == 0 ]]; then
             echo "nothing_to_promote=true" >> "$GITHUB_OUTPUT"
@@ -116,8 +131,9 @@ jobs:
           Source head Development v1 CI: green (checked by this run)
 
           This pull request is opened by the nightly promotion workflow ($TRIGGER). The
-          legacy pipeline on \`$TARGET\` (\`Required CI\`) is the qualification gate; merge
-          with a **merge commit** so every \`$SOURCE\` commit keeps its SHA on \`$TARGET\`.
+          full pipeline on \`$TARGET\` (\`V2 CI\`: \`Build and test\`, \`Docker config and image\`,
+          \`Browser smoke (disabled runtime)\`) is the qualification gate; merge with a
+          **merge commit** so every \`$SOURCE\` commit keeps its SHA on \`$TARGET\`.
           Merging is the operator's decision. If \`$SOURCE\` moves before this is merged,
           the next nightly run refreshes this pull request rather than opening another.
 

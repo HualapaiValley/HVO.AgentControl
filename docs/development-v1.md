@@ -16,9 +16,9 @@ the AgentControl product implements for managed employees is product design
 development/v1
   -> feature/<issue>-<short-name>
   -> draft pull request targeting development/v1
-  -> independent review posted as hvo-agentcontrol[bot], one thread per finding
-  -> ready pull request
-  -> required Development v1 CI
+  -> independent review posted as hvo-agentcontrol[bot], one bot thread per finding
+  -> APPROVE on the head -> ready pull request
+  -> required Development v1 CI on that head -> converged
   -> squash merge into development/v1
   -> nightly promotion PR into main (merge commit, operator merges)
 ```
@@ -45,12 +45,12 @@ and merge SHA. Completion comments state that the work is not promoted to `main`
 `development/v1` requires:
 
 - **Development v1 / Preflight** on a GitHub-hosted runner: exact-range
-  whitespace validation, pinned workflow linting (`actionlint`, which also
-  enforces the organization's full-SHA action pins), and a check that no staged
-  review body is still on the branch.
+  whitespace validation and pinned workflow linting (`actionlint`, which also
+  enforces the organization's full-SHA action pins).
 - **Development v1 / Build and Unit** on a self-hosted `hvo-linux-x64` runner
-  (`hvo-agentcontrol` label): pinned SDK setup, restore, warning-clean Release
-  build, `dotnet format --verify-no-changes`, and the hermetic test selection
+  (`hvo-agentcontrol` label): pinned SDK and Python setup, restore,
+  warning-clean Release build, `dotnet format --verify-no-changes`, and the
+  hermetic test selection
   (everything except the Docker isolation, worker image contract, real-tmux and
   OpenCode wire suites) under a 540 s workload budget, with stage timing,
   largest-process RSS and TRX evidence uploaded per run.
@@ -68,13 +68,15 @@ browser suites. It runs on every promotion pull request and every push to
 ## Review
 
 Mechanical, Standard and Deep review levels use one parent review with one
-resolvable child thread per finding. The parent is committed under
-`.agentcontrol/reviews/` on the PR branch and posted by the `AgentControl`
-workflow as `hvo-agentcontrol[bot]`; author resolutions and the reviewer's
-`VERIFIED_*` verification stay in the finding thread, and the operator resolves
-it. A pull request is marked ready only after the current head is reviewed,
-every finding has a verified terminal disposition, every thread is resolved,
-and the review file is off the branch.
+resolvable child thread per finding. The parent, each finding thread and each
+`VERIFIED_*` verification are posted by the `AgentControl` workflow as
+`hvo-agentcontrol[bot]`, bound to the exact head SHA; the implementer's own
+`CORRECTED`/`DEFERRED`/… replies are under the operator account, and the
+operator resolves the thread. Review text is never committed to the PR branch.
+A pull request is marked ready only after the current head has an `APPROVE`
+verdict, every finding has a verified terminal disposition and every thread is
+resolved; convergence is recorded once the required checks are green on that
+head.
 
 ## Promotion To main
 
