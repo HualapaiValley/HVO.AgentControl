@@ -722,7 +722,7 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
     if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
     var workerOptions = options.Value;
     if (!workerOptions.Enabled)
-        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
     if (workerOptions.Validate().Count != 0)
         return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no approval was recorded.");
     try
@@ -768,7 +768,7 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
     }
 })
     .WithName("ApproveHireRequest").WithTags("Hiring")
-    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build.")
+    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build on the controller-local Docker target.")
     .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)

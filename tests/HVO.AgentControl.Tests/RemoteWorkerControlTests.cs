@@ -55,14 +55,16 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public void FreshSchemaIsV10AndCarriesRemoteWorkerHiringProfileBuildAndApprovalTablesWithoutSeededEnrollment()
+    public void FreshSchemaIsV11AndCarriesRemoteWorkerHiringProfileBuildAndApprovalTablesWithoutSeededEnrollment()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(10L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        Assert.Equal(11L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
         foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "hire_request_approvals", "managed_enrollment_resources", "container_profiles", "container_profile_revisions", "profile_builds" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
+        // The reserved controller-local Docker row is seeded by a fresh create.
+        Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM execution_hosts WHERE id='{ExecutionHosts.LocalDockerId}' AND slug='{ExecutionHosts.LocalDockerSlug}' AND transport_kind='local-docker' AND endpoint_host IS NULL AND endpoint_port IS NULL AND endpoint_user IS NULL AND known_hosts_path IS NULL AND os='linux' AND capability_status='unprobed' AND enabled=1 AND enrolled=0 AND status='registered'")));
     }
 
     [Fact]
@@ -890,7 +892,7 @@ public sealed class RemoteWorkerControlTests
     public async Task DockerInspectParsesContainerAndVolumeFixturesAndRejectsTransportFailure()
     {
         var adapter = new RemoteWorkerProvisionerAdapter(new FixtureOperations());
-        var host = new ApprovedExecutionHost();
+        var host = new ExecutionTarget("host-a", "ssh-docker", new ApprovedExecutionHost());
         var container = await adapter.InspectContainerAsync(host, "worker", CancellationToken.None);
         Assert.True(container.Exists); Assert.Equal("running", container.State); Assert.Equal("worker-a", container.Labels["agentcontrol.worker"]);
         var volume = await adapter.InspectVolumeAsync(host, "volume", CancellationToken.None);
@@ -1581,16 +1583,17 @@ public sealed class RemoteWorkerControlTests
 
         // A managed plan needs no requested host or digest: it resolves both from
         // the frozen approval, and links the exact approval revision to the worker.
-        var enrollment = await coordinator.PlanAsync(creation.RuntimeBindingId, "host-a", CancellationToken.None);
+        var enrollment = await coordinator.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
         Assert.Equal(creation.RuntimeBindingId, enrollment.RuntimeBindingId);
         Assert.Equal(fixture.ManagedDigest, enrollment.ExpectedImageDigest);
+        Assert.Equal(ExecutionHosts.LocalDockerId, enrollment.HostId);
         var linked = fixture.Store.GetHireRequestApproval(creation.HireRequestId)!;
         Assert.Equal(enrollment.WorkerId, linked.WorkerId);
         Assert.Equal(approval.Revision + 1, linked.Revision);
 
         // Re-planning is idempotent: same worker, same approval revision, no new ops.
         var operationCount = fixture.Store.ListProvisioningOperations(enrollment.WorkerId).Count;
-        var replay = await coordinator.PlanAsync(creation.RuntimeBindingId, "host-a", CancellationToken.None);
+        var replay = await coordinator.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
         Assert.Equal(enrollment.WorkerId, replay.WorkerId);
         Assert.Equal(operationCount, fixture.Store.ListProvisioningOperations(enrollment.WorkerId).Count);
         Assert.Equal(linked.Revision, fixture.Store.GetHireRequestApproval(creation.HireRequestId)!.Revision);
@@ -1636,16 +1639,16 @@ public sealed class RemoteWorkerControlTests
     [Fact]
     public async Task ManagedPlanRefusesWrongHostDigestAndCeilingExceedingResourcesBeforeSideEffects()
     {
-        // A wrong host and a wrong digest against a host-a approval.
+        // A managed binding may not be planned through the manual host/digest path.
         using (var fixture = new RemoteStoreFixture())
         {
             var creation = fixture.CreateManagedApprovedBinding();
             var remote = new RecordingProvisioner();
             var coordinator = fixture.CreateCoordinator(remote);
 
-            await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            await Assert.ThrowsAsync<OrganizationValidationException>(() =>
                 coordinator.PlanAsync(creation.RuntimeBindingId, "host-big", CancellationToken.None));
-            await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            await Assert.ThrowsAsync<OrganizationValidationException>(() =>
                 coordinator.PlanAsync(creation.RuntimeBindingId, "host-a", fixture.Digest, CancellationToken.None));
 
             Assert.Empty(fixture.Store.ListWorkerEnrollments());
@@ -1653,17 +1656,40 @@ public sealed class RemoteWorkerControlTests
             Assert.Empty(remote.Effects);
         }
 
-        // Frozen resources above the global ceiling are refused, even though they
-        // were valid against the much larger host capacity at approval time.
+        // A frozen host that is not the controller-local target is refused by the
+        // managed path before any enrollment or remote side effect.
         using (var fixture = new RemoteStoreFixture())
         {
-            fixture.EnsureBigHost();
-            var creation = fixture.CreateManagedApprovedBinding(hostId: "host-big", cpu: 4, memoryMiB: 8192, pids: 512);
+            var creation = fixture.CreateManagedApprovedBinding();
+            // The freeze is immutable at the database boundary; drop the guard in
+            // this test to exercise the coordinator's own non-local refusal.
+            using (var connection = Open(fixture.DatabasePath))
+            {
+                connection.Execute("DROP TRIGGER managed_enrollment_resources_frozen_immutable;");
+                connection.Execute($"UPDATE managed_enrollment_resources SET approved_host_id='host-a' WHERE runtime_binding_id='{creation.RuntimeBindingId}';");
+            }
+            var remote = new RecordingProvisioner();
+            var coordinator = fixture.CreateCoordinator(remote);
+
+            var failure = await Assert.ThrowsAsync<WorkerControlConfigurationException>(() =>
+                coordinator.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None));
+            Assert.Equal("Managed hires provision only on the controller-local Docker target.", failure.Message);
+
+            Assert.Empty(fixture.Store.ListWorkerEnrollments());
+            Assert.Empty(fixture.Store.ListProvisioningOperations());
+            Assert.Empty(remote.Effects);
+        }
+
+        // Frozen resources above the global ceiling are refused, even though they
+        // were valid against the much larger local host capacity at approval time.
+        using (var fixture = new RemoteStoreFixture())
+        {
+            var creation = fixture.CreateManagedApprovedBinding(cpu: 4, memoryMiB: 8192, pids: 512);
             var remote = new RecordingProvisioner();
             var coordinator = fixture.CreateCoordinator(remote);
 
             await Assert.ThrowsAsync<WorkerControlConfigurationException>(() =>
-                coordinator.PlanAsync(creation.RuntimeBindingId, "host-big", CancellationToken.None));
+                coordinator.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None));
 
             Assert.Empty(fixture.Store.ListWorkerEnrollments());
             Assert.Empty(fixture.Store.ListProvisioningOperations());
@@ -2195,18 +2221,24 @@ public sealed class RemoteWorkerControlTests
         /// build is seeded on the exact host so the approval can freeze its digest.
         /// </summary>
         public ManagedEmployeeCreation CreateManagedApprovedBinding(
-            string hostId = "host-a",
+            string? hostId = null,
             string displayName = "Managed Dev",
             int cpu = 1,
             int memoryMiB = 1024,
             int pids = 128,
             string? digest = null)
         {
+            // Managed hiring is controller-local Docker only. Seed the reserved
+            // local target as a ready host with capacity and a verified build, so
+            // the approval can freeze it. The hostId parameter is retained only for
+            // call-site compatibility and is ignored.
+            _ = hostId;
+            EnsureLocalDockerHost();
             var built = digest ?? ManagedDigest;
             var profile = Store.ListContainerProfiles().Single();
             var profileRevisionId = Store.GetContainerProfile(profile.Id)!.Revisions.Single().Id;
             var contextHash = "sha256:" + new string('8', 64);
-            var queued = Store.QueueProfileBuild(profileRevisionId, hostId, Digest, "linux/amd64", contextHash, "agentcontrol-profile:x");
+            var queued = Store.QueueProfileBuild(profileRevisionId, ExecutionHosts.LocalDockerId, Digest, "linux/amd64", contextHash, "agentcontrol-profile:x");
             var building = Store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
             var verifying = Store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
             Store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: built, verified: true, evidenceHash: contextHash);
@@ -2217,8 +2249,17 @@ public sealed class RemoteWorkerControlTests
             var hire = Store.CreateHireRequest(new HireRequestCreate(
                 Guid.NewGuid().ToString("N"), displayName, "Managed hire under test.", department.Id, role.Id,
                 RuntimePlacements.DeveloperContainer, cpu, memoryMiB, pids), null);
-            Store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, profileRevisionId, hostId), "owner");
+            Store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, profileRevisionId), "owner");
             return Store.CreateManagedEmployeeFromHire(hire.Id);
+        }
+
+        /// <summary>Probes the reserved controller-local Docker host with large capacity.</summary>
+        public void EnsureLocalDockerHost()
+        {
+            var host = Store.GetExecutionHost(ExecutionHosts.LocalDockerId);
+            if (host is null || host.CapabilityStatus != "unprobed") return;
+            Store.RecordLocalExecutionHostProbe(ExecutionHosts.LocalDockerId, host.Revision, new LocalExecutionHostProbe(
+                "29.0", "1.51", "x86_64", "overlay2", "ext4", false, 256L << 30, 128L << 30, 64, true, "linux/amd64", "valid"));
         }
 
         public string ManagedDigest { get; } = "sha256:" + new string('9', 64);
@@ -2261,9 +2302,9 @@ public sealed class RemoteWorkerControlTests
             _containerStates[name] = state;
         }
 
-        public Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token) => throw new NotSupportedException();
+        public Task<HostProbePayload> ProbeAsync(ExecutionTarget host, CancellationToken token) => throw new NotSupportedException();
 
-        public Task<string> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec spec, CancellationToken token)
+        public Task<string> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec spec, CancellationToken token)
         {
             Effects.Add("volume:" + spec.Name);
             _labels[spec.Name] = spec.Identity.Labels;
@@ -2273,7 +2314,7 @@ public sealed class RemoteWorkerControlTests
         public List<ContainerCreateSpec> Containers { get; } = [];
         public List<BootstrapSpec> Bootstraps { get; } = [];
 
-        public Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token)
+        public Task<string> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec spec, CancellationToken token)
         {
             Effects.Add("container:" + spec.Name);
             if (FailCreateContainerOnce && Interlocked.Increment(ref _containerAttempts) == 1) throw new RemoteWorkerUnavailableException("injected create failure", transport: true);
@@ -2283,7 +2324,7 @@ public sealed class RemoteWorkerControlTests
             return Task.FromResult("container-ref-" + spec.Name + "-" + Interlocked.Increment(ref _containerRefs));
         }
 
-        public Task BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec spec, byte[] key, CancellationToken token)
+        public Task BootstrapAsync(ExecutionTarget host, BootstrapSpec spec, byte[] key, CancellationToken token)
         {
             try
             {
@@ -2296,13 +2337,13 @@ public sealed class RemoteWorkerControlTests
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(key); }
         }
 
-        public Task StartAsync(ApprovedExecutionHost host, string container, CancellationToken token) { Effects.Add("start:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "running"; return Task.CompletedTask; }
-        public Task StopAsync(ApprovedExecutionHost host, string container, CancellationToken token) { Effects.Add("stop:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "stopped"; return Task.CompletedTask; }
-        public Task RemoveContainerAsync(ApprovedExecutionHost host, string container, CancellationToken token) { Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
-        public Task RemoveVolumeAsync(ApprovedExecutionHost host, string volume, CancellationToken token) { Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
+        public Task StartAsync(ExecutionTarget host, string container, CancellationToken token) { Effects.Add("start:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "running"; return Task.CompletedTask; }
+        public Task StopAsync(ExecutionTarget host, string container, CancellationToken token) { Effects.Add("stop:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "stopped"; return Task.CompletedTask; }
+        public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token) { Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
+        public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token) { Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
 
-        public Task<RemoteResourceInspection> InspectVolumeAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(name, "present");
-        public Task<RemoteResourceInspection> InspectContainerAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running");
+        public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, "present");
+        public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running");
 
         private Task<RemoteResourceInspection> Inspect(string name, string state)
         {

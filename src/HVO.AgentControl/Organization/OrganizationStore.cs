@@ -92,16 +92,21 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 10 adds atomic owner approval and managed-employee creation
-    /// (<c>hire_request_approvals</c>, <c>managed_enrollment_resources</c>) and
-    /// rebuilds <c>hire_requests</c> with a bounded nullable <c>status_detail</c>.
-    /// Schema 9 added per-host profile image builds (additive only). Schema 8
-    /// added immutable container profiles and their revision chain and seeded the
-    /// <c>generic-employee</c> profile. Each migration accepts only the exact
-    /// released signature of the previous version and creates verified, immutable
-    /// source evidence before changing the authoritative store.
+    /// Schema 11 permits managed hiring against the controller-local Docker daemon:
+    /// it rebuilds <c>execution_hosts</c> with a constrained <c>transport_kind</c>
+    /// (<c>local-docker</c> or <c>ssh-docker</c>), a CHECK that an SSH host carries
+    /// all four endpoint columns and a local host none of them, and seeds the
+    /// reserved <c>local-docker</c> row. Schema 10 added atomic owner approval and
+    /// managed-employee creation (<c>hire_request_approvals</c>,
+    /// <c>managed_enrollment_resources</c>) and rebuilt <c>hire_requests</c> with a
+    /// bounded nullable <c>status_detail</c>. Schema 9 added per-host profile image
+    /// builds (additive only). Schema 8 added immutable container profiles and
+    /// their revision chain and seeded the <c>generic-employee</c> profile. Each
+    /// migration accepts only the exact released signature of the previous version
+    /// and creates verified, immutable source evidence before changing the
+    /// authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 10;
+    public const int CurrentSchemaVersion = 11;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -125,6 +130,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV8BackupHashFileName = "control.schema-v8.sha256";
     public const string SchemaV9BackupFileName = "control.schema-v9.db";
     public const string SchemaV9BackupHashFileName = "control.schema-v9.sha256";
+    public const string SchemaV10BackupFileName = "control.schema-v10.db";
+    public const string SchemaV10BackupHashFileName = "control.schema-v10.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -527,6 +534,13 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV10Statements =
         [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements];
 
+    // v11 = v6 with the rebuilt execution_hosts (via RemoteWorkerSchemaV11Statements)
+    // + profile tables + the v10 hire tables + profile immutability + profile builds
+    // + approval/resources tables. The frozen v4 execution_hosts statement stays in
+    // RemoteWorkerSchemaV4Statements for exact v3-v10 signature migration.
+    private static readonly string[] SchemaV11Statements =
+        [.. SchemaV3Statements, .. RemoteWorkerSchemaV11Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -548,8 +562,11 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV9 =
         BuildExpectedSchema(SchemaV9Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV10 =
         BuildExpectedSchema(SchemaV10Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV11Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -581,7 +598,14 @@ public sealed partial class OrganizationStore : IDisposable
     }
 
     private static string NormalizeSchemaSql(string sql) =>
-        System.Text.RegularExpressions.Regex.Replace(sql.Trim(), @"\s+", " ").Trim();
+        // SQLite renders a table that was renamed into place with its name quoted
+        // (`CREATE TABLE "execution_hosts"`). Identifier quotes are not part of the
+        // definition, so they are removed before comparison; schema string literals
+        // use single quotes and are left intact.
+        System.Text.RegularExpressions.Regex.Replace(
+            System.Text.RegularExpressions.Regex.Replace(sql.Trim(), "\"", string.Empty),
+            @"\s+",
+            " ").Trim();
 
     private readonly string _databasePath;
     private readonly TimeSpan _lockTimeout;
@@ -1560,6 +1584,17 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV9ToV10(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV10);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 10)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV10);
+            EnsureSchemaV10Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV10ToV11(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -2081,6 +2116,90 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV10Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 10, SchemaV10BackupFileName, SchemaV10BackupHashFileName, ExpectedSchemaV10);
+
+    /// <summary>The v11 execution_hosts definition created under a staging name during migration.</summary>
+    private static string ExecutionHostsV11StagingStatement =>
+        ExecutionHostsSchemaV11Statement.Replace("CREATE TABLE execution_hosts (", "CREATE TABLE execution_hosts_v11 (", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Rebuilds <c>execution_hosts</c> to admit the controller-local Docker
+    /// transport and seeds its reserved row. Seven tables reference
+    /// <c>execution_hosts(id)</c>, so the rename must not rewrite those references
+    /// to a temporary name: <c>PRAGMA legacy_alter_table = ON</c> keeps every
+    /// referencing foreign key pointed at <c>execution_hosts</c> while the old
+    /// table is renamed, the new table is created, the rows are copied and the old
+    /// table is dropped. The pragma is scoped to this migration and restored before
+    /// commit; <c>PRAGMA foreign_key_check</c> afterwards proves every reference
+    /// resolves against the new table.
+    /// </summary>
+    private void MigrateV10ToV11(SqliteConnection connection)
+    {
+        // Seven tables reference execution_hosts(id). Renaming the old table makes
+        // SQLite rewrite those foreign keys to the temporary name, so instead the
+        // replacement is built under a temporary name, the old table is dropped and
+        // the replacement is renamed into "execution_hosts". Every reference still
+        // names "execution_hosts" throughout and resolves to the new table, which
+        // foreign_key_check proves after commit. Foreign keys are disabled only for
+        // the switch (dropping the referenced old table would otherwise violate the
+        // immediate constraints of its children) and restored before the check.
+        ExecutePragma(connection, "foreign_keys = OFF");
+        using var transaction = connection.BeginTransaction();
+        try
+        {
+            Execute(connection, transaction, ExecutionHostsV11StagingStatement);
+            Execute(connection, transaction,
+                """
+                INSERT INTO execution_hosts_v11 (
+                    id, slug, display_name, transport_kind, endpoint_host, endpoint_port, endpoint_user,
+                    known_hosts_path, host_key_algorithm, host_key_fingerprint, known_hosts_hash, docker_version,
+                    docker_api_version, os, architecture, storage_driver, backing_filesystem, shared_storage,
+                    free_bytes, memory_bytes, cpu_count, limits_supported, image_platform, capability_status,
+                    last_probe_utc, enabled, enrolled, status, created_at, updated_at, revision)
+                SELECT id, slug, display_name, transport_kind, endpoint_host, endpoint_port, endpoint_user,
+                       known_hosts_path, host_key_algorithm, host_key_fingerprint, known_hosts_hash, docker_version,
+                       docker_api_version, os, architecture, storage_driver, backing_filesystem, shared_storage,
+                       free_bytes, memory_bytes, cpu_count, limits_supported, image_platform, capability_status,
+                       last_probe_utc, enabled, enrolled, status, created_at, updated_at, revision
+                FROM execution_hosts
+                """);
+            Execute(connection, transaction, "DROP TABLE execution_hosts");
+            Execute(connection, transaction, "ALTER TABLE execution_hosts_v11 RENAME TO execution_hosts");
+            SeedLocalDockerExecutionHostV11(connection, transaction);
+            Execute(connection, transaction, "UPDATE schema_version SET version = 11 WHERE version = 10");
+            BeforeMigrationCommit?.Invoke();
+            transaction.Commit();
+        }
+        finally
+        {
+            ExecutePragma(connection, "foreign_keys = ON");
+        }
+    }
+
+    /// <summary>
+    /// Seeds the single reserved controller-local Docker execution host. The row
+    /// is structural: it is the only execution target a managed hire may use, so a
+    /// store missing it is partial. Re-running is idempotent and never overwrites
+    /// an existing probed row.
+    /// </summary>
+    private static void SeedLocalDockerExecutionHostV11(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var now = Timestamp();
+        Execute(connection, transaction,
+            """
+            INSERT INTO execution_hosts (
+                id, slug, display_name, transport_kind, endpoint_host, endpoint_port, endpoint_user,
+                known_hosts_path, os, capability_status, enabled, enrolled, status, created_at, updated_at, revision)
+            VALUES ($id, $slug, $name, 'local-docker', NULL, NULL, NULL, NULL, 'linux', 'unprobed', 1, 0, 'registered', $now, $now, 1)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            ("$id", ExecutionHosts.LocalDockerId),
+            ("$slug", ExecutionHosts.LocalDockerSlug),
+            ("$name", ExecutionHosts.LocalDockerDisplayName),
+            ("$now", now));
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -2092,7 +2211,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v9 file is pre-migration evidence only and restoring it would lose owner approvals recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v10 file is pre-migration evidence only and restoring it would lose owner approvals recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2234,7 +2353,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV10Statements)
+        foreach (var statement in SchemaV11Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -2244,6 +2363,8 @@ public sealed partial class OrganizationStore : IDisposable
             transaction,
             "INSERT INTO schema_version (version) VALUES ($version)",
             ("$version", CurrentSchemaVersion));
+
+        SeedLocalDockerExecutionHostV11(connection, transaction);
 
         Execute(
             connection,

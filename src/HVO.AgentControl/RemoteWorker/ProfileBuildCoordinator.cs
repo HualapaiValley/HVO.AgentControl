@@ -27,6 +27,7 @@ namespace HVO.AgentControl.RemoteWorker;
 public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorkerOperations operations, IOptions<WorkerControlOptions> configured, ILogger<ProfileBuildCoordinator> logger)
 {
     private readonly WorkerControlOptions _options = configured.Value;
+    private readonly ExecutionTargetResolver _targets = new(control, configured);
 
     /// <summary>
     /// Build ids this process is actively driving. A row that is
@@ -42,11 +43,14 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     {
         RequireEnabled();
         var store = Store();
-        var host = Approved(hostId);
+        // Queueing is a store-level intent and is permitted for the local target;
+        // the run refuses it before any remote effect. Resolving the target still
+        // requires the host to be a registered execution host.
+        var target = _targets.Resolve(hostId);
         var profile = FindRevision(store, profileRevisionId) ?? throw new OrganizationNotFoundException($"Container profile revision '{profileRevisionId}' does not exist.");
         var (_, contextHash, _) = ProfileBuildContext.Render(profile, _options.ApprovedImageDigest, _options.ApprovedImagePlatform);
         var tag = ResultTag(profile.Id, contextHash);
-        return store.QueueProfileBuild(profile.Id, host.Id, _options.ApprovedImageDigest, _options.ApprovedImagePlatform, contextHash, tag);
+        return store.QueueProfileBuild(profile.Id, target.Id, _options.ApprovedImageDigest, _options.ApprovedImagePlatform, contextHash, tag);
     }
 
     /// <summary>
@@ -69,7 +73,10 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     {
         var store = Store();
         var build = store.GetProfileBuild(buildId) ?? throw new OrganizationNotFoundException($"Profile build '{buildId}' does not exist.");
-        var host = Approved(build.HostId);
+        var host = _targets.Resolve(build.HostId);
+        // The controller-local Docker target is queued at the store level but the
+        // build run refuses it before any remote effect in this build.
+        _ = Ssh(host);
         var revision = FindRevision(store, build.ProfileRevisionId) ?? throw new OrganizationStoreCorruptException("The build's profile revision is missing.");
         if (build.BaseImageDigest != _options.ApprovedImageDigest || build.Platform != _options.ApprovedImagePlatform)
             throw new OrganizationConcurrencyException("The approved base image changed since this build was queued; queue a new build.");
@@ -93,12 +100,13 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
 
             build = store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Building);
             var pinTag = ProfileBuildContext.PinTag(build.BaseImageDigest);
-            var pin = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageTag, [build.BaseImageDigest, pinTag], null, cancellationToken).ConfigureAwait(false);
+            var ssh = Ssh(host);
+            var pin = await operations.ExecuteAsync(ssh, RemoteDockerOperation.ImageTag, [build.BaseImageDigest, pinTag], null, cancellationToken).ConfigureAwait(false);
             if (pin.ExitCode != 0)
                 return Fail(store, build, pin.ErrorCategory == "not-found" ? "The approved base image is not present on the host." : "The base image could not be pinned on the host.", pin.ErrorCategory);
 
             var spec = new ImageBuildSpec(build.BaseImageDigest, build.Platform, revision.Id, build.ContextHash, build.ResultTag, NetworkRequired: ProfileBuildContext.RequiresNetwork(revision));
-            var result = await operations.BuildImageAsync(host, spec, tar, cancellationToken).ConfigureAwait(false);
+            var result = await operations.BuildImageAsync(ssh, spec, tar, cancellationToken).ConfigureAwait(false);
             if (result.ErrorCategory == "transport")
             {
                 // The command may or may not have completed on the host: leave it for reconciliation.
@@ -121,9 +129,10 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         }
     }
 
-    private async Task<ProfileBuildRecord> ReconcileAsync(OrganizationStore store, ApprovedExecutionHost host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
+    private async Task<ProfileBuildRecord> ReconcileAsync(OrganizationStore store, ExecutionTarget host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
     {
-        var inspect = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageInspect, [build.ResultTag], null, cancellationToken).ConfigureAwait(false);
+        var ssh = Ssh(host);
+        var inspect = await operations.ExecuteAsync(ssh, RemoteDockerOperation.ImageInspect, [build.ResultTag], null, cancellationToken).ConfigureAwait(false);
         if (inspect.ErrorCategory == "not-found")
             return store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Failed, failureSummary: "Reconciled: no image carries the build's tag on the host.");
         if (inspect.ExitCode != 0) throw new RemoteWorkerUnavailableException("The build could not be reconciled: the host did not answer the image inspect.", inspect.ErrorCategory == "transport");
@@ -131,11 +140,12 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         return await VerifyAsync(store, host, build, revision, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<ProfileBuildRecord> VerifyAsync(OrganizationStore store, ApprovedExecutionHost host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
+    private async Task<ProfileBuildRecord> VerifyAsync(OrganizationStore store, ExecutionTarget host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
     {
-        var inspect = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageInspect, [build.ResultTag], null, cancellationToken).ConfigureAwait(false);
+        var ssh = Ssh(host);
+        var inspect = await operations.ExecuteAsync(ssh, RemoteDockerOperation.ImageInspect, [build.ResultTag], null, cancellationToken).ConfigureAwait(false);
         if (inspect.ExitCode != 0) return Fail(store, build, "The built image could not be inspected.", inspect.ErrorCategory);
-        var baseInspect = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageInspect, [build.BaseImageDigest], null, cancellationToken).ConfigureAwait(false);
+        var baseInspect = await operations.ExecuteAsync(ssh, RemoteDockerOperation.ImageInspect, [build.BaseImageDigest], null, cancellationToken).ConfigureAwait(false);
         if (baseInspect.ExitCode != 0) return Fail(store, build, "The approved base image could not be inspected.", baseInspect.ErrorCategory);
 
         string digest;
@@ -148,7 +158,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
             return Reject(store, build, exception.Message);
         }
 
-        var verify = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageVerify, [build.ResultTag, build.BaseImageDigest, build.Platform], null, cancellationToken).ConfigureAwait(false);
+        var verify = await operations.ExecuteAsync(ssh, RemoteDockerOperation.ImageVerify, [build.ResultTag, build.BaseImageDigest, build.Platform], null, cancellationToken).ConfigureAwait(false);
         if (verify.ErrorCategory == "transport")
             return store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Uncertain, failureSummary: "Transport failed during verification.");
         if (verify.ExitCode != 0) return Reject(store, build, "The contract verification program did not complete inside the image.");
@@ -185,7 +195,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     }
 
     private OrganizationStore Store() => control.Organization ?? throw new OrganizationStoreException("The authoritative organization store is unavailable.");
-    private ApprovedExecutionHost Approved(string hostId) => _options.ApprovedHosts.SingleOrDefault(x => x.Id == hostId) ?? throw new KeyNotFoundException("Execution host is not approved.");
+    private static ApprovedExecutionHost Ssh(ExecutionTarget target) => target.Ssh ?? throw new WorkerControlConfigurationException(LocalDockerUnavailableOperations.Message);
     private void RequireEnabled() { if (!_options.Enabled) throw new WorkerControlDisabledException(); if (_options.Validate().Count != 0) throw new WorkerControlConfigurationException("Remote worker configuration is invalid."); }
 }
 

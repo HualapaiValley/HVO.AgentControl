@@ -62,7 +62,9 @@ public sealed class WorkerControlOptions
         if (MemoryBytes < 256L * 1024 * 1024 || CpuLimit is <= 0 or > 64 || PidsLimit is < 32 or > 4096) errors.Add("Worker resource limits are invalid.");
         foreach (var host in ApprovedHosts ?? []) errors.AddRange(host.Validate(Enabled && inspectFiles).Select(value => $"ApprovedHosts[{host.Id}]: {value}"));
         if ((ApprovedHosts ?? []).GroupBy(host => host.Id, StringComparer.Ordinal).Any(group => group.Count() != 1)) errors.Add("Approved host IDs must be unique.");
-        if (Enabled && (ApprovedHosts?.Length ?? 0) == 0) errors.Add("At least one approved host is required when enabled.");
+        // ApprovedHosts may be empty when enabled: managed hiring targets the
+        // controller-local Docker daemon, so no SSH host is required. The SSH
+        // manual path simply has no hosts to offer.
         return errors;
     }
 
