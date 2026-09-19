@@ -608,6 +608,287 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
 }
 
 /// <summary>
+/// The approve endpoint against a real runtime. WorkerControl gating is proven
+/// with the disabled and deliberately-invalid factories, and the successful path
+/// seeds the authoritative store host and a verified profile build directly (no
+/// SSH or Docker) so the endpoint freezes a real selection, creates a real
+/// managed employee and returns the joined request.
+/// </summary>
+[Collection(LocalPortBindingCollection.Name)]
+public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlValidRuntimeFactory>
+{
+    private readonly WorkerControlValidRuntimeFactory _valid;
+
+    public HireApprovalApiRuntimeTests(WorkerControlValidRuntimeFactory valid)
+    {
+        _valid = valid;
+    }
+
+    [Fact]
+    public async Task ApproveRejectsUnauthenticatedMalformedAndCrossOriginRequests()
+    {
+        using var client = await ReadyClientAsync(_valid);
+        var id = await CreateDevHireAsync(client, "Approval Guard Hire");
+        var origin = _valid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority);
+        var body = new { expectedRevision = 1, profileRevisionId = "prev-0000000000000000", hostId = "host-a" };
+
+        using var unauthenticated = _valid.CreateClient();
+        using var unauthenticatedResponse = await unauthenticated.PostAsJsonAsync($"/api/hire-requests/{id}/approve", body);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResponse.StatusCode);
+
+        using var malformedRequest = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests/not-a-hire-id/approve") { Content = JsonContent.Create(body) };
+        malformedRequest.Headers.Add("Origin", origin);
+        using var malformedResponse = await client.SendAsync(malformedRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, malformedResponse.StatusCode);
+        Assert.Equal("Invalid hire request id.", (await ReadProblemAsync(malformedResponse)).GetProperty("title").GetString());
+
+        using var crossOriginRequest = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve") { Content = JsonContent.Create(body) };
+        crossOriginRequest.Headers.Add("Origin", "https://other.example");
+        using var crossOriginResponse = await client.SendAsync(crossOriginRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        using var unknownRequest = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests/hire-0000000000000000/approve") { Content = JsonContent.Create(body) };
+        unknownRequest.Headers.Add("Origin", origin);
+        using var unknownResponse = await client.SendAsync(unknownRequest);
+        Assert.Equal(HttpStatusCode.NotFound, unknownResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task ApproveIs409WhenWorkerControlIsDisabled()
+    {
+        using var disabled = new EnabledRuntimeFactory();
+        using var client = await ReadyClientAsync(disabled);
+        var id = await CreateDevHireAsync(client, "Disabled Gate Hire");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1, profileRevisionId = "prev-0000000000000000", hostId = "host-a" }),
+        };
+        request.Headers.Add("Origin", disabled.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("Remote worker control is disabled.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
+    }
+
+    [Fact]
+    public async Task ApproveIs409WhenWorkerControlConfigurationIsInvalid()
+    {
+        using var invalid = new WorkerControlInvalidConfigFactory();
+        using var client = await ReadyClientAsync(invalid);
+        var id = await CreateDevHireAsync(client, "Invalid Config Gate Hire");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1, profileRevisionId = "prev-0000000000000000", hostId = "host-a" }),
+        };
+        request.Headers.Add("Origin", invalid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("Remote worker configuration is invalid.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
+    }
+
+    [Fact]
+    public async Task ApproveFreezesSelectionCreatesManagedEmployeeAndDurablyQueuesProvisioning()
+    {
+        using var client = await ReadyClientAsync(_valid);
+        var store = _valid.Host.Organization!;
+        var build = SeedVerifiedBuild(store);
+        var id = await CreateDevHireAsync(client, "Approved API Developer");
+        var revisionId = build.ProfileRevisionId;
+
+        using var before = await client.GetAsync($"/api/hire-requests/{id}");
+        using var beforeDocument = JsonDocument.Parse(await before.Content.ReadAsStringAsync());
+        var expectedRevision = beforeDocument.RootElement.GetProperty("revision").GetInt32();
+        Assert.Equal(HireRequestStates.Requested, beforeDocument.RootElement.GetProperty("state").GetString());
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve")
+        {
+            Content = JsonContent.Create(new { expectedRevision, profileRevisionId = revisionId, hostId = "host-a" }),
+        };
+        request.Headers.Add("Origin", _valid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var approved = document.RootElement;
+        Assert.Equal(HireRequestStates.Provisioning, approved.GetProperty("state").GetString());
+        Assert.Equal(revisionId, approved.GetProperty("containerProfileRevisionId").GetString());
+        Assert.Equal(build.Id, approved.GetProperty("profileBuildId").GetString());
+        Assert.Equal(build.ImageDigest, approved.GetProperty("approvedImageDigest").GetString());
+        Assert.Equal("host-a", approved.GetProperty("approvedHostId").GetString());
+        var employeeId = approved.GetProperty("employeeId").GetString();
+        var bindingId = approved.GetProperty("runtimeBindingId").GetString();
+        Assert.StartsWith("emp-", employeeId, StringComparison.Ordinal);
+        Assert.StartsWith("rtb-", bindingId, StringComparison.Ordinal);
+        Assert.True(approved.GetProperty("workerId").ValueKind is JsonValueKind.Null);
+
+        // The approval identity is host-derived and never echoed from the body;
+        // the immutable record carries the fixed host value.
+        var approval = store.GetHireRequestApproval(id)!;
+        Assert.Equal(Program.HireApprovalIdentity, approval.ApprovalIdentity);
+        Assert.Equal(employeeId, approval.EmployeeId);
+
+        // The employee identity and frozen resources exist and the durable state is
+        // queued before the HTTP response. The remote work remains asynchronous: no
+        // enrollment or host effect is required for approval to return.
+        Assert.Equal(HireRequestStates.Provisioning, store.GetHireRequest(id)!.State);
+        Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM employees WHERE id = @id", employeeId!));
+        Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM managed_enrollment_resources WHERE runtime_binding_id = @id", bindingId!));
+        Assert.Equal(0, CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments", null));
+    }
+
+    private static async Task<HttpClient> ReadyClientAsync(EnabledRuntimeFactory factory)
+    {
+        var client = factory.CreateClient();
+        await factory.WaitForReadyAsync(TimeSpan.FromSeconds(45));
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
+            "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"owner:{EnabledRuntimeFactory.OwnerPassword}")));
+        return client;
+    }
+
+    private static async Task<string> CreateDevHireAsync(HttpClient client, string displayName)
+    {
+        using var overviewResponse = await client.GetAsync("/api/organization");
+        using var overviewDocument = JsonDocument.Parse(await overviewResponse.Content.ReadAsStringAsync());
+        var overview = overviewDocument.RootElement;
+        var department = overview.GetProperty("departments").EnumerateArray().Single(x => x.GetProperty("slug").GetString() == OrganizationSeed.OperationsSlug);
+        var role = Assert.Single(overview.GetProperty("roles").EnumerateArray());
+        using var create = new HttpRequestMessage(HttpMethod.Post, "/api/hire-requests")
+        {
+            Content = JsonContent.Create(new
+            {
+                idempotencyKey = "api-approve-" + Guid.NewGuid().ToString("N"),
+                requestedDisplayName = displayName,
+                purpose = "Exercise approval through the API.",
+                departmentId = department.GetProperty("id").GetString(),
+                roleId = role.GetProperty("id").GetString(),
+                placement = RuntimePlacements.DeveloperContainer,
+                cpuLimit = 2,
+                memoryLimitMiB = 2048,
+                pidsLimit = 256,
+            }),
+        };
+        create.Headers.Add("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        using var response = await client.SendAsync(create);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return document.RootElement.GetProperty("id").GetString()!;
+    }
+
+    private static ProfileBuildRecord SeedVerifiedBuild(OrganizationStore store)
+    {
+        const string baseDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111";
+        const string builtDigest = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222";
+        const string contextHash = "sha256:" + "3333333333333333333333333333333333333333333333333333333333333333";
+        if (store.GetExecutionHost("host-a") is null)
+        {
+            store.RegisterExecutionHost("host-a", "host-a.example", 22, "roys", "/known", new ExecutionHostRegistration("host-a", "host-a", "Host A"));
+        }
+        var host = store.GetExecutionHost("host-a")!;
+        store.RecordExecutionHostProbe("host-a", host.Revision, new ExecutionHostProbe(
+            "ssh-ed25519", "SHA256:x", "sha256:" + new string('1', 64), "29.0", "1.51", "x86_64", "overlay2", "ext4",
+            false, 64L << 30, 16L << 30, 8, true, "linux/amd64", "valid"));
+        var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
+        var revision = store.GetContainerProfile(profile.Id)!.Revisions.Single();
+        var existing = store.GetVerifiedProfileBuild(revision.Id, "host-a");
+        if (existing is not null) return existing;
+        var queued = store.QueueProfileBuild(revision.Id, "host-a", baseDigest, "linux/amd64", contextHash, "agentcontrol-profile:x");
+        var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+        var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+        return store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: builtDigest, verified: true, evidenceHash: contextHash);
+    }
+
+    private static async Task<JsonElement> ReadProblemAsync(HttpResponseMessage response)
+    {
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return document.RootElement.Clone();
+    }
+
+    private static int CountRaw(OrganizationStore store, string sql, string? parameter)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = store.DatabasePath,
+            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        if (parameter is not null) command.Parameters.AddWithValue("@id", parameter);
+        return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+}
+
+/// <summary>
+/// Control and WorkerControl enabled with a usable configuration: temporary
+/// controller-owned known_hosts and identity files and the effective test uid as
+/// the expected controller uid. Contains no real credential bytes and performs no
+/// host operation.
+/// </summary>
+public sealed class WorkerControlValidRuntimeFactory : EnabledRuntimeFactory
+{
+    private readonly string _workerRoot;
+
+    public WorkerControlValidRuntimeFactory()
+        : base("prompt_fast", workerControlEnabled: true)
+    {
+        _workerRoot = Path.Combine(Path.GetTempPath(), "agentcontrol-workercontrol-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_workerRoot);
+        KnownHostsPath = Path.Combine(_workerRoot, "known_hosts");
+        IdentityFilePath = Path.Combine(_workerRoot, "id");
+        File.WriteAllText(KnownHostsPath, "host-a.example ssh-ed25519 AAAA\n");
+        File.WriteAllText(IdentityFilePath, "not-a-real-key");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(KnownHostsPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.SetUnixFileMode(IdentityFilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
+    public string KnownHostsPath { get; }
+
+    public string IdentityFilePath { get; }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        // The base sets WorkerControl:Enabled because the invalid preset is
+        // enabled; these settings replace the deliberately invalid defaults with
+        // a usable configuration.
+        base.ConfigureWebHost(builder);
+        builder.UseSetting("WorkerControl:Enabled", "true");
+        builder.UseSetting("WorkerControl:ControllerId", "controller-a");
+        builder.UseSetting("WorkerControl:ApprovedImageDigest", "sha256:" + new string('4', 64));
+        builder.UseSetting("WorkerControl:ApprovedImagePlatform", "linux/amd64");
+        builder.UseSetting("WorkerControl:ExpectedControllerUid", HVO.AgentControl.RemoteWorker.ControllerPrivateFile.EffectiveUid.ToString(CultureInfo.InvariantCulture));
+        builder.UseSetting("WorkerControl:ApprovedHosts:0:Id", "host-a");
+        builder.UseSetting("WorkerControl:ApprovedHosts:0:Hostname", "host-a.example");
+        builder.UseSetting("WorkerControl:ApprovedHosts:0:Port", "22");
+        builder.UseSetting("WorkerControl:ApprovedHosts:0:Username", "roys");
+        builder.UseSetting("WorkerControl:ApprovedHosts:0:KnownHostsPath", KnownHostsPath);
+        builder.UseSetting("WorkerControl:ApprovedHosts:0:IdentityFilePath", IdentityFilePath);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (!disposing)
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(_workerRoot, recursive: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+}
+
+/// <summary>
 /// Enabled runtime backed by the disposable fake ACP server and a temporary
 /// controller-private database. The owner password is a disposable file; no
 /// provider credentials or model inference are involved.

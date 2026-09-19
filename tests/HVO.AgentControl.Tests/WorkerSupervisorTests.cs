@@ -139,6 +139,64 @@ finally:
         RunHarness(harness);
     }
 
+    [Fact]
+    public void FixedSupervisorOrientationInstallWritesEmployeeOwnedFileAtomicallyAndRejectsAttacks()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var harness = """
+import base64, hashlib, importlib.util, json, os, shutil, socket, stat, sys, tempfile
+spec=importlib.util.spec_from_file_location('worker_supervisor', sys.argv[1])
+s=importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
+os.umask(0o077)
+root=tempfile.mkdtemp(prefix='hvo-orientation-')
+s.EMPLOYEE_HOME=root
+s.child_setup=lambda: None
+s.peer_uid=lambda _: s.BRIDGE_UID
+
+def ask(request):
+ left,right=socket.socketpair()
+ try:
+  right.sendall(json.dumps(request).encode()+b'\n'); s.handle(left); return json.loads(right.recv(262144))
+ finally:
+  left.close(); right.close()
+
+content=b'# Orientation\nhello employee\n'
+digest='sha256:'+hashlib.sha256(content).hexdigest()
+base={'operation':'orientation-install','assignmentId':'ora-1','orientationVersion':'v1','artifactFileName':'orientation-current.md','contentHash':digest,'content':base64.b64encode(content).decode()}
+response=ask(base)
+assert response['ok'] is True, response
+installed=response['installedPath']
+assert installed==os.path.join(root,'.agentcontrol','orientation','orientation-current.md'), installed
+state=os.lstat(installed)
+assert stat.S_ISREG(state.st_mode)
+assert stat.S_IMODE(state.st_mode)==0o600, oct(state.st_mode)
+assert state.st_nlink==1
+with open(installed,'rb') as handle: assert handle.read()==content
+
+traversal=dict(base); traversal['artifactFileName']='../escape.md'
+assert ask(traversal)=={'ok':False,'error':'invalid-request'}
+assert not os.path.exists(os.path.join(root,'escape.md'))
+
+mismatch=dict(base); mismatch['contentHash']='sha256:'+'0'*64
+assert ask(mismatch)=={'ok':False,'error':'invalid-request'}
+
+oversized=dict(base); oversized['content']=base64.b64encode(b'x'*(s.MAX_ORIENTATION_BYTES+1)).decode()
+assert ask(oversized)=={'ok':False,'error':'invalid-request'}
+
+extra=dict(base); extra['extra']='x'
+assert ask(extra)=={'ok':False,'error':'invalid-request'}
+
+linked_root=tempfile.mkdtemp(prefix='hvo-orientation-link-')
+target=tempfile.mkdtemp(prefix='hvo-orientation-target-')
+os.symlink(target, os.path.join(linked_root,'.agentcontrol'))
+s.EMPLOYEE_HOME=linked_root
+assert ask(base)['ok'] is False
+assert os.listdir(target)==[]
+shutil.rmtree(linked_root); shutil.rmtree(target); shutil.rmtree(root)
+""";
+        RunHarness(harness);
+    }
+
     private static void RunHarness(string harness)
     {
         var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));

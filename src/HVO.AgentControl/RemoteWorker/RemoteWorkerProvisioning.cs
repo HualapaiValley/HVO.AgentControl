@@ -9,6 +9,18 @@ namespace HVO.AgentControl.RemoteWorker;
 
 public sealed record RemoteResourceInspection(bool Exists, string? Reference, IReadOnlyDictionary<string, string> Labels, string State);
 
+/// <summary>
+/// The durable outcome of replacing a worker container to pick up a newly
+/// installed orientation. It carries the exact enrollment, the fresh process
+/// status, the advanced process generation and the authoritative native session
+/// that was loaded in the new process.
+/// </summary>
+public sealed record ContainerReplacementResult(
+    WorkerEnrollmentRecord Enrollment,
+    BridgeWorkerStatus Status,
+    long ProcessGeneration,
+    string NativeSessionId);
+
 public interface IRemoteWorkerProvisioner
 {
     Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token);
@@ -113,6 +125,16 @@ public sealed class RemoteWorkerProvisioningCoordinator
     {
         RequireEnabled();
         var store = Store();
+
+        // A managed binding carries owner-frozen resources. The plan consumes them
+        // exactly: the host, image digest and platform cannot be re-chosen, and the
+        // frozen limits must still fit under the controller's global ceilings. This
+        // is what lets a fresh DeveloperContainer binding (container_ref NULL) plan
+        // without the circular "container must already exist" requirement.
+        var managed = store.GetManagedEnrollmentResources(bindingId);
+        if (managed is not null)
+            return Task.FromResult(PlanManaged(store, managed, bindingId, hostId, imageDigest));
+
         var host = Approved(hostId);
         var digest = imageDigest ?? _options.ApprovedImageDigest;
         if (!store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest).Contains(digest, StringComparer.Ordinal))
@@ -160,6 +182,90 @@ public sealed class RemoteWorkerProvisioningCoordinator
             return Task.FromResult(enrollment);
         }
         finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    /// <summary>
+    /// Plans a managed binding from its frozen owner approval. The frozen host,
+    /// digest and platform are authoritative: a requested host or image that
+    /// disagrees is refused rather than silently re-planned, and the frozen limits
+    /// must fit under the current global ceilings. After the enrollment exists the
+    /// approval is linked to the exact worker identity under its own revision, and
+    /// an exact replay is idempotent.
+    /// </summary>
+    private WorkerEnrollmentRecord PlanManaged(OrganizationStore store, ManagedEnrollmentResourcesRecord managed, string bindingId, string hostId, string? imageDigest)
+    {
+        if (!string.Equals(managed.ApprovedHostId, hostId, StringComparison.Ordinal))
+            throw new OrganizationConcurrencyException("The managed binding is frozen to a different execution host.");
+        if (imageDigest is not null && !string.Equals(managed.ApprovedImageDigest, imageDigest, StringComparison.Ordinal))
+            throw new OrganizationConcurrencyException("The managed binding is frozen to a different image digest.");
+        if (managed.MemoryLimitMiB > _options.MemoryBytes / (1024 * 1024)
+            || managed.CpuLimit > _options.CpuLimit
+            || managed.PidsLimit > _options.PidsLimit)
+            throw new WorkerControlConfigurationException("The frozen managed resources exceed the controller's global ceilings.");
+        if (!string.Equals(managed.Platform, _options.ApprovedImagePlatform, StringComparison.Ordinal))
+            throw new WorkerControlConfigurationException("The frozen managed platform differs from controller policy.");
+
+        // The frozen host must still be approved and remain ready; approval does not
+        // bypass the live host gate. CreateWorkerEnrollmentForPlan re-checks that the
+        // host is enabled and ready in the authoritative store.
+        _ = Approved(managed.ApprovedHostId);
+        var approval = store.GetHireRequestApprovalByBinding(bindingId)
+            ?? throw new OrganizationStoreCorruptException("A managed binding has frozen resources but no owner approval.");
+
+        var existing = store.ListWorkerEnrollments().SingleOrDefault(x => x.RuntimeBindingId == bindingId);
+        if (existing is not null)
+        {
+            if (existing.HostId != managed.ApprovedHostId
+                || existing.ExpectedImageDigest != managed.ApprovedImageDigest
+                || existing.ExpectedPlatform != managed.Platform)
+                throw new OrganizationConcurrencyException("The binding already has a different worker plan.");
+            _ = ControllerPrivateFile.ReadExact(existing.KeyFilePath, _options.ExpectedControllerUid, ControllerFileModes.Private0600, 32);
+            LinkManagedWorker(store, approval, bindingId, existing.WorkerId);
+            return existing;
+        }
+
+        var worker = DeterministicWorkerId(store.GetOverview().Id, bindingId, managed.ApprovedHostId, _options.ControllerId);
+        var keyDirectory = Path.Combine(_control.PrivateDataDirectory, "worker-keys");
+        ControllerPrivateFile.EnsurePrivateDirectory(keyDirectory, _options.ExpectedControllerUid);
+        var keyPath = Path.Combine(keyDirectory, worker + ".key");
+        var key = RandomNumberGenerator.GetBytes(32);
+        var keyId = HVO.AgentControl.Worker.WorkerProtocol.KeyId(key);
+        try
+        {
+            if (File.Exists(keyPath))
+            {
+                CryptographicOperations.ZeroMemory(key);
+                key = ControllerPrivateFile.ReadExact(keyPath, _options.ExpectedControllerUid, ControllerFileModes.Private0600, 32);
+                keyId = HVO.AgentControl.Worker.WorkerProtocol.KeyId(key);
+            }
+            else ControllerPrivateFile.PublishExclusive(keyPath, key, _options.ExpectedControllerUid);
+
+            var enrollment = store.CreateWorkerEnrollmentForPlan(bindingId, managed.ApprovedHostId, _options.ControllerId, managed.ApprovedImageDigest, managed.Platform, keyPath, keyId, worker);
+            store.AddProvisioningIntent(worker, managed.ApprovedHostId, bindingId, "enroll-key", Hash(keyId));
+            foreach (var volume in new[] { enrollment.ControlVolumeName, enrollment.HomeVolumeName, enrollment.WorkspaceVolumeName, enrollment.SessionVolumeName })
+            {
+                var op = store.AddProvisioningIntent(worker, managed.ApprovedHostId, bindingId, "volume-create", Hash(volume));
+                store.AddResourceIntent(op.Id, managed.ApprovedHostId, worker, "volume", volume, LabelsHash(Identity(enrollment, op.Id)));
+            }
+            store.AddProvisioningIntent(worker, managed.ApprovedHostId, bindingId, "bootstrap", Hash(keyId + enrollment.ControlVolumeName));
+            var containerOp = store.AddProvisioningIntent(worker, managed.ApprovedHostId, bindingId, "container-create", Hash(enrollment.ContainerName));
+            store.AddResourceIntent(containerOp.Id, managed.ApprovedHostId, worker, "container", enrollment.ContainerName, LabelsHash(Identity(enrollment, containerOp.Id)));
+            store.AddProvisioningIntent(worker, managed.ApprovedHostId, bindingId, "start", Hash(enrollment.ContainerName));
+
+            LinkManagedWorker(store, approval, bindingId, worker);
+            return enrollment;
+        }
+        finally { CryptographicOperations.ZeroMemory(key); }
+    }
+
+    private static void LinkManagedWorker(OrganizationStore store, HireRequestApprovalRecord approval, string bindingId, string workerId)
+    {
+        if (approval.EmployeeId is null || approval.RuntimeBindingId is null)
+            throw new OrganizationStoreCorruptException("A managed binding's owner approval has no employee or binding link.");
+        if (!string.Equals(approval.RuntimeBindingId, bindingId, StringComparison.Ordinal))
+            throw new OrganizationStoreCorruptException("A managed binding's frozen resources and owner approval disagree.");
+        // LinkHireWorker is revision-bound and idempotent for an identical worker.
+        _ = store.LinkHireWorker(approval.HireRequestId, approval.EmployeeId, approval.RuntimeBindingId, workerId, approval.Revision);
     }
 
     public async Task<WorkerEnrollmentRecord> ApplyNextAsync(string workerId, CancellationToken token)
@@ -366,9 +472,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
             case "container-create":
                 {
                     var resource = store.ListWorkerResources(enrollment.WorkerId).Single(x => x.OperationId == operation.Id);
-                    var mounts = new[] { new NamedVolumeMount(enrollment.ControlVolumeName, "/control"), new(enrollment.HomeVolumeName, "/home/worker"), new(enrollment.WorkspaceVolumeName, "/workspace"), new(enrollment.SessionVolumeName, "/session") };
-                    var approved = store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest);
-                    var reference = await _remote.CreateContainerAsync(host, new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, _options.MemoryBytes, _options.CpuLimit, _options.PidsLimit, approved, ProfileEnvironmentFor(enrollment)), token).ConfigureAwait(false);
+                    var reference = await _remote.CreateContainerAsync(host, ContainerSpecFor(store, enrollment, host, identity), token).ConfigureAwait(false);
                     store.TransitionResource(resource.Id, resource.Revision, "planned", "present", reference);
                     store.SetEnrollmentResourceReference(enrollment.WorkerId, "container", reference);
                     break;
@@ -382,6 +486,106 @@ public sealed class RemoteWorkerProvisioningCoordinator
                 }
             default: throw new WorkerControlConfigurationException("Unsupported provisioning operation.");
         }
+    }
+
+    /// <summary>
+    /// Replaces the enrolled worker's container so a freshly installed orientation
+    /// artifact is loaded by a new process, preserving the four volumes and the
+    /// authoritative native session. This is a deliberate replacement, not cleanup:
+    /// the original owned container is removed after verifying its exact identity
+    /// labels, and every volume is left untouched. It is owner-orchestration and
+    /// safe to repeat: an absent owned container is created, a stopped owned
+    /// container is started, a foreign object at the name is refused, and a crash
+    /// after removal, creation, or start converges on the next call by inspection.
+    /// </summary>
+    public async Task<ContainerReplacementResult> ReplaceContainerForOrientationAsync(string workerId, CancellationToken token)
+    {
+        RequireEnabled();
+        var store = Store();
+        var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+
+        // The expected lifecycle is enrolled: the container has already gone through
+        // the fixed plan and the authoritative session exists. A stopped or failed
+        // enrollment cannot be replaced into service, and a planned one has no
+        // container-create operation to derive an exact owned identity from.
+        if (enrollment.LifecycleStatus != "enrolled")
+            throw new OrganizationConcurrencyException("Container replacement requires an enrolled worker.");
+
+        var resource = store.ListWorkerResources(workerId).SingleOrDefault(x => x.ResourceKind == "container")
+            ?? throw new OrganizationConcurrencyException("The worker has no owned container resource to replace.");
+        var host = Approved(enrollment.HostId);
+        var identity = Identity(enrollment, resource.OperationId);
+
+        // Inspect before touching anything. Absence is only concluded from the exact
+        // Docker "no such" answer; a foreign object at the name fails closed.
+        var needsCreate = false;
+        var inspection = await _remote.InspectContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        if (inspection.Exists)
+        {
+            RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, identity);
+            if (inspection.State.Contains("running", StringComparison.OrdinalIgnoreCase))
+            {
+                // Present and running: stop, then remove, the deliberate replacement.
+                await _remote.StopAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+                await _remote.RemoveContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+                needsCreate = true;
+            }
+            else
+            {
+                // Present and stopped is the crash-after-create (or crash-after-stop)
+                // case: start the owned container rather than removing and recreating.
+                await _remote.StartAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            // Absent, including crash-after-remove: nothing to stop or remove. A
+            // repeated call never removes blindly; it recreates the owned container.
+            needsCreate = true;
+        }
+
+        if (needsCreate)
+        {
+            var reference = await _remote.CreateContainerAsync(host, ContainerSpecFor(store, enrollment, host, identity), token).ConfigureAwait(false);
+            store.TransitionResource(resource.Id, resource.Revision, resource.State, "present", reference);
+            store.ReplaceEnrollmentContainerReference(workerId, reference);
+            await _remote.StartAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        }
+
+        var started = await _remote.InspectContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        if (!started.Exists || !started.State.Contains("running", StringComparison.OrdinalIgnoreCase))
+            throw new RemoteWorkerUnavailableException("The replacement worker container did not reach running state.", transport: false);
+
+        // A fresh process has no in-memory session. Load the authoritative native
+        // session through the verification bridge so the replacement continues the
+        // employee's history rather than starting a new one, then require the
+        // session to be ready for work before returning.
+        await using var session = await _verification.ConnectAsync(store.GetWorkerEnrollment(workerId)!, token).ConfigureAwait(false);
+        var status = await ReadStatusAsync(session, token).ConfigureAwait(false);
+        status = await EnsureProvisionedSessionAsync(store, store.GetWorkerEnrollment(workerId)!, session, status, token).ConfigureAwait(false);
+        var authoritative = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
+        if (authoritative.NativeSessionId is not { } nativeSessionId) throw new OrganizationConcurrencyException("Replacement did not establish an authoritative worker session.");
+        WorkerConnectionManager.EnsureSessionReadyForWork(store, workerId, nativeSessionId, status);
+
+        return new ContainerReplacementResult(
+            store.GetWorkerEnrollment(workerId)!,
+            status,
+            status.ProcessGeneration,
+            nativeSessionId);
+    }
+
+    /// <summary>
+    /// Builds the exact container create spec for an enrollment. It is shared by
+    /// first provisioning and replacement so a replacement reproduces the same
+    /// name, image, platform, four volumes, frozen limits, approved digest set,
+    /// profile environment and operation identity as the original.
+    /// </summary>
+    private ContainerCreateSpec ContainerSpecFor(OrganizationStore store, WorkerEnrollmentRecord enrollment, ApprovedExecutionHost host, WorkerResourceIdentity identity)
+    {
+        var mounts = new[] { new NamedVolumeMount(enrollment.ControlVolumeName, "/control"), new(enrollment.HomeVolumeName, "/home/worker"), new(enrollment.WorkspaceVolumeName, "/workspace"), new(enrollment.SessionVolumeName, "/session") };
+        var approved = store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest);
+        var limits = ContainerLimitsFor(store, enrollment);
+        return new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, limits.MemoryBytes, limits.CpuLimit, limits.PidsLimit, approved, ProfileEnvironmentFor(enrollment));
     }
 
     private async Task ReconcileUncertain(OrganizationStore store, WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation, ApprovedExecutionHost host, CancellationToken token)
@@ -463,6 +667,17 @@ public sealed class RemoteWorkerProvisioningCoordinator
     private string ProfileRevisionFor(WorkerEnrollmentRecord e) =>
         Store().ListProfileBuilds(hostId: e.HostId).SingleOrDefault(b => b.State == ProfileBuildStates.Built && b.Verified && b.ImageDigest == e.ExpectedImageDigest)?.ProfileRevisionId
         ?? throw new WorkerControlConfigurationException("The enrollment's image digest is not a verified profile build on its host.");
+
+    // A managed enrollment consumes the owner-frozen limits recorded at approval
+    // time (MiB to bytes, integer CPU to the decimal Docker expects); every other
+    // enrollment uses the controller's global policy. Either way the command
+    // builder verifies the values are positive and do not exceed the ceilings.
+    private (long MemoryBytes, decimal CpuLimit, int PidsLimit) ContainerLimitsFor(OrganizationStore store, WorkerEnrollmentRecord enrollment)
+    {
+        var managed = store.GetManagedEnrollmentResources(enrollment.RuntimeBindingId);
+        if (managed is null) return (_options.MemoryBytes, _options.CpuLimit, _options.PidsLimit);
+        return ((long)managed.MemoryLimitMiB * 1024 * 1024, managed.CpuLimit, managed.PidsLimit);
+    }
 
     private IReadOnlyDictionary<string, string>? ProfileEnvironmentFor(WorkerEnrollmentRecord enrollment)
     {

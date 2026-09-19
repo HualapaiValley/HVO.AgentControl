@@ -23,6 +23,18 @@ public static class WorkerProtocol
     public const int MaxViewerInputBytes = 16 * 1024;
     public const int MaxViewerOutputBytes = 64 * 1024;
 
+    /// <summary>The fixed employee-owned directory the supervisor publishes orientation into.</summary>
+    public const string OrientationRootDirectory = "/home/worker/.agentcontrol/orientation";
+    public const int MaxOrientationContentBytes = 64 * 1024;
+    public const int MaxOrientationFileNameLength = 128;
+    public const int MaxOrientationVersionLength = 128;
+    public const int OrientationContentHashLength = 71;
+
+    /// <summary>The bounded, tool-free ACP comprehension capture ceiling (16 KiB).</summary>
+    public const int MaxOrientationComprehensionBytes = 16 * 1024;
+    public const int MaxOrientationComprehensionFieldLength = 2048;
+    public const int MaxOrientationComprehensionListItems = 32;
+
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false, MaxDepth = MaxControlJsonDepth };
 
     /// <summary>
@@ -227,6 +239,58 @@ public static class WorkerProtocol
         }
     }
 
+    /// <summary>
+    /// An orientation version is an opaque, exact bounded string. It is never
+    /// normalized: leading/trailing whitespace and every control character are
+    /// rejected so a caller cannot smuggle a different version past comparison.
+    /// </summary>
+    public static void ValidateOrientationVersion(string value)
+    {
+        if (value is not { Length: >= 1 and <= MaxOrientationVersionLength }
+            || value.Any(char.IsControl)
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal))
+        {
+            throw new WorkerProtocolException("Invalid orientation version.");
+        }
+    }
+
+    /// <summary>
+    /// The artifact file name is a basename only: no path separators, directory
+    /// traversal, control characters, or unexpected punctuation. The fixed
+    /// allowlist matches the supervisor's own validation.
+    /// </summary>
+    public static void ValidateOrientationFileName(string value)
+    {
+        if (value is not { Length: >= 1 and <= MaxOrientationFileNameLength }
+            || value is "." or ".."
+            || !value.All(character => character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.' or '_' or '-'))
+        {
+            throw new WorkerProtocolException("Invalid orientation artifact file name.");
+        }
+    }
+
+    /// <summary>Requires an exact lowercase <c>sha256:</c> digest of 64 hex characters.</summary>
+    public static void ValidateOrientationContentHash(string value)
+    {
+        if (value is not { Length: OrientationContentHashLength }
+            || !value.StartsWith("sha256:", StringComparison.Ordinal)
+            || !value.AsSpan(7).ToString().All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'))
+        {
+            throw new WorkerProtocolException("Invalid orientation content hash.");
+        }
+    }
+
+    /// <summary>UTF-8 encodes orientation content, rejecting NUL and the fixed byte ceiling.</summary>
+    public static byte[] EncodeOrientationContent(string content)
+    {
+        if (content is null || content.IndexOf('\0') >= 0) throw new WorkerProtocolException("Orientation content is invalid.");
+        var bytes = Encoding.UTF8.GetBytes(content);
+        if (bytes.Length > MaxOrientationContentBytes) throw new WorkerProtocolException("Orientation content is too large.");
+        return bytes;
+    }
+
+    public static string OrientationContentHash(ReadOnlySpan<byte> content) => "sha256:" + Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+
     public static string ComputeMac(ReadOnlySpan<byte> key, string label, string role, string controllerId, string workerId, string keyId, string clientNonce, string serverNonce, long issuedUnixMilliseconds)
     {
         var message = string.Join('\n', Version, label, role, controllerId, workerId, keyId, clientNonce, serverNonce, issuedUnixMilliseconds.ToString(CultureInfo.InvariantCulture));
@@ -278,6 +342,97 @@ public sealed class NdjsonFrameReader
     }
     private void CompactOrGrow() { if (_start > 0) { _buffer.AsSpan(_start, _end - _start).CopyTo(_buffer); _end -= _start; _start = 0; } if (_end < _buffer.Length) return; var next = Math.Min(_maximumBytes + 1, checked(_buffer.Length * 2)); if (next <= _buffer.Length) throw Failure("Frame is too large."); Array.Resize(ref _buffer, next); }
     private Exception Failure(string message, Exception? inner = null) => _acp ? new AcpProtocolException(message, inner) : new WorkerProtocolException(message, inner);
+}
+
+/// <summary>
+/// The durable, wire-shared orientation install record. <see cref="State"/> is one
+/// of <c>installing</c>, <c>installed</c>, or <c>uncertain</c>. The install
+/// operation returns this on success only after the artifact is durably recorded
+/// as <c>installed</c>; <see cref="AlreadyInstalled"/> distinguishes an
+/// idempotent replay from a first install.
+/// </summary>
+public sealed record OrientationInstallRecord(string AssignmentId, string OrientationVersion, string ArtifactFileName, string ContentHash, string State, string? InstalledPath, bool AlreadyInstalled = false);
+
+/// <summary>
+/// The exact structured comprehension evidence returned by the worker over the
+/// authenticated bridge. It carries only the validated, bounded JSON object the
+/// remote model produced — never the raw prompt or raw response transcript.
+/// <see cref="State"/> is <c>comprehended</c> for a fresh result and an
+/// idempotent replay; <see cref="AlreadyComprehended"/> distinguishes a replay.
+/// </summary>
+public sealed record OrientationComprehensionRecord(
+    string AssignmentId,
+    string EmployeeId,
+    string SessionId,
+    string OrientationVersion,
+    string Identity,
+    string Department,
+    string Reporting,
+    IReadOnlyList<string> Duties,
+    IReadOnlyList<string> Restrictions,
+    string Escalation,
+    string State,
+    string EvidenceHash,
+    bool AlreadyComprehended = false);
+
+/// <summary>
+/// Minimal, bounded validation of the remote model's comprehension JSON. It
+/// enforces the exact field set, bounded string lengths and bounded string
+/// arrays so a malformed or oversized answer can never be persisted or forwarded.
+/// </summary>
+public static class OrientationEvidenceShape
+{
+    public static bool TryValidate(
+        JsonElement element,
+        string expectedAssignmentId,
+        string expectedEmployeeId,
+        string expectedSessionId,
+        string expectedOrientationVersion,
+        out string? failure)
+    {
+        failure = null;
+        if (element.ValueKind != JsonValueKind.Object) { failure = "evidence-not-object"; return false; }
+        var names = element.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray();
+        string[] expected = ["assignmentId", "department", "duties", "employeeId", "escalation", "identity", "orientationVersion", "reporting", "restrictions", "sessionId"];
+        if (!names.SequenceEqual(expected, StringComparer.Ordinal)) { failure = "evidence-field-set"; return false; }
+
+        if (!TryReadString(element, "assignmentId", expectedAssignmentId, out _)) { failure = "evidence-assignment"; return false; }
+        if (!TryReadString(element, "employeeId", expectedEmployeeId, out _)) { failure = "evidence-employee"; return false; }
+        if (!TryReadString(element, "sessionId", expectedSessionId, out _)) { failure = "evidence-session"; return false; }
+        if (!TryReadString(element, "orientationVersion", expectedOrientationVersion, out _)) { failure = "evidence-version"; return false; }
+        if (!TryReadString(element, "identity", null, out _)) { failure = "evidence-identity"; return false; }
+        if (!TryReadString(element, "department", null, out _)) { failure = "evidence-department"; return false; }
+        if (!TryReadString(element, "reporting", null, out _)) { failure = "evidence-reporting"; return false; }
+        if (!TryReadString(element, "escalation", null, out _)) { failure = "evidence-escalation"; return false; }
+        if (!TryReadBoundedList(element, "duties")) { failure = "evidence-duties"; return false; }
+        if (!TryReadBoundedList(element, "restrictions")) { failure = "evidence-restrictions"; return false; }
+        return true;
+    }
+
+    private static bool TryReadString(JsonElement element, string name, string? expected, out string? value)
+    {
+        value = null;
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.String) return false;
+        var text = property.GetString();
+        if (text is not { Length: > 0 and <= WorkerProtocol.MaxOrientationComprehensionFieldLength } || text.Any(char.IsControl)) return false;
+        if (expected is not null && !string.Equals(text, expected, StringComparison.Ordinal)) return false;
+        value = text;
+        return true;
+    }
+
+    private static bool TryReadBoundedList(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Array) return false;
+        var count = 0;
+        foreach (var item in property.EnumerateArray())
+        {
+            if (++count > WorkerProtocol.MaxOrientationComprehensionListItems) return false;
+            if (item.ValueKind != JsonValueKind.String) return false;
+            var text = item.GetString();
+            if (text is not { Length: > 0 and <= WorkerProtocol.MaxOrientationComprehensionFieldLength } || text.Any(char.IsControl)) return false;
+        }
+        return true;
+    }
 }
 
 public class WorkerProtocolException(string message, Exception? inner = null) : Exception(message, inner);

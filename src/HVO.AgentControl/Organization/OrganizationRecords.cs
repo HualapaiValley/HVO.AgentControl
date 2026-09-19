@@ -249,6 +249,75 @@ public sealed record HireRequestCreate(
 
 public sealed record HireRequestReject(int ExpectedRevision);
 
+/// <summary>
+/// An exact owner approval selection for one hire request. The server resolves
+/// the unique verified profile build for <see cref="ProfileRevisionId"/> and
+/// <see cref="HostId"/>; the caller never supplies a build id.
+/// </summary>
+public sealed record HireRequestApprove(int ExpectedRevision, string ProfileRevisionId, string HostId);
+
+/// <summary>A frozen owner approval and its optional managed-employee links.</summary>
+public sealed record HireRequestApprovalRecord(
+    string HireRequestId,
+    string ApprovedRequestVersion,
+    int ApprovedRequestRevision,
+    string RequestVersionHash,
+    string ProfileRevisionId,
+    string ProfileBuildId,
+    string ImageDigest,
+    string HostId,
+    string Platform,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string ApprovalIdentity,
+    DateTimeOffset ApprovedAt,
+    string? EmployeeId,
+    string? RuntimeBindingId,
+    string? WorkerId,
+    int Revision);
+
+/// <summary>
+/// The frozen, per-binding resources a later provisioning run consumes. This is
+/// the durable bridge that avoids rebuilding the v4 <c>worker_enrollments</c>
+/// table: the owner approval freezes them once and provisioning reads them here.
+/// </summary>
+public sealed record ManagedEnrollmentResourcesRecord(
+    string RuntimeBindingId,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string ApprovedProfileRevisionId,
+    string ApprovedProfileBuildId,
+    string ApprovedImageDigest,
+    string ApprovedHostId,
+    string Platform,
+    DateTimeOffset CreatedAt,
+    int Revision);
+
+/// <summary>
+/// The result of creating the managed employee and binding from an approved
+/// hire. <see cref="Created"/> is false when the approval already carried links
+/// and the exact existing identities are returned instead (idempotent replay).
+/// </summary>
+public sealed record ManagedEmployeeCreation(
+    string HireRequestId,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string Slug,
+    string DisplayName,
+    string Placement,
+    bool Created,
+    string ApprovedProfileRevisionId,
+    string ApprovedProfileBuildId,
+    string ApprovedImageDigest,
+    string ApprovedHostId,
+    string Platform,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string? WorkerId);
+
 public sealed record HireRequestSummary(
     string Id,
     string OrganizationId,
@@ -272,7 +341,14 @@ public sealed record HireRequestSummary(
     int Revision,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    string? ContainerProfileRevisionId = null);
+    string? ContainerProfileRevisionId = null,
+    string? StatusDetail = null,
+    string? ProfileBuildId = null,
+    string? ApprovedImageDigest = null,
+    string? ApprovedHostId = null,
+    string? EmployeeId = null,
+    string? RuntimeBindingId = null,
+    string? WorkerId = null);
 
 public static class ContainerProfileStatuses
 {

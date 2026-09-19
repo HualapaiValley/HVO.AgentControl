@@ -704,6 +704,211 @@ globally rejected.
   profile updates never auto-rebuild employees (#261 adds the explicit
   data-preserving rebuild).
 
+### 10.2 Owner approval, managed provisioning and remote orientation (#260; code capability, not operationally validated)
+
+The owner accepted the profile-based design on 2026-09-18. #258 (profiles) and
+#259 (per-host builds) are shipped; #260 (this section) adds the approval,
+managed-employee creation, provisioning and orientation slice, and #261 adds the
+explicit data-preserving rebuild. This section describes **code capability**. No
+live owner-approved hire has been executed on any host, the `home-docker`
+execution-host enrollment remains held by the owner, and `WorkerControl` remains
+disabled by default, so none of it is operationally validated.
+
+**Approval freeze (schema v10).** An approval is one immutable, atomic freeze of
+one hire request revision against one profile build verified on one ready host.
+The request is rebuilt in v10 with a bounded nullable sanitized `status_detail`
+(the v9 signature is migrated only after a create-once verified
+`control.schema-v9.db` plus SHA-256 evidence; existing hires migrate with a NULL
+detail). `hire_request_approvals` records, once and immutably:
+
+- `hire_request_id` (primary key) and the approved request revision;
+- `approved_request_version` — the exact freeze hash below, `sha256:`, 64 hex;
+- `request_version_hash` — the hire request's own immutable version hash;
+- `profile_revision_id` and `profile_build_id` — the exact revision and the
+  unique verified build the server resolved for it on the chosen host;
+- `image_digest` (the verified build's immutable digest);
+- `host_id` and `platform` (`linux/amd64` or `linux/arm64`);
+- `cpu_limit` (1–64), `memory_limit_mib` (256–131072) and `pids_limit` (16–4096)
+  copied from the request;
+- `approval_identity` (1–128 characters, no control characters) and
+  `approved_at`;
+- nullable `employee_id`, `runtime_binding_id` and `worker_id` links allocated
+  in the later steps, and an optimistic `revision`.
+
+Signature-bound triggers abort any UPDATE of a frozen column, any DELETE, and
+any INSERT that would replace an existing approval, so no SQLite conflict form
+can rewrite a freeze. `managed_enrollment_resources` freezes the same
+per-binding limits, image digest, host, platform and profile provenance, keyed by
+`runtime_binding_id`, with the same immutability triggers. It is the durable
+bridge that lets provisioning read the owner-approved resources without
+rebuilding the v4 `worker_enrollments` table.
+
+**Exact approval-freeze hash inputs.** `approved_request_version` is
+`sha256:` over the LF-joined ordered values:
+
+```text
+hire_request_id
+request_revision
+request_version_hash
+profile_revision_id
+profile_build_id
+image_digest
+host_id
+platform
+cpu_limit
+memory_limit_mib
+pids_limit
+```
+
+Because the freeze includes the whole selection and the request version, a later
+parameter change cannot reuse a prior approval. The caller supplies only
+`ExpectedRevision`, `ProfileRevisionId` and `HostId`; the server resolves the
+unique verified build, so a build id is never accepted from the caller. Approval
+requires the hire to be `Requested`, `DeveloperContainer`, unchanged at the
+expected revision, its profile revision to be the active profile's current
+revision, a verified build on the named host, and that host to be enabled,
+`ready`, `valid`, limit-supporting and platform-matching, with the requested
+limits inside the host's probed capacity. A replay of the exact same selection
+and revision is idempotent after the request leaves `Requested`; a different
+selection is a conflict, never a second approval.
+
+**Approval identity.** `POST /api/hire-requests/{id}/approve` records a fixed,
+host-derived identity (`owner-basic-auth`), never a value from the request body,
+so a caller cannot assert an arbitrary owner into the immutable freeze. The
+endpoint is owner-only and same-origin, requires `WorkerControl` to be enabled
+with a valid configuration, and refuses — with a sanitized `422` — a hire whose
+requested cpu/memory/pids exceed the controller-wide ceilings. It never
+provisions or orients: provisioning is a separate trigger and the request stays
+`Approved` until that slice advances it.
+
+**Managed employee creation.** In a second atomic, idempotent step (replay
+returns the existing identities with `Created=false`) the store allocates exactly
+one managed employee and DeveloperContainer runtime binding from the frozen
+approval, and freezes `managed_enrollment_resources`. The slug is deterministic
+(ASCII lowercase, non-alphanumerics folded to hyphens, a stable 8-character
+per-hire suffix, ≤63 characters) and the display name is unique within the
+organization (the requested name when free, otherwise a stable hire-specific
+suffix). The employee fields are fixed safe managed defaults — never text
+inherited from the requesting employee — and the store seeds the unique active
+employee orientation fragment and its bounded facts in the same transaction. A
+hire approved against a since-moved role fails closed rather than creating a
+dangling row. Later, `LinkHireWorker` binds the allocated worker identity under
+the approval's own revision, idempotently for an identical worker.
+
+**State machine.** The post-approval lifecycle is:
+
+```text
+Approved -> Provisioning -> Orienting -> Ready
+Provisioning -> Failed | Interrupted | Uncertain
+Orienting    -> Failed | Interrupted | Uncertain
+Uncertain    -> Provisioning
+Interrupted  -> Provisioning
+```
+
+`Rejected` is terminal and separate. Every transition re-reads the current
+revision, so a concurrent advance is a conflict, not a silent overwrite; each
+transition appends exactly one immutable hashed event, and `status_detail` is
+sanitized (control characters removed, truncated to 512) and cleared on `Ready`.
+`HireProvisioningHostedService` resumes only `Provisioning`, `Orienting`,
+`Interrupted` and `Uncertain` and deliberately never resumes `Approved`, because
+`Approved` is a freeze that no background process may act on by itself. It never
+auto-cleans up: uncertainty and failure leave resources for operator
+reconciliation.
+
+**Provisioning trigger.** Approval is the trigger, but the handoff is durable
+rather than in-request. Inside the approval call the controller commits
+`Approved -> Provisioning` and then queues the hire id; the HTTP response returns
+without waiting for any host effect. The queue is an accelerator, not the record
+of intent: the durable `Provisioning` state is written first, so a crash between
+the commit and execution loses nothing and the hosted service rebuilds the queue
+from persisted in-flight states at startup. Re-queuing the same hire is safe
+because the coordinator is idempotent at every step and returns a `Ready` hire
+untouched. The `/hiring` UI and API describe the request as queued, which is
+exactly what the durable state says.
+
+**Provisioning.** Provisioning consumes the frozen approval through the existing
+`RemoteWorkerProvisioningCoordinator`. `Plan` reads `managed_enrollment_resources`
+and refuses a requested host or image that disagrees with the freeze; the frozen
+limits must still fit under the current global ceilings (the global options are
+now ceilings, not an equality requirement). The circular gate requiring a
+non-null `container_ref` before planning is removed so a fresh DeveloperContainer
+binding can plan; a plan resolves the exact employee-owned binding on a ready
+enabled host and never requires the not-yet-created container. Enrollment and
+binding resource references update transactionally, and a container-reference
+replacement is a deliberate overwrite distinct from first provisioning.
+`WorkerConnectionHostedService` marks any provisioning operation left `Applying`
+by a previous process `Uncertain` before reconciliation, so the next apply
+inspects the remote effect instead of repeating it blind.
+
+**Orientation delivery and why replacement is required.** The managed employee's
+orientation is composed and assigned by the authoritative store, delivered over
+the authenticated bridge with the fixed `install-orientation` mutation, recorded
+`Delivered` with the required *next* process generation, then loaded by a
+deliberately replaced container, confirmed loaded, comprehended through the fixed
+`orientation-comprehension` operation, validated through the store as
+`live-model`, and only then moved to `Ready`. Replacement is required and not an
+optimization: **ACP stdio descriptors are handed to the bridge only when the
+bridge starts**, so a running OpenCode process cannot pick up a changed
+orientation file. A changed orientation therefore requires a new process, and
+the fixed reload mechanism is a deliberate container replacement that preserves
+all four named volumes (control, home, workspace, session) and reloads the same
+authoritative native session rather than starting a new one. The replacement is
+owner-orchestration, not cleanup: it verifies the exact owned container identity
+labels before touching anything, treats an absent object only from Docker's exact
+"no such" answer and a foreign object at the name as a fail-closed error, leaves
+every volume untouched, and converges on the next call after a crash between
+removal, creation or start. The replacement must report a fresh running,
+ACP-initialized process whose generation advanced past the delivery and the exact
+authoritative native session; the store then confirms that generation loaded the
+delivered assignment. (For the existing control-host employee, the equivalent
+reload is `OpenCode reads the generated file at process start`; see §11.)
+
+**Worker operations: exact fields and limits.** Both operations are fixed bridge
+mutations carrying the live lease epoch and connection nonce, and both validate
+their exact field set (unknown or missing fields fail closed).
+
+- `install-orientation`: fields `operation`, `epoch`, `connectionNonce`,
+  `assignmentId`, `orientationVersion`, `artifactFileName`, `contentHash`,
+  `content`. `content` is bounded to 64 KiB and must not contain NUL; the content
+  hash is the authority and is re-verified against the decoded bytes. The
+  artifact file name is a basename (`[A-Za-z0-9._-]{1,128}`, not `.`/`..`); the
+  version is an opaque 1–128-character string with no control characters and no
+  surrounding whitespace; the hash is a lowercase `sha256:` 64-hex digest. The
+  fixed supervisor validates every field again and performs the write atomically
+  as the employee owner: it opens each directory level with
+  `O_NOFOLLOW|O_DIRECTORY`, creates a temporary file `0600` with
+  `O_NOFOLLOW|O_EXCL`, fsyncs, renames relative to the directory descriptor and
+  fsyncs the directory, so the 0700 employee home cannot be redirected through a
+  symlink. The durable bridge journal records `installing` before any file can
+  exist, `installed` after confirmation (with an idempotent replay for the exact
+  same artifact and a conflict for a different one), and `uncertain` when the
+  write may have taken effect but could not be confirmed.
+- `orientation-comprehension`: fields `operation`, `epoch`, `connectionNonce`,
+  `assignmentId`, `employeeId`, `sessionId`, `orientationVersion`. The exact
+  installed artifact for that assignment/version must be current and the
+  process must be running, ACP-initialized and bound to that session. The worker
+  runs one bounded, tool-free `session/prompt` (120 s) that embeds the installed
+  content; it captures only the correlated `agent_message_chunk` text in memory,
+  bounded to 16 KiB and overflowing closed, seals on the matching response, and
+  requires a normal `end_turn`. The response must be valid unfenced JSON with the
+  exact ten-field object (`assignmentId`, `employeeId`, `sessionId`,
+  `orientationVersion`, `identity`, `department`, `reporting`, `duties`,
+  `restrictions`, `escalation`); strings are bounded to 2048 characters with no
+  control characters and `duties`/`restrictions` to at most 32 items. Only the
+  validated, canonically ordered JSON object and its hash cross the bridge — the
+  raw prompt and raw transcript are never journaled or returned. The durable
+  journal records `running` (repeat calls refuse a second model turn, and a
+  `comprehended` replay returns the retained evidence), `comprehended`,
+  `uncertain` (lease-independent, so a lost lease cannot hide an unconfirmed
+  effect) and `failed` (deterministic malformed/oversized/non-terminal output,
+  which an owner-authorized retry may repeat).
+
+**Still not implemented and not to be inferred:** no live owner-approved hire has
+run on any host; the `home-docker` enrollment is held; `WorkerControl` is off by
+default; #261 (data-preserving rebuild) and any termination/scheduling policy are
+out of scope. Approval is a host record of a verified selection, not a
+provisioned employee.
+
 ## 11. Orientation composition and versioning
 
 - Orientation is a deterministic, ordered composition of versioned fragments:
@@ -863,8 +1068,14 @@ These are open and must not be presented as decided or owner-accepted:
   touching existing services and all labeled resources were removed; production
   provisioning and collateral at scale remain unvalidated.
 - Owner review and acceptance of these contracts. This document is a proposal.
-  The #217 first managed disposable two-host acceptance is complete; #219
-  approval/provisioning still requires discussion and owner approval.
+  The #217 first managed disposable two-host acceptance is complete and the
+  owner accepted the profile-based design on 2026-09-18. The #219 approval,
+  managed-provisioning and orientation slice is now implemented as code
+  capability (§10.2) and hermetically tested, but **no live owner-approved hire
+  has been executed on any host** and the `home-docker` execution-host
+  enrollment remains held by the owner, so it is not operationally validated.
+  #261 (data-preserving rebuild) and any termination/scheduling policy remain
+  future work.
 
 ## 15. Non-goals
 
@@ -873,5 +1084,7 @@ migration, no release, and no change to the archive. #213 provides the independe
 worker-owned bridge/runtime artifact; #217 provides the hermetic controller
 binding/routing/provisioning state machines and its first managed disposable
 two-host path was operationally accepted on 2026-09-18. Viewer/read-model work is
-code-complete; key rotation, production provisioning, and #219
-approval/provisioning remain pending discussion and owner approval.
+code-complete; key rotation and production provisioning at scale remain future
+work. The #260 approval/managed-provisioning/orientation slice is implemented and
+hermetically tested (§10.2) but not operationally validated, and #261 remains
+future work.

@@ -234,7 +234,14 @@ public static class RemoteWorkerCommandBuilder
     public static RemoteCommand BuildContainerCreate(ApprovedExecutionHost host, WorkerControlOptions options, ContainerCreateSpec spec)
     {
         RequireApprovedImage(options, spec.ImageDigest, spec.Platform, spec.ApprovedDigests);
-        if (spec.MemoryBytes != options.MemoryBytes || spec.CpuLimit != options.CpuLimit || spec.PidsLimit != options.PidsLimit) throw new WorkerControlConfigurationException("Container resource limits differ from controller policy.");
+        // A managed enrollment carries owner-frozen limits that may be lower than the
+        // global policy, so the guard is positive and bounded by the global ceilings
+        // rather than requiring equality. The exact request bounds were already
+        // enforced when the hire was approved and frozen in the store.
+        if (spec.MemoryBytes <= 0 || spec.MemoryBytes > options.MemoryBytes
+            || spec.CpuLimit <= 0 || spec.CpuLimit > options.CpuLimit
+            || spec.PidsLimit <= 0 || spec.PidsLimit > options.PidsLimit)
+            throw new WorkerControlConfigurationException("Container resource limits must be positive and within controller policy.");
         if (spec.Volumes.Count != 4 || spec.Volumes.Select(x => x.ContainerPath).ToHashSet(StringComparer.Ordinal).SetEquals(ContainerPaths) is false) throw new WorkerControlConfigurationException("Container must use the four fixed named-volume mount points.");
         var parts = new List<string> { "docker container create", "--name", QuoteResource(spec.Name), "--network", QuoteShell(WorkerControlOptions.ContainerNetworkMode), "--read-only", "--cap-drop", "'ALL'", "--cap-add", "'CHOWN'", "--cap-add", "'SETUID'", "--cap-add", "'SETGID'", "--cap-add", "'KILL'", "--security-opt", "'no-new-privileges'", "--env", QuoteShell("WORKER_CONTROL_DIRECTORY=/control"), "--env", QuoteShell("WORKER_ID=" + spec.Identity.WorkerId), "--env", QuoteShell("WORKER_CONTROLLER_ID=" + spec.Identity.ControllerId), "--pids-limit", QuoteNumber(spec.PidsLimit), "--memory", QuoteNumber(spec.MemoryBytes), "--cpus", QuoteNumber(spec.CpuLimit), "--tmpfs", "'/tmp:rw,noexec,nosuid,nodev,size=64m'", "--tmpfs", "'/run:rw,noexec,nosuid,nodev,size=16m'", "--platform", QuotePlatform(spec.Platform) };
         foreach (var variable in (spec.EmployeeEnvironment ?? new Dictionary<string, string>()).OrderBy(x => x.Key, StringComparer.Ordinal))
