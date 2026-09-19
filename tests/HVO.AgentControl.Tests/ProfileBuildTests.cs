@@ -55,7 +55,9 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.DoesNotContain("FROM agentcontrol-worker-base\n", dockerfile, StringComparison.Ordinal);
         Assert.Contains($"LABEL agentcontrol.profile=\"{_generic.Id}\" agentcontrol.base-digest=\"{Base}\"", dockerfile, StringComparison.Ordinal);
         // Features render to fixed recipes, never to network fetches of feature bundles.
-        Assert.Contains("dotnet-sdk-10.0", dockerfile, StringComparison.Ordinal);
+        Assert.Contains("dotnet-install.sh --version " + ProfileBuildContext.DotnetSdkVersion + " --install-dir /opt/dotnet-sdk", dockerfile, StringComparison.Ordinal);
+        Assert.Contains(ProfileBuildContext.DotnetInstallScriptSha256 + "  /tmp/dotnet-install.sh", dockerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet-sdk-10.0", dockerfile, StringComparison.Ordinal);
         Assert.Contains("python3 python3-venv python3-pip", dockerfile, StringComparison.Ordinal);
         Assert.Contains("install -y --no-install-recommends gh", dockerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("ghcr.io", dockerfile.Replace("# ghcr.io", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
@@ -150,14 +152,17 @@ public sealed class ProfileBuildTests : IDisposable
         var host = LocalHost(); var options = Options();
         var tag = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageTag, [Base, ProfileBuildContext.PinTag(Base)]).Arguments[^1];
         Assert.Equal($"docker image tag '{Base}' 'agentcontrol-worker-base:pin-111111111111'", tag);
-        var verify = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["agentcontrol-profile:prev-x-abc", "linux/amd64"]).Arguments[^1];
-        Assert.StartsWith("docker run --rm --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '32' --platform 'linux/amd64' --entrypoint '/usr/bin/python3' 'agentcontrol-profile:prev-x-abc' '-c' 'import base64;exec(base64.b64decode(\"", verify, StringComparison.Ordinal);
-        Assert.Contains("bridgeUid", RemoteWorkerCommandBuilder.ImageVerifyScript, StringComparison.Ordinal);
+        var verify = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["agentcontrol-profile:prev-x-abc", Base, "linux/amd64"]).Arguments[^1];
+        // The BASE image runs the program; the candidate is only a read-only mount, so no candidate executable is ever executed.
+        Assert.StartsWith($"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '32' --platform 'linux/amd64' --mount 'type=image,source=agentcontrol-profile:prev-x-abc,target=/candidate,readonly' --entrypoint '/usr/bin/python3' '{Base}' '-c' 'import base64;exec(base64.b64decode(\"", verify, StringComparison.Ordinal);
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["agentcontrol-profile:prev-x-abc", "agentcontrol-profile:prev-x-abc", "linux/amd64"]));
+        Assert.Contains("/candidate", RemoteWorkerCommandBuilder.ImageVerifyScript, StringComparison.Ordinal);
+        Assert.Contains("artifacts", RemoteWorkerCommandBuilder.ImageVerifyScript, StringComparison.Ordinal);
         Assert.DoesNotContain("\n", verify, StringComparison.Ordinal);
         var remove = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageRemove, ["agentcontrol-profile:prev-x-abc"]).Arguments[^1];
         Assert.Equal("docker image rm --no-prune 'agentcontrol-profile:prev-x-abc'", remove);
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageTag, ["agentcontrol-worker-base:latest", "x:y"]));
-        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["x:y", "linux/386"]));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["agentcontrol-x:y", Base, "linux/386"]));
     }
 
     [Fact]
@@ -198,10 +203,16 @@ public sealed class ProfileBuildTests : IDisposable
     public void RuntimeCheckRequiresTheWorkerContractInsideTheImage()
     {
         ImageContractVerifier.CheckRuntime(VerifyOutput());
-        Assert.Contains("uid 1101", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(bridgeUid: 1000))).Message, StringComparison.Ordinal);
+        Assert.Contains("uid/gid 1101", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(bridgeUid: 1000))).Message, StringComparison.Ordinal);
         Assert.Contains("/control", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(controlMode: 493))).Message, StringComparison.Ordinal);
         Assert.Contains("setuid", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(setuid: ["/usr/bin/sudo"]))).Message, StringComparison.Ordinal);
-        Assert.Contains("worker dll", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(dll: false))).Message, StringComparison.Ordinal);
+        Assert.Contains("/app differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(dll: false))).Message, StringComparison.Ordinal);
+        Assert.Contains("/usr/local/bin/worker-supervisor differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/usr/local/bin/worker-supervisor"))).Message, StringComparison.Ordinal);
+        Assert.Contains("/usr/share/dotnet differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/usr/share/dotnet"))).Message, StringComparison.Ordinal);
+        Assert.Contains("/etc/ld.so.preload differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/etc/ld.so.preload"))).Message, StringComparison.Ordinal);
+        Assert.Contains("/lib/python-shadow differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/lib/python-shadow"))).Message, StringComparison.Ordinal);
+        Assert.Contains("capability", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(caps: ["/usr/bin/ping"]))).Message, StringComparison.Ordinal);
+        Assert.Contains("home or shell", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(bridgeShell: "/bin/bash"))).Message, StringComparison.Ordinal);
         Assert.Contains("Docker socket", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(sock: true))).Message, StringComparison.Ordinal);
         Assert.Contains("/app", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(appMode: 511))).Message, StringComparison.Ordinal);
         // Trailing apt noise before the JSON line is tolerated; the last line is the record.
@@ -217,7 +228,8 @@ public sealed class ProfileBuildTests : IDisposable
         var queued = _store.QueueProfileBuild(_generic.Id, "host-a", Base, "linux/amd64", hash, "agentcontrol-profile:x");
         Assert.Equal(ProfileBuildStates.Queued, queued.State);
         Assert.Equal("building", _store.GetContainerProfile(_generic.ProfileId)!.Profile.CurrentBuildStatus);
-        Assert.Throws<OrganizationConcurrencyException>(() => _store.QueueProfileBuild(_generic.Id, "host-a", Base, "linux/amd64", hash, "agentcontrol-profile:x"));
+        // A second queue for a live pair returns the live row rather than creating a second.
+        Assert.Equal(queued.Id, _store.QueueProfileBuild(_generic.Id, "host-a", Base, "linux/amd64", hash, "agentcontrol-profile:x").Id);
         Assert.Throws<OrganizationConcurrencyException>(() => _store.QueueProfileBuild(_generic.Id, "host-missing", Base, "linux/amd64", hash, "t"));
 
         var building = _store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
@@ -319,7 +331,7 @@ public sealed class ProfileBuildTests : IDisposable
         var uncertain = await coordinator.RunAsync(queued.Id, CancellationToken.None);
         Assert.Equal(ProfileBuildStates.Uncertain, uncertain.State);
         Assert.Equal("building", _store.GetContainerProfile(_generic.ProfileId)!.Revisions.Single().BuildStatus);
-        Assert.Throws<OrganizationConcurrencyException>(() => coordinator.Queue(_generic.Id, "host-a")); // no second live build
+        Assert.Equal(uncertain.Id, coordinator.Queue(_generic.Id, "host-a").Id); // the live row is returned, never a second
 
         // Reconcile: the image turned out to exist on the host → verify it.
         host.BuildTransportLoss = false;
@@ -338,6 +350,67 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Equal(ProfileBuildStates.Failed, f2.State);
         Assert.Contains("no image carries the build's tag", f2.FailureSummary, StringComparison.Ordinal);
         Assert.DoesNotContain("ImageBuild", host2.Operations.Skip(2));
+    }
+
+    [Fact]
+    public async Task InterruptedBuildsAreMarkedUncertainAtStartupAndByTheNextRun()
+    {
+        // Queue through the coordinator so the recorded context hash is the real one the label check expects.
+        var seed = Coordinator(new ScriptedHost(_generic.Id)).Queue(_generic.Id, "host-a");
+        var hash = seed.ContextHash;
+        var building = _store.TransitionProfileBuild(seed.Id, seed.Revision, ProfileBuildStates.Building);
+        var revision2 = NewRevision("""{"image":"agentcontrol-worker-base","name":"two"}""", null);
+        var q2 = _store.QueueProfileBuild(revision2.Id, "host-a", Base, "linux/amd64", hash, "agentcontrol-profile:y");
+        var b2 = _store.TransitionProfileBuild(q2.Id, q2.Revision, ProfileBuildStates.Building);
+        _store.TransitionProfileBuild(b2.Id, b2.Revision, ProfileBuildStates.Verifying);
+
+        // Startup reconciliation strands nothing live.
+        var host = new ScriptedHost(_generic.Id) { KnownContextHash = hash };
+        var coordinator = Coordinator(host);
+        var moved = coordinator.ReconcileInterruptedOnStartup();
+        Assert.Equal(2, moved.Count);
+        Assert.All(_store.ListProfileBuilds(), b => Assert.Equal(ProfileBuildStates.Uncertain, b.State));
+        Assert.Empty(coordinator.ReconcileInterruptedOnStartup());
+
+        // An uncertain row is reconciled by tag, not rebuilt.
+        var done = await coordinator.RunAsync(building.Id, CancellationToken.None);
+        Assert.Equal(ProfileBuildStates.Built, done.State);
+        Assert.DoesNotContain("ImageBuild", host.Operations);
+
+        // A row found building without an owner (no startup pass) is treated as interrupted by the next run.
+        var revision3 = NewRevision("""{"image":"agentcontrol-worker-base","name":"three"}""", null);
+        var q3 = _store.QueueProfileBuild(revision3.Id, "host-a", Base, "linux/amd64", hash, "agentcontrol-profile:z");
+        _store.TransitionProfileBuild(q3.Id, q3.Revision, ProfileBuildStates.Building);
+        var host3 = new ScriptedHost(revision3.Id) { ImageMissing = true };
+        var failed = await Coordinator(host3).RunAsync(q3.Id, CancellationToken.None);
+        Assert.Equal(ProfileBuildStates.Failed, failed.State);
+        Assert.Equal(["ImageInspect"], host3.Operations);
+    }
+
+    [Fact]
+    public async Task CallerCancellationMidBuildLeavesTheRowUncertainNotLive()
+    {
+        var host = new ScriptedHost(_generic.Id) { BuildBlocksUntilCancelled = true };
+        var coordinator = Coordinator(host);
+        var queued = coordinator.Queue(_generic.Id, "host-a");
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.RunAsync(queued.Id, cts.Token));
+        var after = _store.GetProfileBuild(queued.Id)!;
+        Assert.Equal(ProfileBuildStates.Uncertain, after.State);
+        Assert.Contains("cancelled", after.FailureSummary, StringComparison.Ordinal);
+        // The API's next POST resumes this row through Queue → Run.
+        host.BuildBlocksUntilCancelled = false;
+        var resumed = await coordinator.RunAsync(coordinator.Queue(_generic.Id, "host-a").Id, CancellationToken.None);
+        Assert.Equal(ProfileBuildStates.Built, resumed.State);
+    }
+
+    [Fact]
+    public void NetworkIsGrantedOnlyToAptRecipesNeverToFragments()
+    {
+        Assert.True(ProfileBuildContext.RequiresNetwork(_generic)); // dotnet/python/gh recipes use apt
+        Assert.False(ProfileBuildContext.RequiresNetwork(NewRevision("""{"image":"agentcontrol-worker-base","features":{"ghcr.io/devcontainers/features/node:1":{}}}""", null)));
+        Assert.False(ProfileBuildContext.RequiresNetwork(NewRevision("""{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN apt-get install -y curl\nENV TZ=UTC\n")));
+        Assert.True(ProfileBuildContext.RequiresNetwork(NewRevision("""{"build":{"dockerfile":"Dockerfile"},"features":{"ghcr.io/devcontainers/features/github-cli:1":{}}}""", "FROM agentcontrol-worker-base\nRUN true\n")));
     }
 
     [Fact]
@@ -404,11 +477,11 @@ public sealed class ProfileBuildTests : IDisposable
             RootFS = new { Type = "layers", Layers = (layers ?? [.. BaseLayers, "sha256:" + new string('f', 64)]) },
         } });
 
-    private static string VerifyOutput(int bridgeUid = 1101, int controlMode = 448, string[]? setuid = null, bool dll = true, bool sock = false, int appMode = 493) =>
+    private static string VerifyOutput(int bridgeUid = 1101, int controlMode = 448, string[]? setuid = null, bool dll = true, bool sock = false, int appMode = 493, string? differing = null, string[]? caps = null, string bridgeShell = "/usr/sbin/nologin") =>
         JsonSerializer.Serialize(new
         {
-            bridgeUid,
-            employeeUid = 1102,
+            bridge = new { uid = bridgeUid, gid = bridgeUid, home = "/control", shell = bridgeShell },
+            employee = new { uid = 1102, gid = 1102, home = "/home/worker", shell = "/bin/bash" },
             dirs = new Dictionary<string, object>
             {
                 ["/control"] = new { uid = 1101, gid = 1101, mode = controlMode },
@@ -418,10 +491,9 @@ public sealed class ProfileBuildTests : IDisposable
             },
             app = new { uid = 0, gid = 0, mode = appMode },
             supervisor = new { uid = 0, gid = 0, mode = 493 },
-            workerDll = dll,
-            dotnet = true,
-            opencode = true,
+            artifacts = ImageContractVerifier.RequiredIdenticalArtifacts.ToDictionary(a => a, a => a != differing && !(a == "/app" && !dll)),
             setuid = setuid ?? [],
+            fileCaps = caps ?? [],
             dockerSock = sock,
         }) + "\n";
 
@@ -433,7 +505,10 @@ public sealed class ProfileBuildTests : IDisposable
         public bool BaseMissing { get; init; }
         public bool BuildTransportLoss { get; set; }
         public bool ImageMissing { get; set; }
+        public bool BuildBlocksUntilCancelled { get; set; }
         public string? VerifyOutputOverride { get; init; }
+        /// <summary>Context hash the host would have labelled the image with when no build ran in this test (reconciliation cases).</summary>
+        public string? KnownContextHash { get; set; }
         private string? _contextHash;
 
         public Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
@@ -443,19 +518,20 @@ public sealed class ProfileBuildTests : IDisposable
             {
                 RemoteDockerOperation.ImageTag => BaseMissing ? new RemoteOperationResult(1, "", "not-found") : new(0, "", "none"),
                 RemoteDockerOperation.ImageInspect when tokens[0] == Base => new(0, BaseInspect(), "none"),
-                RemoteDockerOperation.ImageInspect => ImageMissing ? new(1, "", "not-found") : new(0, BuiltInspectFor(_contextHash ?? "sha256:" + new string('0', 64)), "none"),
-                RemoteDockerOperation.ImageVerify => new(0, VerifyOutputOverride ?? VerifyOutput(), "none"),
+                RemoteDockerOperation.ImageInspect => ImageMissing ? new(1, "", "not-found") : new(0, BuiltInspectFor(_contextHash ?? KnownContextHash ?? "sha256:" + new string('0', 64)), "none"),
+                RemoteDockerOperation.ImageVerify when tokens.Count == 3 && tokens[1] == Base => new(0, VerifyOutputOverride ?? VerifyOutput(), "none"),
                 _ => throw new NotSupportedException(operation.ToString()),
             });
         }
 
-        public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken)
+        public async Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken)
         {
             Operations.Add("ImageBuild");
             BuildSpec = specification;
             _contextHash = specification.ContextHash;
+            if (BuildBlocksUntilCancelled) await Task.Delay(Timeout.Infinite, cancellationToken);
             Assert.Equal("sha256:" + Convert.ToHexString(SHA256.HashData(contextTar)).ToLowerInvariant(), specification.ContextHash);
-            return Task.FromResult(BuildTransportLoss ? new RemoteOperationResult(255, "", "transport") : new(0, Built + "\n", "none"));
+            return BuildTransportLoss ? new RemoteOperationResult(255, "", "transport") : new(0, Built + "\n", "none");
         }
 
         private string BuiltInspectFor(string contextHash) => JsonSerializer.Serialize(new[] { new

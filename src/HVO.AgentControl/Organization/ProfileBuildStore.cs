@@ -100,9 +100,11 @@ public sealed partial class OrganizationStore
 
     /// <summary>
     /// Records the intent to build. Refuses a retired profile, a revision that is
-    /// not the profile's current one, a host that is not ready, and a second live
-    /// build for the same revision/host (the partial unique index). A verified
-    /// build already present for the pair is returned instead of queuing again.
+    /// not the profile's current one and a host that is not ready. A verified
+    /// build already present for the pair is returned instead of queuing again,
+    /// and so is a live one (queued/building/verifying/uncertain): the caller
+    /// resumes or reconciles that row rather than creating a second, which the
+    /// partial unique index forbids anyway.
     /// </summary>
     public ProfileBuildRecord QueueProfileBuild(string profileRevisionId, string hostId, string baseImageDigest, string platform, string contextHash, string resultTag)
     {
@@ -141,8 +143,8 @@ public sealed partial class OrganizationStore
                 var existing = ReadBuilds(connection, transaction, profileRevisionId, hostId, null);
                 var verified = existing.FirstOrDefault(b => b.State == ProfileBuildStates.Built && b.Verified);
                 if (verified is not null) { transaction.Commit(); return verified; }
-                if (existing.Any(b => b.State is ProfileBuildStates.Queued or ProfileBuildStates.Building or ProfileBuildStates.Verifying or ProfileBuildStates.Uncertain))
-                    throw new OrganizationConcurrencyException("A build for this revision on this host is already in progress or uncertain; reconcile it before queuing another.");
+                var live = existing.FirstOrDefault(b => ProfileBuildStates.IsLive(b.State));
+                if (live is not null) { transaction.Commit(); return live; }
 
                 var id = OrganizationIds.NewProfileBuildId();
                 var now = Timestamp();
@@ -204,6 +206,35 @@ public sealed partial class OrganizationStore
                 FoldRevisionBuildStatus(connection, transaction, current.ProfileRevisionId);
                 transaction.Commit();
                 return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
+    }
+
+    /// <summary>
+    /// A controller that stops while a build is <c>building</c> or <c>verifying</c>
+    /// cannot know whether the host finished the work. On startup those rows are
+    /// moved to <c>uncertain</c> so the next run reconciles them by tag instead of
+    /// leaving them live forever or rebuilding blindly. Returns the ids moved.
+    /// </summary>
+    public IReadOnlyList<string> MarkInterruptedProfileBuildsUncertain()
+    {
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var interrupted = ReadBuilds(connection, transaction, null, null, null)
+                    .Where(b => b.State is ProfileBuildStates.Building or ProfileBuildStates.Verifying).ToArray();
+                foreach (var build in interrupted)
+                {
+                    Execute(connection, transaction,
+                        "UPDATE profile_builds SET state = 'uncertain', failure_summary = $summary, revision = revision + 1, updated_at = $now WHERE id = $id AND revision = $revision",
+                        ("$summary", $"The controller stopped while the build was {build.State}; the result is unknown until reconciled."), ("$now", Timestamp()), ("$id", build.Id), ("$revision", build.Revision));
+                }
+                transaction.Commit();
+                return interrupted.Select(b => b.Id).ToArray();
             }
         });
     }

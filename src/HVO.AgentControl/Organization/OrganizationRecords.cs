@@ -334,6 +334,9 @@ public static class ProfileBuildStates
     public const string Uncertain = "uncertain";
     public const string Removed = "removed";
 
+    /// <summary>States that hold the per-(revision, host) live slot.</summary>
+    public static bool IsLive(string state) => state is Queued or Building or Verifying or Uncertain;
+
     public static bool CanTransition(string from, string to) => (from, to) switch
     {
         (Queued, Building) => true,

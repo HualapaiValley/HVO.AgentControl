@@ -8,9 +8,25 @@ namespace HVO.AgentControl.RemoteWorker;
 public enum RemoteDockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector }
 public sealed record RemoteCommand(string Executable, IReadOnlyList<string> Arguments, byte[]? StandardInput = null);
 public sealed record RemoteOperationResult(int ExitCode, string StandardOutput, string ErrorCategory);
-public sealed record WorkerResourceIdentity(string OrganizationId, string ControllerId, string HostId, string WorkerId, string BindingId, string OperationId)
+/// <summary>
+/// The exact label set every resource an enrollment owns must carry. A worker
+/// provisioned from a verified profile build additionally carries
+/// <c>agentcontrol.profile</c> (the immutable revision id); a base-image
+/// enrollment carries exactly the pre-profile six labels, so the resource label
+/// hashes of existing enrollments are unchanged and their ownership checks
+/// still match.
+/// </summary>
+public sealed record WorkerResourceIdentity(string OrganizationId, string ControllerId, string HostId, string WorkerId, string BindingId, string OperationId, string? ProfileRevisionId = null)
 {
-    public IReadOnlyDictionary<string, string> Labels => new Dictionary<string, string>(StringComparer.Ordinal) { ["agentcontrol.generation"] = "2", ["agentcontrol.owner"] = $"{OrganizationId}/{ControllerId}", ["agentcontrol.host"] = HostId, ["agentcontrol.worker"] = WorkerId, ["agentcontrol.binding"] = BindingId, ["agentcontrol.operation"] = OperationId };
+    public IReadOnlyDictionary<string, string> Labels
+    {
+        get
+        {
+            var labels = new Dictionary<string, string>(StringComparer.Ordinal) { ["agentcontrol.generation"] = "2", ["agentcontrol.owner"] = $"{OrganizationId}/{ControllerId}", ["agentcontrol.host"] = HostId, ["agentcontrol.worker"] = WorkerId, ["agentcontrol.binding"] = BindingId, ["agentcontrol.operation"] = OperationId };
+            if (ProfileRevisionId is not null) labels["agentcontrol.profile"] = ProfileRevisionId;
+            return labels;
+        }
+    }
 }
 
 /// <summary>
@@ -103,10 +119,12 @@ public static class RemoteWorkerCommandBuilder
             // Dockerfile's FROM names; BuildKit refuses an image id as a FROM source.
             RemoteDockerOperation.ImageTag when tokens.Count == 2 => $"docker image tag {QuoteDigest(tokens[0])} {QuoteImageReference(tokens[1])}",
             RemoteDockerOperation.ImageRemove when tokens.Count == 1 => $"docker image rm --no-prune {QuoteImageReference(tokens[0])}",
-            // Fixed post-build contract check run inside the built image with no
-            // network, no capabilities and a read-only root, as root so it can stat
-            // everything; it prints one JSON object the verifier parses.
-            RemoteDockerOperation.ImageVerify when tokens.Count == 2 => $"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '32' --platform {QuotePlatform(tokens[1])} --entrypoint '/usr/bin/python3' {QuoteImageReference(tokens[0])} '-c' {QuoteShell(ImageVerifyProgram)}",
+            // Fixed post-build contract check. It runs the APPROVED BASE image (never
+            // the candidate) with the candidate's filesystem mounted read-only at
+            // /candidate, so no executable supplied by the candidate is ever run;
+            // the base's python3 walks the mount, hashes the contract artifacts and
+            // prints one JSON object. Tokens: candidate tag, base digest, platform.
+            RemoteDockerOperation.ImageVerify when tokens.Count == 3 => $"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '32' --platform {QuotePlatform(tokens[2])} --mount {QuoteShell($"type=image,source={ValidatedImageReference(tokens[0])},target=/candidate,readonly")} --entrypoint '/usr/bin/python3' {QuoteDigest(tokens[1])} '-c' {QuoteShell(ImageVerifyProgram)}",
             RemoteDockerOperation.VolumeInspect when tokens.Count == 1 => $"docker volume inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerInspect when tokens.Count == 1 => $"docker container inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerStart when tokens.Count == 1 => $"docker container start {QuoteResource(tokens[0])}",
@@ -131,12 +149,22 @@ public static class RemoteWorkerCommandBuilder
         "import base64;exec(base64.b64decode(" + '"' + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(ImageVerifyScript)) + '"' + ").decode())";
 
     public const string ImageVerifyScript =
-        "import json,os,pwd,stat,sys\n" +
-        "def mode(p):\n  st=os.lstat(p); return {\"uid\":st.st_uid,\"gid\":st.st_gid,\"mode\":stat.S_IMODE(st.st_mode)}\n" +
-        "setuid=[]\n" +
-        "for root,dirs,files in os.walk(\"/\"):\n  if root.startswith((\"/proc\",\"/sys\",\"/dev\")): dirs[:]=[]; continue\n  for f in files:\n    p=os.path.join(root,f)\n    try: st=os.lstat(p)\n    except OSError: continue\n    if stat.S_ISREG(st.st_mode) and st.st_mode & 0o6000: setuid.append(p)\n" +
-        "def uid(n):\n  try: return pwd.getpwnam(n).pw_uid\n  except KeyError: return None\n" +
-        "print(json.dumps({\"bridgeUid\":uid(\"bridge\"),\"employeeUid\":uid(\"employee\"),\"dirs\":{d:mode(d) for d in (\"/control\",\"/home/worker\",\"/workspace\",\"/session\")},\"app\":mode(\"/app\"),\"supervisor\":mode(\"/usr/local/bin/worker-supervisor\"),\"workerDll\":os.path.isfile(\"/app/HVO.AgentControl.Worker.dll\"),\"dotnet\":os.access(\"/usr/bin/dotnet\",os.X_OK),\"opencode\":os.access(\"/usr/local/bin/opencode\",os.X_OK),\"setuid\":setuid[:16],\"dockerSock\":os.path.exists(\"/var/run/docker.sock\")}))\n";
+        "import hashlib,json,os,stat\n" +
+        "C=\"/candidate\"\n" +
+        "def mode(p):\n  st=os.lstat(C+p); return {\"uid\":st.st_uid,\"gid\":st.st_gid,\"mode\":stat.S_IMODE(st.st_mode)}\n" +
+        "def sha(p):\n  h=hashlib.sha256()\n  with open(p,\"rb\") as f:\n    for b in iter(lambda: f.read(1<<20), b\"\"): h.update(b)\n  return h.hexdigest()\n" +
+        "def tree(p):\n  h=hashlib.sha256()\n  for root,dirs,files in os.walk(p):\n    dirs.sort()\n    for f in sorted(files):\n      q=os.path.join(root,f)\n      if os.path.islink(q) or not os.path.isfile(q): continue\n      h.update(os.path.relpath(q,p).encode()); h.update(sha(q).encode())\n  return h.hexdigest()\n" +
+        "def same(p):\n  a=C+p\n  if not os.path.exists(a) or not os.path.exists(p): return False\n  if os.path.islink(a) or os.path.islink(p): return os.path.islink(a) and os.path.islink(p) and os.readlink(a)==os.readlink(p)\n  return (tree(a)==tree(p)) if os.path.isdir(a) else (sha(a)==sha(p))\n" +
+        "def superset(p):\n  a=C+p\n  if not os.path.isdir(a) or not os.path.isdir(p): return False\n  for root,dirs,files in os.walk(p):\n    for f in files:\n      q=os.path.join(root,f); r=C+q\n      if os.path.islink(q):\n        if not os.path.islink(r) or os.readlink(r)!=os.readlink(q): return False\n      elif not os.path.isfile(r) or os.path.islink(r) or sha(r)!=sha(q): return False\n  return True\n" +
+        "def resolve(p):\n  seen=0\n  while os.path.islink(C+p) and seen<8:\n    t=os.readlink(C+p); p=t if t.startswith(\"/\") else os.path.normpath(os.path.join(os.path.dirname(p),t)); seen+=1\n  return p\n" +
+        "def account(name):\n  try:\n    for line in open(C+\"/etc/passwd\"):\n      f=line.rstrip(\"\\n\").split(\":\")\n      if f[0]==name: return {\"uid\":int(f[2]),\"gid\":int(f[3]),\"home\":f[5],\"shell\":f[6]}\n  except OSError: pass\n  return None\n" +
+        "setuid=[];caps=[]\n" +
+        "for root,dirs,files in os.walk(C):\n  for f in files:\n    p=os.path.join(root,f)\n    try: st=os.lstat(p)\n    except OSError: continue\n    if stat.S_ISREG(st.st_mode) and st.st_mode & 0o6000: setuid.append(p[len(C):])\n    try:\n      if \"security.capability\" in os.listxattr(p, follow_symlinks=False): caps.append(p[len(C):])\n    except OSError: pass\n" +
+        "artifacts={p:same(p) for p in (\"/usr/local/bin/worker-supervisor\",\"/app\",\"/usr/share/dotnet\",\"/usr/local/lib/node_modules/opencode-ai\",\"/usr/local/bin/node\",\"/usr/bin/dotnet\",\"/usr/local/bin/opencode\",\"/usr/bin/python3\",\"/usr/bin/python3.12\")}\n" +
+        "artifacts[\"/usr/lib/python3.12\"]=superset(\"/usr/lib/python3.12\")\n" +
+        "artifacts[\"/etc/ld.so.preload\"]=not os.path.lexists(C+\"/etc/ld.so.preload\")\n" +
+        "artifacts[\"/lib/python-shadow\"]=not any(os.path.lexists(C+d+\"/python3\") for d in (\"/usr/local/bin\",\"/usr/local/sbin\"))\n" +
+        "print(json.dumps({\"bridge\":account(\"bridge\"),\"employee\":account(\"employee\"),\"dirs\":{d:mode(d) for d in (\"/control\",\"/home/worker\",\"/workspace\",\"/session\")},\"app\":mode(\"/app\"),\"supervisor\":mode(\"/usr/local/bin/worker-supervisor\"),\"artifacts\":artifacts,\"setuid\":setuid[:16],\"fileCaps\":caps[:16],\"dockerSock\":os.path.exists(C+\"/var/run/docker.sock\")}))\n";
 
     /// <summary>
     /// <c>docker build</c> reading the deterministic tar context from standard
@@ -173,6 +201,7 @@ public static class RemoteWorkerCommandBuilder
     private static readonly System.Text.RegularExpressions.Regex ImageReference = new("^agentcontrol-[a-z0-9-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static string QuoteDigest(string value) { if (!Digest.IsMatch(value)) throw new WorkerControlConfigurationException("Image digest is invalid."); return QuoteShell(value); }
+    private static string ValidatedImageReference(string value) { ValidateImageReference(value); return value; }
     private static void ValidateImageReference(string value) { if (!ImageReference.IsMatch(value) || value.Length > 200) throw new WorkerControlConfigurationException("Image reference is invalid."); }
     /// <summary>An exact digest or a controller-shaped <c>repository:tag</c> reference; never a registry path.</summary>
     private static string QuoteImageReference(string value) { if (Digest.IsMatch(value)) return QuoteShell(value); ValidateImageReference(value); return QuoteShell(value); }
@@ -267,7 +296,8 @@ public static class RemoteWorkerCommandBuilder
 
     private static IEnumerable<KeyValuePair<string, string>> ExactLabels(WorkerResourceIdentity identity)
     {
-        if (identity.Labels.Count != 6) throw new WorkerControlConfigurationException("Resource label set is invalid.");
+        if (identity.Labels.Count != (identity.ProfileRevisionId is null ? 6 : 7)) throw new WorkerControlConfigurationException("Resource label set is invalid.");
+        if (identity.ProfileRevisionId is not null && !ProfileRevisionId.IsMatch(identity.ProfileRevisionId)) throw new WorkerControlConfigurationException("Resource profile label is invalid.");
         foreach (var label in identity.Labels.OrderBy(x => x.Key, StringComparer.Ordinal)) { if (!Identifier.IsMatch(label.Value.Replace("/", ":", StringComparison.Ordinal))) throw new WorkerControlConfigurationException("Resource label value is invalid."); yield return label; }
     }
     private static string QuoteResource(string value) { ValidateResource(value); return QuoteShell(value); }

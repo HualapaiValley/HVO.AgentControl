@@ -582,15 +582,19 @@ image. The owner accepted this design on 2026-09-18.
   tar whose SHA-256 is the build's `context_hash` — and streams it to
   `docker build -` on the approved host over the same pinned SSH path as
   provisioning: `--pull=false --no-cache`, no build arguments, secrets, cache
-  sources or host context, `--network none` unless a feature recipe needs apt,
+  sources or host context, `--network none` unless a **controller-owned recipe**
+  needs the network (a fragment never earns network access on its own),
   labels `agentcontrol.profile`/`context-hash`/`base-digest`, a local
   `agentcontrol-profile:<revision>-<hash12>` tag. BuildKit refuses an image id as
   a `FROM`, so the exact base digest is first pinned under the controller-owned
   `agentcontrol-worker-base:pin-<12hex>` tag on that host and the generated
   Dockerfile names only that tag.
 - The generated Dockerfile is `FROM <pin>`, the owner's fragment (its own `FROM`
-  dropped), the devcontainer `features` rendered as **fixed apt recipes** per
-  allowlisted id and version (nothing is fetched from ghcr.io), `containerEnv`
+  dropped), the devcontainer `features` rendered as **fixed recipes** per
+  allowlisted id and version (nothing is fetched from ghcr.io; the dotnet feature
+  installs the repository's pinned SDK side by side under `/opt/dotnet-sdk` with
+  Microsoft's checksum-pinned install script, leaving the worker's
+  `/usr/bin/dotnet` untouched), `containerEnv`
   as `ENV`, lifecycle commands and `remoteEnv` recorded as labels (the supervisor
   runs them as the employee; the build never executes them), and a fixed trailer
   that re-strips setuid bits, re-owns `/app` and the supervisor to root, resets
@@ -598,23 +602,40 @@ image. The owner accepted this design on 2026-09-18.
   uids and the worker binaries, and restores the supervisor entrypoint. The
   fragment runs before the trailer, so it cannot undo it.
 - A build becomes `built`/verified only after two independent checks over what
-  the host printed: `docker image inspect` must show the controller's three labels
+  the host printed. `docker image inspect` must show the controller's three labels
   for this revision and context, the supervisor entrypoint, no default user, no
   exposed ports or anonymous volumes, the approved platform and a root filesystem
-  whose layers start with the approved base's; then a fixed verification program
+  whose layers start with the approved base's. Then a fixed verification program
   (a controller constant, carried base64 so the remote token has no quotes) runs
-  inside the image with `--network none --read-only --cap-drop ALL` and must
-  report uids 1101/1102, the four directories 0700 with their owners, `/app` and
-  the supervisor root-owned, the worker dll, `dotnet`, `opencode`, no setuid files
-  and no Docker socket path. A contract failure records `rejected`; a host or
-  build failure records `failed`; a transport loss during build or verify records
-  `uncertain`, and the next run reconciles by inspecting the tag — found → verify,
-  absent → `failed` — never by rebuilding blindly.
+  **in the approved base image** — never the candidate — with the candidate's
+  filesystem mounted read-only at `/candidate` (`--mount type=image`,
+  `--network none --read-only --cap-drop ALL`), so no executable supplied by a
+  fragment is ever run. It must report: the `bridge`/`employee` accounts with
+  uid/gid 1101/1102 and their fixed home and shell; the four directories 0700
+  with their owners; `/app` and the supervisor root-owned; **byte-identical
+  contract artifacts** (`/usr/local/bin/worker-supervisor`, `/app`,
+  `/usr/bin/dotnet`, `/usr/share/dotnet`, `/usr/local/bin/node`,
+  `/usr/local/lib/node_modules/opencode-ai`, `/usr/local/bin/opencode`,
+  `/usr/bin/python3`, `/usr/bin/python3.12`, and every standard-library file of
+  `/usr/lib/python3.12` the base ships), no `/etc/ld.so.preload`, no `python3`
+  shadowing `/usr/bin` under `/usr/local`, no setuid/setgid files, no file
+  capabilities (`security.capability` xattr) and no Docker socket path. The
+  trailer restores metadata; the verifier proves content, because a fragment
+  runs as root before the trailer and could otherwise replace PID 1's
+  interpreter, the supervisor, the worker dll or the runtime. A contract failure
+  records `rejected`; a host or build failure records `failed`; a transport loss
+  or a cancelled/interrupted run records `uncertain`, and the next run reconciles
+  by inspecting the tag — found → verify, absent → `failed` — never by rebuilding
+  blindly. A controller restart moves any build left `building`/`verifying` to
+  `uncertain` before anything else runs.
 - **Approved digests are per host**: the configured base plus every verified build
   on that host. The container-create command builder refuses any other digest;
-  the bootstrap always runs the base. `POST /api/workers/enroll/plan` accepts an
-  optional `imageDigest` that must be in the target host's approved set, and the
-  chosen digest is frozen into the enrollment. The revision-level
+  the key bootstrap always runs the configured base regardless of the enrollment's
+  image. `POST /api/workers/enroll/plan` accepts an optional `imageDigest` that
+  must be in the target host's approved set, and the chosen digest is frozen into
+  the enrollment; a profile enrollment's resources carry the additional
+  `agentcontrol.profile=<revision>` label (base enrollments keep the original six,
+  so existing label hashes are unchanged). The revision-level
   `build_status`/`built_image_digest`/`verified` columns are a fold of the
   per-host rows (`built` if any host verified, else `building`, `rejected`,
   `failed`, `unbuilt`).

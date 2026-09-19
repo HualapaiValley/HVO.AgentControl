@@ -445,13 +445,24 @@ public sealed class RemoteWorkerProvisioningCoordinator
         }
     }
 
+    // The key bootstrap only writes the enrolled key into the control volume, so it
+    // always runs the configured base regardless of the image the long-lived
+    // container will use; a profile digest is never given root-adjacent bootstrap work.
     private BootstrapSpec BootstrapFor(WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation) =>
-        new(enrollment.ControlVolumeName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, Identity(enrollment, operation.Id));
+        new(enrollment.ControlVolumeName, _options.ApprovedImageDigest, enrollment.ExpectedPlatform, Identity(enrollment, operation.Id));
 
     private byte[] Key(WorkerEnrollmentRecord enrollment) =>
         ControllerPrivateFile.ReadExact(enrollment.KeyFilePath, _options.ExpectedControllerUid, ControllerFileModes.Private0600, 32);
 
-    private static WorkerResourceIdentity Identity(WorkerEnrollmentRecord e, string operation) => new(e.OrganizationId, e.ControllerId, e.HostId, e.WorkerId, e.RuntimeBindingId, operation);
+    // A profile enrollment's digest is exactly one verified build on its host, so
+    // the revision id is recovered from the frozen digest rather than stored twice.
+    private WorkerResourceIdentity Identity(WorkerEnrollmentRecord e, string operation) =>
+        new(e.OrganizationId, e.ControllerId, e.HostId, e.WorkerId, e.RuntimeBindingId, operation,
+            e.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(e));
+
+    private string ProfileRevisionFor(WorkerEnrollmentRecord e) =>
+        Store().ListProfileBuilds(hostId: e.HostId).SingleOrDefault(b => b.State == ProfileBuildStates.Built && b.Verified && b.ImageDigest == e.ExpectedImageDigest)?.ProfileRevisionId
+        ?? throw new WorkerControlConfigurationException("The enrollment's image digest is not a verified profile build on its host.");
     private static string LabelsHash(WorkerResourceIdentity identity) => Hash(string.Join('\n', identity.Labels.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Key + "=" + x.Value)));
     private static string VolumeKind(WorkerEnrollmentRecord e, string name) => name == e.ControlVolumeName ? "control" : name == e.HomeVolumeName ? "home" : name == e.WorkspaceVolumeName ? "workspace" : "session";
     private ApprovedExecutionHost Approved(string id) => _options.ApprovedHosts.SingleOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException("Host is not approved.");

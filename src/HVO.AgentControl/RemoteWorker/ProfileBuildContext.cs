@@ -48,6 +48,12 @@ public static class ProfileBuildContext
     public const int MaximumDockerfileBytes = 64 * 1024;
     public const string PinRepository = "agentcontrol-worker-base";
 
+    /// <summary>The SDK the dotnet feature installs: the repository's pinned SDK (global.json).</summary>
+    public const string DotnetSdkVersion = "10.0.401";
+
+    /// <summary>SHA-256 of Microsoft's dotnet-install.sh as pinned for the recipe; a changed script fails the build.</summary>
+    public const string DotnetInstallScriptSha256 = "082f7685e156738a1b2e2ed8381a621870d4ce8e8c59278034556f05c186eb2e";
+
     /// <summary>The controller-owned local tag under which the exact base digest is addressed by a build.</summary>
     public static string PinTag(string baseImageDigest)
     {
@@ -58,14 +64,26 @@ public static class ProfileBuildContext
     /// <summary>Feature id → apt/installer recipe. Only versions the recipe can honour are accepted.</summary>
     private static readonly IReadOnlyDictionary<string, FeatureRecipe> Recipes = new Dictionary<string, FeatureRecipe>(StringComparer.Ordinal)
     {
-        // The base already carries the .NET 10 runtime; the SDK is what a developer needs.
+        // The base carries the .NET 10 runtime under /usr/share/dotnet and the worker's
+        // /usr/bin/dotnet must stay byte-identical (the bridge runs on it); the apt
+        // package would re-point it to /usr/lib/dotnet. The SDK is therefore installed
+        // side by side under /opt/dotnet-sdk with Microsoft's pinned, checksum-verified
+        // install script, at the exact SDK version this repository pins, and reached
+        // through a /usr/local/bin shim that only the employee's PATH consults.
         ["ghcr.io/devcontainers/features/dotnet:2"] = new(
             ["10.0", "latest"],
-            _ => "RUN apt-get update && apt-get install -y --no-install-recommends dotnet-sdk-10.0 && rm -rf /var/lib/apt/lists/*"),
+            _ => "RUN apt-get update && apt-get install -y --no-install-recommends curl libicu74 && rm -rf /var/lib/apt/lists/* \\\n"
+               + "    && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \\\n"
+               + "    && echo \"" + DotnetInstallScriptSha256 + "  /tmp/dotnet-install.sh\" | sha256sum -c - \\\n"
+               + "    && bash /tmp/dotnet-install.sh --version " + DotnetSdkVersion + " --install-dir /opt/dotnet-sdk --no-path \\\n"
+               + "    && rm /tmp/dotnet-install.sh \\\n"
+               + "    && printf '#!/bin/sh\\nexport DOTNET_ROOT=/opt/dotnet-sdk\\nexec /opt/dotnet-sdk/dotnet \"$@\"\\n' > /usr/local/bin/dotnet && chmod 755 /usr/local/bin/dotnet \\\n"
+               + "    && test \"$(readlink /usr/bin/dotnet)\" = /usr/share/dotnet/dotnet && /usr/local/bin/dotnet --list-sdks\n"),
         // The base already carries node 22 (copied from the OpenCode stage); npm is present with it.
         ["ghcr.io/devcontainers/features/node:1"] = new(
             ["22", "lts", "latest"],
-            _ => "RUN /usr/local/bin/node --version"),
+            _ => "RUN /usr/local/bin/node --version",
+            NeedsNetwork: false),
         ["ghcr.io/devcontainers/features/python:1"] = new(
             ["3.12", "3", "latest"],
             _ => "RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv python3-pip && rm -rf /var/lib/apt/lists/*"),
@@ -74,7 +92,21 @@ public static class ProfileBuildContext
             _ => "RUN apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*"),
     };
 
-    private sealed record FeatureRecipe(IReadOnlyList<string> Versions, Func<string, string> Render);
+    private sealed record FeatureRecipe(IReadOnlyList<string> Versions, Func<string, string> Render, bool NeedsNetwork = true);
+
+    /// <summary>
+    /// True only when a fixed feature recipe in the revision installs from apt.
+    /// Fragments never earn network access on their own: a fragment is arbitrary
+    /// root shell at build time, and the only thing that can legitimately need
+    /// the network is a controller-owned recipe.
+    /// </summary>
+    public static bool RequiresNetwork(ContainerProfileRevisionSummary revision)
+    {
+        ArgumentNullException.ThrowIfNull(revision);
+        using var document = JsonDocument.Parse(revision.Definition);
+        if (!document.RootElement.TryGetProperty("features", out var features) || features.ValueKind != JsonValueKind.Object) return false;
+        return features.EnumerateObject().Any(f => Recipes.TryGetValue(f.Name, out var r) && r.NeedsNetwork);
+    }
 
     /// <summary>
     /// Renders the Dockerfile text for a revision against the exact base digest.

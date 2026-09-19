@@ -904,8 +904,10 @@ app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds", async (HttpConte
     {
         var revisions = store.ListContainerProfileRevisions(id);
         if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        // Queue returns the verified build if one exists, else the live row (new,
+        // uncertain or interrupted); running a live row resumes or reconciles it.
         var queued = builds.Queue(revisionId, request.HostId);
-        var result = queued.State == HVO.AgentControl.Organization.ProfileBuildStates.Queued || queued.State == HVO.AgentControl.Organization.ProfileBuildStates.Uncertain
+        var result = HVO.AgentControl.Organization.ProfileBuildStates.IsLive(queued.State)
             ? await builds.RunAsync(queued.Id, context.RequestAborted)
             : queued;
         return Results.Ok(result);
@@ -916,7 +918,7 @@ app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds", async (HttpConte
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 })
     .WithName("BuildProfileRevision").WithTags("Profiles")
-    .WithSummary("Builds and verifies the revision's image on one approved, ready execution host and records the result. A verified digest joins that host's approved set; nothing is provisioned.")
+    .WithSummary("Builds and verifies the revision's image on one approved, ready execution host and records the result; called again for an uncertain or interrupted build it reconciles by tag instead of rebuilding. A verified digest joins that host's approved set; nothing is provisioned.")
     .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)

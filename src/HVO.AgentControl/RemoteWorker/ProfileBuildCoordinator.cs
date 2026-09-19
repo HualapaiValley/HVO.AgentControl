@@ -39,7 +39,14 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         return store.QueueProfileBuild(profile.Id, host.Id, _options.ApprovedImageDigest, _options.ApprovedImagePlatform, contextHash, tag);
     }
 
-    /// <summary>Runs one queued (or uncertain) build to a terminal state.</summary>
+    /// <summary>
+    /// Moves every build a previous controller process left <c>building</c> or
+    /// <c>verifying</c> to <c>uncertain</c>. Called once at startup by the hosted
+    /// service so stranded rows are always reconcilable through the API.
+    /// </summary>
+    public IReadOnlyList<string> ReconcileInterruptedOnStartup() => control.Organization?.MarkInterruptedProfileBuildsUncertain() ?? [];
+
+    /// <summary>Runs one queued, uncertain or interrupted build to a terminal state.</summary>
     public async Task<ProfileBuildRecord> RunAsync(string buildId, CancellationToken cancellationToken)
     {
         RequireEnabled();
@@ -50,6 +57,13 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         if (build.BaseImageDigest != _options.ApprovedImageDigest || build.Platform != _options.ApprovedImagePlatform)
             throw new OrganizationConcurrencyException("The approved base image changed since this build was queued; queue a new build.");
 
+        if (build.State is ProfileBuildStates.Building or ProfileBuildStates.Verifying)
+        {
+            // Another run owns this row, or a previous run died with it mid-flight and
+            // startup reconciliation has not run yet. Treat it as interrupted: the host
+            // may hold the result, so reconcile by tag rather than build again.
+            build = store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Uncertain, failureSummary: $"Found {build.State} without an owner; the result is unknown until reconciled.");
+        }
         if (build.State == ProfileBuildStates.Uncertain) return await ReconcileAsync(store, host, build, revision, cancellationToken).ConfigureAwait(false);
         if (build.State != ProfileBuildStates.Queued) throw new OrganizationConcurrencyException($"Profile build '{buildId}' is {build.State}, not queued.");
 
@@ -64,7 +78,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
             if (pin.ExitCode != 0)
                 return Fail(store, build, pin.ErrorCategory == "not-found" ? "The approved base image is not present on the host." : "The base image could not be pinned on the host.", pin.ErrorCategory);
 
-            var spec = new ImageBuildSpec(build.BaseImageDigest, build.Platform, revision.Id, build.ContextHash, build.ResultTag, NetworkRequired: revision.Definition.Contains("\"features\":{", StringComparison.Ordinal) && !revision.Definition.Contains("\"features\":{}", StringComparison.Ordinal) || revision.DockerfileFragment is not null);
+            var spec = new ImageBuildSpec(build.BaseImageDigest, build.Platform, revision.Id, build.ContextHash, build.ResultTag, NetworkRequired: ProfileBuildContext.RequiresNetwork(revision));
             var result = await operations.BuildImageAsync(host, spec, tar, cancellationToken).ConfigureAwait(false);
             if (result.ErrorCategory == "transport")
             {
@@ -76,10 +90,14 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
             build = store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Verifying);
             return await VerifyAsync(store, host, build, revision, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
+            // Timeout or caller cancellation (a client disconnect) after the intent was
+            // recorded: the host may have completed the work. Never leave the row live.
             var current = store.GetProfileBuild(build.Id)!;
-            return store.TransitionProfileBuild(current.Id, current.Revision, ProfileBuildStates.Uncertain, failureSummary: "The build timed out; the result is unknown until reconciled.");
+            if (ProfileBuildStates.IsLive(current.State) && current.State != ProfileBuildStates.Uncertain && current.State != ProfileBuildStates.Queued)
+                store.TransitionProfileBuild(current.Id, current.Revision, ProfileBuildStates.Uncertain, failureSummary: cancellationToken.IsCancellationRequested ? "The build was cancelled mid-flight; the result is unknown until reconciled." : "The build timed out; the result is unknown until reconciled.");
+            throw;
         }
     }
 
@@ -110,7 +128,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
             return Reject(store, build, exception.Message);
         }
 
-        var verify = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageVerify, [build.ResultTag, build.Platform], null, cancellationToken).ConfigureAwait(false);
+        var verify = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageVerify, [build.ResultTag, build.BaseImageDigest, build.Platform], null, cancellationToken).ConfigureAwait(false);
         if (verify.ErrorCategory == "transport")
             return store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Uncertain, failureSummary: "Transport failed during verification.");
         if (verify.ExitCode != 0) return Reject(store, build, "The contract verification program did not complete inside the image.");
@@ -196,12 +214,20 @@ public static class ImageContractVerifier
         return id;
     }
 
+    /// <summary>
+    /// The verification program ran in the approved base with the candidate
+    /// mounted read-only, so nothing here came from a candidate executable. The
+    /// artifacts the supervisor and bridge depend on must be byte-identical to
+    /// the base's copies (the trailer restores metadata, not content); accounts,
+    /// directory modes, setuid bits, file capabilities, ld.so.preload and the
+    /// socket path are checked on the candidate's files directly.
+    /// </summary>
     public static void CheckRuntime(string verifyJson)
     {
         using var document = Parse(verifyJson.Trim().Split('\n').Last(), "verification output");
         var root = document.RootElement;
-        if (root.GetProperty("bridgeUid").ValueKind != JsonValueKind.Number || root.GetProperty("bridgeUid").GetInt32() != 1101) throw new ImageContractException("The bridge user is not uid 1101.");
-        if (root.GetProperty("employeeUid").ValueKind != JsonValueKind.Number || root.GetProperty("employeeUid").GetInt32() != 1102) throw new ImageContractException("The employee user is not uid 1102.");
+        Account(root, "bridge", 1101, "/control", "/usr/sbin/nologin");
+        Account(root, "employee", 1102, "/home/worker", "/bin/bash");
         var dirs = root.GetProperty("dirs");
         foreach (var (path, uid) in new[] { ("/control", 1101), ("/home/worker", 1102), ("/workspace", 1102), ("/session", 1102) })
         {
@@ -211,11 +237,43 @@ public static class ImageContractVerifier
         }
         if (root.GetProperty("app").GetProperty("uid").GetInt32() != 0 || (root.GetProperty("app").GetProperty("mode").GetInt32() & 18) != 0) throw new ImageContractException("/app is not root-owned and group/other-unwritable.");
         if (root.GetProperty("supervisor").GetProperty("uid").GetInt32() != 0 || root.GetProperty("supervisor").GetProperty("mode").GetInt32() != 493) throw new ImageContractException("The worker supervisor is not root-owned 0755.");
-        if (!root.GetProperty("workerDll").GetBoolean()) throw new ImageContractException("The worker dll is missing.");
-        if (!root.GetProperty("dotnet").GetBoolean()) throw new ImageContractException("/usr/bin/dotnet is not executable.");
-        if (!root.GetProperty("opencode").GetBoolean()) throw new ImageContractException("/usr/local/bin/opencode is not executable.");
+        var artifacts = root.GetProperty("artifacts");
+        foreach (var path in RequiredIdenticalArtifacts)
+        {
+            if (!artifacts.TryGetProperty(path, out var same) || same.ValueKind != JsonValueKind.True)
+                throw new ImageContractException($"{path} differs from the approved base; the worker contract artifacts must be byte-identical.");
+        }
         if (root.GetProperty("setuid").GetArrayLength() != 0) throw new ImageContractException("The built image contains setuid or setgid files.");
+        if (root.GetProperty("fileCaps").GetArrayLength() != 0) throw new ImageContractException("The built image contains files with capability xattrs.");
         if (root.GetProperty("dockerSock").GetBoolean()) throw new ImageContractException("The built image contains a Docker socket path.");
+    }
+
+    /// <summary>
+    /// Paths a fragment may not change in any way. They are what PID 1, the
+    /// bridge and the ACP process execute or load; a fragment that needs a
+    /// different runtime is a different base, not a profile.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RequiredIdenticalArtifacts =
+    [
+        "/usr/local/bin/worker-supervisor", "/app", "/usr/bin/dotnet", "/usr/share/dotnet",
+        "/usr/local/bin/node", "/usr/local/lib/node_modules/opencode-ai", "/usr/local/bin/opencode",
+        // PID 1 is `#!/usr/bin/env python3`: the interpreter and its symlink must be
+        // byte-identical, and every standard-library file the base ships must be
+        // unchanged (the python feature may add files such as ensurepip, never alter
+        // or remove one). Site packages are not pinned; the supervisor imports only
+        // the standard library.
+        "/usr/bin/python3", "/usr/bin/python3.12", "/usr/lib/python3.12",
+        // Absent in the base and must stay absent: a preload would hijack every process,
+        // and a python3 ahead of /usr/bin on the supervisor's PATH would replace PID 1's
+        // interpreter (the SDK from apt lives under /usr/lib/dotnet and is allowed).
+        "/etc/ld.so.preload", "/lib/python-shadow",
+    ];
+
+    private static void Account(JsonElement root, string name, int uid, string home, string shell)
+    {
+        if (!root.TryGetProperty(name, out var account) || account.ValueKind != JsonValueKind.Object) throw new ImageContractException($"The {name} account is missing.");
+        if (account.GetProperty("uid").GetInt32() != uid || account.GetProperty("gid").GetInt32() != uid) throw new ImageContractException($"The {name} account is not uid/gid {uid}.");
+        if (account.GetProperty("home").GetString() != home || account.GetProperty("shell").GetString() != shell) throw new ImageContractException($"The {name} account's home or shell was changed.");
     }
 
     private static void Require(JsonElement labels, string key, string expected)

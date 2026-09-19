@@ -1477,6 +1477,52 @@ public sealed class RemoteWorkerControlTests
     }
 
     /// <summary>
+    /// A verified profile build on the host is a provisionable digest: the plan
+    /// freezes it, the bootstrap still runs the configured base (it only writes the
+    /// key), the long-lived container runs the profile image with the approved set
+    /// supplied to the command builder, and every resource carries the
+    /// <c>agentcontrol.profile</c> label. A digest verified on another host, a
+    /// rejected build, or an unknown digest is refused at plan time.
+    /// </summary>
+    [Fact]
+    public async Task ProvisioningFromAVerifiedProfileBuildFreezesTheDigestBootstrapsTheBaseAndLabelsTheProfile()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var profile = fixture.Store.ListContainerProfiles().Single();
+        var revision = fixture.Store.GetContainerProfile(profile.Id)!.Revisions.Single();
+        var built = "sha256:" + new string('9', 64);
+        var contextHash = "sha256:" + new string('8', 64);
+        var queued = fixture.Store.QueueProfileBuild(revision.Id, "host-a", fixture.Digest, "linux/amd64", contextHash, "agentcontrol-profile:x");
+        var b = fixture.Store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+        var v = fixture.Store.TransitionProfileBuild(b.Id, b.Revision, ProfileBuildStates.Verifying);
+        fixture.Store.TransitionProfileBuild(v.Id, v.Revision, ProfileBuildStates.Built, imageDigest: built, verified: true, evidenceHash: contextHash);
+
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote);
+        await Assert.ThrowsAsync<WorkerControlConfigurationException>(() => coordinator.PlanAsync(fixture.BindingId, "host-a", "sha256:" + new string('7', 64), CancellationToken.None));
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", built, CancellationToken.None);
+        Assert.Equal(built, enrollment.ExpectedImageDigest);
+        // Re-planning with the base now conflicts: the digest is frozen in the enrollment.
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => coordinator.PlanAsync(fixture.BindingId, "host-a", null, CancellationToken.None));
+
+        var enrolled = await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        Assert.Equal("enrolled", enrolled.LifecycleStatus);
+        var bootstrap = Assert.Single(remote.Bootstraps);
+        Assert.Equal(fixture.Digest, bootstrap.ImageDigest);
+        var container = Assert.Single(remote.Containers);
+        Assert.Equal(built, container.ImageDigest);
+        Assert.Contains(built, container.ApprovedDigests!);
+        Assert.Equal(revision.Id, container.Identity.ProfileRevisionId);
+        Assert.Equal(revision.Id, container.Identity.Labels["agentcontrol.profile"]);
+        Assert.Equal(7, container.Identity.Labels.Count);
+        Assert.Equal(revision.Id, bootstrap.Identity.ProfileRevisionId);
+        // Ownership checks accept the labelled resources and reject a resource missing the profile label.
+        RemoteWorkerCommandBuilder.RequireOwnedLabels(container.Identity.Labels, container.Identity);
+        var stripped = new Dictionary<string, string>(container.Identity.Labels); stripped.Remove("agentcontrol.profile");
+        Assert.Throws<ForeignResourceException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(stripped, container.Identity));
+    }
+
+    /// <summary>
     /// Provisioning applies the control volume and the key bootstrap before the
     /// long-lived container is created or started.
     /// </summary>
@@ -1952,10 +1998,14 @@ public sealed class RemoteWorkerControlTests
             return Task.FromResult("volume-ref-" + spec.Name);
         }
 
+        public List<ContainerCreateSpec> Containers { get; } = [];
+        public List<BootstrapSpec> Bootstraps { get; } = [];
+
         public Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token)
         {
             Effects.Add("container:" + spec.Name);
             _labels[spec.Name] = spec.Identity.Labels;
+            Containers.Add(spec);
             return Task.FromResult("container-ref-" + spec.Name);
         }
 
@@ -1964,6 +2014,7 @@ public sealed class RemoteWorkerControlTests
             try
             {
                 Effects.Add("bootstrap:" + spec.ControlVolumeName);
+                Bootstraps.Add(spec);
                 BootstrapKeyIds.Add(HVO.AgentControl.Worker.WorkerProtocol.KeyId(key));
                 if (FailBootstrapAlways || (FailBootstrapOnce && Interlocked.Increment(ref _bootstrapAttempts) == 1)) throw new RemoteWorkerUnavailableException("injected bootstrap failure", transport: true);
                 return Task.CompletedTask;

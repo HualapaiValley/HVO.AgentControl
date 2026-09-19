@@ -283,33 +283,62 @@ public sealed class WorkerImageContractTests
             Assert.Matches("^sha256:[0-9a-f]{64}$", digest);
             Assert.NotEqual(baseDigest, digest);
 
-            var verify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [tag, platform])), null, 120_000);
+            var verify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [tag, baseDigest, platform])), null, 120_000);
             Assert.True(verify.ExitCode == 0, verify.Output);
             HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.Output);
 
             // The generic profile's toolchain is really there, as the employee would see it.
-            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "dotnet --list-sdks | grep -q '^10\\.' && python3 --version && gh --version | head -1 && node --version"]);
+            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "export PATH=/usr/local/bin:/usr/bin:/bin; dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
             Assert.True(tools.ExitCode == 0, tools.Output);
 
-            // A fragment that plants a setuid binary is built the same way and rejected by the same verifier.
-            var hostile = store.CreateContainerProfile(new("hostile", "hostile", "Hostile", null, """{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN cp /bin/sh /usr/local/bin/rootsh && chmod u+s /usr/local/bin/rootsh\n"), null);
-            var hostileRevision = store.GetContainerProfile(hostile.Id)!.Revisions.Single();
-            var (hostileTar, hostileHash, hostileDockerfile) = HVO.AgentControl.RemoteWorker.ProfileBuildContext.Render(hostileRevision, baseDigest, platform);
-            var hostileTag = HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator.ResultTag(hostileRevision.Id, hostileHash);
-            try
+            // Hostile fragments are built the same way and must be rejected by the same,
+            // image-independent verifier. The trailer strips setuid bits, but content
+            // replacement and file capabilities are only caught because the verifier
+            // runs in the BASE with the candidate mounted read-only and byte-compares
+            // the contract artifacts; a candidate's own python3 is never executed.
+            var hostile = new (string Name, string Fragment, string Expect)[]
             {
-                var hostileBuilt = RunWithInput(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, hostileRevision.Id, hostileHash, hostileTag, NetworkRequired: false), hostileTar)), hostileTar, 600_000);
-                Assert.True(hostileBuilt.ExitCode == 0, hostileBuilt.Output);
-                // The fixed trailer strips the bit again, so the image is actually clean...
-                var hostileVerify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [hostileTag, platform])), null, 120_000);
-                Assert.True(hostileVerify.ExitCode == 0, hostileVerify.Output);
-                HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hostileVerify.Output);
-                var bit = Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hostileTag, "-c", "%a", "/usr/local/bin/rootsh"]);
-                Assert.Equal("755", bit.Output.Trim());
-                // ...and the trailer is the last word: the fragment ran before it.
-                Assert.True(hostileDockerfile.IndexOf("chmod u+s", StringComparison.Ordinal) < hostileDockerfile.IndexOf("worker contract trailer", StringComparison.Ordinal));
+                ("setuid", "RUN cp /bin/sh /usr/local/bin/rootsh && chmod u+s /usr/local/bin/rootsh", "none"),
+                // Content replacement is what matters, so a copy of /bin/sh (a real
+                // executable the fragment already has) stands in for a forged binary.
+                ("python", "RUN cp /bin/sh /usr/bin/python3.12", "differs"),
+                ("python-shadow", "RUN cp /bin/sh /usr/local/bin/python3", "/lib/python-shadow differs"),
+                ("supervisor", "RUN cp /bin/sh /usr/local/bin/worker-supervisor", "/usr/local/bin/worker-supervisor differs"),
+                ("worker-dll", "RUN printf 'x' >> /app/HVO.AgentControl.Worker.dll", "/app differs"),
+                ("dotnet", "RUN cp /bin/sh /usr/share/dotnet/dotnet", "/usr/share/dotnet differs"),
+                ("opencode", "RUN rm /usr/local/bin/opencode && cp /bin/sh /usr/local/bin/opencode", "/usr/local/bin/opencode differs"),
+                ("preload", "RUN printf '/lib/evil.so\\n' > /etc/ld.so.preload", "/etc/ld.so.preload differs"),
+                ("filecap", "RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin && rm -rf /var/lib/apt/lists/* && cp /bin/sh /usr/local/bin/capsh2 && setcap cap_sys_admin+ep /usr/local/bin/capsh2", "capability"),
+                ("account", "RUN usermod -s /bin/bash bridge", "home or shell"),
+            };
+            foreach (var (name, fragment, expect) in hostile)
+            {
+                var profile = store.CreateContainerProfile(new("hostile-" + name, "hostile-" + name, "Hostile " + name, null, """{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\n" + fragment + "\n"), null);
+                var revision = store.GetContainerProfile(profile.Id)!.Revisions.Single();
+                var (hTar, hHash, _) = HVO.AgentControl.RemoteWorker.ProfileBuildContext.Render(revision, baseDigest, platform);
+                var hTag = HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator.ResultTag(revision.Id, hHash);
+                try
+                {
+                    // Fragments never get the network; the filecap case needs apt, so that one is
+                    // exercised with a controller-owned recipe's network grant only for the test.
+                    var hBuilt = RunWithInput(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, revision.Id, hHash, hTag, NetworkRequired: name == "filecap"), hTar)), hTar, 600_000);
+                    Assert.True(hBuilt.ExitCode == 0, name + ": " + hBuilt.Output);
+                    var hVerify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [hTag, baseDigest, platform])), null, 120_000);
+                    Assert.True(hVerify.ExitCode == 0, name + ": " + hVerify.Output);
+                    if (expect == "none")
+                    {
+                        // The trailer really stripped the bit, so this one is clean and accepted.
+                        HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output);
+                        Assert.Equal("755", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%a", "/usr/local/bin/rootsh"]).Output.Trim());
+                    }
+                    else
+                    {
+                        var rejected = Assert.Throws<HVO.AgentControl.RemoteWorker.ImageContractException>(() => { try { HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output); } catch (HVO.AgentControl.RemoteWorker.ImageContractException) { throw; } catch { throw; } Assert.Fail("hostile fragment '" + name + "' was ACCEPTED; verify output: " + hVerify.Output); });
+                        Assert.Contains(expect, rejected.Message, StringComparison.Ordinal);
+                    }
+                }
+                finally { Run(["image", "rm", "-f", hTag]); }
             }
-            finally { Run(["image", "rm", "-f", hostileTag]); }
         }
         finally
         {
