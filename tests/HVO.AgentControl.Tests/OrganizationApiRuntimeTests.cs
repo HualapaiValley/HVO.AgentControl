@@ -686,7 +686,7 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         request.Headers.Add("Origin", invalid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
         using var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        Assert.Equal("Remote worker configuration is invalid.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
+        Assert.Equal("Worker control configuration is invalid.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
     }
 
     [Fact]

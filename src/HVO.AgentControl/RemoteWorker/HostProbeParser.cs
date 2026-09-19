@@ -123,6 +123,36 @@ public static class HostProbeParser
             valid ? "valid" : "invalid");
     }
 
+    /// <summary>Builds the local capability record without any SSH host-key fields.</summary>
+    public static LocalExecutionHostProbe ParseLocal(HostProbePayload payload, string expectedPlatform)
+    {
+        var parsed = ParseCapabilities(payload, expectedPlatform);
+        return new LocalExecutionHostProbe(parsed.ServerVersion, parsed.ApiVersion, parsed.Architecture, parsed.Driver, parsed.BackingFilesystem, parsed.SharedStorage, payload.FreeBytes, parsed.Memory, parsed.Cpu, parsed.Limits, parsed.Platform, parsed.Valid ? "valid" : "invalid");
+    }
+
+    private static (string ServerVersion, string ApiVersion, string Architecture, string Driver, string BackingFilesystem, bool SharedStorage, long Memory, int Cpu, bool Limits, string Platform, bool Valid) ParseCapabilities(HostProbePayload payload, string expectedPlatform)
+    {
+        using var infoDocument = Parse(payload.InfoJson, "host information");
+        using var versionDocument = Parse(payload.VersionJson, "daemon version");
+        var info = infoDocument.RootElement;
+        var version = versionDocument.RootElement;
+        if (info.ValueKind != JsonValueKind.Object || version.ValueKind != JsonValueKind.Object) throw new RemoteWorkerUnavailableException("The host probe returned an unexpected document shape.");
+        var os = Text(version, "Os") ?? Text(info, "OSType");
+        var architecture = Text(version, "Arch");
+        var platform = os is not null && architecture is not null ? $"{os}/{architecture}" : "unknown";
+        var serverVersion = Text(version, "Version") ?? Text(info, "ServerVersion");
+        var apiVersion = Text(version, "ApiVersion");
+        var driver = Text(info, "Driver");
+        var backingFilesystem = ReadDriverStatus(info, "Backing Filesystem");
+        var memory = Number(info, "MemTotal");
+        var cpu = Number(info, "NCPU");
+        var volumePlugins = ReadVolumePlugins(info);
+        var sharedStorage = !(driver is not null && LocalStorageDrivers.Contains(driver) && volumePlugins is { Count: > 0 } && volumePlugins.All(plugin => plugin.Equals(LocalVolumePlugin, StringComparison.OrdinalIgnoreCase)));
+        var limits = Flag(info, "MemoryLimit") == true && Flag(info, "CpuCfsQuota") == true && Flag(info, "PidsLimit") == true;
+        var valid = serverVersion is not null && apiVersion is not null && os == "linux" && architecture is "amd64" or "arm64" && platform == expectedPlatform && driver is not null && volumePlugins is not null && !sharedStorage && limits && payload.FreeBytes >= MinimumFreeBytes && memory >= MinimumMemoryBytes && cpu > 0;
+        return (serverVersion ?? "unknown", apiVersion ?? "unknown", architecture ?? "unknown", driver ?? "unknown", backingFilesystem ?? "unknown", sharedStorage, memory ?? 0, cpu is { } count && count is > 0 and <= int.MaxValue ? checked((int)count) : 1, limits, platform, valid);
+    }
+
     private static JsonDocument Parse(string json, string what)
     {
         if (json.Length is 0 or > 1024 * 1024) throw new RemoteWorkerUnavailableException($"The host probe returned no usable {what}.");

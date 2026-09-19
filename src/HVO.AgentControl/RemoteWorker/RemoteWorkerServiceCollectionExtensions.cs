@@ -5,11 +5,17 @@ public static class RemoteWorkerServiceCollectionExtensions
     public static IServiceCollection AddRemoteWorkerControl(this IServiceCollection services, IConfiguration configuration)
     {
         services.Configure<WorkerControlOptions>(configuration.GetSection(WorkerControlOptions.SectionName));
-        services.AddSingleton<IRemoteWorkerOperations, ProcessRemoteWorkerOperations>();
+        services.AddSingleton<LocalDockerHelperClient>();
+        services.AddSingleton<ProcessRemoteWorkerOperations>();
+        services.AddSingleton<ISshExecutionOperations>(provider => provider.GetRequiredService<ProcessRemoteWorkerOperations>());
+        services.AddSingleton<LocalDockerExecutionOperations>();
+        services.AddSingleton<ILocalDockerExecutionOperations>(provider => provider.GetRequiredService<LocalDockerExecutionOperations>());
+        services.AddSingleton<IRemoteWorkerOperations, RoutingExecutionOperations>();
         services.AddSingleton<IRemoteWorkerProvisioner, RemoteWorkerProvisionerAdapter>();
         services.AddSingleton<ProcessWorkerConnector>();
-        services.AddSingleton<IWorkerConnector>(provider => provider.GetRequiredService<ProcessWorkerConnector>());
-        services.AddSingleton<IRemoteTerminalConnector>(provider => provider.GetRequiredService<ProcessWorkerConnector>());
+        services.AddSingleton<RoutingWorkerConnector>();
+        services.AddSingleton<IWorkerConnector>(provider => provider.GetRequiredService<RoutingWorkerConnector>());
+        services.AddSingleton<IRemoteTerminalConnector>(provider => provider.GetRequiredService<RoutingWorkerConnector>());
         services.AddSingleton<IWorkerBridgeSessionFactory, WorkerBridgeSessionFactory>();
         services.AddSingleton<IControllerClock, SystemControllerClock>();
         services.AddSingleton<IWorkerDelay, SystemWorkerDelay>();

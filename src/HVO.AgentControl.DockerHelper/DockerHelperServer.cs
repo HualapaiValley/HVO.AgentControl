@@ -130,7 +130,7 @@ public sealed class DockerHelperServer(DockerHelperOptions options, IPeerCredent
             try
             {
                 if (_credentials.GetUid(socket) != options.ClientUid) { await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperError("error", id, "peer-unauthorized"), token); return; }
-                using var document = await WorkerProtocol.ReadFrameAsync(stream, token).ConfigureAwait(false) ?? throw new InvalidDataException();
+                using var document = await ReadRequestFrameAsync(stream, token).ConfigureAwait(false);
                 var request = JsonSerializer.Deserialize<DockerHelperRequest>(document.RootElement.GetRawText(), DockerHelperProtocol.JsonOptions) ?? throw new InvalidDataException(); id = request.Id;
                 ValidateEnvelope(request);
                 var input = request.BinaryLength == 0 ? null : await ReadExactAsync(stream, request.BinaryLength, token).ConfigureAwait(false);
@@ -152,6 +152,30 @@ public sealed class DockerHelperServer(DockerHelperOptions options, IPeerCredent
     private string[] Build(DockerHelperRequest request) => request.Operation switch { DockerOperation.VolumeCreate when request.VolumeCreate is not null => DockerArgv.BuildVolumeCreate(request.VolumeCreate), DockerOperation.ContainerCreate when request.ContainerCreate is not null => DockerArgv.BuildContainerCreate(request.ContainerCreate, options.Policy), DockerOperation.Bootstrap when request.Bootstrap is not null => DockerArgv.BuildBootstrap(request.Bootstrap, options.Policy), DockerOperation.ImageBuild when request.ImageBuild is not null => DockerArgv.BuildImageBuild(request.ImageBuild), _ => DockerArgv.Build(request.Operation, request.Tokens ?? [], options.Policy) };
     private static void ValidateEnvelope(DockerHelperRequest request) { if (request.Type != "request" || request.Id is not { Length: >= 1 and <= 128 } || request.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_' and not '.' and not ':') || request.TimeoutSeconds is < 1 or > DockerHelperProtocol.MaxTimeoutSeconds || request.BinaryLength is < 0 or > DockerHelperProtocol.MaxBinaryBytes) throw new InvalidDataException(); var needsBinary = request.Operation is DockerOperation.Bootstrap or DockerOperation.ImageBuild; if (needsBinary != (request.BinaryLength > 0)) throw new InvalidDataException(); if (request.Operation is DockerOperation.Connector or DockerOperation.Viewer && request.BinaryLength != 0) throw new InvalidDataException(); }
     private async Task StreamAsync(Stream stream, DockerHelperRequest request, string[] argv, CancellationToken token) { if (!await _concurrency.WaitAsync(0, token).ConfigureAwait(false)) { await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperError("error", request.Id, "capacity-exhausted"), token); return; } Process? process = null; try { process = await _runner.StartStreamAsync(argv, token).ConfigureAwait(false); await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperStreamOpen("stream-open", request.Id), token).ConfigureAwait(false); using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token); var input = stream.CopyToAsync(process.StandardInput.BaseStream, lifetime.Token); var output = process.StandardOutput.BaseStream.CopyToAsync(stream, lifetime.Token); var completed = await Task.WhenAny(input, output, process.WaitForExitAsync(lifetime.Token)).ConfigureAwait(false); lifetime.Cancel(); try { await completed.ConfigureAwait(false); } catch { } } finally { try { if (process is not null && !process.HasExited) process.Kill(true); } catch { } process?.Dispose(); _concurrency.Release(); } }
+    /// <summary>
+    /// Reads only the newline-delimited request envelope. Typed bootstrap/build
+    /// requests place raw binary bytes immediately after it, so a buffered frame
+    /// reader must not read ahead and discard the beginning of that payload.
+    /// </summary>
+    private static async Task<JsonDocument> ReadRequestFrameAsync(Stream stream, CancellationToken token)
+    {
+        using var memory = new MemoryStream();
+        var single = new byte[1];
+        while (memory.Length < WorkerProtocol.MaxControlFrameBytes)
+        {
+            var read = await stream.ReadAsync(single, token).ConfigureAwait(false);
+            if (read == 0) throw new InvalidDataException();
+            if (single[0] == (byte)'\n')
+            {
+                if (memory.Length == 0) throw new InvalidDataException();
+                try { return JsonDocument.Parse(memory.ToArray(), new JsonDocumentOptions { MaxDepth = WorkerProtocol.MaxControlJsonDepth }); }
+                catch (JsonException exception) { throw new InvalidDataException("The helper request envelope is malformed.", exception); }
+            }
+            memory.WriteByte(single[0]);
+        }
+        throw new InvalidDataException();
+    }
+
     private static async Task<byte[]> ReadExactAsync(Stream stream, int length, CancellationToken token) { var bytes = GC.AllocateUninitializedArray<byte>(length); var offset = 0; while (offset < length) { var read = await stream.ReadAsync(bytes.AsMemory(offset), token).ConfigureAwait(false); if (read == 0) throw new InvalidDataException(); offset += read; } return bytes; }
     private static ValueTask WriteAsync(Stream stream, DockerHelperResult result, CancellationToken token) => WorkerProtocol.WriteFrameAsync(stream, result, token);
     private static async Task SafeErrorAsync(Stream stream, string id, string category, CancellationToken token) { try { await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperError("error", id, category), token); } catch { } }

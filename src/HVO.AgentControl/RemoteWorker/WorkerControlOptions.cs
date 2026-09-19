@@ -55,7 +55,7 @@ public sealed class WorkerControlOptions
         if (!ValidId(ControllerId)) errors.Add("ControllerId must be a stable bounded identifier.");
         if (!Path.IsPathRooted(ConnectorExecutable) || ConnectorExecutable != "/usr/bin/ssh") errors.Add("ConnectorExecutable must be /usr/bin/ssh.");
         if (WorkerTarget != "/app/HVO.AgentControl.Worker.dll") errors.Add("WorkerTarget must be /app/HVO.AgentControl.Worker.dll.");
-        if (!Path.IsPathRooted(LocalDockerHelperSocketPath)) errors.Add("LocalDockerHelperSocketPath must be absolute.");
+        if (Enabled && !Path.IsPathRooted(LocalDockerHelperSocketPath)) errors.Add("LocalDockerHelperSocketPath must be absolute when WorkerControl is enabled.");
         if (!Regex.IsMatch(ApprovedImageDigest ?? string.Empty, "^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)) errors.Add("ApprovedImageDigest must be a lowercase sha256 digest.");
         if (ApprovedImagePlatform is not ("linux/amd64" or "linux/arm64")) errors.Add("ApprovedImagePlatform must be linux/amd64 or linux/arm64.");
         if (ConnectTimeoutSeconds is < 1 or > 60 || AuthenticationTimeoutSeconds is < 1 or > 60 || OperationTimeoutSeconds is < 1 or > 600) errors.Add("WorkerControl timeouts are outside their bounds.");

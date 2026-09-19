@@ -22,6 +22,22 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
+    public async Task ExecutionOperationsRouteStrictlyByTargetKind()
+    {
+        var ssh = new RecordingExecutionOperations("ssh");
+        var local = new RecordingExecutionOperations("local");
+        var router = new RoutingExecutionOperations(ssh, local);
+        var approved = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Port = 22, Username = "docker", KnownHostsPath = "/known", IdentityFilePath = "/key" };
+        var sshTarget = new ExecutionTarget("host-a", "ssh-docker", approved);
+        var localTarget = new ExecutionTarget(ExecutionHosts.LocalDockerId, "local-docker", null);
+
+        Assert.Equal("ssh", (await router.ExecuteAsync(sshTarget, RemoteDockerOperation.ContainerStart, ["agentcontrol-worker-a"], null, CancellationToken.None)).StandardOutput);
+        Assert.Equal("local", (await router.ExecuteAsync(localTarget, RemoteDockerOperation.ContainerStart, ["agentcontrol-worker-b"], null, CancellationToken.None)).StandardOutput);
+        Assert.Equal(["ssh:host-a:ContainerStart"], ssh.Calls);
+        Assert.Equal(["local:local-docker:ContainerStart"], local.Calls);
+    }
+
+    [Fact]
     public void DeterministicSshCommandPinsHostKeyAndRejectsInjection()
     {
         var host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Port = 2222, Username = "docker", KnownHostsPath = "/control/known_hosts", IdentityFilePath = "/control/id_ed25519" };
@@ -134,6 +150,16 @@ public sealed class RemoteWorkerControlTests
         // The containerd snapshotter reports no backing filesystem; an absent
         // optional value is recorded, not treated as a capability failure.
         Assert.Equal("unknown", probe.BackingFilesystem);
+    }
+
+    [Fact]
+    public void LocalHostProbeParsesCapabilitiesWithoutSshIdentity()
+    {
+        using var fixture = new ProbeFixture();
+        var probe = HostProbeParser.ParseLocal(fixture.Payload(), "linux/amd64");
+        Assert.Equal("valid", probe.CapabilityStatus);
+        Assert.Equal("linux/amd64", probe.ImagePlatform);
+        Assert.Equal("amd64", probe.Architecture);
     }
 
     [Fact]
@@ -1621,6 +1647,10 @@ public sealed class RemoteWorkerControlTests
 
         var remote = new RecordingProvisioner();
         var coordinator = fixture.CreateCoordinator(remote);
+        // An SSH host may advertise the same digest; the frozen local host remains
+        // authoritative and every effect must retain that local execution target.
+        using (var connection = Open(fixture.DatabasePath))
+            connection.Execute($"INSERT INTO profile_builds(id,profile_revision_id,host_id,base_image_digest,platform,context_hash,result_tag,state,image_digest,verified,evidence_hash,failure_summary,requested_by,created_at,updated_at,revision) VALUES('build-same-digest','{creation.ApprovedProfileRevisionId}','host-a','{fixture.Digest}','linux/amd64','sha256:{new string('8', 64)}','agentcontrol-profile:same','built','{fixture.ManagedDigest}',1,'sha256:{new string('7', 64)}',NULL,'owner','2026-09-15T00:00:00.0000000+00:00','2026-09-15T00:00:00.0000000+00:00',1);");
 
         // A managed plan needs no requested host or digest: it resolves both from
         // the frozen approval, and links the exact approval revision to the worker.
@@ -1641,6 +1671,7 @@ public sealed class RemoteWorkerControlTests
 
         var enrolled = await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
         Assert.Equal("enrolled", enrolled.LifecycleStatus);
+        Assert.All(remote.Targets, target => { Assert.True(target.IsLocalDocker); Assert.Null(target.Ssh); });
 
         // The bootstrap still runs the configured base (it only writes the key).
         var bootstrap = Assert.Single(remote.Bootstraps);
@@ -2148,9 +2179,20 @@ public sealed class RemoteWorkerControlTests
         Assert.Equal(2, (await manager.GetCachedLeaseAsync(enrollment.WorkerId, CancellationToken.None))!.Status.ProcessGeneration);
     }
 
+    private sealed class RecordingExecutionOperations(string name) : ISshExecutionOperations, ILocalDockerExecutionOperations
+    {
+        public List<string> Calls { get; } = [];
+        public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken) { Calls.Add($"{name}:{target.Id}:{operation}"); return Task.FromResult(new RemoteOperationResult(0, name, "none")); }
+        public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec specification, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.VolumeCreate, [specification.Name], null, cancellationToken);
+        public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ContainerCreate, [specification.Name], null, cancellationToken);
+        public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.Bootstrap, [specification.ControlVolumeName], standardInput, cancellationToken);
+        public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageBuild, [specification.ResultTag], contextTar, cancellationToken);
+        public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) { Calls.Add($"{name}:{target.Id}:Probe"); return Task.FromResult(new HostProbePayload("{}", "{}", "/var/lib/docker", 0)); }
+    }
+
     private sealed class FixtureOperations : IRemoteWorkerOperations
     {
-        public Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
+        public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
         {
             var name = tokens.Single();
             if (name == "transport") return Task.FromResult(new RemoteOperationResult(255, "", "transport"));
@@ -2160,11 +2202,11 @@ public sealed class RemoteWorkerControlTests
                 : "{\"Name\":\"volume-id\",\"Labels\":{\"agentcontrol.worker\":\"volume-a\"}}";
             return Task.FromResult(new RemoteOperationResult(0, json, "none"));
         }
-        public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     private sealed class RemoteStoreFixture : IDisposable
@@ -2329,6 +2371,7 @@ public sealed class RemoteWorkerControlTests
         private int _containerRefs;
 
         public List<string> Effects { get; } = [];
+        public List<ExecutionTarget> Targets { get; } = [];
         public List<string> BootstrapKeyIds { get; } = [];
         public bool FailBootstrapOnce { get; set; }
         public bool FailBootstrapAlways { get; set; }
@@ -2347,6 +2390,7 @@ public sealed class RemoteWorkerControlTests
 
         public Task<string> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec spec, CancellationToken token)
         {
+            Targets.Add(host);
             Effects.Add("volume:" + spec.Name);
             _labels[spec.Name] = spec.Identity.Labels;
             return Task.FromResult("volume-ref-" + spec.Name);
@@ -2357,6 +2401,7 @@ public sealed class RemoteWorkerControlTests
 
         public Task<string> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec spec, CancellationToken token)
         {
+            Targets.Add(host);
             Effects.Add("container:" + spec.Name);
             if (FailCreateContainerOnce && Interlocked.Increment(ref _containerAttempts) == 1) throw new RemoteWorkerUnavailableException("injected create failure", transport: true);
             _labels[spec.Name] = spec.Identity.Labels;
@@ -2369,6 +2414,7 @@ public sealed class RemoteWorkerControlTests
         {
             try
             {
+                Targets.Add(host);
                 Effects.Add("bootstrap:" + spec.ControlVolumeName);
                 Bootstraps.Add(spec);
                 BootstrapKeyIds.Add(HVO.AgentControl.Worker.WorkerProtocol.KeyId(key));
@@ -2378,13 +2424,13 @@ public sealed class RemoteWorkerControlTests
             finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(key); }
         }
 
-        public Task StartAsync(ExecutionTarget host, string container, CancellationToken token) { Effects.Add("start:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "running"; return Task.CompletedTask; }
-        public Task StopAsync(ExecutionTarget host, string container, CancellationToken token) { Effects.Add("stop:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "stopped"; return Task.CompletedTask; }
-        public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token) { Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
-        public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token) { Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
+        public Task StartAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("start:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "running"; return Task.CompletedTask; }
+        public Task StopAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("stop:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "stopped"; return Task.CompletedTask; }
+        public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
+        public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token) { Targets.Add(host); Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
 
-        public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, "present");
-        public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running");
+        public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, "present"); }
+        public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running"); }
 
         private Task<RemoteResourceInspection> Inspect(string name, string state)
         {

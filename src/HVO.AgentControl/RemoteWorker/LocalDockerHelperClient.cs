@@ -44,7 +44,26 @@ public sealed class LocalDockerHelperClient(IOptions<WorkerControlOptions> confi
         catch { await stream.DisposeAsync().ConfigureAwait(false); throw; }
     }
 
-    private async Task<Socket> ConnectSocketAsync(CancellationToken token) { if (!Path.IsPathRooted(_options.LocalDockerHelperSocketPath)) throw new WorkerControlConfigurationException("The local Docker helper socket path must be absolute."); var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified); try { await socket.ConnectAsync(new UnixDomainSocketEndPoint(_options.LocalDockerHelperSocketPath), token).ConfigureAwait(false); return socket; } catch { socket.Dispose(); throw; } }
+    private async Task<Socket> ConnectSocketAsync(CancellationToken token)
+    {
+        if (!Path.IsPathRooted(_options.LocalDockerHelperSocketPath)) throw new WorkerControlConfigurationException("The local Docker helper socket path must be absolute.");
+        var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        try
+        {
+            await socket.ConnectAsync(new UnixDomainSocketEndPoint(_options.LocalDockerHelperSocketPath), token).ConfigureAwait(false);
+            return socket;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            socket.Dispose();
+            throw;
+        }
+        catch (Exception exception) when (exception is SocketException or IOException or UnauthorizedAccessException)
+        {
+            socket.Dispose();
+            throw new RemoteWorkerUnavailableException("The local Docker helper is unavailable.", transport: true, exception);
+        }
+    }
     private int Timeout(DockerOperation operation) => operation is DockerOperation.ImageBuild or DockerOperation.ImageVerify ? _options.ImageBuildTimeoutSeconds : _options.OperationTimeoutSeconds;
     private static string Id() => Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
     private static void EnsureLocal(ExecutionTarget target) { if (!target.IsLocalDocker) throw new WorkerControlConfigurationException("The Docker helper client accepts only a local-docker execution target."); }

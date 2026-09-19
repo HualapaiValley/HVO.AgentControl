@@ -90,6 +90,33 @@ public sealed class DockerHelperTests
         Assert.Equal("protocol-error", response.GetProperty("error").GetString());
     }
 
+    [Fact]
+    public async Task TypedBinaryRequestDoesNotLosePayloadBytesAfterEnvelope()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "agentcontrol-helper-binary-" + Guid.NewGuid().ToString("N")[..8] + ".sock");
+        using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        listener.Bind(new UnixDomainSocketEndPoint(path)); listener.Listen(1);
+        using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await client.ConnectAsync(new UnixDomainSocketEndPoint(path));
+        var accepted = await listener.AcceptAsync();
+        var runner = new CapturingRunner();
+        await using var server = new DockerHelperServer(new(path + ".unused", 1001, -1, Policy), new FakeCredentials(1001), runner);
+        using var stream = new NetworkStream(client, ownsSocket: false);
+        var payload = Enumerable.Range(0, 45).Select(index => (byte)index).ToArray();
+        var request = new DockerHelperRequest("request", "binary-id", DockerOperation.Bootstrap, Bootstrap: new("agentcontrol-control-x", Digest, "linux/amd64", Identity()), BinaryLength: payload.Length, TimeoutSeconds: 30);
+        var frame = JsonSerializer.SerializeToUtf8Bytes(request, DockerHelperProtocol.JsonOptions);
+        byte[] combined = [.. frame, (byte)'\n', .. payload];
+        await stream.WriteAsync(combined);
+        await stream.FlushAsync();
+        var handling = server.HandleAsync(accepted, CancellationToken.None);
+
+        using var response = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        await handling;
+        Assert.Equal("result", response!.RootElement.GetProperty("type").GetString());
+        Assert.Equal(payload, runner.Input);
+        try { File.Delete(path); } catch (IOException) { }
+    }
+
     /// <summary>
     /// The stream path must relay the socket to the spawned child in both
     /// directions and stop when the child ends. <c>cat</c> stands in for
@@ -161,6 +188,13 @@ public sealed class DockerHelperTests
     private sealed class FakeRunner : IDockerProcessRunner
     {
         public Task<DockerHelperResult> RunAsync(string id, DockerOperation operation, string[] argv, byte[]? input, TimeSpan timeout, CancellationToken token) => Task.FromResult(new DockerHelperResult("result", id, 0, string.Empty, "none"));
+        public Task<Process> StartStreamAsync(string[] argv, CancellationToken token) => throw new NotSupportedException();
+    }
+
+    private sealed class CapturingRunner : IDockerProcessRunner
+    {
+        public byte[]? Input { get; private set; }
+        public Task<DockerHelperResult> RunAsync(string id, DockerOperation operation, string[] argv, byte[]? input, TimeSpan timeout, CancellationToken token) { Input = input?.ToArray(); return Task.FromResult(new DockerHelperResult("result", id, 0, string.Empty, "none")); }
         public Task<Process> StartStreamAsync(string[] argv, CancellationToken token) => throw new NotSupportedException();
     }
 

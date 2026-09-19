@@ -582,7 +582,7 @@ public sealed class ProfileBuildTests : IDisposable
         public string? KnownContextHash { get; set; }
         private string? _contextHash;
 
-        public async Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
+        public async Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
         {
             Operations.Add(operation.ToString());
             if (operation == RemoteDockerOperation.ImageVerify && VerifyBlocksUntilCancelled) await Task.Delay(Timeout.Infinite, cancellationToken);
@@ -596,7 +596,7 @@ public sealed class ProfileBuildTests : IDisposable
             };
         }
 
-        public async Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken)
+        public async Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken)
         {
             Operations.Add("ImageBuild");
             BuildSpec = specification;
@@ -613,10 +613,10 @@ public sealed class ProfileBuildTests : IDisposable
             RootFS = new { Type = "layers", Layers = new[] { BaseLayers[0], BaseLayers[1], "sha256:" + new string('f', 64) } },
         } });
 
-        public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     private sealed class TempDirectory : IDisposable

@@ -22,9 +22,8 @@ public sealed record ContainerReplacementResult(
     string NativeSessionId);
 
 /// <summary>
-/// Provisioning operations addressed by an <see cref="ExecutionTarget"/>. The
-/// real adapter refuses a controller-local target in this build; the SSH target
-/// carries its configured approved host.
+/// Provisioning operations addressed by an <see cref="ExecutionTarget"/> and
+/// routed to either the controller-local Docker helper or pinned SSH transport.
 /// </summary>
 public interface IRemoteWorkerProvisioner
 {
@@ -42,11 +41,11 @@ public interface IRemoteWorkerProvisioner
 
 public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations operations) : IRemoteWorkerProvisioner
 {
-    public Task<HostProbePayload> ProbeAsync(ExecutionTarget target, CancellationToken token) => operations.ProbeHostAsync(RequireSsh(target), token);
-    public async Task<string> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec spec, CancellationToken token) => Require(await operations.CreateVolumeAsync(RequireSsh(target), spec, token));
-    public async Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(RequireSsh(target), RemoteDockerOperation.VolumeInspect, [name], null, token));
-    public async Task<string> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token) => Require(await operations.CreateContainerAsync(RequireSsh(target), spec, token));
-    public async Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(RequireSsh(target), RemoteDockerOperation.ContainerInspect, [name], null, token));
+    public Task<HostProbePayload> ProbeAsync(ExecutionTarget target, CancellationToken token) => operations.ProbeHostAsync(target, token);
+    public async Task<string> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec spec, CancellationToken token) => Require(await operations.CreateVolumeAsync(target, spec, token));
+    public async Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeInspect, [name], null, token));
+    public async Task<string> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token) => Require(await operations.CreateContainerAsync(target, spec, token));
+    public async Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerInspect, [name], null, token));
 
     /// <summary>
     /// Runs the ephemeral bootstrap container with the controller-encoded key on
@@ -59,7 +58,7 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
         try
         {
             encoded = WorkerBootstrapEncoding.Encode(key);
-            Require(await operations.BootstrapAsync(RequireSsh(target), spec, encoded, token));
+            Require(await operations.BootstrapAsync(target, spec, encoded, token));
         }
         finally
         {
@@ -68,26 +67,15 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
         }
     }
 
-    public async Task StartAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(RequireSsh(target), RemoteDockerOperation.ContainerStart, [container], null, token));
-    public async Task StopAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(RequireSsh(target), RemoteDockerOperation.ContainerStop, [container], null, token));
-    public async Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(RequireSsh(target), RemoteDockerOperation.ContainerRemove, [container], null, token));
-    public async Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token) => _ = Require(await operations.ExecuteAsync(RequireSsh(target), RemoteDockerOperation.VolumeRemove, [volume], null, token));
-
-    /// <summary>
-    /// Routes a controller-local target to the fail-closed implementation. The
-    /// local execution path is not implemented in this build, so the call must
-    /// throw rather than fall through to an SSH operation.
-    /// </summary>
-    public static ApprovedExecutionHost RequireSsh(ExecutionTarget target)
-    {
-        ArgumentNullException.ThrowIfNull(target);
-        return target.Ssh ?? throw new WorkerControlConfigurationException(LocalDockerUnavailableOperations.Message);
-    }
+    public async Task StartAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerStart, [container], null, token));
+    public async Task StopAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerStop, [container], null, token));
+    public async Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerRemove, [container], null, token));
+    public async Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeRemove, [volume], null, token));
 
     private static string Require(RemoteOperationResult result)
     {
         if (result.ExitCode == 0) return result.StandardOutput.Trim();
-        throw new RemoteWorkerUnavailableException("Remote provisioning operation failed.", result.ErrorCategory == "transport");
+        throw new RemoteWorkerUnavailableException("Worker provisioning operation failed.", result.ErrorCategory == "transport");
     }
 
     private static RemoteResourceInspection Inspect(RemoteOperationResult result)
@@ -149,7 +137,8 @@ public sealed class RemoteWorkerProvisioningCoordinator
         if (managed is not null)
             throw new OrganizationValidationException("A managed enrollment is provisioned from its frozen owner approval and cannot be planned by host or digest.");
 
-        var host = _targets.Resolve(hostId).Ssh ?? throw new WorkerControlConfigurationException(LocalDockerUnavailableOperations.Message);
+        var host = _targets.Resolve(hostId);
+        if (host.IsLocalDocker) throw new OrganizationValidationException("The controller-local Docker target is reserved for managed enrollments.");
         var digest = imageDigest ?? _options.ApprovedImageDigest;
         if (!store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest).Contains(digest, StringComparer.Ordinal))
             throw new WorkerControlConfigurationException("The requested image is not the approved base or a verified profile build for this host.");

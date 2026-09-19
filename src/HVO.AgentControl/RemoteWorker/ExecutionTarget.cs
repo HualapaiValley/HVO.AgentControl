@@ -37,35 +37,3 @@ public sealed class ExecutionTargetResolver(AcpControlHost control, IOptions<Wor
         return new ExecutionTarget(host.Id, "ssh-docker", ssh);
     }
 }
-
-/// <summary>
-/// Fail-closed execution operations for the controller-local Docker target.
-/// Managed hiring targets the local daemon so placement is deterministic, but the
-/// local execution path is not implemented in this build: every operation throws
-/// a configuration exception, so a managed hire fails with sanitized detail
-/// instead of silently SSH-ing anywhere.
-/// </summary>
-public sealed class LocalDockerUnavailableOperations : IRemoteWorkerProvisioner, IRemoteWorkerOperations
-{
-    public const string Message = "Controller-local Docker execution is not available in this build.";
-
-    public Task<HostProbePayload> ProbeAsync(ExecutionTarget target, CancellationToken token) => throw Unavailable();
-    public Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token) => throw Unavailable();
-    public Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken) => throw Unavailable();
-    public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw Unavailable();
-    public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw Unavailable();
-    public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw Unavailable();
-    public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw Unavailable();
-    public Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken) => throw Unavailable();
-    public Task<string> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec spec, CancellationToken token) => throw Unavailable();
-    public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token) => throw Unavailable();
-    public Task<string> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token) => throw Unavailable();
-    public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token) => throw Unavailable();
-    public Task BootstrapAsync(ExecutionTarget target, BootstrapSpec spec, byte[] key, CancellationToken token) => throw Unavailable();
-    public Task StartAsync(ExecutionTarget target, string container, CancellationToken token) => throw Unavailable();
-    public Task StopAsync(ExecutionTarget target, string container, CancellationToken token) => throw Unavailable();
-    public Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token) => throw Unavailable();
-    public Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token) => throw Unavailable();
-
-    private static WorkerControlConfigurationException Unavailable() => new(Message);
-}

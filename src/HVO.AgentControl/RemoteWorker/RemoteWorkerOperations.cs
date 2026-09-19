@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 
 namespace HVO.AgentControl.RemoteWorker;
 
-public enum RemoteDockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector }
+public enum RemoteDockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector, Viewer }
 public sealed record RemoteCommand(string Executable, IReadOnlyList<string> Arguments, byte[]? StandardInput = null);
 public sealed record RemoteOperationResult(int ExitCode, string StandardOutput, string ErrorCategory);
 /// <summary>
@@ -18,13 +18,16 @@ public sealed record HostProbePayload(string InfoJson, string VersionJson, strin
 
 public interface IRemoteWorkerOperations
 {
-    Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken);
-    Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken);
-    Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken);
-    Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken);
-    Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken);
-    Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken);
+    Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken);
+    Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec specification, CancellationToken cancellationToken);
+    Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken);
+    Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken);
+    Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken);
+    Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken);
 }
+
+public interface ISshExecutionOperations : IRemoteWorkerOperations;
+public interface ILocalDockerExecutionOperations : IRemoteWorkerOperations;
 
 /// <summary>
 /// Encodes the controller-held 32-byte bridge key exactly the way the worker
@@ -204,27 +207,53 @@ public static class RemoteWorkerCommandBuilder
     }
 }
 
-public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions> configured, ILogger<ProcessRemoteWorkerOperations> logger) : IRemoteWorkerOperations
+public sealed class LocalDockerExecutionOperations(LocalDockerHelperClient client) : ILocalDockerExecutionOperations
+{
+    public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
+    {
+        if (standardInput is not null) throw new WorkerControlConfigurationException("The local Docker helper accepts binary input only for typed operations.");
+        return client.ExecuteAsync(target, (DockerOperation)operation, tokens, cancellationToken);
+    }
+
+    public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec specification, CancellationToken cancellationToken) => client.CreateVolumeAsync(target, specification, cancellationToken);
+    public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => client.CreateContainerAsync(target, specification, cancellationToken);
+    public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => client.BootstrapAsync(target, specification, standardInput, cancellationToken);
+    public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => client.BuildImageAsync(target, specification, contextTar, cancellationToken);
+    public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => client.ProbeAsync(target, cancellationToken);
+}
+
+public sealed class RoutingExecutionOperations(ISshExecutionOperations ssh, ILocalDockerExecutionOperations local) : IRemoteWorkerOperations
+{
+    private IRemoteWorkerOperations Select(ExecutionTarget target) => target.IsLocalDocker ? local : ssh;
+    public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken) => Select(target).ExecuteAsync(target, operation, tokens, standardInput, cancellationToken);
+    public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec specification, CancellationToken cancellationToken) => Select(target).CreateVolumeAsync(target, specification, cancellationToken);
+    public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => Select(target).CreateContainerAsync(target, specification, cancellationToken);
+    public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => Select(target).BootstrapAsync(target, specification, standardInput, cancellationToken);
+    public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => Select(target).BuildImageAsync(target, specification, contextTar, cancellationToken);
+    public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => Select(target).ProbeHostAsync(target, cancellationToken);
+}
+
+public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions> configured, ILogger<ProcessRemoteWorkerOperations> logger) : ISshExecutionOperations
 {
     private const int MaxOutputBytes = 1024 * 1024;
     private readonly WorkerControlOptions _options = configured.Value;
-    public Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.Build(host, _options, operation, tokens, standardInput), operation, cancellationToken);
-    public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildVolumeCreate(host, _options, specification), RemoteDockerOperation.VolumeCreate, cancellationToken);
-    public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildContainerCreate(host, _options, specification), RemoteDockerOperation.ContainerCreate, cancellationToken);
-    public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildBootstrap(host, _options, specification, standardInput), RemoteDockerOperation.Bootstrap, cancellationToken);
-    public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildImageBuild(host, _options, specification, contextTar), RemoteDockerOperation.ImageBuild, cancellationToken);
+    public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.Build(host, _options, operation, tokens, standardInput), operation, cancellationToken); }
+    public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec specification, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildVolumeCreate(host, _options, specification), RemoteDockerOperation.VolumeCreate, cancellationToken); }
+    public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildContainerCreate(host, _options, specification), RemoteDockerOperation.ContainerCreate, cancellationToken); }
+    public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildBootstrap(host, _options, specification, standardInput), RemoteDockerOperation.Bootstrap, cancellationToken); }
+    public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildImageBuild(host, _options, specification, contextTar), RemoteDockerOperation.ImageBuild, cancellationToken); }
 
     /// <summary>
     /// Runs the fixed probe sequence and returns only what the host actually
     /// printed. The storage path comes from the daemon's own DockerRootDir and is
     /// re-validated as a fixed absolute path before it is ever used in a command.
     /// </summary>
-    public async Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken)
+    public async Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken)
     {
-        var info = Require(await ExecuteAsync(host, RemoteDockerOperation.Probe, [], null, cancellationToken).ConfigureAwait(false), "host information");
-        var version = Require(await ExecuteAsync(host, RemoteDockerOperation.VersionProbe, [], null, cancellationToken).ConfigureAwait(false), "daemon version");
+        var info = Require(await ExecuteAsync(target, RemoteDockerOperation.Probe, [], null, cancellationToken).ConfigureAwait(false), "host information");
+        var version = Require(await ExecuteAsync(target, RemoteDockerOperation.VersionProbe, [], null, cancellationToken).ConfigureAwait(false), "daemon version");
         var root = HostProbeParser.ReadDockerRootDirectory(info);
-        var free = Require(await ExecuteAsync(host, RemoteDockerOperation.StorageFree, [root], null, cancellationToken).ConfigureAwait(false), "storage capacity");
+        var free = Require(await ExecuteAsync(target, RemoteDockerOperation.StorageFree, [root], null, cancellationToken).ConfigureAwait(false), "storage capacity");
         return new HostProbePayload(info, version, root, HostProbeParser.ParseAvailableBytes(free));
     }
 
@@ -283,6 +312,9 @@ public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions>
         return text.Length <= 512 && text.Contains(expected, StringComparison.OrdinalIgnoreCase) ? "not-found" : "remote-command-failed";
     }
 
+    private static ApprovedExecutionHost RequireSsh(ExecutionTarget target) =>
+        target is { IsLocalDocker: false, Ssh: not null } ? target.Ssh : throw new WorkerControlConfigurationException("SSH execution operations require an ssh-docker target.");
+
     private void EnsureApproved(ApprovedExecutionHost host)
     {
         if (!_options.Enabled) throw new WorkerControlDisabledException();
@@ -292,16 +324,15 @@ public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions>
     private static async Task<byte[]> ReadBoundedAsync(Stream stream, int maximum, CancellationToken token) { using var memory = new MemoryStream(); var buffer = new byte[8192]; while (true) { var read = await stream.ReadAsync(buffer, token).ConfigureAwait(false); if (read == 0) return memory.ToArray(); if (memory.Length + read > maximum) throw new RemoteWorkerUnavailableException("Remote operation output exceeded the fixed limit."); memory.Write(buffer, 0, read); } }
 }
 
-public sealed class ProcessWorkerConnector(HVO.AgentControl.Runtime.AcpControlHost control, IOptions<WorkerControlOptions> configured) : IWorkerConnector, IRemoteTerminalConnector
+public sealed class ProcessWorkerConnector(IOptions<WorkerControlOptions> configured)
 {
     private readonly WorkerControlOptions _options = configured.Value;
-    public Task<Stream> ConnectViewerAsync(string workerId, CancellationToken cancellationToken) => ConnectAsync(workerId, cancellationToken);
-    public async Task<Stream> ConnectAsync(string workerId, CancellationToken cancellationToken)
+    public async Task<Stream> ConnectAsync(ExecutionTarget target, string containerName, bool viewer, CancellationToken cancellationToken)
     {
         if (!_options.Enabled) throw new WorkerControlDisabledException();
-        var enrollment = control.Organization?.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
-        var host = _options.ApprovedHosts.SingleOrDefault(x => x.Id == enrollment.HostId) ?? throw new WorkerControlConfigurationException("The enrollment host is not approved.");
-        var command = RemoteWorkerCommandBuilder.Build(host, _options, RemoteDockerOperation.Connector, [enrollment.ContainerName]);
+        var host = target is { IsLocalDocker: false, Ssh: not null } ? target.Ssh : throw new WorkerControlConfigurationException("The SSH connector requires an ssh-docker target.");
+        var operation = viewer ? RemoteDockerOperation.Viewer : RemoteDockerOperation.Connector;
+        var command = RemoteWorkerCommandBuilder.Build(host, _options, operation, [containerName]);
         var start = new ProcessStartInfo(command.Executable) { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         foreach (var argument in command.Arguments) start.ArgumentList.Add(argument);
         var process = Process.Start(start) ?? throw new RemoteWorkerUnavailableException("The fixed connector could not start.", transport: true);
@@ -315,6 +346,29 @@ public sealed class ProcessWorkerConnector(HVO.AgentControl.Runtime.AcpControlHo
         var buffer = new byte[4096]; var total = 0;
         try { while (total < 64 * 1024) { var read = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, 64 * 1024 - total)), token).ConfigureAwait(false); if (read == 0) return; total += read; } if (!process.HasExited) process.Kill(true); }
         catch { try { if (!process.HasExited) process.Kill(true); } catch { } }
+    }
+}
+
+public sealed class RoutingWorkerConnector(
+    HVO.AgentControl.Runtime.AcpControlHost control,
+    IOptions<WorkerControlOptions> configured,
+    ProcessWorkerConnector ssh,
+    LocalDockerHelperClient local) : IWorkerConnector, IRemoteTerminalConnector
+{
+    private readonly WorkerControlOptions _options = configured.Value;
+    private readonly ExecutionTargetResolver _targets = new(control, configured);
+
+    public Task<Stream> ConnectAsync(string workerId, CancellationToken cancellationToken) => ConnectAsync(workerId, viewer: false, cancellationToken);
+    public Task<Stream> ConnectViewerAsync(string workerId, CancellationToken cancellationToken) => ConnectAsync(workerId, viewer: true, cancellationToken);
+
+    private Task<Stream> ConnectAsync(string workerId, bool viewer, CancellationToken cancellationToken)
+    {
+        if (!_options.Enabled) throw new WorkerControlDisabledException();
+        var enrollment = control.Organization?.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+        var target = _targets.Resolve(enrollment.HostId);
+        return target.IsLocalDocker
+            ? viewer ? local.ConnectViewerAsync(target, enrollment.ContainerName, cancellationToken) : local.ConnectAsync(target, enrollment.ContainerName, cancellationToken)
+            : ssh.ConnectAsync(target, enrollment.ContainerName, viewer, cancellationToken);
     }
 }
 
