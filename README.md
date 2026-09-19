@@ -103,13 +103,13 @@ extend to a live owner-approved hire: the #260 approval, managed-provisioning
 and orientation slice is implemented and hermetically tested, but **no live
 owner-approved hire has been executed on any host**, the `home-docker`
 execution-host enrollment remains held by the owner, and `WorkerControl` remains
-disabled by default. The approval endpoint does not itself start provisioning:
-only the startup hosted service resumes an already-advanced request, so an
-`Approved` hire stays unprovisioned until a later process resumes it. #261 (the
-data-preserving rebuild) and any
-termination/scheduling policy are out of scope. The accepted path does not
-validate key rotation or compromise re-enrollment and does not authorize
-production managed hiring/provisioning.
+disabled by default. Approval commits the request to `Provisioning` and queues
+the remote workflow durably; the work itself runs asynchronously and is resumed
+from persisted state after a restart, so a queued hire is never lost and never
+repeated. #261 (the data-preserving rebuild) and any termination/scheduling
+policy are out of scope. The accepted path
+does not validate key rotation or compromise re-enrollment
+and does not authorize production managed hiring/provisioning.
 
 ### Run locally
 
@@ -384,7 +384,7 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics. Hire approval is implemented as a revision-bound owner action (`POST /api/hire-requests/{id}/approve`) that freezes one verified profile-revision build on a ready host and creates the managed employee identity and binding; it does not provision or orient, and no live owner-approved hire has run (see the capability note above). `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
+- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics. Hire approval is implemented as a revision-bound owner action (`POST /api/hire-requests/{id}/approve`) that freezes one verified profile-revision build on a ready host, creates the managed employee identity and binding, and durably queues provisioning and orientation to Ready; no live owner-approved hire has run (see the capability note above). `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.

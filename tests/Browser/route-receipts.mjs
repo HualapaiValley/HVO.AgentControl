@@ -324,14 +324,14 @@ try {
   await page.click('.request-card[data-request-id="hire-approve"] button:text("Approve")');
   await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').textContent.includes('Approved hire-approve'));
   record('a successful approval clears the receipt and names the created identity without provisioning',
-    (await statusAttr('[data-hire-receipt]')) === 'ok' && (await page.locator('[data-hire-receipt]').innerText()).includes('provisioning is queued/pending and was not started'),
+    (await statusAttr('[data-hire-receipt]')) === 'ok' && (await page.locator('[data-hire-receipt]').innerText()).includes('provisioning is queued; it runs in the background'),
     { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
   const frozenText = await page.locator('.request-card[data-request-id="hire-approve"] [data-frozen-approval]').innerText();
   record('the approved card renders the frozen build, digest, host, employee and binding',
     frozenText.includes('prev-1') && frozenText.includes('build-1') && frozenText.includes('emp-managed') && frozenText.includes('rtb-managed') && frozenText.includes('host-a'),
     { frozenText });
-  record('the approved card states provisioning resumes separately and never exposes the owner identity',
-    (await page.locator('.request-card[data-request-id="hire-approve"] [data-provisioning-note]').innerText()).includes('Provisioning the worker resumes separately')
+  record('the approved card states provisioning is durably queued and never exposes the owner identity',
+    (await page.locator('.request-card[data-request-id="hire-approve"] [data-provisioning-note]').innerText()).includes('durably queued provisioning and orientation')
       && !(await page.locator('[data-hiring-page]').innerText()).includes('owner-basic-auth'),
     { provisioningNote: await page.locator('.request-card[data-request-id="hire-approve"] [data-provisioning-note]').innerText() });
 

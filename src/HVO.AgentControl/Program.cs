@@ -708,13 +708,13 @@ app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHo
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 // Owner approval is the durable freeze of one hire against one verified profile
-// build. It creates the managed employee and runtime binding from that freeze but
-// never provisions or orients a worker: provisioning resumes separately and the
-// hire stays Approved until that later slice moves it. Worker control must be
+// build. It creates the managed employee and runtime binding from that freeze,
+// commits the request to Provisioning, then queues the idempotent remote workflow.
+// Worker control must be
 // enabled with a usable configuration because the frozen selection is only
 // meaningful when the controller can actually consume it, and the requested
 // resources must sit inside the controller-wide ceilings.
-app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlHost host, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, HVO.AgentControl.Organization.HireRequestApprove request) =>
+app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlHost host, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, HVO.AgentControl.RemoteWorker.HireProvisioningHostedService provisioning, string id, HVO.AgentControl.Organization.HireRequestApprove request) =>
 {
     if (!Program.IsValidHireRequestId(id))
         return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request id.", detail: "A bounded stable hire request id is required.");
@@ -740,7 +740,15 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
         // body, so a caller cannot assert an arbitrary owner identity.
         var approved = store.ApproveHireRequest(id, request, Program.HireApprovalIdentity);
         store.CreateManagedEmployeeFromHire(approved.Id);
-        return Results.Ok(store.GetHireRequest(approved.Id) ?? approved);
+        var queued = store.GetHireRequest(approved.Id) ?? approved;
+        if (queued.State == HVO.AgentControl.Organization.HireRequestStates.Approved)
+            queued = store.TransitionHireRequestState(approved.Id, queued.Revision, HVO.AgentControl.Organization.HireRequestStates.Approved, HVO.AgentControl.Organization.HireRequestStates.Provisioning, "Provisioning queued from owner approval.");
+        if (queued.State is HVO.AgentControl.Organization.HireRequestStates.Provisioning
+            or HVO.AgentControl.Organization.HireRequestStates.Orienting
+            or HVO.AgentControl.Organization.HireRequestStates.Interrupted
+            or HVO.AgentControl.Organization.HireRequestStates.Uncertain)
+            provisioning.Queue(approved.Id);
+        return Results.Ok(queued);
     }
     catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
     {
@@ -760,7 +768,7 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
     }
 })
     .WithName("ApproveHireRequest").WithTags("Hiring")
-    .WithSummary("Records the durable owner approval and creates the managed employee/binding for one DeveloperContainer hire against a verified profile build. It does not provision or orient the worker; provisioning resumes separately and the request remains Approved.")
+    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build.")
     .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)

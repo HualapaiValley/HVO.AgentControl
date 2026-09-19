@@ -810,20 +810,21 @@ revision, so a concurrent advance is a conflict, not a silent overwrite; each
 transition appends exactly one immutable hashed event, and `status_detail` is
 sanitized (control characters removed, truncated to 512) and cleared on `Ready`.
 `HireProvisioningHostedService` resumes only `Provisioning`, `Orienting`,
-`Interrupted` and `Uncertain` on restart and deliberately never resumes
-`Approved`, because the approval endpoint owns that transition. It never
+`Interrupted` and `Uncertain` and deliberately never resumes `Approved`, because
+`Approved` is a freeze that no background process may act on by itself. It never
 auto-cleans up: uncertainty and failure leave resources for operator
 reconciliation.
 
-**Provisioning trigger.** The `HireProvisioningCoordinator` is implemented and
-exercised as code, but at this revision the approval endpoint does **not** start
-it: approving leaves the request `Approved` and the managed employee/binding
-created but unprovisioned, and the only call site is the startup
-`HireProvisioningHostedService`, which resumes a request already in
-`Provisioning`/`Orienting`/`Interrupted`/`Uncertain`. A request left `Approved`
-therefore stays unprovisioned until a later process resumes it (or a future
-explicit trigger is added). The `/hiring` UI and API say "queued/pending and not
-started" truthfully rather than implying that approval provisions.
+**Provisioning trigger.** Approval is the trigger, but the handoff is durable
+rather than in-request. Inside the approval call the controller commits
+`Approved -> Provisioning` and then queues the hire id; the HTTP response returns
+without waiting for any host effect. The queue is an accelerator, not the record
+of intent: the durable `Provisioning` state is written first, so a crash between
+the commit and execution loses nothing and the hosted service rebuilds the queue
+from persisted in-flight states at startup. Re-queuing the same hire is safe
+because the coordinator is idempotent at every step and returns a `Ready` hire
+untouched. The `/hiring` UI and API describe the request as queued, which is
+exactly what the durable state says.
 
 **Provisioning.** Provisioning consumes the frozen approval through the existing
 `RemoteWorkerProvisioningCoordinator`. `Plan` reads `managed_enrollment_resources`

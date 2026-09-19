@@ -1,5 +1,7 @@
 using HVO.AgentControl.Organization;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Threading.Channels;
 
 namespace HVO.AgentControl.RemoteWorker;
 
@@ -17,6 +19,12 @@ internal sealed class HireProvisioningHostedService(
     IOptions<WorkerControlOptions> configured,
     ILogger<HireProvisioningHostedService> logger) : BackgroundService
 {
+    private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+    {
+        SingleReader = true,
+        SingleWriter = false,
+    });
+    private readonly ConcurrentDictionary<string, byte> _queued = new(StringComparer.Ordinal);
     private static readonly string[] ResumableStates =
     [
         HireRequestStates.Provisioning,
@@ -26,6 +34,12 @@ internal sealed class HireProvisioningHostedService(
     ];
 
     private readonly WorkerControlOptions _options = configured.Value;
+
+    public void Queue(string hireId)
+    {
+        if (_queued.TryAdd(hireId, 0) && !_queue.Writer.TryWrite(hireId))
+            _queued.TryRemove(hireId, out _);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -53,19 +67,21 @@ internal sealed class HireProvisioningHostedService(
             return;
         }
 
-        foreach (var hire in hires.Where(x => ResumableStates.Contains(x.State, StringComparer.Ordinal)))
+        foreach (var hire in hires.Where(x => ResumableStates.Contains(x.State, StringComparer.Ordinal))) Queue(hire.Id);
+
+        await foreach (var hireId in _queue.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
         {
-            if (stoppingToken.IsCancellationRequested) return;
             try
             {
-                await coordinator.ResumeAsync(hire.Id, stoppingToken).ConfigureAwait(false);
+                await coordinator.ResumeAsync(hireId, stoppingToken).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
                 // One hire that cannot resume must not stop the others or the host;
                 // the coordinator already recorded the sanitized outcome.
-                logger.LogWarning(exception, "Hire {HireId} could not be resumed to Orienting and remains for recovery.", hire.Id);
+                logger.LogWarning(exception, "Hire {HireId} could not be resumed to Ready and remains for recovery.", hireId);
             }
+            finally { _queued.TryRemove(hireId, out _); }
         }
     }
 }

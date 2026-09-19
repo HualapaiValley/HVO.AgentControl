@@ -71,7 +71,7 @@ if (root) {
             ]) frozen.append(...pair);
             const provisioningNote = document.createElement('span'); provisioningNote.className = 'control-note'; provisioningNote.dataset.provisioningNote = request.id;
             provisioningNote.textContent = request.employeeId
-                ? 'Approval created the employee identity and runtime binding. Provisioning the worker resumes separately in this phase and is queued/pending; the request stays Approved until that step moves it.'
+                ? 'Approval created the employee identity and runtime binding, then durably queued provisioning and orientation. The work runs in the background and resumes from the recorded state after a restart.'
                 : 'Approval records the frozen selection. No employee identity is bound yet.';
             card.append(title, meta, detail, purpose, actions, frozen, provisioningNote);
             return card;
@@ -97,7 +97,7 @@ if (root) {
                 approve.disabled = !selectable;
                 hostSelect.disabled = !selectable;
                 explanation.textContent = selectable
-                    ? 'Approval freezes this exact profile revision and host, then creates the managed employee identity and runtime binding. It does not provision or orient the worker; provisioning resumes separately and is queued/pending.'
+                    ? 'Approval freezes this exact profile revision and host, creates the managed employee identity and runtime binding, then durably queues provisioning and orientation to Ready.'
                     : activeRevisions.length === 0
                         ? 'No active profile revision has a verified image build on a ready host yet. Build and verify a profile revision first; approval then creates the employee identity and binding without provisioning.'
                         : 'No ready host carries the verified build for that profile revision. Choose another revision or verify a build on a ready host.';
@@ -110,7 +110,7 @@ if (root) {
                 try {
                     await fetchJson(`/api/hire-requests/${encodeURIComponent(request.id)}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: request.revision, profileRevisionId: profileSelect.value, hostId: hostSelect.value }) });
                     await load();
-                    receipt.dataset.status = 'ok'; receipt.textContent = `Approved ${request.id}. The employee identity and binding were created; provisioning is queued/pending and was not started.`;
+                    receipt.dataset.status = 'ok'; receipt.textContent = `Approved ${request.id}. The employee identity and binding were created and provisioning is queued; it runs in the background.`;
                 } catch (error) { receipt.dataset.status = 'error'; receipt.textContent = `Approval failed: ${error.message}`; }
             });
             refreshSelectors();

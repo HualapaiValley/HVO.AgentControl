@@ -406,7 +406,7 @@ try {
       && approvalText.includes('Only a DeveloperContainer hire can be approved') && !approvalText.includes('#217'), { approvalText });
   record('hiring heading carries the approval truth and no superseded #217 gate',
     !hiringHeading.includes('#217') && hiringHeading.includes('creates the managed employee identity and runtime binding')
-      && hiringHeading.includes('does not provision or orient the worker') && hiringHeading.includes('queued/pending'), { hiringHeading });
+      && hiringHeading.includes('durably queues provisioning and orientation to Ready'), { hiringHeading });
   record('hiring page-wide copy carries no superseded #217 gate and no owner identity',
     !hiringPageText.includes('#217') && !hiringPageText.includes('owner-basic-auth'), { hiringPageText });
 
@@ -487,8 +487,8 @@ try {
   record('a successful approval clears the receipt and renders the frozen build, digest, host, employee and binding',
     (await statusAttr('[data-hire-receipt]')) === 'ok' && frozenApproval.includes('prev-live') && frozenApproval.includes('build-live') && frozenApproval.includes('emp-managed') && frozenApproval.includes('rtb-managed') && frozenApproval.includes('host-a'),
     { status: await statusAttr('[data-hire-receipt]'), frozenApproval });
-  record('the approved card states provisioning resumes separately and never exposes the owner identity',
-    (await page.locator('.request-card[data-request-id="hire-approve-live"] [data-provisioning-note]').innerText()).includes('Provisioning the worker resumes separately')
+  record('the approved card states provisioning is durably queued and never exposes the owner identity',
+    (await page.locator('.request-card[data-request-id="hire-approve-live"] [data-provisioning-note]').innerText()).includes('durably queued provisioning and orientation')
       && !(await page.locator('[data-hiring-page]').innerText()).includes('owner-basic-auth'),
     { provisioningNote: await page.locator('.request-card[data-request-id="hire-approve-live"] [data-provisioning-note]').innerText() });
 

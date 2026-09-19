@@ -3,7 +3,7 @@
 
 <PageTitle>Hiring · AgentControl V2</PageTitle>
 <section class="page" data-page="hiring" data-hiring-page>
-    <header class="page-heading"><div><p class="eyebrow">Hiring</p><h1>Employee requests</h1><p>Create a durable owner request. A request does not create or provision an employee. Approving a DeveloperContainer request records the owner's exact selection of a verified <a href="/profiles">container profile</a> revision on a ready host and creates the managed employee identity and runtime binding. Approval does not provision or orient the worker: provisioning resumes separately and stays queued/pending in this phase.</p></div></header>
+    <header class="page-heading"><div><p class="eyebrow">Hiring</p><h1>Employee requests</h1><p>Create a durable owner request. A request does not create or provision an employee. Approving a DeveloperContainer request records the owner's exact selection of a verified <a href="/profiles">container profile</a> revision on a ready host and creates the managed employee identity and runtime binding. Approval then durably queues provisioning and orientation to Ready; that work runs in the background and resumes from its recorded state after a restart.</p></div></header>
     <div class="hiring-grid">
         <form class="panel-form" data-hire-form>
             <h2>Request employee</h2>

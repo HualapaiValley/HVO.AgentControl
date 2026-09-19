@@ -686,7 +686,7 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
     }
 
     [Fact]
-    public async Task ApproveFreezesSelectionCreatesManagedEmployeeAndNeverProvisions()
+    public async Task ApproveFreezesSelectionCreatesManagedEmployeeAndDurablyQueuesProvisioning()
     {
         using var client = await ReadyClientAsync(_valid);
         var store = _valid.Host.Organization!;
@@ -708,7 +708,7 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         var approved = document.RootElement;
-        Assert.Equal(HireRequestStates.Approved, approved.GetProperty("state").GetString());
+        Assert.Equal(HireRequestStates.Provisioning, approved.GetProperty("state").GetString());
         Assert.Equal(revisionId, approved.GetProperty("containerProfileRevisionId").GetString());
         Assert.Equal(build.Id, approved.GetProperty("profileBuildId").GetString());
         Assert.Equal(build.ImageDigest, approved.GetProperty("approvedImageDigest").GetString());
@@ -725,10 +725,10 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(Program.HireApprovalIdentity, approval.ApprovalIdentity);
         Assert.Equal(employeeId, approval.EmployeeId);
 
-        // The employee identity and frozen resources exist, but the hire has not
-        // moved to Provisioning and no enrollment was created: approval never
-        // provisions.
-        Assert.Equal(HireRequestStates.Approved, store.GetHireRequest(id)!.State);
+        // The employee identity and frozen resources exist and the durable state is
+        // queued before the HTTP response. The remote work remains asynchronous: no
+        // enrollment or host effect is required for approval to return.
+        Assert.Equal(HireRequestStates.Provisioning, store.GetHireRequest(id)!.State);
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM employees WHERE id = @id", employeeId!));
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM managed_enrollment_resources WHERE runtime_binding_id = @id", bindingId!));
         Assert.Equal(0, CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments", null));
