@@ -613,21 +613,31 @@ image. The owner accepted this design on 2026-09-18.
   fragment is ever run. It must report: the `bridge`/`employee` accounts with
   uid/gid 1101/1102 and their fixed home and shell; the four directories 0700
   with their owners; `/app` and the supervisor root-owned; **byte-identical
-  contract artifacts** (`/usr/local/bin/worker-supervisor`, `/app`,
-  `/usr/bin/dotnet`, `/usr/share/dotnet`, `/usr/local/bin/node`,
-  `/usr/local/lib/node_modules/opencode-ai`, `/usr/local/bin/opencode`,
-  `/usr/bin/python3`, `/usr/bin/python3.12`, and every standard-library file of
-  `/usr/lib/python3.12` the base ships), no `/etc/ld.so.preload`, no `python3`
-  shadowing `/usr/bin` under `/usr/local`, no setuid/setgid files, no file
-  capabilities (`security.capability` xattr) and no Docker socket path. The
-  trailer restores metadata; the verifier proves content, because a fragment
-  runs as root before the trailer and could otherwise replace PID 1's
-  interpreter, the supervisor, the worker dll or the runtime. A contract failure
+  contract artifacts** — the launch chain `/usr/bin/env`, `/bin/sh`,
+  `/usr/bin/dash`, `/usr/bin/python3`, `/usr/bin/python3.12`; the payloads
+  `/usr/local/bin/worker-supervisor`, `/app`, `/usr/bin/dotnet`,
+  `/usr/share/dotnet`, `/usr/local/bin/node`,
+  `/usr/local/lib/node_modules/opencode-ai`, `/usr/local/bin/opencode`; and,
+  as *no base file altered or removed* (additions allowed), the Python standard
+  library `/usr/lib/python3.12` and the loader/shared-library tree
+  `/lib`, `/lib64`, `/usr/lib/<arch>-linux-gnu` — plus unchanged
+  `/etc/ld.so.conf`, `/etc/ld.so.conf.d` and `/etc/nsswitch.conf`, no
+  `/etc/ld.so.preload`, no `python3` shadowing `/usr/bin` under `/usr/local`,
+  no setuid/setgid files, no file capabilities (`security.capability` xattr)
+  and no Docker socket path. The trailer restores metadata; the verifier proves
+  content, because a fragment runs as root before the trailer and could
+  otherwise replace PID 1's interpreter, the shell, the loader, a library, the
+  supervisor, the worker dll or the runtime. Residual, accepted: a fragment may
+  *add* libraries and site packages for its own tools (they are never loaded by
+  the contract binaries unless the pinned loader configuration is changed,
+  which is rejected). A contract failure
   records `rejected`; a host or build failure records `failed`; a transport loss
   or a cancelled/interrupted run records `uncertain`, and the next run reconciles
   by inspecting the tag — found → verify, absent → `failed` — never by rebuilding
   blindly. A controller restart moves any build left `building`/`verifying` to
-  `uncertain` before anything else runs.
+  `uncertain` before anything else runs; within one process a build id has a
+  single in-flight owner, so a concurrent request for a running build is refused
+  rather than allowed to re-transition the row.
 - **Approved digests are per host**: the configured base plus every verified build
   on that host. The container-create command builder refuses any other digest;
   the key bootstrap always runs the configured base regardless of the enrollment's

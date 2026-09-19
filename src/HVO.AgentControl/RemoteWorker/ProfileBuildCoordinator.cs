@@ -28,6 +28,16 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
 {
     private readonly WorkerControlOptions _options = configured.Value;
 
+    /// <summary>
+    /// Build ids this process is actively driving. A row that is
+    /// <c>building</c>/<c>verifying</c> AND owned here is in flight, not
+    /// interrupted; a concurrent request for it waits on nothing and is told to
+    /// retry, rather than stealing the row and racing its transitions. Rows in
+    /// those states with no in-process owner are, by construction, left over
+    /// from a previous process and are safe to reconcile.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _owned = new(StringComparer.Ordinal);
+
     public ProfileBuildRecord Queue(string profileRevisionId, string hostId)
     {
         RequireEnabled();
@@ -50,6 +60,13 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     public async Task<ProfileBuildRecord> RunAsync(string buildId, CancellationToken cancellationToken)
     {
         RequireEnabled();
+        if (!_owned.TryAdd(buildId, 0)) throw new OrganizationConcurrencyException($"Profile build '{buildId}' is being run by another request; wait for it to finish.");
+        try { return await RunOwnedAsync(buildId, cancellationToken).ConfigureAwait(false); }
+        finally { _owned.TryRemove(buildId, out _); }
+    }
+
+    private async Task<ProfileBuildRecord> RunOwnedAsync(string buildId, CancellationToken cancellationToken)
+    {
         var store = Store();
         var build = store.GetProfileBuild(buildId) ?? throw new OrganizationNotFoundException($"Profile build '{buildId}' does not exist.");
         var host = Approved(build.HostId);
@@ -59,20 +76,22 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
 
         if (build.State is ProfileBuildStates.Building or ProfileBuildStates.Verifying)
         {
-            // Another run owns this row, or a previous run died with it mid-flight and
-            // startup reconciliation has not run yet. Treat it as interrupted: the host
-            // may hold the result, so reconcile by tag rather than build again.
+            // We hold the in-process lease and the row is still mid-flight, so no live
+            // run of this process owns it: a previous process died with it (and the
+            // startup pass has not run yet). The host may hold the result, so reconcile
+            // by tag rather than build again.
             build = store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Uncertain, failureSummary: $"Found {build.State} without an owner; the result is unknown until reconciled.");
         }
-        if (build.State == ProfileBuildStates.Uncertain) return await ReconcileAsync(store, host, build, revision, cancellationToken).ConfigureAwait(false);
-        if (build.State != ProfileBuildStates.Queued) throw new OrganizationConcurrencyException($"Profile build '{buildId}' is {build.State}, not queued.");
+        if (build.State != ProfileBuildStates.Uncertain && build.State != ProfileBuildStates.Queued) throw new OrganizationConcurrencyException($"Profile build '{buildId}' is {build.State}, not runnable.");
 
-        var (tar, contextHash, _) = ProfileBuildContext.Render(revision, build.BaseImageDigest, build.Platform);
-        if (contextHash != build.ContextHash) throw new OrganizationConcurrencyException("The rendered build context no longer matches the queued build.");
-
-        build = store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Building);
         try
         {
+            if (build.State == ProfileBuildStates.Uncertain) return await ReconcileAsync(store, host, build, revision, cancellationToken).ConfigureAwait(false);
+
+            var (tar, contextHash, _) = ProfileBuildContext.Render(revision, build.BaseImageDigest, build.Platform);
+            if (contextHash != build.ContextHash) throw new OrganizationConcurrencyException("The rendered build context no longer matches the queued build.");
+
+            build = store.TransitionProfileBuild(build.Id, build.Revision, ProfileBuildStates.Building);
             var pinTag = ProfileBuildContext.PinTag(build.BaseImageDigest);
             var pin = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageTag, [build.BaseImageDigest, pinTag], null, cancellationToken).ConfigureAwait(false);
             if (pin.ExitCode != 0)
@@ -92,10 +111,11 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         }
         catch (OperationCanceledException)
         {
-            // Timeout or caller cancellation (a client disconnect) after the intent was
-            // recorded: the host may have completed the work. Never leave the row live.
+            // Timeout or caller cancellation (a client disconnect) after an intent was
+            // recorded — on the initial path or the reconciliation path: the host may
+            // have completed the work. Never leave the row mid-flight.
             var current = store.GetProfileBuild(build.Id)!;
-            if (ProfileBuildStates.IsLive(current.State) && current.State != ProfileBuildStates.Uncertain && current.State != ProfileBuildStates.Queued)
+            if (current.State is ProfileBuildStates.Building or ProfileBuildStates.Verifying)
                 store.TransitionProfileBuild(current.Id, current.Revision, ProfileBuildStates.Uncertain, failureSummary: cancellationToken.IsCancellationRequested ? "The build was cancelled mid-flight; the result is unknown until reconciled." : "The build timed out; the result is unknown until reconciled.");
             throw;
         }
@@ -257,12 +277,19 @@ public static class ImageContractVerifier
     [
         "/usr/local/bin/worker-supervisor", "/app", "/usr/bin/dotnet", "/usr/share/dotnet",
         "/usr/local/bin/node", "/usr/local/lib/node_modules/opencode-ai", "/usr/local/bin/opencode",
-        // PID 1 is `#!/usr/bin/env python3`: the interpreter and its symlink must be
-        // byte-identical, and every standard-library file the base ships must be
+        // PID 1 is `#!/usr/bin/env python3`: env, the interpreter and its symlink must
+        // be byte-identical, and every standard-library file the base ships must be
         // unchanged (the python feature may add files such as ensurepip, never alter
         // or remove one). Site packages are not pinned; the supervisor imports only
-        // the standard library.
-        "/usr/bin/python3", "/usr/bin/python3.12", "/usr/lib/python3.12",
+        // the standard library. /bin/sh (dash) is what subprocess and the fragment's
+        // own RUN lines execute.
+        "/usr/bin/python3", "/usr/bin/python3.12", "/usr/lib/python3.12", "/usr/bin/env", "/bin/sh", "/usr/bin/dash",
+        // The dynamic loader and every shared library the base ships (libc, libm,
+        // libstdc++, libz, libexpat, ...): a fragment may add libraries for its own
+        // tools but may not alter or remove any the base's binaries load. The loader
+        // configuration and NSS configuration are pinned so resolution cannot be
+        // redirected to an added path.
+        "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/nsswitch.conf",
         // Absent in the base and must stay absent: a preload would hijack every process,
         // and a python3 ahead of /usr/bin on the supervisor's PATH would replace PID 1's
         // interpreter (the SDK from apt lives under /usr/lib/dotnet and is allowed).

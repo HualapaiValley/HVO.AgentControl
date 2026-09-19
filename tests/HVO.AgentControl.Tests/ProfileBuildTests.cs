@@ -405,6 +405,36 @@ public sealed class ProfileBuildTests : IDisposable
     }
 
     [Fact]
+    public async Task AConcurrentRequestCannotStealARunningBuildAndCancellationDuringReconcileLeavesItUncertain()
+    {
+        // In-process ownership: while one request drives the build, a second request for
+        // the same id is refused instead of re-transitioning the row underneath it.
+        var host = new ScriptedHost(_generic.Id) { BuildBlocksUntilCancelled = true };
+        var coordinator = Coordinator(host);
+        var queued = coordinator.Queue(_generic.Id, "host-a");
+        using var first = new CancellationTokenSource();
+        var running = coordinator.RunAsync(queued.Id, first.Token);
+        await Task.Delay(100);
+        Assert.Equal(ProfileBuildStates.Building, _store.GetProfileBuild(queued.Id)!.State);
+        var stolen = await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => coordinator.RunAsync(queued.Id, CancellationToken.None));
+        Assert.Contains("another request", stolen.Message, StringComparison.Ordinal);
+        Assert.Equal(ProfileBuildStates.Building, _store.GetProfileBuild(queued.Id)!.State); // untouched by the refused request
+        first.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => running);
+        Assert.Equal(ProfileBuildStates.Uncertain, _store.GetProfileBuild(queued.Id)!.State);
+
+        // Cancellation on the reconciliation path (uncertain → verifying → cancelled) also
+        // never strands the row in verifying.
+        host.BuildBlocksUntilCancelled = false; host.VerifyBlocksUntilCancelled = true;
+        using var second = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.RunAsync(queued.Id, second.Token));
+        var after = _store.GetProfileBuild(queued.Id)!;
+        Assert.Equal(ProfileBuildStates.Uncertain, after.State);
+        host.VerifyBlocksUntilCancelled = false;
+        Assert.Equal(ProfileBuildStates.Built, (await coordinator.RunAsync(queued.Id, CancellationToken.None)).State);
+    }
+
+    [Fact]
     public void NetworkIsGrantedOnlyToAptRecipesNeverToFragments()
     {
         Assert.True(ProfileBuildContext.RequiresNetwork(_generic)); // dotnet/python/gh recipes use apt
@@ -506,22 +536,24 @@ public sealed class ProfileBuildTests : IDisposable
         public bool BuildTransportLoss { get; set; }
         public bool ImageMissing { get; set; }
         public bool BuildBlocksUntilCancelled { get; set; }
+        public bool VerifyBlocksUntilCancelled { get; set; }
         public string? VerifyOutputOverride { get; init; }
         /// <summary>Context hash the host would have labelled the image with when no build ran in this test (reconciliation cases).</summary>
         public string? KnownContextHash { get; set; }
         private string? _contextHash;
 
-        public Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
+        public async Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
         {
             Operations.Add(operation.ToString());
-            return Task.FromResult(operation switch
+            if (operation == RemoteDockerOperation.ImageVerify && VerifyBlocksUntilCancelled) await Task.Delay(Timeout.Infinite, cancellationToken);
+            return operation switch
             {
                 RemoteDockerOperation.ImageTag => BaseMissing ? new RemoteOperationResult(1, "", "not-found") : new(0, "", "none"),
                 RemoteDockerOperation.ImageInspect when tokens[0] == Base => new(0, BaseInspect(), "none"),
                 RemoteDockerOperation.ImageInspect => ImageMissing ? new(1, "", "not-found") : new(0, BuiltInspectFor(_contextHash ?? KnownContextHash ?? "sha256:" + new string('0', 64)), "none"),
                 RemoteDockerOperation.ImageVerify when tokens.Count == 3 && tokens[1] == Base => new(0, VerifyOutputOverride ?? VerifyOutput(), "none"),
                 _ => throw new NotSupportedException(operation.ToString()),
-            });
+            };
         }
 
         public async Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken)

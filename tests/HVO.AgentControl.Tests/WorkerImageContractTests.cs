@@ -310,6 +310,15 @@ public sealed class WorkerImageContractTests
                 ("preload", "RUN printf '/lib/evil.so\\n' > /etc/ld.so.preload", "/etc/ld.so.preload differs"),
                 ("filecap", "RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin && rm -rf /var/lib/apt/lists/* && cp /bin/sh /usr/local/bin/capsh2 && setcap cap_sys_admin+ep /usr/local/bin/capsh2", "capability"),
                 ("account", "RUN usermod -s /bin/bash bridge", "home or shell"),
+                // The interpreter launch chain and the loader/libraries beneath every contract binary.
+                ("env", "RUN cp /bin/sh /usr/bin/env", "/usr/bin/env differs"),
+                // Replacing /bin/sh breaks the trailer's own RUN, so the build itself fails closed.
+                ("sh", "RUN cp /usr/bin/env /usr/bin/dash.new && mv /usr/bin/dash.new /usr/bin/dash", "build-fails"),
+                ("libc", "RUN printf 'x' >> /usr/lib/x86_64-linux-gnu/libz.so.1.3", "/usr/lib/x86_64-linux-gnu differs"),
+                ("ld-conf", "RUN printf '/opt/evil\\n' > /etc/ld.so.conf.d/zz.conf", "/etc/ld.so.conf.d differs"),
+                // Re-pointing the loader path breaks every dynamic binary including the shell, so the build fails closed.
+                ("lib64", "RUN rm /lib64 && mkdir /lib64 && cp /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib64/", "build-fails"),
+                ("libdir", "RUN cp /usr/bin/env /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1.new && mv /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1.new /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1", "/usr/lib/x86_64-linux-gnu differs"),
             };
             foreach (var (name, fragment, expect) in hostile)
             {
@@ -322,6 +331,12 @@ public sealed class WorkerImageContractTests
                     // Fragments never get the network; the filecap case needs apt, so that one is
                     // exercised with a controller-owned recipe's network grant only for the test.
                     var hBuilt = RunWithInput(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, revision.Id, hHash, hTag, NetworkRequired: name == "filecap"), hTar)), hTar, 600_000);
+                    if (expect == "build-fails")
+                    {
+                        Assert.NotEqual(0, hBuilt.ExitCode);
+                        Assert.Contains("did not complete successfully", hBuilt.Output, StringComparison.Ordinal);
+                        continue;
+                    }
                     Assert.True(hBuilt.ExitCode == 0, name + ": " + hBuilt.Output);
                     var hVerify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [hTag, baseDigest, platform])), null, 120_000);
                     Assert.True(hVerify.ExitCode == 0, name + ": " + hVerify.Output);

@@ -160,8 +160,12 @@ public static class RemoteWorkerCommandBuilder
         "def account(name):\n  try:\n    for line in open(C+\"/etc/passwd\"):\n      f=line.rstrip(\"\\n\").split(\":\")\n      if f[0]==name: return {\"uid\":int(f[2]),\"gid\":int(f[3]),\"home\":f[5],\"shell\":f[6]}\n  except OSError: pass\n  return None\n" +
         "setuid=[];caps=[]\n" +
         "for root,dirs,files in os.walk(C):\n  for f in files:\n    p=os.path.join(root,f)\n    try: st=os.lstat(p)\n    except OSError: continue\n    if stat.S_ISREG(st.st_mode) and st.st_mode & 0o6000: setuid.append(p[len(C):])\n    try:\n      if \"security.capability\" in os.listxattr(p, follow_symlinks=False): caps.append(p[len(C):])\n    except OSError: pass\n" +
-        "artifacts={p:same(p) for p in (\"/usr/local/bin/worker-supervisor\",\"/app\",\"/usr/share/dotnet\",\"/usr/local/lib/node_modules/opencode-ai\",\"/usr/local/bin/node\",\"/usr/bin/dotnet\",\"/usr/local/bin/opencode\",\"/usr/bin/python3\",\"/usr/bin/python3.12\")}\n" +
+        "artifacts={p:same(p) for p in (\"/usr/local/bin/worker-supervisor\",\"/app\",\"/usr/share/dotnet\",\"/usr/local/lib/node_modules/opencode-ai\",\"/usr/local/bin/node\",\"/usr/bin/dotnet\",\"/usr/local/bin/opencode\",\"/usr/bin/python3\",\"/usr/bin/python3.12\",\"/usr/bin/env\",\"/bin/sh\",\"/usr/bin/dash\",\"/etc/ld.so.conf\",\"/etc/ld.so.conf.d\",\"/etc/nsswitch.conf\")}\n" +
         "artifacts[\"/usr/lib/python3.12\"]=superset(\"/usr/lib/python3.12\")\n" +
+        "artifacts[\"/lib\"]=os.readlink(C+\"/lib\")==os.readlink(\"/lib\") if os.path.islink(\"/lib\") else same(\"/lib\")\n" +
+        "artifacts[\"/lib64\"]=os.readlink(C+\"/lib64\")==os.readlink(\"/lib64\") if os.path.islink(\"/lib64\") else same(\"/lib64\")\n" +
+        "artifacts[\"/usr/lib/x86_64-linux-gnu\"]=superset(\"/usr/lib/x86_64-linux-gnu\") and superset(\"/usr/lib64\") if os.path.isdir(\"/usr/lib64\") else superset(\"/usr/lib/x86_64-linux-gnu\")\n" +
+        "artifacts[\"/usr/lib/aarch64-linux-gnu\"]=superset(\"/usr/lib/aarch64-linux-gnu\") if os.path.isdir(\"/usr/lib/aarch64-linux-gnu\") else True\n" +
         "artifacts[\"/etc/ld.so.preload\"]=not os.path.lexists(C+\"/etc/ld.so.preload\")\n" +
         "artifacts[\"/lib/python-shadow\"]=not any(os.path.lexists(C+d+\"/python3\") for d in (\"/usr/local/bin\",\"/usr/local/sbin\"))\n" +
         "print(json.dumps({\"bridge\":account(\"bridge\"),\"employee\":account(\"employee\"),\"dirs\":{d:mode(d) for d in (\"/control\",\"/home/worker\",\"/workspace\",\"/session\")},\"app\":mode(\"/app\"),\"supervisor\":mode(\"/usr/local/bin/worker-supervisor\"),\"artifacts\":artifacts,\"setuid\":setuid[:16],\"fileCaps\":caps[:16],\"dockerSock\":os.path.exists(C+\"/var/run/docker.sock\")}))\n";
