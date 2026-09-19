@@ -37,12 +37,15 @@ idempotent hire requests with append-only hashed
 state events and owner rejection; a request does **not** create an employee.
 Control schema v8 adds immutable, content-addressed container profiles
 (`/profiles`, `/profiles/{id}`, `/api/profiles`) with a constrained
-devcontainer subset and the seeded `generic-employee` profile; recording a
-profile does **not** build an image or create an employee. The owner accepted
-the profile-based employee-creation design (epic #257): image build and
-verification (#259), owner approval/provisioning/orientation (#260) and the
-explicit data-preserving rebuild (#261) are the remaining #219 slices. The #217 hermetic
-controller records are retained in the current schema-v8 store, including
+devcontainer subset and the seeded `generic-employee` profile, and schema v9
+adds per-host profile image builds: a revision is rendered to a deterministic
+build context, built on one approved host over the pinned SSH path, and
+contract-verified inside the image before its digest joins that host's
+approved set. Recording a profile or building it does **not** create an
+employee. The owner accepted the profile-based employee-creation design (epic
+#257): owner approval/provisioning/orientation (#260) and the explicit
+data-preserving rebuild (#261) are the remaining #219 slices. The #217 hermetic
+controller records are retained in the current schema-v9 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
@@ -391,10 +394,10 @@ because actual two-way TUI synchronization is not available; an acknowledged ACP
 model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/control.db` is the authoritative schema-v8 SQLite store for organization,
+`/control-data/control.db` is the authoritative schema-v9 SQLite store for organization,
 department, role, employee, runtime-binding and session identity; versioned
 orientation fragments/facts/assignments/evidence; layered permission policy/grants/audit;
-dispatch holds; remote-worker controller records; durable hire requests; and immutable container profiles in the
+dispatch holds; remote-worker controller records; durable hire requests; immutable container profiles; and per-host profile builds in the
 controller-private volume; `/control-data/runtime.json` is retained as adoption
 evidence only. The database, its WAL/SHM sidecars and the writer lock are
 controller-only `0600`, and a fresh database is seed-published atomically so an

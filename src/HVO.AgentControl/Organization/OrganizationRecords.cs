@@ -29,6 +29,7 @@ public static class OrganizationIds
     public const string HireRequestEventPrefix = "hevt-";
     public const string ContainerProfilePrefix = "prof-";
     public const string ContainerProfileRevisionPrefix = "prev-";
+    public const string ProfileBuildPrefix = "pbld-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -50,6 +51,7 @@ public static class OrganizationIds
     public static string NewHireRequestEventId() => NewId(HireRequestEventPrefix);
     public static string NewContainerProfileId() => NewId(ContainerProfilePrefix);
     public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
+    public static string NewProfileBuildId() => NewId(ProfileBuildPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -319,6 +321,62 @@ public static class ContainerProfileSeed
         }
         """;
 }
+
+/// <summary>Fixed state machine of one profile image build on one host.</summary>
+public static class ProfileBuildStates
+{
+    public const string Queued = "queued";
+    public const string Building = "building";
+    public const string Verifying = "verifying";
+    public const string Built = "built";
+    public const string Failed = "failed";
+    public const string Rejected = "rejected";
+    public const string Uncertain = "uncertain";
+    public const string Removed = "removed";
+
+    public static bool CanTransition(string from, string to) => (from, to) switch
+    {
+        (Queued, Building) => true,
+        (Queued, Failed) => true,
+        (Building, Verifying) => true,
+        (Building, Failed) => true,
+        (Building, Uncertain) => true,
+        (Verifying, Built) => true,
+        (Verifying, Rejected) => true,
+        (Verifying, Failed) => true,
+        (Verifying, Uncertain) => true,
+        // Reconciliation after a lost result: the image is either found by its labels
+        // (and re-verified) or provably absent.
+        (Uncertain, Verifying) => true,
+        (Uncertain, Failed) => true,
+        // Explicit scoped cleanup of a non-verified image (#261 exposes it).
+        (Failed, Removed) => true,
+        (Rejected, Removed) => true,
+        _ => false,
+    };
+}
+
+public sealed record ProfileBuildRecord(
+    string Id,
+    string ProfileRevisionId,
+    string HostId,
+    string BaseImageDigest,
+    string Platform,
+    string ContextHash,
+    string ResultTag,
+    string State,
+    string? ImageDigest,
+    bool Verified,
+    string? FailureSummary,
+    string? EvidenceHash,
+    string RequestedBy,
+    int Revision,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? FinishedAt,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record ProfileBuildRequest(string HostId);
 
 public sealed record ContainerProfileCreate(
     string? IdempotencyKey,

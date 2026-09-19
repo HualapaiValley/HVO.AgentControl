@@ -100,15 +100,27 @@ public sealed class RemoteWorkerProvisioningCoordinator
     private readonly AcpControlHost _control; private readonly IRemoteWorkerProvisioner _remote; private readonly WorkerControlOptions _options; private readonly IWorkerBridgeSessionFactory _verification;
     public RemoteWorkerProvisioningCoordinator(AcpControlHost control, IRemoteWorkerProvisioner remote, IOptions<WorkerControlOptions> configured, IWorkerBridgeSessionFactory verification) { _control = control; _remote = remote; _options = configured.Value; _verification = verification; }
 
-    public Task<WorkerEnrollmentRecord> PlanAsync(string bindingId, string hostId, CancellationToken token = default)
+    /// <summary>
+    /// Plans an enrollment. <paramref name="imageDigest"/> is the configured base
+    /// when null; otherwise it must be a verified profile build digest for this
+    /// host (the host's approved set), and it is frozen into the enrollment so a
+    /// later change of the approved base or a new build never moves an existing
+    /// plan.
+    /// </summary>
+    public Task<WorkerEnrollmentRecord> PlanAsync(string bindingId, string hostId, CancellationToken token = default) => PlanAsync(bindingId, hostId, null, token);
+
+    public Task<WorkerEnrollmentRecord> PlanAsync(string bindingId, string hostId, string? imageDigest, CancellationToken token = default)
     {
         RequireEnabled();
         var store = Store();
         var host = Approved(hostId);
+        var digest = imageDigest ?? _options.ApprovedImageDigest;
+        if (!store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest).Contains(digest, StringComparer.Ordinal))
+            throw new WorkerControlConfigurationException("The requested image is not the approved base or a verified profile build for this host.");
         var existing = store.ListWorkerEnrollments().SingleOrDefault(x => x.RuntimeBindingId == bindingId);
         if (existing is not null)
         {
-            if (existing.HostId != hostId || existing.ExpectedImageDigest != _options.ApprovedImageDigest || existing.ExpectedPlatform != _options.ApprovedImagePlatform) throw new OrganizationConcurrencyException("The binding already has a different worker plan.");
+            if (existing.HostId != hostId || existing.ExpectedImageDigest != digest || existing.ExpectedPlatform != _options.ApprovedImagePlatform) throw new OrganizationConcurrencyException("The binding already has a different worker plan.");
             _ = ControllerPrivateFile.ReadExact(existing.KeyFilePath, _options.ExpectedControllerUid, ControllerFileModes.Private0600, 32);
             return Task.FromResult(existing);
         }
@@ -129,7 +141,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
             }
             else ControllerPrivateFile.PublishExclusive(keyPath, key, _options.ExpectedControllerUid);
 
-            var enrollment = store.CreateWorkerEnrollmentForPlan(bindingId, host.Id, _options.ControllerId, _options.ApprovedImageDigest, _options.ApprovedImagePlatform, keyPath, keyId, worker);
+            var enrollment = store.CreateWorkerEnrollmentForPlan(bindingId, host.Id, _options.ControllerId, digest, _options.ApprovedImagePlatform, keyPath, keyId, worker);
             store.AddProvisioningIntent(worker, host.Id, bindingId, "enroll-key", Hash(keyId));
 
             // The control volume and the ephemeral key bootstrap are applied before
@@ -355,7 +367,8 @@ public sealed class RemoteWorkerProvisioningCoordinator
                 {
                     var resource = store.ListWorkerResources(enrollment.WorkerId).Single(x => x.OperationId == operation.Id);
                     var mounts = new[] { new NamedVolumeMount(enrollment.ControlVolumeName, "/control"), new(enrollment.HomeVolumeName, "/home/worker"), new(enrollment.WorkspaceVolumeName, "/workspace"), new(enrollment.SessionVolumeName, "/session") };
-                    var reference = await _remote.CreateContainerAsync(host, new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, _options.MemoryBytes, _options.CpuLimit, _options.PidsLimit), token).ConfigureAwait(false);
+                    var approved = store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest);
+                    var reference = await _remote.CreateContainerAsync(host, new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, _options.MemoryBytes, _options.CpuLimit, _options.PidsLimit, approved), token).ConfigureAwait(false);
                     store.TransitionResource(resource.Id, resource.Revision, "planned", "present", reference);
                     store.SetEnrollmentResourceReference(enrollment.WorkerId, "container", reference);
                     break;

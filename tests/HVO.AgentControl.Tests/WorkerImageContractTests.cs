@@ -244,6 +244,97 @@ public sealed class WorkerImageContractTests
         }
     }
 
+    /// <summary>
+    /// The controller's own build path against the local daemon (#259): the
+    /// seeded generic-employee revision is rendered to its deterministic context,
+    /// the exact ImageTag / ImageBuild / ImageInspect / ImageVerify argv the
+    /// controller would send over SSH is executed locally, and the pure verifier
+    /// must accept the real result. A fragment that re-introduces a setuid file is
+    /// then proven to be rejected by the same path.
+    /// </summary>
+    [Fact]
+    public void RealProfileBuildProducesAVerifiableChildOfTheWorkerBase()
+    {
+        if (!Available.Value) return;
+        var baseDigest = ImageDigest(); var platform = Platform();
+        using var temp = new TempDirectory();
+        using var store = new HVO.AgentControl.Organization.OrganizationStore(Path.Combine(temp.Path, "control.db"));
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        var generic = store.GetContainerProfile(store.ListContainerProfiles().Single().Id)!.Revisions.Single();
+        var options = new HVO.AgentControl.RemoteWorker.WorkerControlOptions { ControllerId = "controller-contract", ApprovedImageDigest = baseDigest, ApprovedImagePlatform = platform };
+        var host = LocalHost();
+
+        var (tar, contextHash, dockerfile) = HVO.AgentControl.RemoteWorker.ProfileBuildContext.Render(generic, baseDigest, platform);
+        Assert.Contains("FROM " + HVO.AgentControl.RemoteWorker.ProfileBuildContext.PinTag(baseDigest) + "\n", dockerfile, StringComparison.Ordinal);
+        var tag = HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator.ResultTag(generic.Id, contextHash);
+        try
+        {
+            var pin = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageTag, [baseDigest, HVO.AgentControl.RemoteWorker.ProfileBuildContext.PinTag(baseDigest)])));
+            Assert.True(pin.ExitCode == 0, pin.Output);
+
+            var build = HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, generic.Id, contextHash, tag, NetworkRequired: true), tar);
+            var built = RunWithInput(LocalArguments(build), tar, 600_000);
+            Assert.True(built.ExitCode == 0, built.Output);
+
+            var inspect = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageInspect, [tag])));
+            var baseInspect = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageInspect, [baseDigest])));
+            Assert.True(inspect.ExitCode == 0 && baseInspect.ExitCode == 0, inspect.Output + baseInspect.Output);
+            var digest = HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckInspect(inspect.Output, baseInspect.Output, generic.Id, contextHash, baseDigest, platform);
+            Assert.Matches("^sha256:[0-9a-f]{64}$", digest);
+            Assert.NotEqual(baseDigest, digest);
+
+            var verify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [tag, platform])), null, 120_000);
+            Assert.True(verify.ExitCode == 0, verify.Output);
+            HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.Output);
+
+            // The generic profile's toolchain is really there, as the employee would see it.
+            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "dotnet --list-sdks | grep -q '^10\\.' && python3 --version && gh --version | head -1 && node --version"]);
+            Assert.True(tools.ExitCode == 0, tools.Output);
+
+            // A fragment that plants a setuid binary is built the same way and rejected by the same verifier.
+            var hostile = store.CreateContainerProfile(new("hostile", "hostile", "Hostile", null, """{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN cp /bin/sh /usr/local/bin/rootsh && chmod u+s /usr/local/bin/rootsh\n"), null);
+            var hostileRevision = store.GetContainerProfile(hostile.Id)!.Revisions.Single();
+            var (hostileTar, hostileHash, hostileDockerfile) = HVO.AgentControl.RemoteWorker.ProfileBuildContext.Render(hostileRevision, baseDigest, platform);
+            var hostileTag = HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator.ResultTag(hostileRevision.Id, hostileHash);
+            try
+            {
+                var hostileBuilt = RunWithInput(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, hostileRevision.Id, hostileHash, hostileTag, NetworkRequired: false), hostileTar)), hostileTar, 600_000);
+                Assert.True(hostileBuilt.ExitCode == 0, hostileBuilt.Output);
+                // The fixed trailer strips the bit again, so the image is actually clean...
+                var hostileVerify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [hostileTag, platform])), null, 120_000);
+                Assert.True(hostileVerify.ExitCode == 0, hostileVerify.Output);
+                HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hostileVerify.Output);
+                var bit = Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hostileTag, "-c", "%a", "/usr/local/bin/rootsh"]);
+                Assert.Equal("755", bit.Output.Trim());
+                // ...and the trailer is the last word: the fragment ran before it.
+                Assert.True(hostileDockerfile.IndexOf("chmod u+s", StringComparison.Ordinal) < hostileDockerfile.IndexOf("worker contract trailer", StringComparison.Ordinal));
+            }
+            finally { Run(["image", "rm", "-f", hostileTag]); }
+        }
+        finally
+        {
+            Run(["image", "rm", "-f", tag]);
+            Run(["image", "rm", "--no-prune", HVO.AgentControl.RemoteWorker.ProfileBuildContext.PinTag(baseDigest)]);
+        }
+    }
+
+    private static (int ExitCode, string Output) RunWithInput(string[] args, byte[] input, int timeout)
+    {
+        using var process = CreateProcess(args, null, redirectInput: true);
+        process.Start();
+        process.StandardInput.BaseStream.Write(input); process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
+        return (process.ExitCode, output);
+    }
+
+    private sealed class TempDirectory : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "agentcontrol-contract-" + Guid.NewGuid().ToString("N"));
+        public TempDirectory() => Directory.CreateDirectory(Path);
+        public void Dispose() { try { Directory.Delete(Path, true); } catch (IOException) { } }
+    }
+
     /// <summary>An approved-host stand-in whose SSH prefix is stripped for local execution.</summary>
     private static HVO.AgentControl.RemoteWorker.ApprovedExecutionHost LocalHost() => new()
     {

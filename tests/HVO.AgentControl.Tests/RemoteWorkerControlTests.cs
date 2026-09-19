@@ -55,13 +55,13 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public void FreshSchemaIsV8AndCarriesRemoteWorkerHiringAndProfileTablesWithoutSeededEnrollment()
+    public void FreshSchemaIsV9AndCarriesRemoteWorkerHiringProfileAndBuildTablesWithoutSeededEnrollment()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(8L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
-        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "container_profiles", "container_profile_revisions" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
+        Assert.Equal(9L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "container_profiles", "container_profile_revisions", "profile_builds" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
     }
 
@@ -72,8 +72,9 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var trigger in new[] { "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
-            foreach (var table in new[] { "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
+            foreach (var index in new[] { "one_active_profile_build_per_revision_host", "one_verified_profile_build_per_revision_host" }) connection.Execute($"DROP INDEX {index}");
+            foreach (var trigger in new[] { "profile_builds_identity_immutable", "profile_builds_no_delete", "profile_builds_no_replace", "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
+            foreach (var table in new[] { "profile_builds", "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
             connection.Execute("UPDATE schema_version SET version=3");
         }
         var policyBefore = Raw(path, "SELECT version || ':' || revision || ':' || summary FROM permission_policies");
@@ -1853,6 +1854,7 @@ public sealed class RemoteWorkerControlTests
         public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 

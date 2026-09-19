@@ -523,7 +523,7 @@ Ready -> Degraded / Stopped / Orienting
   effects before continuing. No automatic retry of an uncertain create or tool.
 - Provisioning has no privileged authority until Section 6 is satisfied.
 
-### 10.1 Container profiles (#257, slice #258 implemented)
+### 10.1 Container profiles (#257; #258 profiles and #259 builds implemented)
 
 Every managed employee is built from a **container profile revision**: an
 immutable, content-addressed template that extends the approved worker base
@@ -572,18 +572,65 @@ image. The owner accepted this design on 2026-09-18.
 - The canonical form (compact JSON, ordinal-sorted keys, LF fragment) is what is
   hashed and stored, so key order and line endings never create a new revision.
 - The base is referenced symbolically. The concrete approved digest is pinned per
-  host when a revision is built (#259) and frozen again at hire approval (#260);
-  the revision itself stays immutable and hermetically validatable without
+  host when a revision is built and frozen again at hire approval (#260); the
+  revision itself stays immutable and hermetically validatable without
   deployment configuration.
+- **Builds are per (revision, host)** (`profile_builds`, schema v9, `pbld-<hex>`;
+  identity columns immutable, never deleted or replaced, at most one live and one
+  verified build per pair). The controller renders the revision to a
+  deterministic build context — one generated `Dockerfile` in a fixed-metadata
+  tar whose SHA-256 is the build's `context_hash` — and streams it to
+  `docker build -` on the approved host over the same pinned SSH path as
+  provisioning: `--pull=false --no-cache`, no build arguments, secrets, cache
+  sources or host context, `--network none` unless a feature recipe needs apt,
+  labels `agentcontrol.profile`/`context-hash`/`base-digest`, a local
+  `agentcontrol-profile:<revision>-<hash12>` tag. BuildKit refuses an image id as
+  a `FROM`, so the exact base digest is first pinned under the controller-owned
+  `agentcontrol-worker-base:pin-<12hex>` tag on that host and the generated
+  Dockerfile names only that tag.
+- The generated Dockerfile is `FROM <pin>`, the owner's fragment (its own `FROM`
+  dropped), the devcontainer `features` rendered as **fixed apt recipes** per
+  allowlisted id and version (nothing is fetched from ghcr.io), `containerEnv`
+  as `ENV`, lifecycle commands and `remoteEnv` recorded as labels (the supervisor
+  runs them as the employee; the build never executes them), and a fixed trailer
+  that re-strips setuid bits, re-owns `/app` and the supervisor to root, resets
+  the four private directories to their fixed owners and 0700, asserts the two
+  uids and the worker binaries, and restores the supervisor entrypoint. The
+  fragment runs before the trailer, so it cannot undo it.
+- A build becomes `built`/verified only after two independent checks over what
+  the host printed: `docker image inspect` must show the controller's three labels
+  for this revision and context, the supervisor entrypoint, no default user, no
+  exposed ports or anonymous volumes, the approved platform and a root filesystem
+  whose layers start with the approved base's; then a fixed verification program
+  (a controller constant, carried base64 so the remote token has no quotes) runs
+  inside the image with `--network none --read-only --cap-drop ALL` and must
+  report uids 1101/1102, the four directories 0700 with their owners, `/app` and
+  the supervisor root-owned, the worker dll, `dotnet`, `opencode`, no setuid files
+  and no Docker socket path. A contract failure records `rejected`; a host or
+  build failure records `failed`; a transport loss during build or verify records
+  `uncertain`, and the next run reconciles by inspecting the tag — found → verify,
+  absent → `failed` — never by rebuilding blindly.
+- **Approved digests are per host**: the configured base plus every verified build
+  on that host. The container-create command builder refuses any other digest;
+  the bootstrap always runs the base. `POST /api/workers/enroll/plan` accepts an
+  optional `imageDigest` that must be in the target host's approved set, and the
+  chosen digest is frozen into the enrollment. The revision-level
+  `build_status`/`built_image_digest`/`verified` columns are a fold of the
+  per-host rows (`built` if any host verified, else `building`, `rejected`,
+  `failed`, `unbuilt`).
+- Owner routes: `GET/POST /api/profiles/{id}/revisions/{revisionId}/builds`
+  (the POST queues, runs and verifies synchronously on one ready host and returns
+  the terminal record); `/profiles/{id}` shows per-host builds and a build action.
+  **Building never provisions an employee.**
 - `generic-employee` revision 1 is seeded on fresh stores and on the v7→v8
   migration, never overwriting an existing slug.
 - Owner routes: `GET/POST /api/profiles`, `GET /api/profiles/{id}` (profile plus
   full revision chain), `GET/POST /api/profiles/{id}/revisions`,
   `POST /api/profiles/{id}/retire`; portal pages `/profiles` and `/profiles/{id}`.
-  These record definitions only. **Nothing in this slice builds an image,
-  approves a hire, creates an employee or rebuilds an existing employee**;
-  `build_status` stays `unbuilt` until #259 and profile updates never
-  auto-rebuild employees (#261 adds the explicit data-preserving rebuild).
+  These record definitions only. **Nothing in the profile or build slices
+  approves a hire, creates an employee or rebuilds an existing employee**, and
+  profile updates never auto-rebuild employees (#261 adds the explicit
+  data-preserving rebuild).
 
 ## 11. Orientation composition and versioning
 

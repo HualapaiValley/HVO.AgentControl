@@ -41,6 +41,8 @@ public sealed class WorkerControlOptions
     public int ConnectTimeoutSeconds { get; set; } = 10;
     public int AuthenticationTimeoutSeconds { get; set; } = 10;
     public int OperationTimeoutSeconds { get; set; } = 60;
+    /// <summary>Bound for one profile image build or verification run; builds pull nothing but may run apt.</summary>
+    public int ImageBuildTimeoutSeconds { get; set; } = 900;
     public int ExpectedControllerUid { get; set; } = 1001;
     public long MemoryBytes { get; set; } = 2L * 1024 * 1024 * 1024;
     public decimal CpuLimit { get; set; } = 2;
@@ -55,6 +57,7 @@ public sealed class WorkerControlOptions
         if (!Regex.IsMatch(ApprovedImageDigest ?? string.Empty, "^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)) errors.Add("ApprovedImageDigest must be a lowercase sha256 digest.");
         if (ApprovedImagePlatform is not ("linux/amd64" or "linux/arm64")) errors.Add("ApprovedImagePlatform must be linux/amd64 or linux/arm64.");
         if (ConnectTimeoutSeconds is < 1 or > 60 || AuthenticationTimeoutSeconds is < 1 or > 60 || OperationTimeoutSeconds is < 1 or > 600) errors.Add("WorkerControl timeouts are outside their bounds.");
+        if (ImageBuildTimeoutSeconds is < 60 or > 3600) errors.Add("WorkerControl image build timeout is outside 60-3600 seconds.");
         if (ExpectedControllerUid < 0) errors.Add("ExpectedControllerUid is invalid.");
         if (MemoryBytes < 256L * 1024 * 1024 || CpuLimit is <= 0 or > 64 || PidsLimit is < 32 or > 4096) errors.Add("Worker resource limits are invalid.");
         foreach (var host in ApprovedHosts ?? []) errors.AddRange(host.Validate(Enabled && inspectFiles).Select(value => $"ApprovedHosts[{host.Id}]: {value}"));

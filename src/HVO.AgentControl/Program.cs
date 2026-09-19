@@ -343,7 +343,7 @@ app.MapPost("/api/workers/enroll/plan", async (HttpContext context, AcpControlHo
 {
     if (Program.RejectCrossOrigin(context, "Worker enrollment planning") is { } rejection) return rejection;
     if (control.Organization is null) return Program.WorkerStoreUnavailable();
-    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, context.RequestAborted)); }
+    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, request.ImageDigest, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("PlanRemoteWorkerEnrollment").WithTags("Remote workers");
 
@@ -865,6 +865,59 @@ app.MapPost("/api/profiles/{id}/retire", (HttpContext context, AcpControlHost ho
     .WithName("RetireContainerProfile").WithTags("Profiles")
     .WithSummary("Retires a profile so it cannot receive new revisions or be selected for new approvals. Existing revisions remain readable.")
     .Produces<HVO.AgentControl.Organization.ContainerProfileSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/profiles/{id}/revisions/{revisionId}/builds", (AcpControlHost host, string id, string revisionId) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile or revision id.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        return Results.Ok(store.ListProfileBuilds(revisionId));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException) { return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Profile builds unavailable."); }
+})
+    .WithName("ListProfileBuilds").WithTags("Profiles")
+    .WithSummary("Lists the per-host image builds of one immutable profile revision, newest first.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.ProfileBuildRecord>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator builds, string id, string revisionId, HVO.AgentControl.Organization.ProfileBuildRequest request) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile or revision id.");
+    if (Program.RejectCrossOrigin(context, "Profile image build") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        var queued = builds.Queue(revisionId, request.HostId);
+        var result = queued.State == HVO.AgentControl.Organization.ProfileBuildStates.Queued || queued.State == HVO.AgentControl.Organization.ProfileBuildStates.Uncertain
+            ? await builds.RunAsync(queued.Id, context.RequestAborted)
+            : queued;
+        return Results.Ok(result);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception) { return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid profile build.", detail: exception.Message); }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException) { return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found."); }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception) { return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Profile build conflicted.", detail: exception.Message); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("BuildProfileRevision").WithTags("Profiles")
+    .WithSummary("Builds and verifies the revision's image on one approved, ready execution host and records the result. A verified digest joins that host's approved set; nothing is provisioned.")
+    .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status403Forbidden)
@@ -1974,6 +2027,9 @@ public partial class Program
     public static bool IsValidContainerProfileId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfilePrefix, MaximumContainerProfileIdLength);
 
+    public static bool IsValidContainerProfileRevisionId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfileRevisionPrefix, MaximumContainerProfileIdLength);
+
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > maximumLength)
@@ -2024,7 +2080,7 @@ public partial class Program
     }
 }
 
-public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId);
+public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId, string? ImageDigest = null);
 public sealed record WorkerPromptRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt);
 public sealed record WorkerRecoveryRequest(string ObligationId, int ExpectedRevision);
 public sealed record WorkerRecoveryAcknowledgementRequest(int ExpectedRevision, string EvidenceHash, string Disposition);
