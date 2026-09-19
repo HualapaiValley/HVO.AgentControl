@@ -612,8 +612,9 @@ image. The owner accepted this design on 2026-09-18.
   `--network none --read-only --cap-drop ALL`), so no executable supplied by a
   fragment is ever run. It must report: the `bridge`/`employee` accounts with
   uid/gid 1101/1102 and their fixed home and shell; the four directories 0700
-  with their owners; `/app` and the supervisor root-owned; **byte-identical
-  contract artifacts** — the launch chain `/usr/bin/env`, `/bin/sh`,
+  with their owners; `/app` and the supervisor root-owned; **identical contract
+  artifacts in content and uid/gid/mode** (an unreadable or non-executable
+  artifact is rejected like a replaced one) — the launch chain `/usr/bin/env`, `/bin/sh`,
   `/usr/bin/dash`, `/usr/bin/python3`, `/usr/bin/python3.12`; the payloads
   `/usr/local/bin/worker-supervisor`, `/app`, `/usr/bin/dotnet`,
   `/usr/share/dotnet`, `/usr/local/bin/node`,
@@ -621,7 +622,10 @@ image. The owner accepted this design on 2026-09-18.
   as *no base file altered or removed* (additions allowed), the Python standard
   library `/usr/lib/python3.12` and the loader/shared-library tree
   `/lib`, `/lib64`, `/usr/lib/<arch>-linux-gnu` — plus unchanged
-  `/etc/ld.so.conf`, `/etc/ld.so.conf.d` and `/etc/nsswitch.conf`, no
+  `/etc/ld.so.conf`, `/etc/ld.so.conf.d` and `/etc/nsswitch.conf`, an
+  `/etc/ld.so.cache` whose every entry (read with the base's `ldconfig`)
+  resolves inside the pinned multiarch directories (a recipe may regenerate the
+  cache by installing a library; `ldconfig /opt/evil` cannot), no
   `/etc/ld.so.preload`, no `python3` shadowing `/usr/bin` under `/usr/local`,
   no setuid/setgid files, no file capabilities (`security.capability` xattr)
   and no Docker socket path. The trailer restores metadata; the verifier proves

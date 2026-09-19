@@ -211,6 +211,8 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Contains("/usr/share/dotnet differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/usr/share/dotnet"))).Message, StringComparison.Ordinal);
         Assert.Contains("/etc/ld.so.preload differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/etc/ld.so.preload"))).Message, StringComparison.Ordinal);
         Assert.Contains("/lib/python-shadow differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/lib/python-shadow"))).Message, StringComparison.Ordinal);
+        Assert.Contains("/etc/ld.so.cache differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/etc/ld.so.cache"))).Message, StringComparison.Ordinal);
+        Assert.Contains("/usr/bin/env differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/usr/bin/env"))).Message, StringComparison.Ordinal);
         Assert.Contains("capability", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(caps: ["/usr/bin/ping"]))).Message, StringComparison.Ordinal);
         Assert.Contains("home or shell", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(bridgeShell: "/bin/bash"))).Message, StringComparison.Ordinal);
         Assert.Contains("Docker socket", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(sock: true))).Message, StringComparison.Ordinal);

@@ -319,6 +319,17 @@ public sealed class WorkerImageContractTests
                 // Re-pointing the loader path breaks every dynamic binary including the shell, so the build fails closed.
                 ("lib64", "RUN rm /lib64 && mkdir /lib64 && cp /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib64/", "build-fails"),
                 ("libdir", "RUN cp /usr/bin/env /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1.new && mv /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1.new /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1", "/usr/lib/x86_64-linux-gnu differs"),
+                // Metadata: an unreadable or non-executable contract artifact is as fatal as a replaced one.
+                ("env-mode", "RUN chmod 0644 /usr/bin/env", "/usr/bin/env differs"),
+                // The trailer's own `test -x /usr/bin/dotnet` fails the build for this one.
+                ("dotnet-mode", "RUN chmod 0600 /usr/share/dotnet/dotnet", "build-fails"),
+                ("node-mode", "RUN chmod 0600 /usr/local/bin/node", "/usr/local/bin/node differs"),
+                ("lib-mode", "RUN chmod 0600 /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1", "/usr/lib/x86_64-linux-gnu differs"),
+                ("stdlib-mode", "RUN chmod 0000 /usr/lib/python3.12/json/__init__.py", "/usr/lib/python3.12 differs"),
+                // /app ownership is restored by the trailer (chown -R root:root), so this one is genuinely clean.
+                ("app-owner", "RUN chown 1102:1102 /app/HVO.AgentControl.Worker.dll", "none"),
+                // Loader cache: ldconfig with an extra directory redirects resolution without touching ld.so.conf.
+                ("ldcache", "RUN mkdir -p /opt/evil && cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /opt/evil/libz.so.1 && ldconfig /opt/evil", "/etc/ld.so.cache differs"),
             };
             foreach (var (name, fragment, expect) in hostile)
             {
@@ -342,9 +353,10 @@ public sealed class WorkerImageContractTests
                     Assert.True(hVerify.ExitCode == 0, name + ": " + hVerify.Output);
                     if (expect == "none")
                     {
-                        // The trailer really stripped the bit, so this one is clean and accepted.
+                        // The trailer really undid the damage, so this one is clean and accepted.
                         HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output);
-                        Assert.Equal("755", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%a", "/usr/local/bin/rootsh"]).Output.Trim());
+                        if (name == "setuid") Assert.Equal("755", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%a", "/usr/local/bin/rootsh"]).Output.Trim());
+                        if (name == "app-owner") Assert.Equal("0:0", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%u:%g", "/app/HVO.AgentControl.Worker.dll"]).Output.Trim());
                     }
                     else
                     {

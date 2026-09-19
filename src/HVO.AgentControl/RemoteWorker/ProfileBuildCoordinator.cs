@@ -237,8 +237,9 @@ public static class ImageContractVerifier
     /// <summary>
     /// The verification program ran in the approved base with the candidate
     /// mounted read-only, so nothing here came from a candidate executable. The
-    /// artifacts the supervisor and bridge depend on must be byte-identical to
-    /// the base's copies (the trailer restores metadata, not content); accounts,
+    /// artifacts the supervisor and bridge depend on must be identical to the
+    /// base's copies in content **and** uid/gid/mode (a chmod 0644 on the
+    /// interpreter is as fatal as replacing it); accounts,
     /// directory modes, setuid bits, file capabilities, ld.so.preload and the
     /// socket path are checked on the candidate's files directly.
     /// </summary>
@@ -289,7 +290,13 @@ public static class ImageContractVerifier
         // tools but may not alter or remove any the base's binaries load. The loader
         // configuration and NSS configuration are pinned so resolution cannot be
         // redirected to an added path.
-        "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/nsswitch.conf",
+        // ld.so.cache is consulted before the default directories, so a fragment
+        // running `ldconfig /opt/evil` would redirect a contract binary without
+        // touching ld.so.conf. A recipe that installs a library package (libicu for
+        // the SDK) legitimately regenerates the cache, so the invariant is on its
+        // contents, read with the BASE's ldconfig: every entry must resolve inside
+        // the pinned multiarch library directories.
+        "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ld.so.cache", "/etc/nsswitch.conf",
         // Absent in the base and must stay absent: a preload would hijack every process,
         // and a python3 ahead of /usr/bin on the supervisor's PATH would replace PID 1's
         // interpreter (the SDK from apt lives under /usr/lib/dotnet and is allowed).
