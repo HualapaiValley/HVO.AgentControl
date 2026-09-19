@@ -245,4 +245,3 @@ Done 2026-09-18, after the transfer recorded in `docs/REPOSITORY-ADMIN.md`.
 - **Untouched.** `main` protection (three `V2 CI` checks, admins enforced,
   conversation resolution, no linear-history requirement), the `release`
   environment, deploy keys, and the manual `release.yml` workflow.
-
