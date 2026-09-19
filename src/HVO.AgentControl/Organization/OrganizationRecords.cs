@@ -29,6 +29,7 @@ public static class OrganizationIds
     public const string HireRequestEventPrefix = "hevt-";
     public const string ContainerProfilePrefix = "prof-";
     public const string ContainerProfileRevisionPrefix = "prev-";
+    public const string ProfileBuildPrefix = "pbld-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -50,6 +51,7 @@ public static class OrganizationIds
     public static string NewHireRequestEventId() => NewId(HireRequestEventPrefix);
     public static string NewContainerProfileId() => NewId(ContainerProfilePrefix);
     public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
+    public static string NewProfileBuildId() => NewId(ProfileBuildPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -247,6 +249,75 @@ public sealed record HireRequestCreate(
 
 public sealed record HireRequestReject(int ExpectedRevision);
 
+/// <summary>
+/// An exact owner approval selection for one hire request. The server resolves
+/// the unique verified profile build for <see cref="ProfileRevisionId"/> and
+/// <see cref="HostId"/>; the caller never supplies a build id.
+/// </summary>
+public sealed record HireRequestApprove(int ExpectedRevision, string ProfileRevisionId, string HostId);
+
+/// <summary>A frozen owner approval and its optional managed-employee links.</summary>
+public sealed record HireRequestApprovalRecord(
+    string HireRequestId,
+    string ApprovedRequestVersion,
+    int ApprovedRequestRevision,
+    string RequestVersionHash,
+    string ProfileRevisionId,
+    string ProfileBuildId,
+    string ImageDigest,
+    string HostId,
+    string Platform,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string ApprovalIdentity,
+    DateTimeOffset ApprovedAt,
+    string? EmployeeId,
+    string? RuntimeBindingId,
+    string? WorkerId,
+    int Revision);
+
+/// <summary>
+/// The frozen, per-binding resources a later provisioning run consumes. This is
+/// the durable bridge that avoids rebuilding the v4 <c>worker_enrollments</c>
+/// table: the owner approval freezes them once and provisioning reads them here.
+/// </summary>
+public sealed record ManagedEnrollmentResourcesRecord(
+    string RuntimeBindingId,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string ApprovedProfileRevisionId,
+    string ApprovedProfileBuildId,
+    string ApprovedImageDigest,
+    string ApprovedHostId,
+    string Platform,
+    DateTimeOffset CreatedAt,
+    int Revision);
+
+/// <summary>
+/// The result of creating the managed employee and binding from an approved
+/// hire. <see cref="Created"/> is false when the approval already carried links
+/// and the exact existing identities are returned instead (idempotent replay).
+/// </summary>
+public sealed record ManagedEmployeeCreation(
+    string HireRequestId,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string Slug,
+    string DisplayName,
+    string Placement,
+    bool Created,
+    string ApprovedProfileRevisionId,
+    string ApprovedProfileBuildId,
+    string ApprovedImageDigest,
+    string ApprovedHostId,
+    string Platform,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string? WorkerId);
+
 public sealed record HireRequestSummary(
     string Id,
     string OrganizationId,
@@ -270,7 +341,14 @@ public sealed record HireRequestSummary(
     int Revision,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    string? ContainerProfileRevisionId = null);
+    string? ContainerProfileRevisionId = null,
+    string? StatusDetail = null,
+    string? ProfileBuildId = null,
+    string? ApprovedImageDigest = null,
+    string? ApprovedHostId = null,
+    string? EmployeeId = null,
+    string? RuntimeBindingId = null,
+    string? WorkerId = null);
 
 public static class ContainerProfileStatuses
 {
@@ -306,6 +384,8 @@ public static class ContainerProfileSeed
             "ghcr.io/devcontainers/features/github-cli:1": {}
           },
           "containerEnv": {
+            "DOTNET_ROOT": "/opt/dotnet-sdk",
+            "PATH": "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin",
             "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
             "DOTNET_NOLOGO": "1",
             "NPM_CONFIG_UPDATE_NOTIFIER": "false"
@@ -319,6 +399,65 @@ public static class ContainerProfileSeed
         }
         """;
 }
+
+/// <summary>Fixed state machine of one profile image build on one host.</summary>
+public static class ProfileBuildStates
+{
+    public const string Queued = "queued";
+    public const string Building = "building";
+    public const string Verifying = "verifying";
+    public const string Built = "built";
+    public const string Failed = "failed";
+    public const string Rejected = "rejected";
+    public const string Uncertain = "uncertain";
+    public const string Removed = "removed";
+
+    /// <summary>States that hold the per-(revision, host) live slot.</summary>
+    public static bool IsLive(string state) => state is Queued or Building or Verifying or Uncertain;
+
+    public static bool CanTransition(string from, string to) => (from, to) switch
+    {
+        (Queued, Building) => true,
+        (Queued, Failed) => true,
+        (Building, Verifying) => true,
+        (Building, Failed) => true,
+        (Building, Uncertain) => true,
+        (Verifying, Built) => true,
+        (Verifying, Rejected) => true,
+        (Verifying, Failed) => true,
+        (Verifying, Uncertain) => true,
+        // Reconciliation after a lost result: the image is either found by its labels
+        // (and re-verified) or provably absent.
+        (Uncertain, Verifying) => true,
+        (Uncertain, Failed) => true,
+        // Explicit scoped cleanup of a non-verified image (#261 exposes it).
+        (Failed, Removed) => true,
+        (Rejected, Removed) => true,
+        _ => false,
+    };
+}
+
+public sealed record ProfileBuildRecord(
+    string Id,
+    string ProfileRevisionId,
+    string HostId,
+    string BaseImageDigest,
+    string Platform,
+    string ContextHash,
+    string ResultTag,
+    string State,
+    string? ImageDigest,
+    bool Verified,
+    string? FailureSummary,
+    string? EvidenceHash,
+    string RequestedBy,
+    int Revision,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? FinishedAt,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record ProfileBuildRequest(string HostId);
 
 public sealed record ContainerProfileCreate(
     string? IdempotencyKey,

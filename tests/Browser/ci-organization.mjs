@@ -399,9 +399,16 @@ try {
   const approvalText = await page.locator('.request-card').first().innerText();
   const hiringHeading = await page.locator('[data-hiring-page] .page-heading').innerText();
   const hiringPageText = await page.locator('[data-hiring-page]').innerText();
-  record('approval is disabled until a verified profile build exists (#259/#260)', await page.locator('.request-card button:text("Approve")').first().isDisabled() && approvalText.includes('verified container profile build') && approvalText.includes('No request auto-creates an employee') && !approvalText.includes('#217'), { approvalText });
-  record('hiring heading and card body carry no superseded #217 gate', !hiringHeading.includes('#217') && !approvalText.includes('#217') && hiringHeading.includes('explicit owner approval bound to a verified container profile revision'), { hiringHeading });
-  record('hiring page-wide copy carries no superseded #217 gate', !hiringPageText.includes('#217'), { hiringPageText });
+  // The default request is an InternalSharedContainer, which has no profile build
+  // to select: its card offers no Approve control and explains the placement.
+  record('an internal shared container request offers no approval and explains the placement',
+    await page.locator('.request-card button:text("Approve")').count() === 0
+      && approvalText.includes('Only a DeveloperContainer hire can be approved') && !approvalText.includes('#217'), { approvalText });
+  record('hiring heading carries the approval truth and no superseded #217 gate',
+    !hiringHeading.includes('#217') && hiringHeading.includes('creates the managed employee identity and runtime binding')
+      && hiringHeading.includes('durably queues provisioning and orientation to Ready'), { hiringHeading });
+  record('hiring page-wide copy carries no superseded #217 gate and no owner identity',
+    !hiringPageText.includes('#217') && !hiringPageText.includes('owner-basic-auth'), { hiringPageText });
 
   await page.addInitScript(() => {
     try { Object.defineProperty(Crypto.prototype, 'randomUUID', { configurable: true, value: undefined }); } catch {}
@@ -418,6 +425,78 @@ try {
   await page.reload(); await page.waitForSelector(`.request-card[data-request-id="${createdId}"]`); const browserCard = page.locator(`.request-card[data-request-id="${createdId}"]`); record('hire request survives reload', (await browserCard.innerText()).includes('Browser Developer'));
   await browserCard.locator('button:text("Reject")').click(); await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').textContent.includes('Rejected'));
   record('requested hire can be revision-bound rejected', (await browserCard.innerText()).includes('Rejected'));
+
+  // ---- approval selection, pending, error and success -----------------
+  // A Requested DeveloperContainer request becomes selectable only when an active
+  // current profile revision has a verified built row on a ready host. The exact
+  // selection reaches the approve body; the receipt stays pending, then errors,
+  // then succeeds and renders the frozen identities without provisioning.
+  const requestedApproval = { id: 'hire-approve-live', state: 'Requested', revision: 4, createdAt: '2026-01-01T00:00:00.0000000+00:00', requestedDisplayName: 'Approve Live', departmentDisplayName: 'Operations', roleDisplayName: 'Operations / IT', placement: 'DeveloperContainer', cpuLimit: 2, memoryLimitMiB: 2048, pidsLimit: 256, purpose: 'Approve this developer container.' };
+  const approvedApproval = { ...requestedApproval, state: 'Approved', revision: 5, containerProfileRevisionId: 'prev-live', profileBuildId: 'build-live', approvedImageDigest: 'sha256:' + '9'.repeat(64), approvedHostId: 'host-a', employeeId: 'emp-managed', runtimeBindingId: 'rtb-managed', workerId: null, statusDetail: null };
+  let approvalPhase = 'pending';
+  await page.route('**/api/hire-requests', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const body = approvalPhase === 'success' ? [approvedApproval] : [requestedApproval];
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  await page.route('**/api/hire-requests/*/approve', async (route) => {
+    if (approvalPhase === 'pending') { await sleep(400); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(requestedApproval) }); }
+    if (approvalPhase === 'error') return route.fulfill({ status: 409, contentType: 'application/problem+json', body: JSON.stringify({ title: 'Hire request approval conflicted.', detail: 'The hire request changed; reload and retry.' }) });
+    approvalPhase = 'success';
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(approvedApproval) });
+  });
+  await page.route('**/api/profiles', async (route) => route.request().method() === 'GET'
+    ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ id: 'prof-live', slug: 'generic-employee', displayName: 'Generic Employee', status: 'active', currentRevisionId: 'prev-live', currentRevisionNumber: 1 }]) })
+    : route.continue());
+  await page.route('**/api/profiles/*/revisions/*/builds', async (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ id: 'build-live', profileRevisionId: 'prev-live', hostId: 'host-a', state: 'built', verified: true, imageDigest: 'sha256:' + '9'.repeat(64) }]) }));
+  await page.route('**/api/execution-hosts', async (route) => route.request().method() === 'GET'
+    ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ id: 'host-a', slug: 'host-a', displayName: 'Host A', enabled: true, status: 'ready' }]) })
+    : route.continue());
+
+  const statusAttr = (selector) => page.getAttribute(selector, 'data-status');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.request-card[data-request-id="hire-approve-live"] [data-approve-profile]:not([disabled])');
+  record('a verified build on a ready host enables the approval selection with the exact host',
+    await page.locator('[data-approve-host="hire-approve-live"] option').count() === 1
+      && await page.locator('[data-approve-host="hire-approve-live"] option').first().getAttribute('value') === 'host-a',
+    { hostOptions: await page.locator('[data-approve-host="hire-approve-live"] option').allTextContents() });
+
+  const pendingApprove = page.waitForRequest((request) => request.url().endsWith('/api/hire-requests/hire-approve-live/approve'));
+  await page.click('.request-card[data-request-id="hire-approve-live"] button:text("Approve")');
+  const selection = (await pendingApprove).postDataJSON();
+  await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').dataset.status === 'pending');
+  record('an in-flight approval reports a pending receipt and sends the exact selection',
+    (await statusAttr('[data-hire-receipt]')) === 'pending' && selection.expectedRevision === 4 && selection.profileRevisionId === 'prev-live' && selection.hostId === 'host-a',
+    { receipt: await page.locator('[data-hire-receipt]').innerText(), selection });
+
+  // Let the in-flight approval settle before the next phase so its receipt does
+  // not race the assertions that follow.
+  await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').dataset.status === 'ok');
+
+  approvalPhase = 'error';
+  await page.click('.request-card[data-request-id="hire-approve-live"] button:text("Approve")');
+  await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').dataset.status === 'error');
+  record('a failed approval reports an error receipt with the server detail',
+    (await statusAttr('[data-hire-receipt]')) === 'error' && (await page.locator('[data-hire-receipt]').innerText()).includes('The hire request changed'),
+    { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
+
+  approvalPhase = 'success';
+  await page.click('.request-card[data-request-id="hire-approve-live"] button:text("Approve")');
+  await page.waitForSelector('.request-card[data-request-id="hire-approve-live"] [data-frozen-approval]');
+  const frozenApproval = await page.locator('.request-card[data-request-id="hire-approve-live"] [data-frozen-approval]').innerText();
+  record('a successful approval clears the receipt and renders the frozen build, digest, host, employee and binding',
+    (await statusAttr('[data-hire-receipt]')) === 'ok' && frozenApproval.includes('prev-live') && frozenApproval.includes('build-live') && frozenApproval.includes('emp-managed') && frozenApproval.includes('rtb-managed') && frozenApproval.includes('host-a'),
+    { status: await statusAttr('[data-hire-receipt]'), frozenApproval });
+  record('the approved card states provisioning is durably queued and never exposes the owner identity',
+    (await page.locator('.request-card[data-request-id="hire-approve-live"] [data-provisioning-note]').innerText()).includes('durably queued provisioning and orientation')
+      && !(await page.locator('[data-hiring-page]').innerText()).includes('owner-basic-auth'),
+    { provisioningNote: await page.locator('.request-card[data-request-id="hire-approve-live"] [data-provisioning-note]').innerText() });
+
+  await page.unroute('**/api/hire-requests');
+  await page.unroute('**/api/hire-requests/*/approve');
+  await page.unroute('**/api/profiles');
+  await page.unroute('**/api/profiles/*/revisions/*/builds');
+  await page.unroute('**/api/execution-hosts');
 
   await page.goto(`${base}/system`); await page.waitForSelector('[data-system-forms]:not([hidden])');
   const original = await page.inputValue('[data-org-name-input]'); await page.fill('[data-org-name-input]', `${original} draft`);

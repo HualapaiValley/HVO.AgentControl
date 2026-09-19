@@ -12,6 +12,8 @@ namespace HVO.AgentControl.RemoteWorker;
 /// </summary>
 internal sealed class WorkerConnectionHostedService(
     WorkerConnectionManager manager,
+    ProfileBuildCoordinator builds,
+    HVO.AgentControl.Runtime.AcpControlHost control,
     IOptions<WorkerControlOptions> configured,
     ILogger<WorkerConnectionHostedService> logger) : BackgroundService
 {
@@ -35,6 +37,17 @@ internal sealed class WorkerConnectionHostedService(
 
         try
         {
+            // A provisioning step left applying by a previous process has an unknown
+            // remote effect. Mark it uncertain before the manager reconciles so the
+            // next apply inspects the effect instead of repeating it blind.
+            var store = control.Organization ?? throw new OrganizationStoreException("Organization store unavailable.");
+            var interrupted = store.MarkInterruptedProvisioningOperationsUncertain();
+            if (interrupted > 0) logger.LogWarning("Marked {Count} interrupted provisioning operation(s) uncertain for reconciliation.", interrupted);
+
+            // A build left building/verifying by a previous process is unknowable now;
+            // mark it uncertain so the next build request reconciles it by tag.
+            var buildInterrupted = builds.ReconcileInterruptedOnStartup();
+            if (buildInterrupted.Count > 0) logger.LogWarning("Marked {Count} interrupted profile build(s) uncertain for reconciliation: {Ids}", buildInterrupted.Count, string.Join(", ", buildInterrupted));
             await manager.ReconcileStartupAsync(stoppingToken).ConfigureAwait(false);
         }
         catch (OrganizationStoreException)

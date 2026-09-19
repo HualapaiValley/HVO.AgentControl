@@ -144,14 +144,23 @@ intent-first cancellation/provisioning, command-injection rejection, pinned SSH
 flags, resource-label ownership and bounded Linux capability parsing. The bridge,
 connection and provisioning services expose injectable interfaces for deterministic
 fakes. These checks do not access SSH credentials or remote hosts.
-`WorkerControl` and its hosted manager are disabled by default. The first
+`HireApprovalStoreTests`, `HireProvisioningCoordinatorTests`,
+`RemoteOrientationCoordinatorTests` and `WorkerOrientationTests` cover the
+schema-v9→v10 approval freeze and migration, the managed employee/binding
+creation, the `Approved → Provisioning → Orienting → Ready` coordinator, the
+fixed worker `install-orientation`/`orientation-comprehension` operations and
+their bounded evidence. `WorkerControl` and its hosted manager are disabled by
+default. The first
 managed disposable two-host path was accepted live on 2026-09-18 under explicit
 owner authorization and the disposable resources were removed; the flags in
 `/api/info` (`WorkerControlImplemented`, `WorkerControlOperationallyValidated`)
 report that first path, with `workerControlValidatedScope` carrying the exact
 `first-managed-disposable-two-host` bound, while `WorkerControlEnabled` remains
-the deployment/configuration gate and is false by default. Production
-provisioning and key rotation remain future work.
+the deployment/configuration gate and is false by default. The #260
+approval/provisioning/orientation slice is code capability with hermetic coverage
+only: no live owner-approved hire has been executed on any host, the
+`home-docker` execution-host enrollment remains held by the owner, and #261 and
+any termination/scheduling policy are out of scope.
 
 The approved-host capability probe is parsed from the real captured output of
 `docker system info`, `docker version` and one `df -B1 --output=avail` of the
@@ -182,6 +191,36 @@ raises `WorkerTerminalStopUncertainException` and suppresses viewer
 availability until a later attach proves the slot is free. It does not hold
 dispatch, because an unconfirmed viewer teardown says nothing about prompt
 safety.
+
+### Profile build checks
+
+`ProfileBuildTests` are hermetic: the deterministic build-context renderer
+(one fixed-metadata `Dockerfile` tar; identical inputs, identical bytes and
+hash), the fixed `docker build -`/`image tag`/`image inspect`/verify command
+grammar, the pure contract verifier over captured inspect and verification
+shapes, the per-host build state machine (queued → building → verifying →
+built/rejected/failed/uncertain, one live and one verified build per
+revision/host), the per-host approved-digest set, and the coordinator against
+a scripted host (build, contract rejection, missing base, transport loss →
+uncertain → reconcile by tag). No SSH and no Docker.
+
+`WorkerImageContractTests.RealProfileBuildProducesAVerifiableChildOfTheWorkerBase`
+runs the controller's own argv against the local daemon: it renders the seeded
+`generic-employee` revision, pins the freshly built worker image, builds the
+child, proves the verifier accepts the real inspect/verify output and that the
+toolchain is present as the employee, then builds a hostile fragment that
+plants a setuid binary and proves the fixed trailer stripped it. It needs
+Docker and runs in the `Docker config and image` job (`AGENTCONTROL_DOCKER_REQUIRED=1`),
+not in the Development v1 gate.
+
+The #268 hardening tests additionally prove the production entrypoint is the
+absolute isolated Python vector (`-I -S`), image environment is base-identical
+(`ENV` is not permitted in fragments), structured `containerEnv` is applied
+only to employee children, candidate mountpoints are empty and runtime mounts
+use `volume-nocopy`, system/root OpenCode policy and `/etc/dotnet` are absent,
+CA trust and full xattr maps on pinned contract trees match the base, and the
+standalone dotnet connector/bootstrap commands clear loader and startup-hook
+environment variables.
 
 ### Worker bridge checks
 
@@ -422,6 +461,7 @@ unconfirmed upstream change, `503` not ready or cancellation not accepted.
 | `/`, `/api/control`, `/api/control/model`, `/api/control/cancel`, `/terminal`, `/api/version` | Implemented | Unchanged |
 | `/api/info` | Implemented | Adds `workerControlValidatedScope` to bound the accepted capability claim |
 | `/api/organization` | Not implemented | Owner-protected overview plus same-origin revision-guarded rename and basic-instruction update backed by the authoritative SQLite store; employee rows include orientation readiness/holds |
+| Hire approval (`POST /api/hire-requests/{id}/approve`) | Not implemented | Owner-only, same-origin, revision-bound approval that freezes one hire against one verified profile build on a ready host and atomically creates the managed employee identity and DeveloperContainer binding, then durably queues provisioning and orientation to Ready. Code capability with hermetic coverage only — no live owner-approved hire has run and `WorkerControl` is off by default |
 | `/api/orientation*`, `/api/roles/{id}/instructions`, `/api/permissions/grants*` | Not implemented | Owner-authenticated stale-readable orientation status, host-verified assignment delivery with persisted restart-required generation, authoritative revisioned role-fragment instruction update, assignment-bound owner/live comprehension, manual hold and staged grant/revoke operations; host-started malformed/empty/oversized/non-terminal/ACP-error turns persist live-model failure, timeout/caller cancellation request bounded remote cancellation and fence retries, grants are not ACP-executable in Phase 1, permission callbacks persist synchronous rejection plus every matched restriction ID, and all mutations require same origin and ProblemDetails |
 
 The new endpoints and ProblemDetails behavior have local regression coverage;

@@ -31,7 +31,12 @@ public sealed record WorkerStatus(long WorkerGeneration, long ProcessGeneration,
     bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence,
     long AcknowledgedWorkerGeneration, long AcknowledgedSequence, ReplayLoss? ReplayLoss, JournalFailure? JournalFailure,
     int ReplayGapCount, IReadOnlyList<ReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false,
-    bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null);
+    bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null,
+    string? OrientationAssignmentId = null, string? OrientationVersion = null, string? OrientationArtifactFileName = null,
+    string? OrientationContentHash = null, string? OrientationState = null, string? OrientationInstalledPath = null,
+    string? OrientationComprehensionState = null, string? OrientationComprehensionEvidenceHash = null);
+public sealed record OrientationComprehensionState(string AssignmentId, string EmployeeId, string SessionId, string OrientationVersion,
+    string State, string? EvidenceHash, string? EvidenceJson, bool NewlyBegun = false);
 public sealed record PendingPermission(long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string DecisionId,
     string PayloadHash, IReadOnlyList<string> OptionIds, string State, string? Decision, IReadOnlyList<string>? SafeRejectOptionIds = null);
 public sealed record StoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson,

@@ -92,12 +92,16 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 8 adds immutable container profiles and their revision chain and
-    /// seeds the <c>generic-employee</c> profile. Migration accepts only the exact
-    /// released schema-v7 signature and creates verified, immutable source
-    /// evidence before changing the authoritative store.
+    /// Schema 10 adds atomic owner approval and managed-employee creation
+    /// (<c>hire_request_approvals</c>, <c>managed_enrollment_resources</c>) and
+    /// rebuilds <c>hire_requests</c> with a bounded nullable <c>status_detail</c>.
+    /// Schema 9 added per-host profile image builds (additive only). Schema 8
+    /// added immutable container profiles and their revision chain and seeded the
+    /// <c>generic-employee</c> profile. Each migration accepts only the exact
+    /// released signature of the previous version and creates verified, immutable
+    /// source evidence before changing the authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 8;
+    public const int CurrentSchemaVersion = 10;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -117,6 +121,10 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV6BackupHashFileName = "control.schema-v6.sha256";
     public const string SchemaV7BackupFileName = "control.schema-v7.db";
     public const string SchemaV7BackupHashFileName = "control.schema-v7.sha256";
+    public const string SchemaV8BackupFileName = "control.schema-v8.db";
+    public const string SchemaV8BackupHashFileName = "control.schema-v8.sha256";
+    public const string SchemaV9BackupFileName = "control.schema-v9.db";
+    public const string SchemaV9BackupHashFileName = "control.schema-v9.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -510,6 +518,15 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV8Statements =
         [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV8Statements, .. ContainerProfileImmutabilityV8Statements];
 
+    private static readonly string[] SchemaV9Statements =
+        [.. SchemaV8Statements, .. ProfileBuildSchemaV9Statements];
+
+    // v10 = v6 + profile tables + the rebuilt v10 hire tables + profile
+    // immutability + profile builds + approval/resources tables and triggers. The
+    // v8/v9 hire and profile statements stay frozen for exact-signature migration.
+    private static readonly string[] SchemaV10Statements =
+        [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -525,8 +542,14 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV7 =
         BuildExpectedSchema(SchemaV7Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV8 =
         BuildExpectedSchema(SchemaV8Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV9 =
+        BuildExpectedSchema(SchemaV9Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV10Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1515,6 +1538,28 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV7ToV8(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV8);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 8)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV8);
+            EnsureSchemaV8Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV8ToV9(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV9);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 9)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV9);
+            EnsureSchemaV9Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV9ToV10(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -1977,6 +2022,65 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV8Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 8, SchemaV8BackupFileName, SchemaV8BackupHashFileName, ExpectedSchemaV8);
+
+    private void MigrateV8ToV9(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in ProfileBuildSchemaV9Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 9 WHERE version = 8");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
+    private void EnsureSchemaV9Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 9, SchemaV9BackupFileName, SchemaV9BackupHashFileName, ExpectedSchemaV9);
+
+    private void MigrateV9ToV10(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+
+        // Rebuild hire_requests once more to add the bounded nullable
+        // status_detail. The referencing events table is renamed first so SQLite
+        // rewrites its foreign key to the renamed source, then both are copied
+        // into the exact v10 definitions; every existing hire survives with a
+        // NULL detail. The approval tables are created afterwards because they
+        // reference the rebuilt hire_requests.
+        Execute(connection, transaction, "ALTER TABLE hire_request_events RENAME TO hire_request_events_v9");
+        Execute(connection, transaction, "ALTER TABLE hire_requests RENAME TO hire_requests_v9");
+        foreach (var statement in HireRequestSchemaV10Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction,
+            """
+            INSERT INTO hire_requests (
+                id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
+                memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
+                owner_approval, container_profile_revision_id, status_detail, revision, created_at, updated_at)
+            SELECT id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                   requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
+                   memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
+                   owner_approval, container_profile_revision_id, NULL, revision, created_at, updated_at
+            FROM hire_requests_v9
+            """);
+        Execute(connection, transaction, "INSERT INTO hire_request_events SELECT * FROM hire_request_events_v9");
+        Execute(connection, transaction, "DROP TABLE hire_request_events_v9");
+        Execute(connection, transaction, "DROP TABLE hire_requests_v9");
+        foreach (var statement in HireApprovalSchemaV10Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 10 WHERE version = 9");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1988,7 +2092,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v7 file is pre-migration evidence only and restoring it would lose container profiles recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v9 file is pre-migration evidence only and restoring it would lose owner approvals recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2130,7 +2234,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV8Statements)
+        foreach (var statement in SchemaV10Statements)
         {
             Execute(connection, transaction, statement);
         }

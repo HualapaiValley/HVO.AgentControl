@@ -343,7 +343,7 @@ app.MapPost("/api/workers/enroll/plan", async (HttpContext context, AcpControlHo
 {
     if (Program.RejectCrossOrigin(context, "Worker enrollment planning") is { } rejection) return rejection;
     if (control.Organization is null) return Program.WorkerStoreUnavailable();
-    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, context.RequestAborted)); }
+    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, request.ImageDigest, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("PlanRemoteWorkerEnrollment").WithTags("Remote workers");
 
@@ -707,6 +707,77 @@ app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHo
     .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+// Owner approval is the durable freeze of one hire against one verified profile
+// build. It creates the managed employee and runtime binding from that freeze,
+// commits the request to Provisioning, then queues the idempotent remote workflow.
+// Worker control must be
+// enabled with a usable configuration because the frozen selection is only
+// meaningful when the controller can actually consume it, and the requested
+// resources must sit inside the controller-wide ceilings.
+app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlHost host, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, HVO.AgentControl.RemoteWorker.HireProvisioningHostedService provisioning, string id, HVO.AgentControl.Organization.HireRequestApprove request) =>
+{
+    if (!Program.IsValidHireRequestId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request id.", detail: "A bounded stable hire request id is required.");
+    if (Program.RejectCrossOrigin(context, "Hire request approval") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no approval was recorded.");
+    try
+    {
+        var current = store.GetHireRequest(id);
+        if (current is null)
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+        if (current.CpuLimit > workerOptions.CpuLimit)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested CPU limit exceeds the controller ceiling.");
+        if ((long)current.MemoryLimitMiB * 1024 * 1024 > workerOptions.MemoryBytes)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested memory limit exceeds the controller ceiling.");
+        if (current.PidsLimit > workerOptions.PidsLimit)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested PID limit exceeds the controller ceiling.");
+        // The approval identity is host-derived, never taken from the request
+        // body, so a caller cannot assert an arbitrary owner identity.
+        var approved = store.ApproveHireRequest(id, request, Program.HireApprovalIdentity);
+        store.CreateManagedEmployeeFromHire(approved.Id);
+        var queued = store.GetHireRequest(approved.Id) ?? approved;
+        if (queued.State == HVO.AgentControl.Organization.HireRequestStates.Approved)
+            queued = store.TransitionHireRequestState(approved.Id, queued.Revision, HVO.AgentControl.Organization.HireRequestStates.Approved, HVO.AgentControl.Organization.HireRequestStates.Provisioning, "Provisioning queued from owner approval.");
+        if (queued.State is HVO.AgentControl.Organization.HireRequestStates.Provisioning
+            or HVO.AgentControl.Organization.HireRequestStates.Orienting
+            or HVO.AgentControl.Organization.HireRequestStates.Interrupted
+            or HVO.AgentControl.Organization.HireRequestStates.Uncertain)
+            provisioning.Queue(approved.Id);
+        return Results.Ok(queued);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request approval conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire request unavailable.");
+    }
+})
+    .WithName("ApproveHireRequest").WithTags("Hiring")
+    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build.")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapGet("/api/profiles", (AcpControlHost host) =>
 {
     if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
@@ -865,6 +936,61 @@ app.MapPost("/api/profiles/{id}/retire", (HttpContext context, AcpControlHost ho
     .WithName("RetireContainerProfile").WithTags("Profiles")
     .WithSummary("Retires a profile so it cannot receive new revisions or be selected for new approvals. Existing revisions remain readable.")
     .Produces<HVO.AgentControl.Organization.ContainerProfileSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/profiles/{id}/revisions/{revisionId}/builds", (AcpControlHost host, string id, string revisionId) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile or revision id.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        return Results.Ok(store.ListProfileBuilds(revisionId));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException) { return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Profile builds unavailable."); }
+})
+    .WithName("ListProfileBuilds").WithTags("Profiles")
+    .WithSummary("Lists the per-host image builds of one immutable profile revision, newest first.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.ProfileBuildRecord>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator builds, string id, string revisionId, HVO.AgentControl.Organization.ProfileBuildRequest request) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile or revision id.");
+    if (Program.RejectCrossOrigin(context, "Profile image build") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        // Queue returns the verified build if one exists, else the live row (new,
+        // uncertain or interrupted); running a live row resumes or reconciles it.
+        var queued = builds.Queue(revisionId, request.HostId);
+        var result = HVO.AgentControl.Organization.ProfileBuildStates.IsLive(queued.State)
+            ? await builds.RunAsync(queued.Id, context.RequestAborted)
+            : queued;
+        return Results.Ok(result);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception) { return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid profile build.", detail: exception.Message); }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException) { return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found."); }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception) { return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Profile build conflicted.", detail: exception.Message); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("BuildProfileRevision").WithTags("Profiles")
+    .WithSummary("Builds and verifies the revision's image on one approved, ready execution host and records the result; called again for an uncertain or interrupted build it reconciles by tag instead of rebuilding. A verified digest joins that host's approved set; nothing is provisioned.")
+    .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status403Forbidden)
@@ -1562,6 +1688,13 @@ public partial class Program
     public const int MaximumContainerProfileIdLength = 64;
 
     /// <summary>
+    /// Fixed owner-approval identity recorded with every owner approval. It is
+    /// host-derived and deliberately not taken from the request body, so a caller
+    /// cannot assert an arbitrary owner identity into the immutable approval.
+    /// </summary>
+    public const string HireApprovalIdentity = "owner-basic-auth";
+
+    /// <summary>
     /// Exact, stable scope label reported by <c>/api/info</c> for the worker-control
     /// capability that <see cref="InfoResponse.WorkerControlImplemented"/> and
     /// <see cref="InfoResponse.WorkerControlOperationallyValidated"/> describe. It
@@ -1974,6 +2107,9 @@ public partial class Program
     public static bool IsValidContainerProfileId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfilePrefix, MaximumContainerProfileIdLength);
 
+    public static bool IsValidContainerProfileRevisionId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfileRevisionPrefix, MaximumContainerProfileIdLength);
+
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > maximumLength)
@@ -2024,7 +2160,7 @@ public partial class Program
     }
 }
 
-public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId);
+public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId, string? ImageDigest = null);
 public sealed record WorkerPromptRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt);
 public sealed record WorkerRecoveryRequest(string ObligationId, int ExpectedRevision);
 public sealed record WorkerRecoveryAcknowledgementRequest(int ExpectedRevision, string EvidenceHash, string Disposition);

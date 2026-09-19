@@ -1,16 +1,33 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
+using HVO.AgentControl.Organization;
 using Microsoft.Extensions.Options;
 
 namespace HVO.AgentControl.RemoteWorker;
 
-public enum RemoteDockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector }
+public enum RemoteDockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector }
 public sealed record RemoteCommand(string Executable, IReadOnlyList<string> Arguments, byte[]? StandardInput = null);
 public sealed record RemoteOperationResult(int ExitCode, string StandardOutput, string ErrorCategory);
-public sealed record WorkerResourceIdentity(string OrganizationId, string ControllerId, string HostId, string WorkerId, string BindingId, string OperationId)
+/// <summary>
+/// The exact label set every resource an enrollment owns must carry. A worker
+/// provisioned from a verified profile build additionally carries
+/// <c>agentcontrol.profile</c> (the immutable revision id); a base-image
+/// enrollment carries exactly the pre-profile six labels, so the resource label
+/// hashes of existing enrollments are unchanged and their ownership checks
+/// still match.
+/// </summary>
+public sealed record WorkerResourceIdentity(string OrganizationId, string ControllerId, string HostId, string WorkerId, string BindingId, string OperationId, string? ProfileRevisionId = null)
 {
-    public IReadOnlyDictionary<string, string> Labels => new Dictionary<string, string>(StringComparer.Ordinal) { ["agentcontrol.generation"] = "2", ["agentcontrol.owner"] = $"{OrganizationId}/{ControllerId}", ["agentcontrol.host"] = HostId, ["agentcontrol.worker"] = WorkerId, ["agentcontrol.binding"] = BindingId, ["agentcontrol.operation"] = OperationId };
+    public IReadOnlyDictionary<string, string> Labels
+    {
+        get
+        {
+            var labels = new Dictionary<string, string>(StringComparer.Ordinal) { ["agentcontrol.generation"] = "2", ["agentcontrol.owner"] = $"{OrganizationId}/{ControllerId}", ["agentcontrol.host"] = HostId, ["agentcontrol.worker"] = WorkerId, ["agentcontrol.binding"] = BindingId, ["agentcontrol.operation"] = OperationId };
+            if (ProfileRevisionId is not null) labels["agentcontrol.profile"] = ProfileRevisionId;
+            return labels;
+        }
+    }
 }
 
 /// <summary>
@@ -22,7 +39,12 @@ public sealed record HostProbePayload(string InfoJson, string VersionJson, strin
 
 public sealed record VolumeCreateSpec(string Name, WorkerResourceIdentity Identity);
 public sealed record NamedVolumeMount(string Name, string ContainerPath, bool ReadOnly = false);
-public sealed record ContainerCreateSpec(string Name, string ImageDigest, string Platform, WorkerResourceIdentity Identity, IReadOnlyList<NamedVolumeMount> Volumes, long MemoryBytes, decimal CpuLimit, int PidsLimit);
+/// <summary>
+/// <paramref name="ApprovedDigests"/> is the host's approved set at the time the
+/// command is built: the configured base plus every verified profile build on
+/// that host. The command builder refuses any other digest.
+/// </summary>
+public sealed record ContainerCreateSpec(string Name, string ImageDigest, string Platform, WorkerResourceIdentity Identity, IReadOnlyList<NamedVolumeMount> Volumes, long MemoryBytes, decimal CpuLimit, int PidsLimit, IReadOnlyList<string>? ApprovedDigests = null, IReadOnlyDictionary<string, string>? EmployeeEnvironment = null);
 
 /// <summary>
 /// The ephemeral key-bootstrap container. It mounts only the control volume and
@@ -31,12 +53,23 @@ public sealed record ContainerCreateSpec(string Name, string ImageDigest, string
 /// </summary>
 public sealed record BootstrapSpec(string ControlVolumeName, string ImageDigest, string Platform, WorkerResourceIdentity Identity);
 
+/// <summary>
+/// One profile image build on one host: the exact base digest the generated
+/// Dockerfile extends (addressed through the controller-owned pin tag), the
+/// revision and context hash that label the result, and the tar context the
+/// build reads from standard input. Nothing else reaches the build: no build
+/// arguments, no secrets, no host paths, no network unless the profile's fixed
+/// recipes need apt.
+/// </summary>
+public sealed record ImageBuildSpec(string BaseImageDigest, string Platform, string ProfileRevisionId, string ContextHash, string ResultTag, bool NetworkRequired);
+
 public interface IRemoteWorkerOperations
 {
     Task<RemoteOperationResult> ExecuteAsync(ApprovedExecutionHost host, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken);
     Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken);
     Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken);
     Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken);
+    Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken);
     Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken);
 }
 
@@ -82,18 +115,74 @@ public static class RemoteWorkerCommandBuilder
             RemoteDockerOperation.Probe when tokens.Count == 0 => "docker system info --format '{{json .}}'",
             RemoteDockerOperation.VersionProbe when tokens.Count == 0 => "docker version --format '{{json .Server}}'",
             RemoteDockerOperation.StorageFree when tokens.Count == 1 => $"df -B1 --output=avail -- {QuoteAbsolutePath(tokens[0])}",
-            RemoteDockerOperation.ImageInspect when tokens.Count == 1 => $"docker image inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
+            RemoteDockerOperation.ImageInspect when tokens.Count == 1 => $"docker image inspect --format '{{{{json .}}}}' {QuoteImageReference(tokens[0])}",
+            // Pins the exact base digest under the controller-owned tag the generated
+            // Dockerfile's FROM names; BuildKit refuses an image id as a FROM source.
+            RemoteDockerOperation.ImageTag when tokens.Count == 2 => $"docker image tag {QuoteDigest(tokens[0])} {QuoteImageReference(tokens[1])}",
+            RemoteDockerOperation.ImageRemove when tokens.Count == 1 => $"docker image rm --no-prune {QuoteImageReference(tokens[0])}",
+            // Fixed post-build contract check. It runs the APPROVED BASE image (never
+            // the candidate) with the candidate's filesystem mounted read-only at
+            // /candidate, so no executable supplied by the candidate is ever run;
+            // the base's python3 walks the mount, hashes the contract artifacts and
+            // prints one JSON object. Tokens: candidate tag, base digest, platform.
+            RemoteDockerOperation.ImageVerify when tokens.Count == 3 => $"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --cap-add 'DAC_READ_SEARCH' --security-opt 'no-new-privileges' --pids-limit '32' --platform {QuotePlatform(tokens[2])} --mount {QuoteShell($"type=image,source={ValidatedImageReference(tokens[0])},target=/candidate,readonly")} --entrypoint '/usr/bin/python3' {QuoteDigest(tokens[1])} '-I' '-S' '/usr/local/bin/profile-image-verify'",
             RemoteDockerOperation.VolumeInspect when tokens.Count == 1 => $"docker volume inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerInspect when tokens.Count == 1 => $"docker container inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerStart when tokens.Count == 1 => $"docker container start {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerStop when tokens.Count == 1 => $"docker container stop --time 10 {QuoteResource(tokens[0])}",
             RemoteDockerOperation.VolumeRemove when tokens.Count == 1 => $"docker volume rm {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerRemove when tokens.Count == 1 => $"docker container rm {QuoteResource(tokens[0])}",
-            RemoteDockerOperation.Connector when tokens.Count == 1 => $"docker container exec -i --user '1101:1101' {QuoteResource(tokens[0])} '/usr/bin/dotnet' {QuoteShell(options.WorkerTarget)} '--worker-pipe'",
+            RemoteDockerOperation.Connector when tokens.Count == 1 => $"docker container exec -i --user '1101:1101' {FixedDotnetEnvironment()} {QuoteResource(tokens[0])} '/usr/bin/dotnet' {QuoteShell(options.WorkerTarget)} '--worker-pipe'",
             _ => throw new WorkerControlConfigurationException("Remote operation arguments or operation kind are invalid."),
         };
         return BuildSsh(host, options, remote, stdin);
     }
+
+    /// <summary>
+    /// <c>docker build</c> reading the deterministic tar context from standard
+    /// input. No build arguments, no cache-from, no secrets, no host context; the
+    /// base is addressed only through the pin tag, so <c>--pull=false</c> cannot
+    /// fetch anything, and <c>--network none</c> is used unless a fixed feature
+    /// recipe needs apt.
+    /// </summary>
+    public static RemoteCommand BuildImageBuild(ApprovedExecutionHost host, WorkerControlOptions options, ImageBuildSpec spec, byte[] contextTar)
+    {
+        if (!Digest.IsMatch(spec.BaseImageDigest) || !Digest.IsMatch(spec.ContextHash)) throw new WorkerControlConfigurationException("Image build digests must be exact sha256 values.");
+        if (!ProfileRevisionId.IsMatch(spec.ProfileRevisionId)) throw new WorkerControlConfigurationException("Image build profile revision id is invalid.");
+        ValidateImageReference(spec.ResultTag);
+        if (contextTar is not { Length: > 0 and <= MaximumContextBytes }) throw new WorkerControlConfigurationException("Image build context is empty or exceeds the fixed limit.");
+        var parts = new List<string>
+        {
+            "docker build", "--quiet", "--pull=false", "--no-cache",
+            "--network", QuoteShell(spec.NetworkRequired ? "default" : "none"),
+            "--platform", QuotePlatform(spec.Platform),
+            "--label", QuoteLabel(ProfileBuildContext.ProfileLabel, spec.ProfileRevisionId),
+            "--label", QuoteLabel(ProfileBuildContext.ContextHashLabel, spec.ContextHash),
+            "--label", QuoteLabel(ProfileBuildContext.BaseDigestLabel, spec.BaseImageDigest),
+            "--tag", QuoteImageReference(spec.ResultTag),
+            "-",
+        };
+        return BuildSsh(host, options, string.Join(' ', parts), contextTar);
+    }
+
+    public const int MaximumContextBytes = 256 * 1024;
+    private static readonly System.Text.RegularExpressions.Regex Digest = new("^sha256:[0-9a-f]{64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private static readonly System.Text.RegularExpressions.Regex ProfileRevisionId = new("^prev-[a-f0-9]{16}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    // Local repository:tag only: no registry host or path component, so a build can
+    // never be tagged into (or a FROM resolved from) anything but the host's own store.
+    private static readonly System.Text.RegularExpressions.Regex ImageReference = new("^agentcontrol-[a-z0-9-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    private static string QuoteDigest(string value) { if (!Digest.IsMatch(value)) throw new WorkerControlConfigurationException("Image digest is invalid."); return QuoteShell(value); }
+    private static string FixedDotnetEnvironment() => string.Join(' ', new[]
+    {
+        "HOME=/control", "PATH=/usr/bin:/bin", "DOTNET_ROOT=/usr/share/dotnet",
+        "DOTNET_STARTUP_HOOKS=", "DOTNET_ADDITIONAL_DEPS=", "DOTNET_SHARED_STORE=",
+        "LD_PRELOAD=", "LD_AUDIT=", "LD_LIBRARY_PATH=",
+    }.Select(value => "--env " + QuoteShell(value)));
+    private static string ValidatedImageReference(string value) { ValidateImageReference(value); return value; }
+    private static void ValidateImageReference(string value) { if (!ImageReference.IsMatch(value) || value.Length > 200) throw new WorkerControlConfigurationException("Image reference is invalid."); }
+    /// <summary>An exact digest or a controller-shaped <c>repository:tag</c> reference; never a registry path.</summary>
+    private static string QuoteImageReference(string value) { if (Digest.IsMatch(value)) return QuoteShell(value); ValidateImageReference(value); return QuoteShell(value); }
 
     public static RemoteCommand BuildVolumeCreate(ApprovedExecutionHost host, WorkerControlOptions options, VolumeCreateSpec spec)
     {
@@ -122,6 +211,15 @@ public static class RemoteWorkerCommandBuilder
             "--security-opt", "'no-new-privileges'",
             "--pids-limit", QuoteNumber(64),
             "--env", QuoteShell("WORKER_CONTROL_DIRECTORY=/control"),
+            "--env", QuoteShell("HOME=/control"),
+            "--env", QuoteShell("PATH=/usr/bin:/bin"),
+            "--env", QuoteShell("DOTNET_ROOT=/usr/share/dotnet"),
+            "--env", QuoteShell("DOTNET_STARTUP_HOOKS="),
+            "--env", QuoteShell("DOTNET_ADDITIONAL_DEPS="),
+            "--env", QuoteShell("DOTNET_SHARED_STORE="),
+            "--env", QuoteShell("LD_PRELOAD="),
+            "--env", QuoteShell("LD_AUDIT="),
+            "--env", QuoteShell("LD_LIBRARY_PATH="),
             "--mount", QuoteShell($"type=volume,src={spec.ControlVolumeName},dst=/control"),
             "--platform", QuotePlatform(spec.Platform),
             "--entrypoint", QuoteShell("/usr/bin/dotnet"),
@@ -135,15 +233,28 @@ public static class RemoteWorkerCommandBuilder
 
     public static RemoteCommand BuildContainerCreate(ApprovedExecutionHost host, WorkerControlOptions options, ContainerCreateSpec spec)
     {
-        RequireApprovedImage(options, spec.ImageDigest, spec.Platform);
-        if (spec.MemoryBytes != options.MemoryBytes || spec.CpuLimit != options.CpuLimit || spec.PidsLimit != options.PidsLimit) throw new WorkerControlConfigurationException("Container resource limits differ from controller policy.");
+        RequireApprovedImage(options, spec.ImageDigest, spec.Platform, spec.ApprovedDigests);
+        // A managed enrollment carries owner-frozen limits that may be lower than the
+        // global policy, so the guard is positive and bounded by the global ceilings
+        // rather than requiring equality. The exact request bounds were already
+        // enforced when the hire was approved and frozen in the store.
+        if (spec.MemoryBytes <= 0 || spec.MemoryBytes > options.MemoryBytes
+            || spec.CpuLimit <= 0 || spec.CpuLimit > options.CpuLimit
+            || spec.PidsLimit <= 0 || spec.PidsLimit > options.PidsLimit)
+            throw new WorkerControlConfigurationException("Container resource limits must be positive and within controller policy.");
         if (spec.Volumes.Count != 4 || spec.Volumes.Select(x => x.ContainerPath).ToHashSet(StringComparer.Ordinal).SetEquals(ContainerPaths) is false) throw new WorkerControlConfigurationException("Container must use the four fixed named-volume mount points.");
         var parts = new List<string> { "docker container create", "--name", QuoteResource(spec.Name), "--network", QuoteShell(WorkerControlOptions.ContainerNetworkMode), "--read-only", "--cap-drop", "'ALL'", "--cap-add", "'CHOWN'", "--cap-add", "'SETUID'", "--cap-add", "'SETGID'", "--cap-add", "'KILL'", "--security-opt", "'no-new-privileges'", "--env", QuoteShell("WORKER_CONTROL_DIRECTORY=/control"), "--env", QuoteShell("WORKER_ID=" + spec.Identity.WorkerId), "--env", QuoteShell("WORKER_CONTROLLER_ID=" + spec.Identity.ControllerId), "--pids-limit", QuoteNumber(spec.PidsLimit), "--memory", QuoteNumber(spec.MemoryBytes), "--cpus", QuoteNumber(spec.CpuLimit), "--tmpfs", "'/tmp:rw,noexec,nosuid,nodev,size=64m'", "--tmpfs", "'/run:rw,noexec,nosuid,nodev,size=16m'", "--platform", QuotePlatform(spec.Platform) };
+        foreach (var variable in (spec.EmployeeEnvironment ?? new Dictionary<string, string>()).OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            try { ContainerProfileDefinition.ValidateEnvironmentEntry(variable.Key, variable.Value, "containerEnv"); }
+            catch (OrganizationValidationException exception) { throw new WorkerControlConfigurationException(exception.Message, exception); }
+            parts.Add("--env"); parts.Add(QuoteShell(variable.Key + "=" + variable.Value));
+        }
         foreach (var label in ExactLabels(spec.Identity)) { parts.Add("--label"); parts.Add(QuoteLabel(label.Key, label.Value)); }
         foreach (var mount in spec.Volumes.OrderBy(x => x.ContainerPath, StringComparer.Ordinal))
         {
             ValidateResource(mount.Name); if (!ContainerPaths.Contains(mount.ContainerPath)) throw new WorkerControlConfigurationException("Container mount path is not fixed.");
-            parts.Add("--mount"); parts.Add(QuoteShell($"type=volume,src={mount.Name},dst={mount.ContainerPath}{(mount.ReadOnly ? ",readonly" : string.Empty)}"));
+            parts.Add("--mount"); parts.Add(QuoteShell($"type=volume,src={mount.Name},dst={mount.ContainerPath},volume-nocopy{(mount.ReadOnly ? ",readonly" : string.Empty)}"));
         }
         parts.Add(QuoteShell(spec.ImageDigest));
         return BuildSsh(host, options, string.Join(' ', parts), null);
@@ -162,9 +273,18 @@ public static class RemoteWorkerCommandBuilder
         return QuoteShell(value);
     }
 
-    private static void RequireApprovedImage(WorkerControlOptions options, string digest, string platform)
+    /// <summary>
+    /// The bootstrap always runs the configured base (it only writes the key). A
+    /// long-lived container may run the base or any digest in the host's approved
+    /// set, which is the base plus verified profile builds on that host; the set
+    /// is supplied by the caller from the store and every entry must itself be an
+    /// exact digest.
+    /// </summary>
+    private static void RequireApprovedImage(WorkerControlOptions options, string digest, string platform, IReadOnlyList<string>? approvedDigests = null)
     {
-        if (!System.Text.RegularExpressions.Regex.IsMatch(digest, "^sha256:[0-9a-f]{64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) || digest != options.ApprovedImageDigest) throw new WorkerControlConfigurationException("Container image must be the exact approved digest.");
+        if (!Digest.IsMatch(digest)) throw new WorkerControlConfigurationException("Container image must be an exact sha256 digest.");
+        var approved = digest == options.ApprovedImageDigest || (approvedDigests is not null && approvedDigests.All(Digest.IsMatch) && approvedDigests.Contains(digest, StringComparer.Ordinal));
+        if (!approved) throw new WorkerControlConfigurationException("Container image must be the exact approved base digest or a verified profile build digest for this host.");
         if (platform != options.ApprovedImagePlatform) throw new WorkerControlConfigurationException("Container platform differs from controller policy.");
     }
 
@@ -176,7 +296,8 @@ public static class RemoteWorkerCommandBuilder
 
     private static IEnumerable<KeyValuePair<string, string>> ExactLabels(WorkerResourceIdentity identity)
     {
-        if (identity.Labels.Count != 6) throw new WorkerControlConfigurationException("Resource label set is invalid.");
+        if (identity.Labels.Count != (identity.ProfileRevisionId is null ? 6 : 7)) throw new WorkerControlConfigurationException("Resource label set is invalid.");
+        if (identity.ProfileRevisionId is not null && !ProfileRevisionId.IsMatch(identity.ProfileRevisionId)) throw new WorkerControlConfigurationException("Resource profile label is invalid.");
         foreach (var label in identity.Labels.OrderBy(x => x.Key, StringComparer.Ordinal)) { if (!Identifier.IsMatch(label.Value.Replace("/", ":", StringComparison.Ordinal))) throw new WorkerControlConfigurationException("Resource label value is invalid."); yield return label; }
     }
     private static string QuoteResource(string value) { ValidateResource(value); return QuoteShell(value); }
@@ -201,6 +322,7 @@ public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions>
     public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildVolumeCreate(host, _options, specification), RemoteDockerOperation.VolumeCreate, cancellationToken);
     public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildContainerCreate(host, _options, specification), RemoteDockerOperation.ContainerCreate, cancellationToken);
     public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildBootstrap(host, _options, specification, standardInput), RemoteDockerOperation.Bootstrap, cancellationToken);
+    public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => RunAsync(host, RemoteWorkerCommandBuilder.BuildImageBuild(host, _options, specification, contextTar), RemoteDockerOperation.ImageBuild, cancellationToken);
 
     /// <summary>
     /// Runs the fixed probe sequence and returns only what the host actually
@@ -224,7 +346,7 @@ public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions>
 
     private async Task<RemoteOperationResult> RunAsync(ApprovedExecutionHost host, RemoteCommand command, RemoteDockerOperation operation, CancellationToken cancellationToken)
     {
-        EnsureApproved(host); using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); timeout.CancelAfter(TimeSpan.FromSeconds(_options.OperationTimeoutSeconds));
+        EnsureApproved(host); using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); timeout.CancelAfter(TimeSpan.FromSeconds(operation is RemoteDockerOperation.ImageBuild or RemoteDockerOperation.ImageVerify ? _options.ImageBuildTimeoutSeconds : _options.OperationTimeoutSeconds));
         using var process = Start(command);
         try
         {
@@ -263,7 +385,7 @@ public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions>
         {
             RemoteDockerOperation.ContainerInspect => "no such container",
             RemoteDockerOperation.VolumeInspect => "no such volume",
-            RemoteDockerOperation.ImageInspect => "no such image",
+            RemoteDockerOperation.ImageInspect or RemoteDockerOperation.ImageRemove or RemoteDockerOperation.ImageTag => "no such image",
             _ => null,
         };
         if (expected is null) return "remote-command-failed";
