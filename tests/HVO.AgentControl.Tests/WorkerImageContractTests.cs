@@ -330,6 +330,14 @@ public sealed class WorkerImageContractTests
                 ("app-owner", "RUN chown 1102:1102 /app/HVO.AgentControl.Worker.dll", "none"),
                 // Loader cache: ldconfig with an extra directory redirects resolution without touching ld.so.conf.
                 ("ldcache", "RUN mkdir -p /opt/evil && cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /opt/evil/libz.so.1 && ldconfig /opt/evil", "/etc/ld.so.cache differs"),
+                // Redirecting a base SONAME to an added file inside the pinned directory itself.
+                // Redirecting a base SONAME symlink to an added file inside the pinned directory
+                // (what a hostile ldconfig run would achieve in place): the symlink target changed.
+                ("ldcache-inplace", "RUN cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /usr/lib/x86_64-linux-gnu/libz-evil.so.1.3 && ln -sfn libz-evil.so.1.3 /usr/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib/x86_64-linux-gnu differs"),
+                // Directory metadata: a contract tree made world-writable is rejected even though every file is identical.
+                ("stdlib-dirmode", "RUN chmod 0777 /usr/lib/python3.12/json", "/usr/lib/python3.12 differs"),
+                ("app-dirmode", "RUN mkdir -p /app/sub && chmod 0777 /app/sub", "/app differs"),
+                ("libdir-mode", "RUN chmod 0777 /usr/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu differs"),
             };
             foreach (var (name, fragment, expect) in hostile)
             {

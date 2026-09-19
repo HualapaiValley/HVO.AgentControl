@@ -623,9 +623,11 @@ image. The owner accepted this design on 2026-09-18.
   library `/usr/lib/python3.12` and the loader/shared-library tree
   `/lib`, `/lib64`, `/usr/lib/<arch>-linux-gnu` — plus unchanged
   `/etc/ld.so.conf`, `/etc/ld.so.conf.d` and `/etc/nsswitch.conf`, an
-  `/etc/ld.so.cache` whose every entry (read with the base's `ldconfig`)
-  resolves inside the pinned multiarch directories (a recipe may regenerate the
-  cache by installing a library; `ldconfig /opt/evil` cannot), no
+  `/etc/ld.so.cache` (read with the base's `ldconfig`) in which every SONAME
+  the base resolves still has exactly the base's ordered entries, each pointing
+  at a file identical to the base's (a recipe may add SONAMEs by installing a
+  library; `ldconfig /opt/evil` prepending an entry for a base SONAME cannot
+  pass), directory uid/gid/mode preserved throughout every pinned tree, no
   `/etc/ld.so.preload`, no `python3` shadowing `/usr/bin` under `/usr/local`,
   no setuid/setgid files, no file capabilities (`security.capability` xattr)
   and no Docker socket path. The trailer restores metadata; the verifier proves
