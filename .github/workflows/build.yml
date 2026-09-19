@@ -1,6 +1,9 @@
 name: V2 CI
 
-# Pull-request and main-branch validation. This workflow never receives
+# Full qualification for the stable line: pushes to main and pull requests
+# targeting main (in practice the nightly promotion PR opened by
+# promote-main.yml from development/v1). Feature work runs the narrower
+# Development v1 gate (development-v1.yml). This workflow never receives
 # secrets and never publishes or pushes anything. Release publication lives in
 # release.yml and is manual-only.
 

@@ -442,10 +442,11 @@ persistence surface.
 ## Execution workflow
 
 A **development batch** is the dependency-ordered set of issues being delivered
-under an owner request. A **review cycle** is one independent reviewer pair on
-one PR's exact base/head. An authorized fourth review cycle is not a new batch
-or permission to carry deferred work indefinitely. Deferred issues enter the
-next development batch and must be assessed in that batch's relevant PR reviews.
+under an owner request. A **review round** is one review (initial `R0` or
+correction `R<n>`) of one PR's exact range under the
+[Development v1 review process](REVIEW-PROTOCOL.md); the level sets the round
+cap. Deferred findings enter the next development batch through their linked
+follow-up issues.
 
 1. Establish the starting point: inspect worktree changes, target/base SHA,
    issue prerequisites, open deferrals, recorded authorization and applicable CI.
@@ -472,16 +473,19 @@ next development batch and must be assessed in that batch's relevant PR reviews.
    update the blocked branch and revalidate/review the changed base/head. A
    pre-existing cause is not a reason to merge red. Do not call a fix complete
    based only on publication, local success or a previous head's green CI.
-5. Use the [review protocol](REVIEW-PROTOCOL.md). Keep the PR body current after
-   head/base changes and review/validation results: scope, current SHA pair,
-   checks, reviewer evidence, finding dispositions, deferrals and authorization.
-   Comments preserve history; the body is the current summary, not a stale plan.
+5. Use the [review process](REVIEW-PROTOCOL.md) and the
+   [walkthrough](runbooks/pull-request-walkthrough.md). Keep the PR body current
+   after head/base changes and review/validation results: scope, current SHA
+   pair, checks, finding dispositions and deferrals. Comments preserve history;
+   the body is the current summary, not a stale plan.
 6. After an authorized merge, verify the actual merge SHA and issue closure,
    ensure unfinished/deferred issues remain open, update original finding links
    when follow-ups truly finish, and reconcile local/remote branch state without
-   overwriting unrelated changes. Inspect the resulting main CI; investigate a
-   failure before relying on that baseline or deploying it. A pending run is not
-   a pass. Record the next dependency-ready issue and continue authorized work.
+   overwriting unrelated changes. Inspect the resulting `development/v1` push
+   run; investigate a failure before relying on that baseline. A pending run is
+   not a pass. Promotion to `main` is the nightly bot PR; deployments are taken
+   from `main`. Record the next dependency-ready issue and continue authorized
+   work.
 
 Adapt the batch to evidence, not convenience: fix blocking regressions first,
 carry approved deferrals first in the next batch, and parallelize only independent
@@ -494,39 +498,30 @@ request when the owner already authorized continuing the batch.
 
 ## Pull request process guardrails
 
-These bounds are agreed with the repository owner. They keep review and delivery
-predictable while the project is small.
+These bounds keep review and delivery predictable while the project is small.
+They summarize the [Development v1 review process](REVIEW-PROTOCOL.md); that
+document governs where they differ.
 
-- **Phase 1 reviewer selection.** Follow the [two-model protocol](REVIEW-PROTOCOL.md).
-  Two distinct randomly selected approved models, excluding the coordinator,
-  review independently; record verifiable selection and routing limits. The
-  pair counts as one cycle. Failed review/task models may be replaced from the
-  applicable approved list under the recorded replacement procedure; disclose
-  every replacement and preserve independence and partial-effect reconciliation.
-- **Independent review.** Review is performed by a party other than the
-  implementing agent (a separate agent/harness or a human), against an immutable
-  exact head SHA. A review result is valid only for the SHA it reviewed. PR #208
-  Round 1 baseline is `002e8261ad0f6f48dd2a55f8d6f82c5bee9f94c0` (`002e826`).
-- **Triage everything.** Disposition every review finding, including all owner
-  comments. Nothing is silently ignored.
-- **Evidence per thread.** Each fix is answered in its own thread with the
-  change, the validation that exercised it, and the exact head it applies to.
-  Resolve a thread only after the response is posted.
-- **Deferrals are explicit.** A finding may be deferred only with owner approval
-  and a linked follow-up issue describing reproduction, expected/actual
-  behavior, and acceptance criteria. Security, data-loss, acceptance,
-  failing-CI, and material-correctness findings are never deferrable.
-- **Bounded rounds.** At most three review rounds. After the third, pause and
-  ask the owner before starting a fourth; route remaining non-blocking findings
-  to one linked follow-up issue rather than looping.
+- **Independent review, distinct identity.** Review is performed by a session
+  other than the implementing one, against an immutable exact range, and posted
+  as `hvo-agentcontrol[bot]` through the `AgentControl` workflow so the record
+  is attributable to an identity distinct from the implementer.
+- **Levels bound rounds.** Mechanical (1), Standard (1 + 2 corrections), Deep
+  (1 + 3 corrections). An exceptional focused review is allowed only for a
+  CI-discovered code defect, a late security/data-loss defect or a material
+  base-sync interaction, with the reason recorded.
+- **Triage everything.** Every finding is a thread with a stable ID and a
+  severity; every one gets a verified terminal disposition. Nothing is silently
+  ignored.
+- **Deferrals are explicit.** Only the issue owner defers, only Medium and below,
+  only to a linked follow-up issue that records the source evidence and residual
+  risk. Critical and High are never deferred.
 - **CI green is necessary, not sufficient.** Required checks must pass on the
-  exact reviewed head, but a green run does not by itself authorize merge;
-  unresolved threads, stale review SHAs, or unsynchronized bases still block.
-- **Owner-authorized merge only.** Do not auto-merge. Merge only when the owner
-  explicitly authorizes it. Merging never triggers a release; releases are a
-  separate manual action.
-- Do not amend or force-push a reviewed head. Add new commits so the reviewed
-  range stays auditable.
+  exact reviewed head, but unresolved threads, a stale reviewed SHA or an
+  unsynchronized base still block. Do not post a converged verdict before the
+  checks have run.
+- **Squash into `development/v1`; merge commit into `main`.** Do not amend or
+  force-push a reviewed head. Merging never triggers a release or a deployment.
 
 ## Notes for agents
 

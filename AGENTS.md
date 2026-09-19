@@ -123,47 +123,43 @@ credentials, destructive actions or review-cycle exceptions to avoid a pause.
 
 ## Pull request process
 
-Phase 1 uses independent reviewers on randomly selected approved policy lanes,
-excluding the coordinator model. Reviewer count follows the owner-approved
-practice: one independent reviewer for a routine change, two for a high-risk
-change, and one focused reviewer for a correction. Named aliases are requested
-policy lanes, not serving models; random independence is requested-lane
-independence only and fallback overlap must be disclosed. Verify explicit model
-selection and record provenance; generic Task agent types do not prove model
-identity. See [review protocol](docs/REVIEW-PROTOCOL.md). The reviewer set is one
-review cycle, with a maximum of three cycles before owner direction. No silent
-model fallback.
-The owner-approved pool uses Fable 5.1 instead of Fable 5. Failed review/task
-models may be replaced from the applicable approved list under the protocol;
-record the failure/replacement and reconcile partial task effects before retry.
-Record and attest the same immutable merge-base/head pair for both reviewers.
-Mark owner-approved deferrals explicitly in the source thread with a follow-up
-issue number, keep the issue open with `status:deferred`, and carry it into the
-next development/review cycle. A resolved thread or merged PR is not a fixed
-deferred item.
+This repository uses the HualapaiValley development model: `development/v1`
+is the default daily-integration branch, `main` is the stable line that moves
+only by the nightly promotion PR, and every feature PR gets an independent
+review posted as `hvo-agentcontrol[bot]` with one resolvable thread per
+finding. This is the process for changes **to this repository**; it is not the
+managed-employee review the AgentControl product implements.
 
-Keep changes focused and one issue per branch/PR. Review is independent of the
-implementer and bound to an exact head SHA; PR #208 Round 1 baseline is
-`002e826`. Triage every finding, including all owner comments, and answer each
-fix in its own thread with the change, the validation that exercised it, and the
-exact head it applies to. Defer a finding only with owner approval and a linked
-follow-up issue. Before completion of an authorized fourth review cycle,
-security, data-loss, acceptance, failing-CI and material-correctness findings
-are not deferrable. After cycle four, the owner may grant a per-finding exception
-that converts a critical or material finding which does not block build, required
-CI, migration safety or repository integrity from a merge blocker into a release
-blocker. Record the exception in the original thread, link a dedicated open
-issue carrying `status:deferred` and `status:release-blocker`, list it in the PR
-and release checklist, and resolve the thread only as **Deferred, not fixed**.
-No tag, registry publication, release, deployment, live migration or live
-enrollment is authorized while that release blocker remains open and
-independently unverified. The exception is never blanket authorization for other
-findings or PRs. Allow at most three review rounds, then pause and ask the owner
-before a fourth; every later cycle also requires explicit owner authorization.
-CI must be green on the exact reviewed head, but green CI is necessary, not
-sufficient. Do not amend or force-push a reviewed head. Merge only when the
-owner explicitly authorizes it; never auto-merge, and never treat a merge as a
-release.
+- Rulebook: [docs/REVIEW-PROTOCOL.md](docs/REVIEW-PROTOCOL.md) (levels
+  Mechanical/Standard/Deep and their round caps, finding lifecycle
+  `OPEN -> CORRECTED -> VERIFIED_CORRECTED -> resolved`, convergence rules).
+- Procedure with commands: [docs/runbooks/pull-request-walkthrough.md](docs/runbooks/pull-request-walkthrough.md).
+- Landing page and CI shape: [docs/development-v1.md](docs/development-v1.md).
+
+Non-negotiables an agent must keep:
+
+- Claim the issue before editing (`workflow:in-progress`, a `review:*` level
+  label, a CLAIM comment). One issue per branch/PR; branch from
+  `development/v1` and target it. Never push to `main`.
+- The implementer and the independent reviewer are different sessions. The
+  reviewer never edits the branch; the implementer never posts `VERIFIED_*`.
+  Review text is never committed to the PR branch: the parent review, each
+  finding thread and each `VERIFIED_*` reply are dispatched through
+  `agentcontrol.yml` (`post-review`, `post-finding`, `reply-thread`) bound to
+  the exact head SHA, and posted as `hvo-agentcontrol[bot]`.
+- Every finding is a thread with a stable `F<n>` ID and a severity. Critical
+  and High are never deferred; Medium is deferred only by the issue owner to a
+  linked follow-up issue. The reviewer posts the `VERIFIED_*` disposition; the
+  operator resolves the thread. Nothing is silently ignored.
+- A verdict is bound to an exact head; the bot refuses to post against a moved
+  PR. `APPROVE` on the head permits marking ready; the required checks then run
+  on that head; convergence is asserted only after they are green. Pushing
+  after `APPROVE` invalidates it. Do not amend or force-push a reviewed head.
+- Merge into `development/v1` only when converged, all threads resolved, the
+  head current, and the required Development v1 checks green; squash, and
+  close the issue with the merge SHA and "Not promoted to main". Promotion to
+  `main` is the nightly bot PR, merged by the operator with a merge commit;
+  merging is never a release or a deployment.
 
 ## Secrets and data
 
