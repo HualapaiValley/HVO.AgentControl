@@ -118,7 +118,7 @@ The implementer posts `CORRECTED`, `DEFERRED`, `NON_ACTIONABLE`, or `SUPERSEDED`
 ## Review
 
 Review ID: `PR-123-R0-abc1234`
-Mode: `Initial | Correction | Base Sync | Exceptional`
+Mode: `Initial | Correction | Base Sync | Exceptional | Convergence`
 Level: `Mechanical | Standard | Deep`
 Reviewer: `<identity>`
 Provider/model/effort: `<actual values or N/A>`
@@ -201,14 +201,16 @@ A PR is converged only when:
 - the latest verdict is `APPROVE`;
 - the round limit is respected.
 
-Post one convergence summary after the required checks are green on the reviewed head (the `APPROVE` verdict, not convergence, is what permits marking the PR ready):
+Post one convergence summary after the required checks are green on the reviewed head (the `APPROVE` verdict, not convergence, is what permits marking the PR ready). The summary is **not a review round**: it re-reads nothing, it restates the last verdict against the same head and adds the check evidence, so it does not count against the level's maximum and carries no `R<k>` number. It is posted by the reviewer as the bot through `post-review` with a header of the form `REVIEW PR-<n>-R<k>-<head8>` where `R<k>` is the **last reviewed round** (the header binds it to that round and head; it is the same claim, now evidenced), and `Mode: Convergence` in the body:
 
 ```markdown
 ## Review Converged
 
+Review ID: `PR-123-R2-abc1234` (convergence of round 2; not a new round)
+Mode: `Convergence`
 Reviewed head: `<sha>`
 Review level: `Standard`
-Rounds: `2 of 3 maximum`
+Rounds used: `2 of 3 maximum`
 Verified corrected: 2
 Verified deferred: 1
 Open: 0

@@ -84,8 +84,12 @@ head.
 America/Phoenix, `.github/workflows/promote-main.yml` compares the two branches
 and, when `development/v1` is ahead, opens or refreshes one promotion pull
 request as `hvo-agentcontrol[bot]`. It refuses to promote a head whose own
-Development v1 push run is not green, and it halts if `main` has commits that
-`development/v1` lacks, because that means the branch model was bypassed.
+Development v1 push run is not green. It tolerates exactly one kind of commit
+on `main` that `development/v1` lacks — its own earlier promotion merges (a
+two-parent merge whose merged head is on `development/v1` and whose first
+parent is on `development/v1` or is itself an earlier promotion merge) — and
+halts on anything else (a hotfix, a squash, a merge of another branch),
+because that means the branch model was bypassed.
 
 `V2 CI` on `main` is the qualification gate for the promotion pull request.
 Merging is the operator's decision, taken with a merge commit so every

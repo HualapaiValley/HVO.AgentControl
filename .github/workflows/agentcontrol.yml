@@ -182,19 +182,33 @@ jobs:
           printf '\n\n<sub>Posted by `hvo-agentcontrol[bot]` on dispatch by `%s`; head `%s`; run %s</sub>\n' "$ACTOR" "$HEAD" "$RUN_URL" >> "$RUNNER_TEMP/final.md"
           case "$OPERATION" in
             post-review)
-              url="$(gh api "repos/$REPOSITORY/issues/$PR/comments" -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+              created="$(gh api "repos/$REPOSITORY/issues/$PR/comments" -F body=@"$RUNNER_TEMP/final.md" --jq '"\(.id) \(.html_url)"')"
               ;;
             post-finding)
-              url="$(gh api "repos/$REPOSITORY/pulls/$PR/comments" \
+              created="$(gh api "repos/$REPOSITORY/pulls/$PR/comments" \
                 -f commit_id="$HEAD" -f path="$FILE_PATH" -F line="$LINE" -f side=RIGHT \
-                -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+                -F body=@"$RUNNER_TEMP/final.md" --jq '"\(.id) \(.html_url)"')"
               ;;
             reply-thread)
               # The thread must belong to this PR: the reply endpoint is PR-scoped, so a
               # comment id from another PR is a 404 rather than a cross-post.
-              url="$(gh api "repos/$REPOSITORY/pulls/$PR/comments/$COMMENT_ID/replies" \
-                -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+              created="$(gh api "repos/$REPOSITORY/pulls/$PR/comments/$COMMENT_ID/replies" \
+                -F body=@"$RUNNER_TEMP/final.md" --jq '"\(.id) \(.html_url)"')"
               ;;
           esac
-          [[ "$url" == https://* ]] || { echo "comment was not created: $url" >&2; exit 1; }
+          id="${created%% *}"; url="${created#* }"
+          [[ "$id" =~ ^[0-9]+$ && "$url" == https://* ]] || { echo "comment was not created: $created" >&2; exit 1; }
+          # Postcondition: the PR must still be at the bound head now that the comment
+          # exists. A push in the window between the pre-check and the write would leave a
+          # review bound to a head the PR no longer has; retract it rather than let a stale
+          # artifact stand. Issue comments and review comments have different delete routes.
+          after="$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)"
+          if [[ "$after" != "$HEAD" ]]; then
+            case "$OPERATION" in
+              post-review) gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" ;;
+              *) gh api -X DELETE "repos/$REPOSITORY/pulls/comments/$id" ;;
+            esac
+            printf '::error::PR #%s moved from %s to %s while posting; the comment %s was retracted. Re-review the current head.\n' "$PR" "$HEAD" "$after" "$url"
+            exit 1
+          fi
           printf '%s\n' "$url" | tee -a "$GITHUB_STEP_SUMMARY"

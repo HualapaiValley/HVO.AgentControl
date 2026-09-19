@@ -202,9 +202,14 @@ In this order, because each step depends on the last:
 ## 8. Known follow-ups
 
 - After a merge-commit promotion, `main` is one commit "ahead" of
-  `development/v1` (the merge commit). The promotion workflow tolerates exactly
-  that shape (a merge commit every parent of which is on `development/v1`,
-  SkyMonitor #914) and halts on anything else.
+  `development/v1` (the merge commit), and after the second promotion the
+  newer merge's first parent is the older merge, not a `development/v1`
+  commit. The promotion workflow walks the stray commits oldest-first and
+  tolerates a two-parent merge whose merged head is on `development/v1` and
+  whose first parent is on `development/v1` or an already-tolerated promotion
+  merge; anything else halts. (SkyMonitor's #914 requires *every* parent to be
+  on `development/v1`, which tolerates only the first promotion; that gap was
+  found in this repository's review and the fix should go back upstream.)
 - `resolveReviewThread` is refused for App installation tokens even on threads
   the App authored. The reviewer's `VERIFIED_*` reply is posted by the bot;
   the operator resolves the thread.

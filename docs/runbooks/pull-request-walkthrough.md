@@ -189,8 +189,10 @@ gh pr checks <n> --watch
 
 Marking ready starts the self-hosted Build and Unit check on exactly that head.
 When both required checks are green, the reviewer posts the convergence summary
-(via `post-review` as the next `R<k>` with `Mode: Convergence`), the operator
-labels it and merges:
+via `post-review`, reusing the **last reviewed round's** header
+(`REVIEW PR-<n>-R<k>-<head8>`, the same `R<k>` that gave the `APPROVE`) with
+`Mode: Convergence` in the body: it is not a new round and does not count
+against the level's maximum. The operator labels it and merges:
 
 ```bash
 gh pr edit <n> --add-label review:converged

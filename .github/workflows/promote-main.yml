@@ -63,25 +63,33 @@ jobs:
             echo "behind=$behind"
           } >> "$GITHUB_OUTPUT"
           if [[ "$behind" != 0 ]]; then
-            # main has commits v1 does not. After a merge-commit promotion that is expected:
-            # the merge commit itself is on main and not on v1, and every parent of it is on
-            # v1. Any other shape (a hotfix, a mis-targeted PR, a squash) is a bypass of the
-            # branch model and needs a person, so halt rather than open a PR that would carry
-            # it back into v1 by implication.
-            stray="$(gh api "repos/$REPOSITORY/compare/$SOURCE...$TARGET" --paginate --jq '.commits[]|"\(.sha) \(.parents|length) \(.parents|map(.sha)|join(" "))"')"
-            while read -r sha parent_count parents; do
+            # main has commits v1 does not. After merge-commit promotions that is expected:
+            # each promotion merge is on main and not on v1, its second parent (the promoted
+            # v1 head) is on v1, and its first parent is either on v1 (the first promotion)
+            # or the previous promotion merge. Walk the stray commits oldest-first so a chain
+            # of promotions is recognised; any other shape (a hotfix, a mis-targeted PR, a
+            # squash, a merge of some other branch) is a bypass of the branch model and
+            # needs a person, so halt rather than open a PR that would carry it back into
+            # v1 by implication. The compare API lists commits oldest-first.
+            stray="$(gh api "repos/$REPOSITORY/compare/$SOURCE...$TARGET" --paginate --jq '.commits[]|"\(.sha) \(.parents|map(.sha)|join(" "))"')"
+            tolerated=" "
+            on_source() { [[ "$(gh api "repos/$REPOSITORY/compare/$SOURCE...$1" --jq .ahead_by)" == 0 ]]; }
+            while read -r sha first second extra; do
               [[ -n "$sha" ]] || continue
-              if (( parent_count < 2 )); then
-                printf '::error::%s has non-merge commit %s that %s lacks; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
+              if [[ -z "$second" || -n "$extra" ]]; then
+                printf '::error::%s has commit %s that is not a two-parent merge and that %s lacks; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
                 exit 1
               fi
-              for parent in $parents; do
-                if [[ "$(gh api "repos/$REPOSITORY/compare/$SOURCE...$parent" --jq .ahead_by)" != 0 ]]; then
-                  printf '::error::%s has merge commit %s with parent %s that is not on %s; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "${parent:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
-                  exit 1
-                fi
-              done
-              printf 'Tolerating %s merge commit %s: every parent is on %s.\n' "$TARGET" "${sha:0:8}" "$SOURCE" | tee -a "$GITHUB_STEP_SUMMARY"
+              if ! on_source "$second"; then
+                printf '::error::%s has merge commit %s whose merged head %s is not on %s; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "${second:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
+                exit 1
+              fi
+              if [[ "$tolerated" != *" $first "* ]] && ! on_source "$first"; then
+                printf '::error::%s has merge commit %s whose first parent %s is neither on %s nor an earlier promotion merge; promotion halted until %s is synchronized into %s.\n' "$TARGET" "${sha:0:8}" "${first:0:8}" "$SOURCE" "$TARGET" "$SOURCE"
+                exit 1
+              fi
+              tolerated="$tolerated$sha "
+              printf 'Tolerating %s promotion merge %s (merged %s).\n' "$TARGET" "${sha:0:8}" "${second:0:8}" | tee -a "$GITHUB_STEP_SUMMARY"
             done <<< "$stray"
           fi
           if [[ "$ahead" == 0 ]]; then
