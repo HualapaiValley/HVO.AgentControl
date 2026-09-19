@@ -8,6 +8,7 @@ COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
 RUN dotnet publish src/HVO.AgentControl/HVO.AgentControl.csproj -c Release -o /app
 RUN dotnet publish src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj -c Release -o /worker-app
+RUN dotnet publish src/HVO.AgentControl.DockerHelper/HVO.AgentControl.DockerHelper.csproj -c Release -o /docker-helper-app
 
 # The privileged launcher is the container's only setuid component. It is built
 # from source in its own stage so the runtime image never carries a compiler,
@@ -140,6 +141,25 @@ RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
     && chmod 0755 /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify
 ENV LANG=C.UTF-8
 ENTRYPOINT ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"]
+
+# Privileged daemon helper: the only service with the Docker socket. Debian's
+# docker.io package supplies the CLI from the same signed distribution archive
+# used by the base image, avoiding an additional third-party apt trust root.
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS docker-helper
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && userdel ubuntu \
+    && { groupdel ubuntu 2>/dev/null || true; } \
+    && groupadd --gid 1002 dockerhelper \
+    && useradd --uid 1002 --gid 1002 --home-dir /nonexistent --shell /usr/sbin/nologin --no-create-home dockerhelper \
+    && mkdir -p /app /run/agentcontrol-docker-helper \
+    && chown 1002:1002 /run/agentcontrol-docker-helper \
+    && chmod 0750 /run/agentcontrol-docker-helper
+COPY --from=build /docker-helper-app/ /app/
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + && chmod -R go-w /app
+USER 1002:1002
+WORKDIR /app
+ENTRYPOINT ["dotnet", "HVO.AgentControl.DockerHelper.dll"]
 
 # Preserve the historical default build result for existing control-image jobs;
 # the worker remains available only through the explicit `--target worker`.

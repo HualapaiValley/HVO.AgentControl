@@ -1,6 +1,8 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/HVO.AgentControl/HVO.AgentControl.csproj" />
+    <Project Path="src/HVO.AgentControl.DockerGrammar/HVO.AgentControl.DockerGrammar.csproj" />
+    <Project Path="src/HVO.AgentControl.DockerHelper/HVO.AgentControl.DockerHelper.csproj" />
     <Project Path="src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj" />
     <Project Path="src/HVO.AgentControl.WorkerProtocol/HVO.AgentControl.WorkerProtocol.csproj" />
   </Folder>

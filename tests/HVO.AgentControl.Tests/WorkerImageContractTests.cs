@@ -30,7 +30,9 @@ public sealed class WorkerImageContractTests
         Assert.Contains("restart: \"no\"", compose);
         Assert.Contains("network_mode: none", compose);
         Assert.Contains("read_only: true", compose); Assert.Contains("pids_limit: 256", compose); Assert.Contains("mem_limit: 2g", compose); Assert.Contains("cpus: 2.0", compose);
-        Assert.DoesNotContain("docker.sock", compose, StringComparison.OrdinalIgnoreCase);
+        var control = compose[..compose.IndexOf("  docker-helper:", StringComparison.Ordinal)];
+        Assert.DoesNotContain("docker.sock", control, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("/var/run/docker.sock:/var/run/docker.sock", compose, StringComparison.Ordinal);
         Assert.DoesNotContain("DOCKER_HOST", compose, StringComparison.Ordinal);
         Assert.DoesNotContain("owner-password", compose[compose.IndexOf("worker-local:", StringComparison.Ordinal)..], StringComparison.Ordinal);
         Assert.Contains("operation == \"start\"", supervisor);

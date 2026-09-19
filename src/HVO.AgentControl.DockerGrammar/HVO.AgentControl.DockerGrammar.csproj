@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>HVO.AgentControl.DockerGrammar</AssemblyName>
+  </PropertyGroup>
+</Project>

@@ -31,6 +31,7 @@ services:
       - control-data:/data
       - control-private:/control-data
       - control-secrets:/run/agentcontrol-secrets:ro
+      - docker-helper-socket:/run/agentcontrol-docker-helper
     # Startup-only: CHOWN/DAC_OVERRIDE/FOWNER let the root entrypoint re-own the
     # pre-isolation volume (agent-owned directories and the UID 1000, mode 0600
     # legacy runtime state). SETPCAP lets it remove exactly those three from the
@@ -72,6 +73,31 @@ services:
       - "0.0.0.0:5054:8080"
     networks:
       - agents
+  docker-helper:
+    build:
+      context: .
+      target: docker-helper
+    environment:
+      AGENTCONTROL_DOCKER_HELPER_SOCKET: /run/agentcontrol-docker-helper/helper.sock
+      AGENTCONTROL_DOCKER_HELPER_CLIENT_UID: "1001"
+      AGENTCONTROL_DOCKER_HELPER_GID: "1001"
+      AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST: ${AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST:-}
+      AGENTCONTROL_DOCKER_HELPER_APPROVED_PLATFORM: ${AGENTCONTROL_DOCKER_HELPER_APPROVED_PLATFORM:-linux/amd64}
+      AGENTCONTROL_DOCKER_HELPER_MAX_MEMORY_BYTES: "2147483648"
+      AGENTCONTROL_DOCKER_HELPER_MAX_CPU: "2"
+      AGENTCONTROL_DOCKER_HELPER_MAX_PIDS: "256"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - docker-helper-socket:/run/agentcontrol-docker-helper
+    group_add:
+      - ${AGENTCONTROL_DOCKER_GID:-998}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    init: true
+    restart: unless-stopped
   worker-local:
     profiles: ["worker"]
     build:
@@ -117,6 +143,7 @@ networks:
 volumes:
   control-data:
   control-private:
+  docker-helper-socket:
   control-secrets:
     external: true
     name: agentcontrol-v2-secrets

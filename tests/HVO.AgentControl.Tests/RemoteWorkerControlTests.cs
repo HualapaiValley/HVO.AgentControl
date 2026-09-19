@@ -297,6 +297,47 @@ public sealed class RemoteWorkerControlTests
         File.Delete(hardlink); File.SetUnixFileMode(path, UnixFileMode.UserRead); Assert.Throws<InvalidOperationException>(() => ControllerPrivateFile.OpenRead(path, ControllerPrivateFile.EffectiveUid, ControllerFileModes.Private0600));
     }
 
+    /// <summary>
+    /// The SSH remote string is now rendered by quoting the shared grammar's argv
+    /// tokens rather than being assembled as a string. These are the exact strings
+    /// the pre-extraction builder produced, captured verbatim: any drift in the
+    /// grammar, in the token order, or in the quoting rule changes the command a
+    /// live host would execute and must fail here.
+    /// </summary>
+    [Fact]
+    public void ExtractedGrammarRendersTheExactPreviousRemoteCommandStrings()
+    {
+        var host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Port = 2222, Username = "docker", KnownHostsPath = "/control/known_hosts", IdentityFilePath = "/control/id" };
+        var digest = "sha256:" + new string('a', 64);
+        var options = new WorkerControlOptions { ControllerId = "controller-a", ApprovedImageDigest = digest };
+        var identity = new WorkerResourceIdentity("org-a", "controller-a", "host-a", "worker-a", "binding-a", "operation-a");
+        var volumes = new[] { new NamedVolumeMount("control-a", "/control"), new NamedVolumeMount("home-a", "/home/worker"), new NamedVolumeMount("workspace-a", "/workspace"), new NamedVolumeMount("session-a", "/session") };
+
+        Assert.Equal(
+            "docker container inspect --format '{{json .}}' 'agentcontrol-worker-a'",
+            RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ContainerInspect, ["agentcontrol-worker-a"]).Arguments[^1]);
+
+        Assert.Equal(
+            "docker container exec -i --user '1101:1101' --env 'HOME=/control' --env 'PATH=/usr/bin:/bin' --env 'DOTNET_ROOT=/usr/share/dotnet' --env 'DOTNET_STARTUP_HOOKS=' --env 'DOTNET_ADDITIONAL_DEPS=' --env 'DOTNET_SHARED_STORE=' --env 'LD_PRELOAD=' --env 'LD_AUDIT=' --env 'LD_LIBRARY_PATH=' 'agentcontrol-worker-a' '/usr/bin/dotnet' '/app/HVO.AgentControl.Worker.dll' '--worker-pipe'",
+            RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.Connector, ["agentcontrol-worker-a"]).Arguments[^1]);
+
+        Assert.Equal(
+            "docker volume create --label 'agentcontrol.binding=binding-a' --label 'agentcontrol.generation=2' --label 'agentcontrol.host=host-a' --label 'agentcontrol.operation=operation-a' --label 'agentcontrol.owner=org-a/controller-a' --label 'agentcontrol.worker=worker-a' 'agentcontrol-control-a'",
+            RemoteWorkerCommandBuilder.BuildVolumeCreate(host, options, new VolumeCreateSpec("agentcontrol-control-a", identity)).Arguments[^1]);
+
+        Assert.Equal(
+            "docker container create --name 'worker-a' --network 'bridge' --read-only --cap-drop 'ALL' --cap-add 'CHOWN' --cap-add 'SETUID' --cap-add 'SETGID' --cap-add 'KILL' --security-opt 'no-new-privileges' --env 'WORKER_CONTROL_DIRECTORY=/control' --env 'WORKER_ID=worker-a' --env 'WORKER_CONTROLLER_ID=controller-a' --pids-limit '256' --memory '2147483648' --cpus '2' --tmpfs '/tmp:rw,noexec,nosuid,nodev,size=64m' --tmpfs '/run:rw,noexec,nosuid,nodev,size=16m' --platform 'linux/amd64' --label 'agentcontrol.binding=binding-a' --label 'agentcontrol.generation=2' --label 'agentcontrol.host=host-a' --label 'agentcontrol.operation=operation-a' --label 'agentcontrol.owner=org-a/controller-a' --label 'agentcontrol.worker=worker-a' --mount 'type=volume,src=control-a,dst=/control,volume-nocopy' --mount 'type=volume,src=home-a,dst=/home/worker,volume-nocopy' --mount 'type=volume,src=session-a,dst=/session,volume-nocopy' --mount 'type=volume,src=workspace-a,dst=/workspace,volume-nocopy' '" + digest + "'",
+            RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("worker-a", digest, "linux/amd64", identity, volumes, options.MemoryBytes, options.CpuLimit, options.PidsLimit)).Arguments[^1]);
+
+        Assert.Equal(
+            "docker run --rm -i --user '1101:1101' --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '64' --env 'WORKER_CONTROL_DIRECTORY=/control' --env 'HOME=/control' --env 'PATH=/usr/bin:/bin' --env 'DOTNET_ROOT=/usr/share/dotnet' --env 'DOTNET_STARTUP_HOOKS=' --env 'DOTNET_ADDITIONAL_DEPS=' --env 'DOTNET_SHARED_STORE=' --env 'LD_PRELOAD=' --env 'LD_AUDIT=' --env 'LD_LIBRARY_PATH=' --mount 'type=volume,src=agentcontrol-control-a,dst=/control' --platform 'linux/amd64' --entrypoint '/usr/bin/dotnet' --label 'agentcontrol.binding=binding-a' --label 'agentcontrol.generation=2' --label 'agentcontrol.host=host-a' --label 'agentcontrol.operation=operation-a' --label 'agentcontrol.owner=org-a/controller-a' --label 'agentcontrol.worker=worker-a' '" + digest + "' '/app/HVO.AgentControl.Worker.dll' '--worker-bootstrap-key'",
+            RemoteWorkerCommandBuilder.BuildBootstrap(host, options, new BootstrapSpec("agentcontrol-control-a", digest, "linux/amd64", identity), [1, 2, 3]).Arguments[^1]);
+
+        Assert.Equal(
+            "docker build --quiet --pull=false --no-cache --network 'default' --platform 'linux/amd64' --label 'agentcontrol.profile=prev-0123456789abcdef' --label 'agentcontrol.context-hash=sha256:" + new string('b', 64) + "' --label 'agentcontrol.base-digest=" + digest + "' --tag 'agentcontrol-profile:prev-x' -",
+            RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new ImageBuildSpec(digest, "linux/amd64", "prev-0123456789abcdef", "sha256:" + new string('b', 64), "agentcontrol-profile:prev-x", true), [1, 2, 3]).Arguments[^1]);
+    }
+
     [Fact]
     public void RemoteShellTokensAreSingleQuotedAndRejectQuoteOrControl()
     {
