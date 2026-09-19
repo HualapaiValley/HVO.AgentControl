@@ -133,12 +133,13 @@ RUN ln -s /usr/local/lib/node_modules/opencode-ai/bin/opencode.exe /usr/local/bi
     && chmod 0700 /control /home/worker /workspace /session
 COPY --from=build /worker-app/ /app/
 COPY src/container/worker-supervisor.py /usr/local/bin/worker-supervisor
+COPY src/container/profile-image-verify.py /usr/local/bin/profile-image-verify
 RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
-    && chown -R root:root /app /usr/local/bin/worker-supervisor \
+    && chown -R root:root /app /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify \
     && chmod -R go-w /app \
-    && chmod 0755 /usr/local/bin/worker-supervisor
+    && chmod 0755 /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify
 ENV LANG=C.UTF-8
-ENTRYPOINT ["/usr/local/bin/worker-supervisor"]
+ENTRYPOINT ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"]
 
 # Preserve the historical default build result for existing control-image jobs;
 # the worker remains available only through the explicit `--target worker`.

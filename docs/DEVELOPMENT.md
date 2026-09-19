@@ -204,6 +204,15 @@ plants a setuid binary and proves the fixed trailer stripped it. It needs
 Docker and runs in the `Docker config and image` job (`AGENTCONTROL_DOCKER_REQUIRED=1`),
 not in the Development v1 gate.
 
+The #268 hardening tests additionally prove the production entrypoint is the
+absolute isolated Python vector (`-I -S`), image environment is base-identical
+(`ENV` is not permitted in fragments), structured `containerEnv` is applied
+only to employee children, candidate mountpoints are empty and runtime mounts
+use `volume-nocopy`, system/root OpenCode policy and `/etc/dotnet` are absent,
+CA trust and full xattr maps on pinned contract trees match the base, and the
+standalone dotnet connector/bootstrap commands clear loader and startup-hook
+environment variables.
+
 ### Worker bridge checks
 
 The worker is a separate build target and optional Compose profile; normal

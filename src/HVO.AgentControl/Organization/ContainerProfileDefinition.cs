@@ -101,7 +101,7 @@ public sealed partial class ContainerProfileDefinition
     /// <summary>Environment variable names a profile may set for the employee process.</summary>
     public static readonly IReadOnlyList<string> AllowedEnvironmentKeys =
     [
-        "TZ", "LANG", "LC_ALL", "EDITOR", "VISUAL",
+        "TZ", "LANG", "LC_ALL", "EDITOR", "VISUAL", "DOTNET_ROOT", "PATH",
         "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
         "DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_NOLOGO", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
         "NPM_CONFIG_UPDATE_NOTIFIER", "NPM_CONFIG_FUND", "PYTHONDONTWRITEBYTECODE", "PIP_DISABLE_PIP_VERSION_CHECK",
@@ -109,7 +109,7 @@ public sealed partial class ContainerProfileDefinition
 
     /// <summary>Dockerfile instructions permitted in a fragment after the base FROM line.</summary>
     public static readonly IReadOnlyList<string> AllowedDockerfileInstructions =
-        ["RUN", "ENV", "ARG", "LABEL", "WORKDIR"];
+        ["RUN", "ARG", "LABEL", "WORKDIR"];
 
     private static readonly HashSet<string> AllowedKeySet = new(AllowedKeys, StringComparer.Ordinal);
     private static readonly HashSet<string> AllowedFeatureSet = new(AllowedFeatures, StringComparer.Ordinal);
@@ -289,6 +289,10 @@ public sealed partial class ContainerProfileDefinition
                 throw new OrganizationValidationException($"'{key}.{variable.Name}' must be printable ASCII without control characters.");
             if (value.Contains("${", StringComparison.Ordinal) || value.Contains("$(", StringComparison.Ordinal))
                 throw new OrganizationValidationException($"'{key}.{variable.Name}' must not contain variable or command substitution.");
+            if (variable.Name == "PATH" && value != "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin")
+                throw new OrganizationValidationException($"'{key}.PATH' must be the fixed employee path.");
+            if (variable.Name == "DOTNET_ROOT" && value != "/opt/dotnet-sdk")
+                throw new OrganizationValidationException($"'{key}.DOTNET_ROOT' must be /opt/dotnet-sdk.");
         }
     }
 
@@ -410,8 +414,6 @@ public sealed partial class ContainerProfileDefinition
                 RejectRunHazards(arguments, lineNumber);
             if (instruction == "WORKDIR" && !(arguments is "/workspace" || arguments.StartsWith("/workspace/", StringComparison.Ordinal)))
                 throw new OrganizationValidationException($"Line {lineNumber}: WORKDIR must stay under /workspace.");
-            if (instruction == "ENV" && PathAssignment().IsMatch(arguments) && !arguments.Contains("$PATH", StringComparison.Ordinal) && !arguments.Contains("${PATH}", StringComparison.Ordinal))
-                throw new OrganizationValidationException($"Line {lineNumber}: replacing PATH is not allowed; append with ENV PATH=\"$PATH:...\".");
         }
 
         if (!sawFrom)
@@ -567,9 +569,6 @@ public sealed partial class ContainerProfileDefinition
 
     [GeneratedRegex("(?:^|\\s)--(?:mount|network|security)(?:=|\\s)", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex RunFlagPattern();
-
-    [GeneratedRegex("(?:^|\\s)PATH(?:=|\\s)", RegexOptions.CultureInvariant)]
-    private static partial Regex PathAssignment();
 
     [GeneratedRegex("<<-?\\s*['\"]?[A-Za-z_]", RegexOptions.CultureInvariant)]
     private static partial Regex HeredocPattern();

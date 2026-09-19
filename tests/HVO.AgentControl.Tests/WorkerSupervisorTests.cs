@@ -6,6 +6,32 @@ namespace HVO.AgentControl.Tests;
 public sealed class WorkerSupervisorTests
 {
     [Fact]
+    public void EmployeeEnvironmentOverlaysOnlyTheClosedProfileAllowlist()
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        var harness = """
+import importlib.util, os, sys
+spec=importlib.util.spec_from_file_location('worker_supervisor', sys.argv[1])
+s=importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
+keys=['TZ','LANG','LC_ALL','EDITOR','VISUAL','DOTNET_ROOT','PATH','GIT_AUTHOR_NAME','PYTHONDONTWRITEBYTECODE','LD_PRELOAD','PYTHONPATH','NODE_OPTIONS','DOTNET_STARTUP_HOOKS']
+old={k:os.environ.get(k) for k in keys}
+try:
+ for k in keys: os.environ[k]='candidate-'+k
+ env=s.employee_environment()
+ for k in ['TZ','LANG','LC_ALL','EDITOR','VISUAL','DOTNET_ROOT','PATH','GIT_AUTHOR_NAME','PYTHONDONTWRITEBYTECODE']:
+  assert env[k]=='candidate-'+k, (k,env.get(k))
+ for k in ['LD_PRELOAD','PYTHONPATH','NODE_OPTIONS','DOTNET_STARTUP_HOOKS']:
+  assert k not in env, (k,env.get(k))
+ assert env['HOME']=='/home/worker' and env['XDG_CONFIG_HOME']=='/home/worker/.config'
+finally:
+ for k,v in old.items():
+  if v is None: os.environ.pop(k,None)
+  else: os.environ[k]=v
+""";
+        RunHarness(harness);
+    }
+
+    [Fact]
     public void FixedSupervisorViewerOperationUsesExactAttachCredentialAndDescriptorContract()
     {
         if (!OperatingSystem.IsLinux()) return;
