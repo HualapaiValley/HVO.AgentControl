@@ -107,6 +107,9 @@ public sealed partial class ContainerProfileDefinition
         "NPM_CONFIG_UPDATE_NOTIFIER", "NPM_CONFIG_FUND", "PYTHONDONTWRITEBYTECODE", "PIP_DISABLE_PIP_VERSION_CHECK",
     ];
 
+    public const string EmployeeDotnetRoot = "/opt/dotnet-sdk";
+    public const string EmployeePath = "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin";
+
     /// <summary>Dockerfile instructions permitted in a fragment after the base FROM line.</summary>
     public static readonly IReadOnlyList<string> AllowedDockerfileInstructions =
         ["RUN", "ARG", "LABEL", "WORKDIR"];
@@ -280,20 +283,31 @@ public sealed partial class ContainerProfileDefinition
         RejectDuplicateKeys(environment, key);
         foreach (var variable in environment.EnumerateObject())
         {
-            if (!AllowedEnvironmentKeySet.Contains(variable.Name))
-                throw new OrganizationValidationException($"'{key}.{Sanitize(variable.Name)}' is not an allowed variable. Allowed: {string.Join(", ", AllowedEnvironmentKeys)}.");
             var value = RequireString(variable.Value, $"{key}.{variable.Name}");
-            if (value.Length > MaximumEnvironmentValueLength)
-                throw new OrganizationValidationException($"'{key}.{variable.Name}' must be at most {MaximumEnvironmentValueLength} characters.");
-            if (value.Any(c => char.IsControl(c) || c > 0x7E))
-                throw new OrganizationValidationException($"'{key}.{variable.Name}' must be printable ASCII without control characters.");
-            if (value.Contains("${", StringComparison.Ordinal) || value.Contains("$(", StringComparison.Ordinal))
-                throw new OrganizationValidationException($"'{key}.{variable.Name}' must not contain variable or command substitution.");
-            if (variable.Name == "PATH" && value != "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin")
-                throw new OrganizationValidationException($"'{key}.PATH' must be the fixed employee path.");
-            if (variable.Name == "DOTNET_ROOT" && value != "/opt/dotnet-sdk")
-                throw new OrganizationValidationException($"'{key}.DOTNET_ROOT' must be /opt/dotnet-sdk.");
+            ValidateEnvironmentEntry(variable.Name, value, key);
         }
+    }
+
+    /// <summary>
+    /// Shared final-boundary validation for one structured employee environment
+    /// entry. Profile parsing and container command construction both call this,
+    /// so an internal caller or corrupt store cannot bypass the fixed PATH/root
+    /// contract after the definition was originally accepted.
+    /// </summary>
+    public static void ValidateEnvironmentEntry(string name, string value, string scope = "containerEnv")
+    {
+        if (!AllowedEnvironmentKeySet.Contains(name))
+            throw new OrganizationValidationException($"'{scope}.{Sanitize(name)}' is not an allowed variable. Allowed: {string.Join(", ", AllowedEnvironmentKeys)}.");
+        if (value.Length > MaximumEnvironmentValueLength)
+            throw new OrganizationValidationException($"'{scope}.{name}' must be at most {MaximumEnvironmentValueLength} characters.");
+        if (value.Any(c => char.IsControl(c) || c > 0x7E))
+            throw new OrganizationValidationException($"'{scope}.{name}' must be printable ASCII without control characters.");
+        if (value.Contains("${", StringComparison.Ordinal) || value.Contains("$(", StringComparison.Ordinal))
+            throw new OrganizationValidationException($"'{scope}.{name}' must not contain variable or command substitution.");
+        if (name == "PATH" && value != EmployeePath)
+            throw new OrganizationValidationException($"'{scope}.PATH' must be the fixed employee path.");
+        if (name == "DOTNET_ROOT" && value != EmployeeDotnetRoot)
+            throw new OrganizationValidationException($"'{scope}.DOTNET_ROOT' must be {EmployeeDotnetRoot}.");
     }
 
     private static void ValidateCommand(JsonElement command, string key)

@@ -239,8 +239,8 @@ public static class RemoteWorkerCommandBuilder
         var parts = new List<string> { "docker container create", "--name", QuoteResource(spec.Name), "--network", QuoteShell(WorkerControlOptions.ContainerNetworkMode), "--read-only", "--cap-drop", "'ALL'", "--cap-add", "'CHOWN'", "--cap-add", "'SETUID'", "--cap-add", "'SETGID'", "--cap-add", "'KILL'", "--security-opt", "'no-new-privileges'", "--env", QuoteShell("WORKER_CONTROL_DIRECTORY=/control"), "--env", QuoteShell("WORKER_ID=" + spec.Identity.WorkerId), "--env", QuoteShell("WORKER_CONTROLLER_ID=" + spec.Identity.ControllerId), "--pids-limit", QuoteNumber(spec.PidsLimit), "--memory", QuoteNumber(spec.MemoryBytes), "--cpus", QuoteNumber(spec.CpuLimit), "--tmpfs", "'/tmp:rw,noexec,nosuid,nodev,size=64m'", "--tmpfs", "'/run:rw,noexec,nosuid,nodev,size=16m'", "--platform", QuotePlatform(spec.Platform) };
         foreach (var variable in (spec.EmployeeEnvironment ?? new Dictionary<string, string>()).OrderBy(x => x.Key, StringComparer.Ordinal))
         {
-            if (!ContainerProfileDefinition.AllowedEnvironmentKeys.Contains(variable.Key, StringComparer.Ordinal)) throw new WorkerControlConfigurationException("Container employee environment key is not approved.");
-            if (variable.Value.Length > ContainerProfileDefinition.MaximumEnvironmentValueLength || variable.Value.Any(c => char.IsControl(c) || c > 0x7e)) throw new WorkerControlConfigurationException("Container employee environment value is invalid.");
+            try { ContainerProfileDefinition.ValidateEnvironmentEntry(variable.Key, variable.Value, "containerEnv"); }
+            catch (OrganizationValidationException exception) { throw new WorkerControlConfigurationException(exception.Message, exception); }
             parts.Add("--env"); parts.Add(QuoteShell(variable.Key + "=" + variable.Value));
         }
         foreach (var label in ExactLabels(spec.Identity)) { parts.Add("--label"); parts.Add(QuoteLabel(label.Key, label.Value)); }

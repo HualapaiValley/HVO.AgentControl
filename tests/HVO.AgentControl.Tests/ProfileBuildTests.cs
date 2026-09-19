@@ -166,6 +166,8 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Contains("--env 'PATH=/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin'", create, StringComparison.Ordinal);
         Assert.Contains("volume-nocopy", create, StringComparison.Ordinal);
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, new Dictionary<string, string> { ["LD_PRELOAD"] = "/evil" })));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, new Dictionary<string, string> { ["PATH"] = "/workspace/bin" })));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, new Dictionary<string, string> { ["DOTNET_ROOT"] = "/workspace/runtime" })));
 
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildImageBuild(host, options, spec with { ResultTag = "evil; rm -rf /" }, tar));
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildImageBuild(host, options, spec with { ResultTag = "registry.example/x:y" }, tar));
