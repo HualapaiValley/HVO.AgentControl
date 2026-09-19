@@ -12,7 +12,7 @@
     <div data-profile-content hidden>
         <div class="detail-grid">
             <article><h2>Identity</h2><dl data-profile-identity></dl></article>
-            <article><h2>Current revision</h2><dl data-profile-current></dl><p class="control-note">Build and verification are recorded per revision by the profile build slice (#259); nothing here builds an image.</p></article>
+            <article><h2>Current revision</h2><dl data-profile-current></dl><p class="control-note">Builds are per execution host: a revision's image is built and contract-verified on one ready host, and only a verified digest can be provisioned on that host. Building never provisions an employee.</p></article>
         </div>
         <form class="panel-form" data-revision-form>
             <h2>New revision</h2>
@@ -20,6 +20,13 @@
             <label for="revision-definition">Definition (devcontainer subset)<textarea id="revision-definition" name="definition" required rows="12" spellcheck="false"></textarea></label>
             <label for="revision-fragment">Dockerfile fragment (only with <code>build</code>)<textarea id="revision-fragment" name="dockerfileFragment" rows="4" spellcheck="false"></textarea></label>
             <button class="btn btn-primary" type="submit" data-revision-submit>Create revision</button>
+        </form>
+        <form class="panel-form" data-build-form>
+            <h2>Build current revision</h2>
+            <label for="build-host">Execution host<select id="build-host" name="hostId" required></select></label>
+            <p class="control-note" data-no-build-hosts role="alert" hidden>No enabled, ready execution host is registered. Register and probe one under System before building.</p>
+            <button class="btn btn-primary" type="submit" data-build-submit disabled>Build and verify on host</button>
+            <p class="receipt" data-build-receipt role="status"></p>
         </form>
         <article class="department-roster"><h2>Revision history</h2><div class="request-list" data-profile-revisions></div></article>
     </div>

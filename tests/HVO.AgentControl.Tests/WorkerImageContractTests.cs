@@ -244,6 +244,163 @@ public sealed class WorkerImageContractTests
         }
     }
 
+    /// <summary>
+    /// The controller's own build path against the local daemon (#259): the
+    /// seeded generic-employee revision is rendered to its deterministic context,
+    /// the exact ImageTag / ImageBuild / ImageInspect / ImageVerify argv the
+    /// controller would send over SSH is executed locally, and the pure verifier
+    /// must accept the real result. A fragment that re-introduces a setuid file is
+    /// then proven to be rejected by the same path.
+    /// </summary>
+    [Fact]
+    public void RealProfileBuildProducesAVerifiableChildOfTheWorkerBase()
+    {
+        if (!Available.Value) return;
+        var baseDigest = ImageDigest(); var platform = Platform();
+        using var temp = new TempDirectory();
+        using var store = new HVO.AgentControl.Organization.OrganizationStore(Path.Combine(temp.Path, "control.db"));
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        var generic = store.GetContainerProfile(store.ListContainerProfiles().Single().Id)!.Revisions.Single();
+        var options = new HVO.AgentControl.RemoteWorker.WorkerControlOptions { ControllerId = "controller-contract", ApprovedImageDigest = baseDigest, ApprovedImagePlatform = platform };
+        var host = LocalHost();
+
+        var (tar, contextHash, dockerfile) = HVO.AgentControl.RemoteWorker.ProfileBuildContext.Render(generic, baseDigest, platform);
+        Assert.Contains("FROM " + HVO.AgentControl.RemoteWorker.ProfileBuildContext.PinTag(baseDigest) + "\n", dockerfile, StringComparison.Ordinal);
+        var tag = HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator.ResultTag(generic.Id, contextHash);
+        try
+        {
+            var pin = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageTag, [baseDigest, HVO.AgentControl.RemoteWorker.ProfileBuildContext.PinTag(baseDigest)])));
+            Assert.True(pin.ExitCode == 0, pin.Output);
+
+            var build = HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, generic.Id, contextHash, tag, NetworkRequired: true), tar);
+            var built = RunWithInput(LocalArguments(build), tar, 600_000);
+            Assert.True(built.ExitCode == 0, built.Output);
+
+            var inspect = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageInspect, [tag])));
+            var baseInspect = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageInspect, [baseDigest])));
+            Assert.True(inspect.ExitCode == 0 && baseInspect.ExitCode == 0, inspect.Output + baseInspect.Output);
+            var digest = HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckInspect(inspect.Output, baseInspect.Output, generic.Id, contextHash, baseDigest, platform);
+            Assert.Matches("^sha256:[0-9a-f]{64}$", digest);
+            Assert.NotEqual(baseDigest, digest);
+
+            var verify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [tag, baseDigest, platform])), null, 120_000);
+            Assert.True(verify.ExitCode == 0, verify.Output);
+            HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.Output);
+
+            // The generic profile's toolchain is really there, as the employee would see it.
+            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "export PATH=/usr/local/bin:/usr/bin:/bin; dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
+            Assert.True(tools.ExitCode == 0, tools.Output);
+
+            // Hostile fragments are built the same way and must be rejected by the same,
+            // image-independent verifier. The trailer strips setuid bits, but content
+            // replacement and file capabilities are only caught because the verifier
+            // runs in the BASE with the candidate mounted read-only and byte-compares
+            // the contract artifacts; a candidate's own python3 is never executed.
+            var hostile = new (string Name, string Fragment, string Expect)[]
+            {
+                ("setuid", "RUN cp /bin/sh /usr/local/bin/rootsh && chmod u+s /usr/local/bin/rootsh", "none"),
+                // Content replacement is what matters, so a copy of /bin/sh (a real
+                // executable the fragment already has) stands in for a forged binary.
+                ("python", "RUN cp /bin/sh /usr/bin/python3.12", "differs"),
+                ("python-shadow", "RUN cp /bin/sh /usr/local/bin/python3", "/lib/python-shadow differs"),
+                ("supervisor", "RUN cp /bin/sh /usr/local/bin/worker-supervisor", "/usr/local/bin/worker-supervisor differs"),
+                ("worker-dll", "RUN printf 'x' >> /app/HVO.AgentControl.Worker.dll", "/app differs"),
+                ("dotnet", "RUN cp /bin/sh /usr/share/dotnet/dotnet", "/usr/share/dotnet differs"),
+                ("opencode", "RUN rm /usr/local/bin/opencode && cp /bin/sh /usr/local/bin/opencode", "/usr/local/bin/opencode differs"),
+                ("preload", "RUN printf '/lib/evil.so\\n' > /etc/ld.so.preload", "/etc/ld.so.preload differs"),
+                ("filecap", "RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin && rm -rf /var/lib/apt/lists/* && cp /bin/sh /usr/local/bin/capsh2 && setcap cap_sys_admin+ep /usr/local/bin/capsh2", "capability"),
+                ("account", "RUN usermod -s /bin/bash bridge", "home or shell"),
+                // The interpreter launch chain and the loader/libraries beneath every contract binary.
+                ("env", "RUN cp /bin/sh /usr/bin/env", "/usr/bin/env differs"),
+                // Replacing /bin/sh breaks the trailer's own RUN, so the build itself fails closed.
+                ("sh", "RUN cp /usr/bin/env /usr/bin/dash.new && mv /usr/bin/dash.new /usr/bin/dash", "build-fails"),
+                ("libc", "RUN printf 'x' >> /usr/lib/x86_64-linux-gnu/libz.so.1.3", "/usr/lib/x86_64-linux-gnu differs"),
+                ("ld-conf", "RUN printf '/opt/evil\\n' > /etc/ld.so.conf.d/zz.conf", "/etc/ld.so.conf.d differs"),
+                // Re-pointing the loader path breaks every dynamic binary including the shell, so the build fails closed.
+                ("lib64", "RUN rm /lib64 && mkdir /lib64 && cp /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib64/", "build-fails"),
+                ("libdir", "RUN cp /usr/bin/env /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1.new && mv /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1.new /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1", "/usr/lib/x86_64-linux-gnu differs"),
+                // Metadata: an unreadable or non-executable contract artifact is as fatal as a replaced one.
+                ("env-mode", "RUN chmod 0644 /usr/bin/env", "/usr/bin/env differs"),
+                // The trailer's own `test -x /usr/bin/dotnet` fails the build for this one.
+                ("dotnet-mode", "RUN chmod 0600 /usr/share/dotnet/dotnet", "build-fails"),
+                ("node-mode", "RUN chmod 0600 /usr/local/bin/node", "/usr/local/bin/node differs"),
+                ("lib-mode", "RUN chmod 0600 /usr/lib/x86_64-linux-gnu/libexpat.so.1.9.1", "/usr/lib/x86_64-linux-gnu differs"),
+                ("stdlib-mode", "RUN chmod 0000 /usr/lib/python3.12/json/__init__.py", "/usr/lib/python3.12 differs"),
+                // /app ownership is restored by the trailer (chown -R root:root), so this one is genuinely clean.
+                ("app-owner", "RUN chown 1102:1102 /app/HVO.AgentControl.Worker.dll", "none"),
+                // Loader cache: ldconfig with an extra directory redirects resolution without touching ld.so.conf.
+                ("ldcache", "RUN mkdir -p /opt/evil && cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /opt/evil/libz.so.1 && ldconfig /opt/evil", "/etc/ld.so.cache differs"),
+                // Redirecting a base SONAME to an added file inside the pinned directory itself.
+                // Redirecting a base SONAME symlink to an added file inside the pinned directory
+                // (what a hostile ldconfig run would achieve in place): the symlink target changed.
+                // A hwcap variant of a base SONAME is preferred by the loader over the plain entry.
+                ("ldcache-hwcap", "RUN mkdir -p /opt/evil/glibc-hwcaps/x86-64-v2 && cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /opt/evil/glibc-hwcaps/x86-64-v2/libz.so.1 && ldconfig /opt/evil", "/etc/ld.so.cache differs"),
+                ("ldcache-inplace", "RUN cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /usr/lib/x86_64-linux-gnu/libz-evil.so.1.3 && ln -sfn libz-evil.so.1.3 /usr/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib/x86_64-linux-gnu differs"),
+                // Directory metadata: a contract tree made world-writable is rejected even though every file is identical.
+                ("stdlib-dirmode", "RUN chmod 0777 /usr/lib/python3.12/json", "/usr/lib/python3.12 differs"),
+                ("app-dirmode", "RUN mkdir -p /app/sub && chmod 0777 /app/sub", "/app differs"),
+                ("libdir-mode", "RUN chmod 0777 /usr/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu differs"),
+            };
+            foreach (var (name, fragment, expect) in hostile)
+            {
+                var profile = store.CreateContainerProfile(new("hostile-" + name, "hostile-" + name, "Hostile " + name, null, """{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\n" + fragment + "\n"), null);
+                var revision = store.GetContainerProfile(profile.Id)!.Revisions.Single();
+                var (hTar, hHash, _) = HVO.AgentControl.RemoteWorker.ProfileBuildContext.Render(revision, baseDigest, platform);
+                var hTag = HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator.ResultTag(revision.Id, hHash);
+                try
+                {
+                    // Fragments never get the network; the filecap case needs apt, so that one is
+                    // exercised with a controller-owned recipe's network grant only for the test.
+                    var hBuilt = RunWithInput(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildImageBuild(host, options, new(baseDigest, platform, revision.Id, hHash, hTag, NetworkRequired: name == "filecap"), hTar)), hTar, 600_000);
+                    if (expect == "build-fails")
+                    {
+                        Assert.NotEqual(0, hBuilt.ExitCode);
+                        Assert.Contains("did not complete successfully", hBuilt.Output, StringComparison.Ordinal);
+                        continue;
+                    }
+                    Assert.True(hBuilt.ExitCode == 0, name + ": " + hBuilt.Output);
+                    var hVerify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [hTag, baseDigest, platform])), null, 120_000);
+                    Assert.True(hVerify.ExitCode == 0, name + ": " + hVerify.Output);
+                    if (expect == "none")
+                    {
+                        // The trailer really undid the damage, so this one is clean and accepted.
+                        HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output);
+                        if (name == "setuid") Assert.Equal("755", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%a", "/usr/local/bin/rootsh"]).Output.Trim());
+                        if (name == "app-owner") Assert.Equal("0:0", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%u:%g", "/app/HVO.AgentControl.Worker.dll"]).Output.Trim());
+                    }
+                    else
+                    {
+                        var rejected = Assert.Throws<HVO.AgentControl.RemoteWorker.ImageContractException>(() => { try { HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output); } catch (HVO.AgentControl.RemoteWorker.ImageContractException) { throw; } catch { throw; } Assert.Fail("hostile fragment '" + name + "' was ACCEPTED; verify output: " + hVerify.Output); });
+                        Assert.Contains(expect, rejected.Message, StringComparison.Ordinal);
+                    }
+                }
+                finally { Run(["image", "rm", "-f", hTag]); }
+            }
+        }
+        finally
+        {
+            Run(["image", "rm", "-f", tag]);
+            Run(["image", "rm", "--no-prune", HVO.AgentControl.RemoteWorker.ProfileBuildContext.PinTag(baseDigest)]);
+        }
+    }
+
+    private static (int ExitCode, string Output) RunWithInput(string[] args, byte[] input, int timeout)
+    {
+        using var process = CreateProcess(args, null, redirectInput: true);
+        process.Start();
+        process.StandardInput.BaseStream.Write(input); process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
+        return (process.ExitCode, output);
+    }
+
+    private sealed class TempDirectory : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "agentcontrol-contract-" + Guid.NewGuid().ToString("N"));
+        public TempDirectory() => Directory.CreateDirectory(Path);
+        public void Dispose() { try { Directory.Delete(Path, true); } catch (IOException) { } }
+    }
+
     /// <summary>An approved-host stand-in whose SSH prefix is stripped for local execution.</summary>
     private static HVO.AgentControl.RemoteWorker.ApprovedExecutionHost LocalHost() => new()
     {

@@ -12,6 +12,7 @@ namespace HVO.AgentControl.RemoteWorker;
 /// </summary>
 internal sealed class WorkerConnectionHostedService(
     WorkerConnectionManager manager,
+    ProfileBuildCoordinator builds,
     IOptions<WorkerControlOptions> configured,
     ILogger<WorkerConnectionHostedService> logger) : BackgroundService
 {
@@ -35,6 +36,10 @@ internal sealed class WorkerConnectionHostedService(
 
         try
         {
+            // A build left building/verifying by a previous process is unknowable now;
+            // mark it uncertain so the next build request reconciles it by tag.
+            var interrupted = builds.ReconcileInterruptedOnStartup();
+            if (interrupted.Count > 0) logger.LogWarning("Marked {Count} interrupted profile build(s) uncertain for reconciliation: {Ids}", interrupted.Count, string.Join(", ", interrupted));
             await manager.ReconcileStartupAsync(stoppingToken).ConfigureAwait(false);
         }
         catch (OrganizationStoreException)

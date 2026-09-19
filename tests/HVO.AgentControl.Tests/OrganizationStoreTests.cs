@@ -162,7 +162,7 @@ public sealed class OrganizationStoreTests
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
         Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(obligation.Id, audit.ObligationId);
         }
 
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_obligations'"), StringComparison.Ordinal);
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var v4Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
@@ -230,7 +230,7 @@ public sealed class OrganizationStoreTests
         using (var migrated = Open(root))
             migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
 
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupHashFileName);
@@ -307,7 +307,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -356,7 +356,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -492,7 +492,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -809,11 +809,11 @@ public sealed class OrganizationStoreTests
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Contains("unexpected table shape", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("current authoritative schema-v8 backup or source", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("No schema-v8 backup is created automatically", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("schema-v7 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("lose container profiles recorded after migration", exception.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("Restore the verified schema-v7 backup", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("current authoritative schema-v9 backup or source", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("No schema-v9 backup is created automatically", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("schema-v8 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("lose profile builds recorded after migration", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restore the verified schema-v8 backup", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -860,7 +860,7 @@ public sealed class OrganizationStoreTests
             store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         }
 
-        ExecuteRaw(root.Path, "DELETE FROM permission_audit; DELETE FROM permission_requests; DELETE FROM permission_grants; DELETE FROM dispatch_holds; DELETE FROM orientation_evidence; DELETE FROM orientation_assignment_fragments; DELETE FROM orientation_assignments; DELETE FROM permission_restrictions; DELETE FROM permission_policies; DELETE FROM orientation_facts; DELETE FROM orientation_fragments; DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments; DROP TRIGGER container_profile_revisions_no_delete; DROP TRIGGER container_profiles_no_delete; DELETE FROM container_profile_revisions; DELETE FROM container_profiles; DELETE FROM organizations; CREATE TRIGGER container_profile_revisions_no_delete BEFORE DELETE ON container_profile_revisions BEGIN SELECT RAISE(ABORT, 'container profile revisions are never deleted'); END; CREATE TRIGGER container_profiles_no_delete BEFORE DELETE ON container_profiles BEGIN SELECT RAISE(ABORT, 'container profiles are retired, never deleted'); END;");
+        ExecuteRaw(root.Path, "DELETE FROM permission_audit; DELETE FROM permission_requests; DELETE FROM permission_grants; DELETE FROM dispatch_holds; DELETE FROM orientation_evidence; DELETE FROM orientation_assignment_fragments; DELETE FROM orientation_assignments; DELETE FROM permission_restrictions; DELETE FROM permission_policies; DELETE FROM orientation_facts; DELETE FROM orientation_fragments; DELETE FROM adoption_audit; DELETE FROM runtime_bindings; DELETE FROM acp_sessions; DELETE FROM employees; DELETE FROM roles; DELETE FROM departments; DROP TRIGGER profile_builds_no_delete; DELETE FROM profile_builds; DROP TRIGGER container_profile_revisions_no_delete; DROP TRIGGER container_profiles_no_delete; DELETE FROM container_profile_revisions; DELETE FROM container_profiles; DELETE FROM organizations; CREATE TRIGGER profile_builds_no_delete BEFORE DELETE ON profile_builds BEGIN SELECT RAISE(ABORT, 'profile builds are never deleted'); END; CREATE TRIGGER container_profile_revisions_no_delete BEFORE DELETE ON container_profile_revisions BEGIN SELECT RAISE(ABORT, 'container profile revisions are never deleted'); END; CREATE TRIGGER container_profiles_no_delete BEFORE DELETE ON container_profiles BEGIN SELECT RAISE(ABORT, 'container profiles are retired, never deleted'); END;");
         using var reopened = new OrganizationStore(root.Path, lockTimeout: TimeSpan.FromMilliseconds(200));
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
@@ -1370,7 +1370,7 @@ public sealed class OrganizationStoreTests
             Assert.Empty(migrated.ListHireRequests());
         }
 
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupHashFileName);
         Assert.True(File.Exists(backup));
@@ -1414,7 +1414,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("seed", Assert.Single(migrated.GetContainerProfile(profile.Id)!.Revisions).CreatedBy);
         }
 
-        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM hire_request_events WHERE hire_request_id = '{hireId}';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'container_profile_revision_id';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_list('hire_requests') WHERE \"table\" = 'container_profile_revisions';"));
@@ -1431,6 +1431,58 @@ public sealed class OrganizationStoreTests
         restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(retained, File.ReadAllBytes(backup));
         Assert.Single(restarted.ListContainerProfiles());
+    }
+
+    [Fact]
+    public void ExactSchemaV8MigratesToV9WithVerifiedCreateOnceBackupAndPreservesProfiles()
+    {
+        using var root = new TempStore();
+        string profileId;
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            profileId = store.CreateContainerProfile(new ContainerProfileCreate("v8-key", "kept", "Kept", null, """{"image":"agentcontrol-worker-base","name":"Kept"}""", null), null).Id;
+        }
+        DowngradeToCanonicalV8(root.Path);
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        var before = SnapshotCoreData(root.Path);
+
+        using (var migrated = Open(root))
+        {
+            migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            Assert.Equal(before, SnapshotCoreData(root.Path));
+            Assert.Equal(2, migrated.ListContainerProfiles().Count);
+            Assert.Single(migrated.GetContainerProfile(profileId)!.Revisions);
+            Assert.Empty(migrated.ListProfileBuilds());
+        }
+
+        Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_builds';"));
+        Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'profile_builds%';"));
+        var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV8BackupFileName);
+        var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV8BackupHashFileName);
+        Assert.True(File.Exists(backup));
+        AssertNoBackupSidecars(backup);
+        Assert.Equal(8, RawScalar(backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(0, RawScalar(backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'profile_builds';"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), File.ReadAllText(hash).Trim());
+        var retained = File.ReadAllBytes(backup);
+        using var restarted = Open(root);
+        restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(retained, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
+    public void UnknownSchemaV8ShapeFailsBeforeBackupOrMigration()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        DowngradeToCanonicalV8(root.Path);
+        ExecuteRaw(root.Path, "ALTER TABLE container_profiles ADD COLUMN unknown_v8_value TEXT;");
+        using var reopened = Open(root);
+        Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Equal(8, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV8BackupFileName)));
     }
 
     [Fact]
@@ -1541,6 +1593,12 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER profile_builds_identity_immutable;
+            DROP TRIGGER profile_builds_no_delete;
+            DROP TRIGGER profile_builds_no_replace;
+            DROP INDEX one_active_profile_build_per_revision_host;
+            DROP INDEX one_verified_profile_build_per_revision_host;
+            DROP TABLE profile_builds;
             DROP TRIGGER container_profile_revisions_immutable;
             DROP TRIGGER container_profile_revisions_no_delete;
             DROP TRIGGER container_profiles_no_delete;
@@ -1611,11 +1669,33 @@ public sealed class OrganizationStoreTests
             """);
     }
 
+    private static void DowngradeToCanonicalV8(string path)
+    {
+        ExecuteRaw(path,
+            """
+            PRAGMA foreign_keys = OFF;
+            DROP TRIGGER profile_builds_identity_immutable;
+            DROP TRIGGER profile_builds_no_delete;
+            DROP TRIGGER profile_builds_no_replace;
+            DROP INDEX one_active_profile_build_per_revision_host;
+            DROP INDEX one_verified_profile_build_per_revision_host;
+            DROP TABLE profile_builds;
+            UPDATE schema_version SET version = 8;
+            PRAGMA foreign_keys = ON;
+            """);
+    }
+
     private static void DowngradeToCanonicalV7(string path)
     {
         ExecuteRaw(path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER profile_builds_identity_immutable;
+            DROP TRIGGER profile_builds_no_delete;
+            DROP TRIGGER profile_builds_no_replace;
+            DROP INDEX one_active_profile_build_per_revision_host;
+            DROP INDEX one_verified_profile_build_per_revision_host;
+            DROP TABLE profile_builds;
             DROP TRIGGER container_profile_revisions_immutable;
             DROP TRIGGER container_profile_revisions_no_delete;
             DROP TRIGGER container_profiles_no_delete;
@@ -1676,6 +1756,12 @@ public sealed class OrganizationStoreTests
         ExecuteRaw(path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER profile_builds_identity_immutable;
+            DROP TRIGGER profile_builds_no_delete;
+            DROP TRIGGER profile_builds_no_replace;
+            DROP INDEX one_active_profile_build_per_revision_host;
+            DROP INDEX one_verified_profile_build_per_revision_host;
+            DROP TABLE profile_builds;
             DROP TRIGGER container_profile_revisions_immutable;
             DROP TRIGGER container_profile_revisions_no_delete;
             DROP TRIGGER container_profiles_no_delete;
@@ -1698,6 +1784,12 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER profile_builds_identity_immutable;
+            DROP TRIGGER profile_builds_no_delete;
+            DROP TRIGGER profile_builds_no_replace;
+            DROP INDEX one_active_profile_build_per_revision_host;
+            DROP INDEX one_verified_profile_build_per_revision_host;
+            DROP TABLE profile_builds;
             DROP TRIGGER container_profile_revisions_immutable;
             DROP TRIGGER container_profile_revisions_no_delete;
             DROP TRIGGER container_profiles_no_delete;
@@ -1722,6 +1814,12 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TRIGGER profile_builds_identity_immutable;
+            DROP TRIGGER profile_builds_no_delete;
+            DROP TRIGGER profile_builds_no_replace;
+            DROP INDEX one_active_profile_build_per_revision_host;
+            DROP INDEX one_verified_profile_build_per_revision_host;
+            DROP TABLE profile_builds;
             DROP TRIGGER container_profile_revisions_immutable;
             DROP TRIGGER container_profile_revisions_no_delete;
             DROP TRIGGER container_profiles_no_delete;

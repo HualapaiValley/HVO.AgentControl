@@ -92,12 +92,13 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 8 adds immutable container profiles and their revision chain and
-    /// seeds the <c>generic-employee</c> profile. Migration accepts only the exact
-    /// released schema-v7 signature and creates verified, immutable source
-    /// evidence before changing the authoritative store.
+    /// Schema 9 adds per-host profile image builds (additive only). Schema 8 added
+    /// immutable container profiles and their revision chain and seeded the
+    /// <c>generic-employee</c> profile. Each migration accepts only the exact
+    /// released signature of the previous version and creates verified, immutable
+    /// source evidence before changing the authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 8;
+    public const int CurrentSchemaVersion = 9;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -117,6 +118,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV6BackupHashFileName = "control.schema-v6.sha256";
     public const string SchemaV7BackupFileName = "control.schema-v7.db";
     public const string SchemaV7BackupHashFileName = "control.schema-v7.sha256";
+    public const string SchemaV8BackupFileName = "control.schema-v8.db";
+    public const string SchemaV8BackupHashFileName = "control.schema-v8.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -510,6 +513,9 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV8Statements =
         [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV8Statements, .. ContainerProfileImmutabilityV8Statements];
 
+    private static readonly string[] SchemaV9Statements =
+        [.. SchemaV8Statements, .. ProfileBuildSchemaV9Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -525,8 +531,11 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV7 =
         BuildExpectedSchema(SchemaV7Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV8 =
         BuildExpectedSchema(SchemaV8Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV9Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1515,6 +1524,17 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV7ToV8(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV8);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 8)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV8);
+            EnsureSchemaV8Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV8ToV9(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -1977,6 +1997,21 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV8Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 8, SchemaV8BackupFileName, SchemaV8BackupHashFileName, ExpectedSchemaV8);
+
+    private void MigrateV8ToV9(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in ProfileBuildSchemaV9Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 9 WHERE version = 8");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1988,7 +2023,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v7 file is pre-migration evidence only and restoring it would lose container profiles recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v8 file is pre-migration evidence only and restoring it would lose profile builds recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2130,7 +2165,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV8Statements)
+        foreach (var statement in SchemaV9Statements)
         {
             Execute(connection, transaction, statement);
         }

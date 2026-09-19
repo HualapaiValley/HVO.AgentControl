@@ -55,13 +55,13 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public void FreshSchemaIsV8AndCarriesRemoteWorkerHiringAndProfileTablesWithoutSeededEnrollment()
+    public void FreshSchemaIsV9AndCarriesRemoteWorkerHiringProfileAndBuildTablesWithoutSeededEnrollment()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(8L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
-        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "container_profiles", "container_profile_revisions" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
+        Assert.Equal(9L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "container_profiles", "container_profile_revisions", "profile_builds" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
     }
 
@@ -72,8 +72,9 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var trigger in new[] { "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
-            foreach (var table in new[] { "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
+            foreach (var index in new[] { "one_active_profile_build_per_revision_host", "one_verified_profile_build_per_revision_host" }) connection.Execute($"DROP INDEX {index}");
+            foreach (var trigger in new[] { "profile_builds_identity_immutable", "profile_builds_no_delete", "profile_builds_no_replace", "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
+            foreach (var table in new[] { "profile_builds", "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
             connection.Execute("UPDATE schema_version SET version=3");
         }
         var policyBefore = Raw(path, "SELECT version || ':' || revision || ':' || summary FROM permission_policies");
@@ -1476,6 +1477,52 @@ public sealed class RemoteWorkerControlTests
     }
 
     /// <summary>
+    /// A verified profile build on the host is a provisionable digest: the plan
+    /// freezes it, the bootstrap still runs the configured base (it only writes the
+    /// key), the long-lived container runs the profile image with the approved set
+    /// supplied to the command builder, and every resource carries the
+    /// <c>agentcontrol.profile</c> label. A digest verified on another host, a
+    /// rejected build, or an unknown digest is refused at plan time.
+    /// </summary>
+    [Fact]
+    public async Task ProvisioningFromAVerifiedProfileBuildFreezesTheDigestBootstrapsTheBaseAndLabelsTheProfile()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var profile = fixture.Store.ListContainerProfiles().Single();
+        var revision = fixture.Store.GetContainerProfile(profile.Id)!.Revisions.Single();
+        var built = "sha256:" + new string('9', 64);
+        var contextHash = "sha256:" + new string('8', 64);
+        var queued = fixture.Store.QueueProfileBuild(revision.Id, "host-a", fixture.Digest, "linux/amd64", contextHash, "agentcontrol-profile:x");
+        var b = fixture.Store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+        var v = fixture.Store.TransitionProfileBuild(b.Id, b.Revision, ProfileBuildStates.Verifying);
+        fixture.Store.TransitionProfileBuild(v.Id, v.Revision, ProfileBuildStates.Built, imageDigest: built, verified: true, evidenceHash: contextHash);
+
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote);
+        await Assert.ThrowsAsync<WorkerControlConfigurationException>(() => coordinator.PlanAsync(fixture.BindingId, "host-a", "sha256:" + new string('7', 64), CancellationToken.None));
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", built, CancellationToken.None);
+        Assert.Equal(built, enrollment.ExpectedImageDigest);
+        // Re-planning with the base now conflicts: the digest is frozen in the enrollment.
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => coordinator.PlanAsync(fixture.BindingId, "host-a", null, CancellationToken.None));
+
+        var enrolled = await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        Assert.Equal("enrolled", enrolled.LifecycleStatus);
+        var bootstrap = Assert.Single(remote.Bootstraps);
+        Assert.Equal(fixture.Digest, bootstrap.ImageDigest);
+        var container = Assert.Single(remote.Containers);
+        Assert.Equal(built, container.ImageDigest);
+        Assert.Contains(built, container.ApprovedDigests!);
+        Assert.Equal(revision.Id, container.Identity.ProfileRevisionId);
+        Assert.Equal(revision.Id, container.Identity.Labels["agentcontrol.profile"]);
+        Assert.Equal(7, container.Identity.Labels.Count);
+        Assert.Equal(revision.Id, bootstrap.Identity.ProfileRevisionId);
+        // Ownership checks accept the labelled resources and reject a resource missing the profile label.
+        RemoteWorkerCommandBuilder.RequireOwnedLabels(container.Identity.Labels, container.Identity);
+        var stripped = new Dictionary<string, string>(container.Identity.Labels); stripped.Remove("agentcontrol.profile");
+        Assert.Throws<ForeignResourceException>(() => RemoteWorkerCommandBuilder.RequireOwnedLabels(stripped, container.Identity));
+    }
+
+    /// <summary>
     /// Provisioning applies the control volume and the key bootstrap before the
     /// long-lived container is created or started.
     /// </summary>
@@ -1853,6 +1900,7 @@ public sealed class RemoteWorkerControlTests
         public Task<RemoteOperationResult> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> BuildImageAsync(ApprovedExecutionHost host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<HostProbePayload> ProbeHostAsync(ApprovedExecutionHost host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
@@ -1950,10 +1998,14 @@ public sealed class RemoteWorkerControlTests
             return Task.FromResult("volume-ref-" + spec.Name);
         }
 
+        public List<ContainerCreateSpec> Containers { get; } = [];
+        public List<BootstrapSpec> Bootstraps { get; } = [];
+
         public Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token)
         {
             Effects.Add("container:" + spec.Name);
             _labels[spec.Name] = spec.Identity.Labels;
+            Containers.Add(spec);
             return Task.FromResult("container-ref-" + spec.Name);
         }
 
@@ -1962,6 +2014,7 @@ public sealed class RemoteWorkerControlTests
             try
             {
                 Effects.Add("bootstrap:" + spec.ControlVolumeName);
+                Bootstraps.Add(spec);
                 BootstrapKeyIds.Add(HVO.AgentControl.Worker.WorkerProtocol.KeyId(key));
                 if (FailBootstrapAlways || (FailBootstrapOnce && Interlocked.Increment(ref _bootstrapAttempts) == 1)) throw new RemoteWorkerUnavailableException("injected bootstrap failure", transport: true);
                 return Task.CompletedTask;

@@ -523,7 +523,7 @@ Ready -> Degraded / Stopped / Orienting
   effects before continuing. No automatic retry of an uncertain create or tool.
 - Provisioning has no privileged authority until Section 6 is satisfied.
 
-### 10.1 Container profiles (#257, slice #258 implemented)
+### 10.1 Container profiles (#257; #258 profiles and #259 builds implemented)
 
 Every managed employee is built from a **container profile revision**: an
 immutable, content-addressed template that extends the approved worker base
@@ -572,18 +572,104 @@ image. The owner accepted this design on 2026-09-18.
 - The canonical form (compact JSON, ordinal-sorted keys, LF fragment) is what is
   hashed and stored, so key order and line endings never create a new revision.
 - The base is referenced symbolically. The concrete approved digest is pinned per
-  host when a revision is built (#259) and frozen again at hire approval (#260);
-  the revision itself stays immutable and hermetically validatable without
+  host when a revision is built and frozen again at hire approval (#260); the
+  revision itself stays immutable and hermetically validatable without
   deployment configuration.
+- **Builds are per (revision, host)** (`profile_builds`, schema v9, `pbld-<hex>`;
+  identity columns immutable, never deleted or replaced, at most one live and one
+  verified build per pair). The controller renders the revision to a
+  deterministic build context — one generated `Dockerfile` in a fixed-metadata
+  tar whose SHA-256 is the build's `context_hash` — and streams it to
+  `docker build -` on the approved host over the same pinned SSH path as
+  provisioning: `--pull=false --no-cache`, no build arguments, secrets, cache
+  sources or host context, `--network none` unless a **controller-owned recipe**
+  needs the network (a fragment never earns network access on its own),
+  labels `agentcontrol.profile`/`context-hash`/`base-digest`, a local
+  `agentcontrol-profile:<revision>-<hash12>` tag. BuildKit refuses an image id as
+  a `FROM`, so the exact base digest is first pinned under the controller-owned
+  `agentcontrol-worker-base:pin-<12hex>` tag on that host and the generated
+  Dockerfile names only that tag.
+- The generated Dockerfile is `FROM <pin>`, the owner's fragment (its own `FROM`
+  dropped), the devcontainer `features` rendered as **fixed recipes** per
+  allowlisted id and version (nothing is fetched from ghcr.io; the dotnet feature
+  installs the repository's pinned SDK side by side under `/opt/dotnet-sdk` with
+  Microsoft's checksum-pinned install script, leaving the worker's
+  `/usr/bin/dotnet` untouched), `containerEnv`
+  as `ENV`, lifecycle commands and `remoteEnv` recorded as labels (the supervisor
+  runs them as the employee; the build never executes them), and a fixed trailer
+  that re-strips setuid bits, re-owns `/app` and the supervisor to root, resets
+  the four private directories to their fixed owners and 0700, asserts the two
+  uids and the worker binaries, and restores the supervisor entrypoint. The
+  fragment runs before the trailer, so it cannot undo it.
+- A build becomes `built`/verified only after two independent checks over what
+  the host printed. `docker image inspect` must show the controller's three labels
+  for this revision and context, the supervisor entrypoint, no default user, no
+  exposed ports or anonymous volumes, the approved platform and a root filesystem
+  whose layers start with the approved base's. Then a fixed verification program
+  (a controller constant, carried base64 so the remote token has no quotes) runs
+  **in the approved base image** — never the candidate — with the candidate's
+  filesystem mounted read-only at `/candidate` (`--mount type=image`,
+  `--network none --read-only --cap-drop ALL`), so no executable supplied by a
+  fragment is ever run. It must report: the `bridge`/`employee` accounts with
+  uid/gid 1101/1102 and their fixed home and shell; the four directories 0700
+  with their owners; `/app` and the supervisor root-owned; **identical contract
+  artifacts in content and uid/gid/mode** (an unreadable or non-executable
+  artifact is rejected like a replaced one) — the launch chain `/usr/bin/env`, `/bin/sh`,
+  `/usr/bin/dash`, `/usr/bin/python3`, `/usr/bin/python3.12`; the payloads
+  `/usr/local/bin/worker-supervisor`, `/app`, `/usr/bin/dotnet`,
+  `/usr/share/dotnet`, `/usr/local/bin/node`,
+  `/usr/local/lib/node_modules/opencode-ai`, `/usr/local/bin/opencode`; and,
+  as *no base file altered or removed* (additions allowed), the Python standard
+  library `/usr/lib/python3.12` and the loader/shared-library tree
+  `/lib`, `/lib64`, `/usr/lib/<arch>-linux-gnu` — plus unchanged
+  `/etc/ld.so.conf`, `/etc/ld.so.conf.d` and `/etc/nsswitch.conf`, an
+  `/etc/ld.so.cache` (read with the base's `ldconfig`, keyed by bare SONAME so
+  hwcap/flags variants count as the same library) in which every SONAME the
+  base resolves still has exactly the base's ordered entries with their flags,
+  each pointing at a file identical to the base's (a recipe may add SONAMEs by
+  installing a library; `ldconfig /opt/evil` prepending a plain or hwcap entry
+  for a base SONAME cannot pass), directory uid/gid/mode preserved throughout
+  every pinned tree, no
+  `/etc/ld.so.preload`, no `python3` shadowing `/usr/bin` under `/usr/local`,
+  no setuid/setgid files, no file capabilities (`security.capability` xattr)
+  and no Docker socket path. The trailer restores metadata; the verifier proves
+  content, because a fragment runs as root before the trailer and could
+  otherwise replace PID 1's interpreter, the shell, the loader, a library, the
+  supervisor, the worker dll or the runtime. Residual, accepted: a fragment may
+  *add* libraries and site packages for its own tools (they are never loaded by
+  the contract binaries unless the pinned loader configuration is changed,
+  which is rejected). A contract failure
+  records `rejected`; a host or build failure records `failed`; a transport loss
+  or a cancelled/interrupted run records `uncertain`, and the next run reconciles
+  by inspecting the tag — found → verify, absent → `failed` — never by rebuilding
+  blindly. A controller restart moves any build left `building`/`verifying` to
+  `uncertain` before anything else runs; within one process a build id has a
+  single in-flight owner, so a concurrent request for a running build is refused
+  rather than allowed to re-transition the row.
+- **Approved digests are per host**: the configured base plus every verified build
+  on that host. The container-create command builder refuses any other digest;
+  the key bootstrap always runs the configured base regardless of the enrollment's
+  image. `POST /api/workers/enroll/plan` accepts an optional `imageDigest` that
+  must be in the target host's approved set, and the chosen digest is frozen into
+  the enrollment; a profile enrollment's resources carry the additional
+  `agentcontrol.profile=<revision>` label (base enrollments keep the original six,
+  so existing label hashes are unchanged). The revision-level
+  `build_status`/`built_image_digest`/`verified` columns are a fold of the
+  per-host rows (`built` if any host verified, else `building`, `rejected`,
+  `failed`, `unbuilt`).
+- Owner routes: `GET/POST /api/profiles/{id}/revisions/{revisionId}/builds`
+  (the POST queues, runs and verifies synchronously on one ready host and returns
+  the terminal record); `/profiles/{id}` shows per-host builds and a build action.
+  **Building never provisions an employee.**
 - `generic-employee` revision 1 is seeded on fresh stores and on the v7→v8
   migration, never overwriting an existing slug.
 - Owner routes: `GET/POST /api/profiles`, `GET /api/profiles/{id}` (profile plus
   full revision chain), `GET/POST /api/profiles/{id}/revisions`,
   `POST /api/profiles/{id}/retire`; portal pages `/profiles` and `/profiles/{id}`.
-  These record definitions only. **Nothing in this slice builds an image,
-  approves a hire, creates an employee or rebuilds an existing employee**;
-  `build_status` stays `unbuilt` until #259 and profile updates never
-  auto-rebuild employees (#261 adds the explicit data-preserving rebuild).
+  These record definitions only. **Nothing in the profile or build slices
+  approves a hire, creates an employee or rebuilds an existing employee**, and
+  profile updates never auto-rebuild employees (#261 adds the explicit
+  data-preserving rebuild).
 
 ## 11. Orientation composition and versioning
 

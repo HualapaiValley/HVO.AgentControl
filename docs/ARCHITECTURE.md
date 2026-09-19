@@ -37,8 +37,10 @@ from the `generation = 2` identity.
   and discussion (the #217 two-host dependency is satisfied) and are never
   represented as completed employee creation.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
-  Schema v8 migrates only the exact released v7 signature after creating and
-  verifying immutable `control.schema-v7.db` and SHA-256 evidence. It adds
+  Schema v9 migrates only the exact released v8 signature after creating and
+  verifying immutable `control.schema-v8.db` and SHA-256 evidence; it adds the
+  per-host `profile_builds` table (additive only). Schema v8 migrated only the
+  exact released v7 signature after verified `control.schema-v7.db` evidence. It added
   immutable container profiles and their append-only revision chain and seeds
   the `generic-employee` profile (see `docs/PHASE-1-CONTRACTS.md` §10.1); the
   seed never overwrites an existing slug. Schema v7 migrated only the exact
@@ -543,12 +545,13 @@ The pre-isolation image understands only `runtime.json`, so republishing it
 would run old JSON-only code against stale session identity while the database
 held the real state. No compatible downgrade is provided; restoring a verified
 backup of the whole controller-private volume is the owner-run recovery path.
-Before the first live deployment of schema v8, stop/quiesce the controller and
+Before the first live deployment of schema v9, stop/quiesce the controller and
 snapshot the current private volume (including `control.db` and any SQLite
 sidecars) through the deployment's existing backup workflow, then verify that
-snapshot before starting the new image. The automatic schema-v7 backup is
-pre-migration evidence only; it is not a current schema-v8 recovery point and
-cannot recover container profiles or other writes made after migration.
+snapshot before starting the new image. The automatic schema-v7 and schema-v8
+backups are pre-migration evidence only; they are not a current schema-v9
+recovery point and cannot recover profiles, builds or other writes made after
+migration.
 `prepare-layout.py` likewise treats a JSON-only divergence as evidence rather
 than blocking the database-era start.
 

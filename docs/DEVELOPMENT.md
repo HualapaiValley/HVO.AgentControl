@@ -183,6 +183,27 @@ availability until a later attach proves the slot is free. It does not hold
 dispatch, because an unconfirmed viewer teardown says nothing about prompt
 safety.
 
+### Profile build checks
+
+`ProfileBuildTests` are hermetic: the deterministic build-context renderer
+(one fixed-metadata `Dockerfile` tar; identical inputs, identical bytes and
+hash), the fixed `docker build -`/`image tag`/`image inspect`/verify command
+grammar, the pure contract verifier over captured inspect and verification
+shapes, the per-host build state machine (queued → building → verifying →
+built/rejected/failed/uncertain, one live and one verified build per
+revision/host), the per-host approved-digest set, and the coordinator against
+a scripted host (build, contract rejection, missing base, transport loss →
+uncertain → reconcile by tag). No SSH and no Docker.
+
+`WorkerImageContractTests.RealProfileBuildProducesAVerifiableChildOfTheWorkerBase`
+runs the controller's own argv against the local daemon: it renders the seeded
+`generic-employee` revision, pins the freshly built worker image, builds the
+child, proves the verifier accepts the real inspect/verify output and that the
+toolchain is present as the employee, then builds a hostile fragment that
+plants a setuid binary and proves the fixed trailer stripped it. It needs
+Docker and runs in the `Docker config and image` job (`AGENTCONTROL_DOCKER_REQUIRED=1`),
+not in the Development v1 gate.
+
 ### Worker bridge checks
 
 The worker is a separate build target and optional Compose profile; normal
