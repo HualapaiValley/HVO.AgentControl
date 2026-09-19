@@ -1,0 +1,133 @@
+name: AgentControl
+
+# Control plane for the independent review identity. A local agent has only the
+# operator's PAT and cannot act as the HVO-AgentControl GitHub App; this workflow
+# holds the App's private key and performs a small, named set of operations as
+# `hvo-agentcontrol[bot]`, each with a token narrowed to exactly the permission
+# it needs. Nothing here runs on push or pull_request: it only runs when
+# dispatched by someone with write access, and every operation records who
+# dispatched it and what it did on the target PR.
+#
+# Resolving a review thread is deliberately not an operation here. The GraphQL
+# `resolveReviewThread` mutation is refused for App installation tokens
+# ("Resource not accessible by integration") regardless of permission grant and
+# even on a thread the App authored, proven on PR #909. The reviewer's judgement
+# is the VERIFIED_* comment, which the App can post; resolving the thread is the
+# operator's click.
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: What to do as hvo-agentcontrol[bot]
+        type: choice
+        required: true
+        options:
+          - verify-identity
+          - post-review
+      pr:
+        description: Pull request number (post-review)
+        type: string
+        required: false
+      body_file:
+        description: Path in the repository to a Markdown file holding the review body (post-review); read from the PR head
+        type: string
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: agentcontrol-${{ inputs.pr || 'identity' }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+
+jobs:
+  verify-identity:
+    name: Verify identity
+    if: inputs.operation == 'verify-identity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Mint a read-only token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.HVO_AGENTCONTROL_APP_ID }}
+          private-key: ${{ secrets.HVO_AGENTCONTROL_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-contents: read
+      - name: Report what the token is
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          APP_SLUG: ${{ steps.token.outputs.app-slug }}
+          INSTALLATION_ID: ${{ steps.token.outputs.installation-id }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          repos="$(gh api installation/repositories --jq '[.repositories[].full_name]|join(",")')"
+          rate="$(gh api rate_limit --jq .resources.core.limit)"
+          # The backticks are literal Markdown for the step summary; the values are printf arguments.
+          # shellcheck disable=SC2016
+          printf -- '### AgentControl identity\n\n- app slug: `%s`\n- installation id: `%s`\n- token sees: `%s`\n- core rate limit: `%s` (installation tokens get 5000+; a PAT would show the user limit)\n- dispatched by: `%s`\n' \
+            "$APP_SLUG" "$INSTALLATION_ID" "$repos" "$rate" "$ACTOR" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$repos" == "$REPOSITORY" ]] || { echo "token sees an unexpected repository set: $repos" >&2; exit 1; }
+
+  post-review:
+    name: Post review
+    if: inputs.operation == 'post-review'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate inputs
+        env:
+          PR: ${{ inputs.pr }}
+          BODY_FILE: ${{ inputs.body_file }}
+        run: |
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "pr must be a number" >&2; exit 2; }
+          [[ -n "$BODY_FILE" && "$BODY_FILE" != *..* && "$BODY_FILE" == .agentcontrol/reviews/* ]] || {
+            echo "body_file must be a path under .agentcontrol/reviews/ on the PR head" >&2; exit 2; }
+      - name: Mint a pull-request write token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.HVO_AGENTCONTROL_APP_ID }}
+          private-key: ${{ secrets.HVO_AGENTCONTROL_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-contents: read
+          permission-pull-requests: write
+      - name: Read the review body from the PR head
+        id: body
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          BODY_FILE: ${{ inputs.body_file }}
+        run: |
+          head="$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)"
+          gh api "repos/$REPOSITORY/contents/$BODY_FILE?ref=$head" --jq .content | base64 -d > "$RUNNER_TEMP/review.md"
+          [[ -s "$RUNNER_TEMP/review.md" ]] || { echo "review body is empty" >&2; exit 2; }
+          grep -qE "^REVIEW PR-$PR-R[0-9]+-[0-9a-f]{8}\$" "$RUNNER_TEMP/review.md" || {
+            echo "review body must begin with a 'REVIEW PR-$PR-R<n>-<head8>' header" >&2; exit 2; }
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+      - name: Post as hvo-agentcontrol[bot]
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          ACTOR: ${{ github.actor }}
+          HEAD: ${{ steps.body.outputs.head }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cp "$RUNNER_TEMP/review.md" "$RUNNER_TEMP/final.md"
+          # The backticks are literal Markdown in the posted comment; the values are printf arguments.
+          # shellcheck disable=SC2016
+          printf '\n\n<sub>Posted by `hvo-agentcontrol[bot]` on dispatch by `%s`; head `%s`; run %s</sub>\n' "$ACTOR" "$HEAD" "$RUN_URL" >> "$RUNNER_TEMP/final.md"
+          url="$(gh api "repos/$REPOSITORY/issues/$PR/comments" -F body=@"$RUNNER_TEMP/final.md" --jq .html_url)"
+          [[ "$url" == https://* ]] || { echo "comment was not created: $url" >&2; exit 1; }
+          printf '%s\n' "$url" | tee -a "$GITHUB_STEP_SUMMARY"

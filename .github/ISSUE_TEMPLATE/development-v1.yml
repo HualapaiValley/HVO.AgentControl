@@ -1,0 +1,75 @@
+name: Development v1 issue
+description: Define work intended to merge into development/v1.
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is complete when its reviewed PR merges into `development/v1`, unless promotion to `main` is explicitly part of acceptance.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What observable result should exist when this issue is complete?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List independently verifiable behaviors or evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Files, components, and behaviors owned by this issue.
+    validations:
+      required: true
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Exclusions
+      description: Explicitly state what this issue must not change.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Blocking issues, contracts, decisions, or external resources. Write "None" when unblocked.
+    validations:
+      required: true
+  - type: dropdown
+    id: review-level
+    attributes:
+      label: Review level
+      options:
+        - Mechanical
+        - Standard
+        - Deep
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and required lenses
+      description: Security, durability, concurrency, CI-control, deployment, compatibility, or performance concerns.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Expected validation
+      description: Focused local tests and any qualification beyond Development v1 CI.
+    validations:
+      required: true
+  - type: checkboxes
+    id: target
+    attributes:
+      label: Target branch
+      options:
+        - label: This issue targets `development/v1` and does not imply promotion to `main`.
+          required: true

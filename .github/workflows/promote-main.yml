@@ -1,0 +1,138 @@
+name: Promote to main
+
+# Nightly promotion of development/v1 to main, option (b): this workflow opens or
+# refreshes the promotion pull request as hvo-agentcontrol[bot] and lets the legacy
+# pipeline on main gate it; merging stays with the operator. It never pushes to
+# main and never merges. The App token it mints is pull-requests write only.
+#
+# It refuses to promote a head that has not passed its own Development v1 CI, so
+# the 20-minute main pipeline is only ever spent on a green v1 head, and it keeps
+# one promotion PR open at a time, moving that PR forward rather than stacking.
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 02:00 America/Phoenix (MST, no DST); 09:00 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: promote-main
+  cancel-in-progress: false
+
+env:
+  SOURCE: development/v1
+  TARGET: main
+
+jobs:
+  promote:
+    name: Open or refresh the promotion pull request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Mint a pull-request write token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.HVO_AGENTCONTROL_APP_ID }}
+          private-key: ${{ secrets.HVO_AGENTCONTROL_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-metadata: read
+          permission-contents: read
+          permission-actions: read
+          permission-pull-requests: write
+
+      - name: Compare source and target
+        id: compare
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          source_sha="$(gh api "repos/$REPOSITORY/branches/$SOURCE" --jq .commit.sha)"
+          target_sha="$(gh api "repos/$REPOSITORY/branches/$TARGET" --jq .commit.sha)"
+          compare="$(gh api "repos/$REPOSITORY/compare/$TARGET...$SOURCE" --jq '{status, ahead_by, behind_by}')"
+          status="$(jq -r .status <<< "$compare")"
+          ahead="$(jq -r .ahead_by <<< "$compare")"
+          behind="$(jq -r .behind_by <<< "$compare")"
+          printf 'source=%s target=%s status=%s ahead=%s behind=%s\n' "$source_sha" "$target_sha" "$status" "$ahead" "$behind" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "source_sha=$source_sha"
+            echo "target_sha=$target_sha"
+            echo "ahead=$ahead"
+            echo "behind=$behind"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$behind" != 0 ]]; then
+            # main has commits v1 does not: the branch model has been violated somewhere
+            # (a hotfix or a mis-targeted PR). Stop rather than open a PR that would merge
+            # main back into v1 by implication; this needs a person.
+            printf '::error::%s is %s commit(s) behind %s; promotion halted until %s is synchronized into %s.\n' "$SOURCE" "$behind" "$TARGET" "$TARGET" "$SOURCE"
+            exit 1
+          fi
+          if [[ "$ahead" == 0 ]]; then
+            echo "nothing_to_promote=true" >> "$GITHUB_OUTPUT"
+            printf 'Nothing to promote: %s and %s are at the same commit.\n' "$SOURCE" "$TARGET" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Require a green Development v1 run on the source head
+        if: steps.compare.outputs.nothing_to_promote != 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ steps.compare.outputs.source_sha }}
+        run: |
+          # The push run on the source head, not a PR run: that is the run that executed
+          # on exactly the commit being promoted.
+          conclusion="$(gh api "repos/$REPOSITORY/actions/workflows/development-v1.yml/runs?head_sha=$SOURCE_SHA&event=push&per_page=5" \
+            --jq '[.workflow_runs[]|select(.status=="completed")]|sort_by(.run_number)|last|.conclusion // "none"')"
+          printf 'Development v1 push run on %s: %s\n' "$SOURCE_SHA" "$conclusion" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$conclusion" == success ]] || {
+            printf '::error::%s head %s has no successful Development v1 push run (found: %s); not promoting.\n' "$SOURCE" "$SOURCE_SHA" "$conclusion"
+            exit 1
+          }
+
+      - name: Open or refresh the promotion pull request
+        if: steps.compare.outputs.nothing_to_promote != 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ steps.compare.outputs.source_sha }}
+          TARGET_SHA: ${{ steps.compare.outputs.target_sha }}
+          AHEAD: ${{ steps.compare.outputs.ahead }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          today="$(TZ=America/Phoenix date +%Y-%m-%d)"
+          title="Promote $SOURCE to $TARGET ($today)"
+          commits="$(gh api "repos/$REPOSITORY/compare/$TARGET_SHA...$SOURCE_SHA" --paginate \
+            --jq '.commits[]|"- \(.sha[0:8]) \(.commit.message|split("\n")[0])"')"
+          issues="$(printf '%s\n' "$commits" | grep -oE '#[0-9]+' | sort -u | tr '\n' ' ')"
+          body="$(cat <<BODY
+          ## Promotion
+
+          Source: \`$SOURCE\` at \`$SOURCE_SHA\`
+          Target: \`$TARGET\` at \`$TARGET_SHA\`
+          Commits: $AHEAD
+          Source head Development v1 CI: green (checked by this run)
+
+          This pull request is opened by the nightly promotion workflow ($TRIGGER). The
+          legacy pipeline on \`$TARGET\` (\`Required CI\`) is the qualification gate; merge
+          with a **merge commit** so every \`$SOURCE\` commit keeps its SHA on \`$TARGET\`.
+          Merging is the operator's decision. If \`$SOURCE\` moves before this is merged,
+          the next nightly run refreshes this pull request rather than opening another.
+
+          Referenced issues and pull requests: $issues
+
+          ## Commits
+
+          $commits
+
+          <sub>Opened by \`hvo-agentcontrol[bot]\`; run $RUN_URL</sub>
+          BODY
+          )"
+          existing="$(gh api "repos/$REPOSITORY/pulls?state=open&base=$TARGET&head=${REPOSITORY%%/*}:$SOURCE" --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/$REPOSITORY/pulls/$existing" -f title="$title" -f body="$body" --jq .html_url | sed 's/^/refreshed: /' | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            gh api -X POST "repos/$REPOSITORY/pulls" -f title="$title" -f head="$SOURCE" -f base="$TARGET" -f body="$body" -F draft=false --jq .html_url | sed 's/^/opened: /' | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

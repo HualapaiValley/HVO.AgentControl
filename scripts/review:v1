@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    printf 'Usage: %s request|correction|converged PR_NUMBER [PREVIOUS_REVIEWED_HEAD]\n' "${0##*/}" >&2
+    exit 2
+}
+
+mode="${1-}"
+pr="${2-}"
+[[ "$mode" =~ ^(request|correction|converged)$ && "$pr" =~ ^[0-9]+$ ]] || usage
+
+pr_json="$(gh pr view "$pr" --json number,url,baseRefName,baseRefOid,headRefOid,isDraft,title)"
+base_ref="$(jq -r .baseRefName <<< "$pr_json")"
+head="$(jq -r .headRefOid <<< "$pr_json")"
+number="$(jq -r .number <<< "$pr_json")"
+url="$(jq -r .url <<< "$pr_json")"
+merge_base="$(git merge-base "origin/$base_ref" "$head")"
+short_head="${head:0:8}"
+
+case "$mode" in
+    request)
+        cat <<EOF
+## Review Request
+
+Review ID: \`PR-$number-R0-$short_head\`
+Review level: \`Mechanical | Standard | Deep\`
+Review mode: \`Initial\`
+
+PR: $url
+Base branch: \`$base_ref\`
+Base SHA: \`$(jq -r .baseRefOid <<< "$pr_json")\`
+Current head: \`$head\`
+Exact range: \`$merge_base..$head\`
+
+Acceptance criteria:
+-
+
+Changed behavior:
+-
+
+Validation:
+- \`command\`: passed
+
+Required lenses:
+- Correctness
+- Failure handling
+EOF
+        ;;
+    correction)
+        previous="${3-}"
+        [[ "$previous" =~ ^[0-9a-fA-F]{40}$ ]] || usage
+        git merge-base --is-ancestor "$previous" "$head" || {
+            printf 'Previous reviewed head is not an ancestor of current head.\n' >&2
+            exit 1
+        }
+        cat <<EOF
+## Correction Review Request
+
+Previous reviewed head: \`$previous\`
+Current head: \`$head\`
+Exact range: \`$previous..$head\`
+
+Prior findings:
+- \`F1\`: expected corrected
+
+Focused validation:
+- \`command\`: passed
+EOF
+        ;;
+    converged)
+        cat <<EOF
+## Review Converged
+
+Reviewed head: \`$head\`
+Review level: \`Mechanical | Standard | Deep\`
+Rounds: \`N of maximum\`
+Verified corrected: 0
+Verified deferred: 0
+Open: 0
+
+Current PR head matches the reviewed head.
+Next: mark ready and run Development v1 CI.
+EOF
+        ;;
+esac
