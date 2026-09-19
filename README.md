@@ -1,6 +1,6 @@
 # HVO.AgentControl
 
-[![CI](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/build.yml)
+[![CI](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/build.yml) [![Development v1 CI](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/development-v1.yml/badge.svg?branch=development%2Fv1)](https://github.com/HualapaiValley/HVO.AgentControl/actions/workflows/development-v1.yml?query=branch%3Adevelopment%2Fv1)
 ![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)
 ![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4)
 [![License: Proprietary](https://img.shields.io/badge/license-Proprietary-red)](LICENSE)

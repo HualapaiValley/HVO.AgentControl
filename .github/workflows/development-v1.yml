@@ -1,0 +1,197 @@
+name: Development v1
+
+# Fast integration gate for feature pull requests into development/v1 and for
+# pushes to that branch. Hosted Preflight is cheap and runs on drafts; the
+# self-hosted Build and Unit job runs only once a PR is marked ready, after the
+# initial review has approved the head, under a 540 s workload budget with a
+# timing manifest as evidence.
+#
+# This is deliberately narrower than main's qualification pipeline
+# (build.yml): no Docker image build, no alternate-UID isolation suite, no
+# worker image contract, no real-OpenCode wire test, no hermetic browser
+# suites. Those run on the nightly promotion pull request into main.
+
+on:
+  pull_request:
+    branches: [development/v1]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [development/v1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-v1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  preflight:
+    name: Development v1 / Preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reject whitespace errors
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" == '0000000000000000000000000000000000000000' ]]; then
+            BASE_SHA="${HEAD_SHA}^"
+          fi
+          git diff --check "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Lint workflows
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' \
+            "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" .github/workflows/*.yml
+
+  build-unit:
+    name: Development v1 / Build and Unit
+    needs: preflight
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, linux, x64, hvo-agentcontrol]
+    timeout-minutes: 15
+    steps:
+      - name: Record workload start
+        run: |
+          started_at_epoch="$(date +%s)"
+          evidence_root="$RUNNER_TEMP/development-v1"
+          rm -rf "$evidence_root"
+          mkdir -p "$evidence_root/timing" "$evidence_root/unit"
+          {
+            printf 'DEV_V1_EVIDENCE_ROOT=%s\n' "$evidence_root"
+            printf 'DEV_V1_STARTED_AT_EPOCH=%s\n' "$started_at_epoch"
+            printf 'DEV_V1_DEADLINE_EPOCH=%s\n' "$((started_at_epoch + 540))"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET from global.json
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      # The fake ACP server, the worker supervisor and the PTY bridge are Python;
+      # the selection below executes them, so the interpreter is pinned here as
+      # in build.yml rather than taken from whatever the runner host has.
+      - name: Setup pinned Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Restore solution
+        id: restore
+        run: |
+          remaining="$((DEV_V1_DEADLINE_EPOCH - $(date +%s)))"
+          ((remaining > 0)) || exit 124
+          /usr/bin/time -v -o "$DEV_V1_EVIDENCE_ROOT/timing/restore.time" \
+            timeout --signal=TERM --kill-after=30s "${remaining}s" \
+            dotnet restore HVO.AgentControl.slnx
+
+      - name: Build warning-clean Release solution
+        id: build
+        run: |
+          remaining="$((DEV_V1_DEADLINE_EPOCH - $(date +%s)))"
+          ((remaining > 0)) || exit 124
+          /usr/bin/time -v -o "$DEV_V1_EVIDENCE_ROOT/timing/build.time" \
+            timeout --signal=TERM --kill-after=30s "${remaining}s" \
+            dotnet build HVO.AgentControl.slnx \
+              --no-restore \
+              --configuration Release \
+              --warnaserror
+
+      - name: Verify formatting
+        id: format
+        run: |
+          remaining="$((DEV_V1_DEADLINE_EPOCH - $(date +%s)))"
+          ((remaining > 0)) || exit 124
+          /usr/bin/time -v -o "$DEV_V1_EVIDENCE_ROOT/timing/format.time" \
+            timeout --signal=TERM --kill-after=30s "${remaining}s" \
+            dotnet format HVO.AgentControl.slnx --no-restore --verify-no-changes
+
+      # The hermetic selection: everything except the four suites that need a
+      # Docker daemon, the built images, a real tmux integration or the pinned
+      # OpenCode wire. Those remain main's qualification gate (build.yml).
+      - name: Run hermetic Unit selection
+        id: unit
+        env:
+          DOCKER_HOST: unix:///tmp/hvo-no-docker.sock
+        run: |
+          remaining="$((DEV_V1_DEADLINE_EPOCH - $(date +%s)))"
+          ((remaining > 0)) || exit 124
+          /usr/bin/time -v -o "$DEV_V1_EVIDENCE_ROOT/timing/unit.time" \
+            timeout --signal=TERM --kill-after=30s "${remaining}s" \
+            dotnet test HVO.AgentControl.slnx \
+              --no-build \
+              --configuration Release \
+              --filter 'FullyQualifiedName!~AgentIsolationContainerTests&FullyQualifiedName!~WorkerImageContractTests&FullyQualifiedName!~TmuxRealIntegrationTests&FullyQualifiedName!~OpenCodeOutboundIntegrationTests' \
+              --results-directory "$DEV_V1_EVIDENCE_ROOT/unit" \
+              --logger trx
+
+      - name: Write evidence summary
+        if: always()
+        env:
+          RESTORE_OUTCOME: ${{ steps.restore.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          FORMAT_OUTCOME: ${{ steps.format.outcome }}
+          UNIT_OUTCOME: ${{ steps.unit.outcome }}
+        run: |
+          read_metric() {
+            local file="$1" label="$2"
+            [[ -f "$file" ]] || return 0
+            awk -v label="$label" 'index($0, label) { sub(/^.*: /, ""); print; exit }' "$file"
+          }
+          stage_json() {
+            local stage="$1" outcome="$2" file="$DEV_V1_EVIDENCE_ROOT/timing/$1.time"
+            jq -n \
+              --arg name "$stage" \
+              --arg outcome "$outcome" \
+              --arg elapsed "$(read_metric "$file" 'Elapsed (wall clock) time')" \
+              --arg rss "$(read_metric "$file" 'Maximum resident set size (kbytes)')" \
+              '{name:$name,outcome:$outcome,elapsed:$elapsed,largestProcessRssKilobytes:($rss|if length==0 then null else tonumber end)}'
+          }
+          completed_at="$(date +%s)"
+          trx_count="$(find "$DEV_V1_EVIDENCE_ROOT/unit" -name '*.trx' -type f | wc -l)"
+          jq -n \
+            --arg schema hvo-development-v1-ci-v3 \
+            --arg headSha "$GITHUB_SHA" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg sdkVersion "$(dotnet --version 2>/dev/null || true)" \
+            --argjson elapsed "$((completed_at - DEV_V1_STARTED_AT_EPOCH))" \
+            --argjson trxCount "$trx_count" \
+            --argjson restore "$(stage_json restore "$RESTORE_OUTCOME")" \
+            --argjson build "$(stage_json build "$BUILD_OUTCOME")" \
+            --argjson format "$(stage_json format "$FORMAT_OUTCOME")" \
+            --argjson unit "$(stage_json unit "$UNIT_OUTCOME")" \
+            '{schema:$schema,headSha:$headSha,event:$event,sdkVersion:$sdkVersion,runnerElapsedThroughSummaryStartSeconds:$elapsed,targetSeconds:600,workloadBudgetSeconds:540,hardTimeoutSeconds:900,unitTrxCount:$trxCount,memoryMetric:"GNU time ru_maxrss: largest single process",stages:[$restore,$build,$format,$unit]}' \
+            > "$DEV_V1_EVIDENCE_ROOT/manifest.json"
+          jq . "$DEV_V1_EVIDENCE_ROOT/manifest.json"
+
+      - name: Upload development CI evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: development-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/development-v1/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
