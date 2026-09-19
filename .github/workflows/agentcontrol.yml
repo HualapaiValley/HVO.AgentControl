@@ -202,13 +202,21 @@ jobs:
           # exists. A push in the window between the pre-check and the write would leave a
           # review bound to a head the PR no longer has; retract it rather than let a stale
           # artifact stand. Issue comments and review comments have different delete routes.
-          after="$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha)"
+          # A failed re-read is treated as "moved": better to retract a valid post than to
+          # leave one whose validity is unknown.
+          after="$(gh api "repos/$REPOSITORY/pulls/$PR" --jq .head.sha 2>/dev/null || echo unknown)"
           if [[ "$after" != "$HEAD" ]]; then
             case "$OPERATION" in
-              post-review) gh api -X DELETE "repos/$REPOSITORY/issues/comments/$id" ;;
-              *) gh api -X DELETE "repos/$REPOSITORY/pulls/comments/$id" ;;
+              post-review) route="repos/$REPOSITORY/issues/comments/$id" ;;
+              *) route="repos/$REPOSITORY/pulls/comments/$id" ;;
             esac
-            printf '::error::PR #%s moved from %s to %s while posting; the comment %s was retracted. Re-review the current head.\n' "$PR" "$HEAD" "$after" "$url"
+            if gh api -X DELETE "$route"; then
+              printf '::error::PR #%s head is %s, not the bound %s, after posting; the comment %s was retracted. Re-review the current head.\n' "$PR" "$after" "$HEAD" "$url"
+            else
+              # The stale artifact is still published and must be dealt with by hand.
+              printf '::error::PR #%s head is %s, not the bound %s, after posting, and retracting %s FAILED. Delete it manually before continuing.\n' "$PR" "$after" "$HEAD" "$url"
+              printf 'STALE ARTIFACT NOT RETRACTED: %s\n' "$url" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
             exit 1
           fi
           printf '%s\n' "$url" | tee -a "$GITHUB_STEP_SUMMARY"

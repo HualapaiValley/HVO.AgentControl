@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s request|correction|converged PR_NUMBER [PREVIOUS_REVIEWED_HEAD]\n' "${0##*/}" >&2
+    printf 'Usage: %s request PR_NUMBER | correction PR_NUMBER PREVIOUS_REVIEWED_HEAD | converged PR_NUMBER LAST_REVIEWED_ROUND\n' "${0##*/}" >&2
     exit 2
 }
 
@@ -69,12 +69,20 @@ Focused validation:
 EOF
         ;;
     converged)
+        # Convergence is not a review round: it reuses the header of the round that
+        # gave the APPROVE on this head, so it binds to the same PR/round/head and
+        # does not increment the round count.
+        round="${3-}"
+        [[ "$round" =~ ^[0-9]+$ ]] || usage
         cat <<EOF
+REVIEW PR-$number-R$round-$short_head
 ## Review Converged
 
+Review ID: \`PR-$number-R$round-$short_head\` (convergence of round $round; not a new round)
+Mode: \`Convergence\`
 Reviewed head: \`$head\`
 Review level: \`Mechanical | Standard | Deep\`
-Rounds: \`N of maximum\`
+Rounds used: \`$round of maximum\`
 Verified corrected: 0
 Verified deferred: 0
 Open: 0
