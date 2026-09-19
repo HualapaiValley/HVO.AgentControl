@@ -61,11 +61,11 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Contains("python3 python3-venv python3-pip", dockerfile, StringComparison.Ordinal);
         Assert.Contains("install -y --no-install-recommends gh", dockerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("ghcr.io", dockerfile.Replace("# ghcr.io", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
-        Assert.Contains("ENV DOTNET_CLI_TELEMETRY_OPTOUT=\"1\"", dockerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("ENV DOTNET_CLI_TELEMETRY_OPTOUT", dockerfile, StringComparison.Ordinal);
         // Fixed trailer re-asserts the worker contract and the entrypoint last.
         Assert.Contains("find / -xdev -perm /6000 -type f -exec chmod a-s", dockerfile, StringComparison.Ordinal);
         Assert.Contains("chmod 0700 /control /home/worker /workspace /session", dockerfile, StringComparison.Ordinal);
-        Assert.EndsWith("ENTRYPOINT [\"/usr/local/bin/worker-supervisor\"]\n", dockerfile, StringComparison.Ordinal);
+        Assert.EndsWith("ENTRYPOINT [\"/usr/bin/python3\", \"-I\", \"-S\", \"/usr/local/bin/worker-supervisor\"]\n", dockerfile, StringComparison.Ordinal);
 
         // The tar is exactly one fixed-metadata Dockerfile entry.
         using var reader = new TarReader(new MemoryStream(tar1));
@@ -82,7 +82,7 @@ public sealed class ProfileBuildTests : IDisposable
     [Fact]
     public void RenderPlacesTheFragmentBeforeTheTrailerAndRecordsLifecycleAsLabels()
     {
-        var revision = NewRevision("""{"build":{"dockerfile":"Dockerfile"},"postCreateCommand":["dotnet","--info"],"postStartCommand":"echo hi","remoteEnv":{"EDITOR":"vim"}}""", "FROM agentcontrol-worker-base\nRUN apt-get update && apt-get install -y jq\nENV PATH=\"$PATH:/opt/x\"\n");
+        var revision = NewRevision("""{"build":{"dockerfile":"Dockerfile"},"postCreateCommand":["dotnet","--info"],"postStartCommand":"echo hi","remoteEnv":{"EDITOR":"vim"}}""", "FROM agentcontrol-worker-base\nRUN apt-get update && apt-get install -y jq\n");
         var dockerfile = ProfileBuildContext.RenderDockerfile(revision, Base, "linux/amd64");
         var fragmentAt = dockerfile.IndexOf("RUN apt-get update && apt-get install -y jq", StringComparison.Ordinal);
         var trailerAt = dockerfile.IndexOf("# --- worker contract trailer (fixed) ---", StringComparison.Ordinal);
@@ -114,6 +114,25 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Throws<WorkerControlConfigurationException>(() => ProfileBuildContext.RenderDockerfile(_generic, Base, "windows/amd64"));
     }
 
+    [Theory]
+    [InlineData("LD_PRELOAD=/opt/evil.so")]
+    [InlineData("LD_AUDIT=/opt/audit.so")]
+    [InlineData("LD_LIBRARY_PATH=/opt/evil")]
+    [InlineData("GLIBC_TUNABLES=glibc.cpu.hwcaps=-AVX2")]
+    [InlineData("PYTHONPATH=/opt/evil")]
+    [InlineData("PYTHONHOME=/opt/python")]
+    [InlineData("NODE_OPTIONS=--require=/opt/evil.js")]
+    [InlineData("DOTNET_STARTUP_HOOKS=/opt/evil.dll")]
+    [InlineData("SSL_CERT_FILE=/opt/evil.pem")]
+    [InlineData("BASH_ENV=/opt/evil.sh")]
+    public void InspectRefusesAnyCandidateImageEnvironmentAddition(string addition)
+    {
+        var hash = "sha256:" + new string('d', 64);
+        var exception = Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(
+            BuiltInspect(hash, environment: [.. BaseEnvironment, addition]), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
+        Assert.Contains("environment differs", exception.Message, StringComparison.Ordinal);
+    }
+
     // ---------------------------------------------------------- command builder
 
     [Fact]
@@ -139,6 +158,17 @@ public sealed class ProfileBuildTests : IDisposable
         var offline = RemoteWorkerCommandBuilder.BuildImageBuild(host, options, spec with { NetworkRequired = false }, tar).Arguments[^1];
         Assert.Contains("--network 'none'", offline, StringComparison.Ordinal);
 
+        var employeeEnvironment = new Dictionary<string, string> { ["DOTNET_ROOT"] = "/opt/dotnet-sdk", ["PATH"] = "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin" };
+        var identity = new WorkerResourceIdentity("org", "controller", "host-a", "worker", "binding", "operation");
+        var mounts = new[] { new NamedVolumeMount("c", "/control"), new NamedVolumeMount("h", "/home/worker"), new NamedVolumeMount("w", "/workspace"), new NamedVolumeMount("s", "/session") };
+        var create = RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, employeeEnvironment)).Arguments[^1];
+        Assert.Contains("--env 'DOTNET_ROOT=/opt/dotnet-sdk'", create, StringComparison.Ordinal);
+        Assert.Contains("--env 'PATH=/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin'", create, StringComparison.Ordinal);
+        Assert.Contains("volume-nocopy", create, StringComparison.Ordinal);
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, new Dictionary<string, string> { ["LD_PRELOAD"] = "/evil" })));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, new Dictionary<string, string> { ["PATH"] = "/workspace/bin" })));
+        Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildContainerCreate(host, options, new ContainerCreateSpec("agentcontrol-worker-x", Base, "linux/amd64", identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, null, new Dictionary<string, string> { ["DOTNET_ROOT"] = "/workspace/runtime" })));
+
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildImageBuild(host, options, spec with { ResultTag = "evil; rm -rf /" }, tar));
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildImageBuild(host, options, spec with { ResultTag = "registry.example/x:y" }, tar));
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.BuildImageBuild(host, options, spec with { ProfileRevisionId = "prev-x" }, tar));
@@ -154,10 +184,8 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Equal($"docker image tag '{Base}' 'agentcontrol-worker-base:pin-111111111111'", tag);
         var verify = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["agentcontrol-profile:prev-x-abc", Base, "linux/amd64"]).Arguments[^1];
         // The BASE image runs the program; the candidate is only a read-only mount, so no candidate executable is ever executed.
-        Assert.StartsWith($"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '32' --platform 'linux/amd64' --mount 'type=image,source=agentcontrol-profile:prev-x-abc,target=/candidate,readonly' --entrypoint '/usr/bin/python3' '{Base}' '-c' 'import base64;exec(base64.b64decode(\"", verify, StringComparison.Ordinal);
+        Assert.Equal($"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --cap-add 'DAC_READ_SEARCH' --security-opt 'no-new-privileges' --pids-limit '32' --platform 'linux/amd64' --mount 'type=image,source=agentcontrol-profile:prev-x-abc,target=/candidate,readonly' --entrypoint '/usr/bin/python3' '{Base}' '-I' '-S' '/usr/local/bin/profile-image-verify'", verify);
         Assert.Throws<WorkerControlConfigurationException>(() => RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageVerify, ["agentcontrol-profile:prev-x-abc", "agentcontrol-profile:prev-x-abc", "linux/amd64"]));
-        Assert.Contains("/candidate", RemoteWorkerCommandBuilder.ImageVerifyScript, StringComparison.Ordinal);
-        Assert.Contains("artifacts", RemoteWorkerCommandBuilder.ImageVerifyScript, StringComparison.Ordinal);
         Assert.DoesNotContain("\n", verify, StringComparison.Ordinal);
         var remove = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.ImageRemove, ["agentcontrol-profile:prev-x-abc"]).Arguments[^1];
         Assert.Equal("docker image rm --no-prune 'agentcontrol-profile:prev-x-abc'", remove);
@@ -191,7 +219,10 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, layers: ["sha256:" + new string('z', 64)]), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
         Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, profile: "prev-other"), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
         Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash), BaseInspect(), _generic.Id, "sha256:" + new string('e', 64), Base, "linux/amd64"));
-        Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, entrypoint: "/bin/sh"), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
+        Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, entrypoint: ["/bin/sh"]), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
+        Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, environment: [.. BaseEnvironment, "LD_PRELOAD=/opt/evil.so"]), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
+        Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, environment: [.. BaseEnvironment, "LANG=C.UTF-8"]), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
+        Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, workingDirectory: "/tmp"), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
         Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, user: "1102"), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
         Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, ports: true), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
         Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckInspect(BuiltInspect(hash, arch: "arm64"), BaseInspect(), _generic.Id, hash, Base, "linux/amd64"));
@@ -215,6 +246,8 @@ public sealed class ProfileBuildTests : IDisposable
         Assert.Contains("/usr/bin/env differs", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(differing: "/usr/bin/env"))).Message, StringComparison.Ordinal);
         Assert.Contains("capability", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(caps: ["/usr/bin/ping"]))).Message, StringComparison.Ordinal);
         Assert.Contains("home or shell", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(bridgeShell: "/bin/bash"))).Message, StringComparison.Ordinal);
+        Assert.Contains("mountpoint contains", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(mountpointsEmpty: false))).Message, StringComparison.Ordinal);
+        Assert.Contains("OpenCode configuration", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(systemPolicyAbsent: false))).Message, StringComparison.Ordinal);
         Assert.Contains("Docker socket", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(sock: true))).Message, StringComparison.Ordinal);
         Assert.Contains("/app", Assert.Throws<ImageContractException>(() => ImageContractVerifier.CheckRuntime(VerifyOutput(appMode: 511))).Message, StringComparison.Ordinal);
         // Trailing apt noise before the JSON line is tolerated; the last line is the record.
@@ -441,7 +474,7 @@ public sealed class ProfileBuildTests : IDisposable
     {
         Assert.True(ProfileBuildContext.RequiresNetwork(_generic)); // dotnet/python/gh recipes use apt
         Assert.False(ProfileBuildContext.RequiresNetwork(NewRevision("""{"image":"agentcontrol-worker-base","features":{"ghcr.io/devcontainers/features/node:1":{}}}""", null)));
-        Assert.False(ProfileBuildContext.RequiresNetwork(NewRevision("""{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN apt-get install -y curl\nENV TZ=UTC\n")));
+        Assert.False(ProfileBuildContext.RequiresNetwork(NewRevision("""{"build":{"dockerfile":"Dockerfile"}}""", "FROM agentcontrol-worker-base\nRUN apt-get install -y curl\n")));
         Assert.True(ProfileBuildContext.RequiresNetwork(NewRevision("""{"build":{"dockerfile":"Dockerfile"},"features":{"ghcr.io/devcontainers/features/github-cli:1":{}}}""", "FROM agentcontrol-worker-base\nRUN true\n")));
     }
 
@@ -494,32 +527,35 @@ public sealed class ProfileBuildTests : IDisposable
 
     private static ApprovedExecutionHost LocalHost() => new() { Id = "host-a", Hostname = "host-a.example", Port = 22, Username = "roys", KnownHostsPath = "/dev/null", IdentityFilePath = "/dev/zero" };
 
-    private static string BaseInspect(string id = Base) => JsonSerializer.Serialize(new[] { new { Id = id, Os = "linux", Architecture = "amd64", Config = new { Labels = (object?)null, Entrypoint = new[] { "/usr/local/bin/worker-supervisor" } }, RootFS = new { Type = "layers", Layers = BaseLayers } } });
+    private static readonly string[] BaseEnvironment = ["APP_UID=1654", "ASPNETCORE_HTTP_PORTS=8080", "DOTNET_RUNNING_IN_CONTAINER=true", "DOTNET_VERSION=10.0.12", "LANG=C.UTF-8", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"];
+    private static readonly string[] IsolatedEntrypoint = ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"];
 
-    private string BuiltInspect(string contextHash, string? profile = null, string[]? layers = null, string entrypoint = "/usr/local/bin/worker-supervisor", string user = "", bool ports = false, string arch = "amd64") =>
+    private static string BaseInspect(string id = Base) => JsonSerializer.Serialize(new[] { new { Id = id, Os = "linux", Architecture = "amd64", Config = new { Labels = (object?)null, Entrypoint = IsolatedEntrypoint, Env = BaseEnvironment, WorkingDir = "/workspace", Cmd = (string[]?)null }, RootFS = new { Type = "layers", Layers = BaseLayers } } });
+
+    private string BuiltInspect(string contextHash, string? profile = null, string[]? layers = null, string[]? entrypoint = null, string user = "", bool ports = false, string arch = "amd64", string[]? environment = null, string workingDirectory = "/workspace") =>
         JsonSerializer.Serialize(new[] { new
         {
             Id = Built, Os = "linux", Architecture = arch,
             Config = new
             {
                 Labels = new Dictionary<string, string> { [ProfileBuildContext.ProfileLabel] = profile ?? _generic.Id, [ProfileBuildContext.ContextHashLabel] = contextHash, [ProfileBuildContext.BaseDigestLabel] = Base },
-                Entrypoint = new[] { entrypoint }, User = user,
+                Entrypoint = entrypoint ?? IsolatedEntrypoint, Env = environment ?? BaseEnvironment, WorkingDir = workingDirectory, Cmd = (string[]?)null, User = user,
                 ExposedPorts = ports ? new Dictionary<string, object> { ["8080/tcp"] = new { } } : null,
             },
             RootFS = new { Type = "layers", Layers = (layers ?? [.. BaseLayers, "sha256:" + new string('f', 64)]) },
         } });
 
-    private static string VerifyOutput(int bridgeUid = 1101, int controlMode = 448, string[]? setuid = null, bool dll = true, bool sock = false, int appMode = 493, string? differing = null, string[]? caps = null, string bridgeShell = "/usr/sbin/nologin") =>
+    private static string VerifyOutput(int bridgeUid = 1101, int controlMode = 448, string[]? setuid = null, bool dll = true, bool sock = false, int appMode = 493, string? differing = null, string[]? caps = null, string bridgeShell = "/usr/sbin/nologin", bool mountpointsEmpty = true, bool systemPolicyAbsent = true) =>
         JsonSerializer.Serialize(new
         {
             bridge = new { uid = bridgeUid, gid = bridgeUid, home = "/control", shell = bridgeShell },
             employee = new { uid = 1102, gid = 1102, home = "/home/worker", shell = "/bin/bash" },
             dirs = new Dictionary<string, object>
             {
-                ["/control"] = new { uid = 1101, gid = 1101, mode = controlMode },
-                ["/home/worker"] = new { uid = 1102, gid = 1102, mode = 448 },
-                ["/workspace"] = new { uid = 1102, gid = 1102, mode = 448 },
-                ["/session"] = new { uid = 1102, gid = 1102, mode = 448 },
+                ["/control"] = new { uid = 1101, gid = 1101, mode = controlMode, xattrs = Array.Empty<string>() },
+                ["/home/worker"] = new { uid = 1102, gid = 1102, mode = 448, xattrs = Array.Empty<string>() },
+                ["/workspace"] = new { uid = 1102, gid = 1102, mode = 448, xattrs = Array.Empty<string>() },
+                ["/session"] = new { uid = 1102, gid = 1102, mode = 448, xattrs = Array.Empty<string>() },
             },
             app = new { uid = 0, gid = 0, mode = appMode },
             supervisor = new { uid = 0, gid = 0, mode = 493 },
@@ -527,6 +563,8 @@ public sealed class ProfileBuildTests : IDisposable
             setuid = setuid ?? [],
             fileCaps = caps ?? [],
             dockerSock = sock,
+            mountpointsEmpty,
+            systemPolicyAbsent,
         }) + "\n";
 
     /// <summary>A host that answers the fixed operations the way a real one would, with scripted faults.</summary>
@@ -571,7 +609,7 @@ public sealed class ProfileBuildTests : IDisposable
         private string BuiltInspectFor(string contextHash) => JsonSerializer.Serialize(new[] { new
         {
             Id = Built, Os = "linux", Architecture = "amd64",
-            Config = new { Labels = new Dictionary<string, string> { [ProfileBuildContext.ProfileLabel] = revisionId, [ProfileBuildContext.ContextHashLabel] = contextHash, [ProfileBuildContext.BaseDigestLabel] = Base }, Entrypoint = new[] { "/usr/local/bin/worker-supervisor" }, User = "" },
+            Config = new { Labels = new Dictionary<string, string> { [ProfileBuildContext.ProfileLabel] = revisionId, [ProfileBuildContext.ContextHashLabel] = contextHash, [ProfileBuildContext.BaseDigestLabel] = Base }, Entrypoint = IsolatedEntrypoint, Env = BaseEnvironment, WorkingDir = "/workspace", Cmd = (string[]?)null, User = "" },
             RootFS = new { Type = "layers", Layers = new[] { BaseLayers[0], BaseLayers[1], "sha256:" + new string('f', 64) } },
         } });
 

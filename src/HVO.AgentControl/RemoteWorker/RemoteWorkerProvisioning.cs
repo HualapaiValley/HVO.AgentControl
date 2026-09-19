@@ -368,7 +368,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
                     var resource = store.ListWorkerResources(enrollment.WorkerId).Single(x => x.OperationId == operation.Id);
                     var mounts = new[] { new NamedVolumeMount(enrollment.ControlVolumeName, "/control"), new(enrollment.HomeVolumeName, "/home/worker"), new(enrollment.WorkspaceVolumeName, "/workspace"), new(enrollment.SessionVolumeName, "/session") };
                     var approved = store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest);
-                    var reference = await _remote.CreateContainerAsync(host, new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, _options.MemoryBytes, _options.CpuLimit, _options.PidsLimit, approved), token).ConfigureAwait(false);
+                    var reference = await _remote.CreateContainerAsync(host, new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, _options.MemoryBytes, _options.CpuLimit, _options.PidsLimit, approved, ProfileEnvironmentFor(enrollment)), token).ConfigureAwait(false);
                     store.TransitionResource(resource.Id, resource.Revision, "planned", "present", reference);
                     store.SetEnrollmentResourceReference(enrollment.WorkerId, "container", reference);
                     break;
@@ -463,6 +463,19 @@ public sealed class RemoteWorkerProvisioningCoordinator
     private string ProfileRevisionFor(WorkerEnrollmentRecord e) =>
         Store().ListProfileBuilds(hostId: e.HostId).SingleOrDefault(b => b.State == ProfileBuildStates.Built && b.Verified && b.ImageDigest == e.ExpectedImageDigest)?.ProfileRevisionId
         ?? throw new WorkerControlConfigurationException("The enrollment's image digest is not a verified profile build on its host.");
+
+    private IReadOnlyDictionary<string, string>? ProfileEnvironmentFor(WorkerEnrollmentRecord enrollment)
+    {
+        if (enrollment.ExpectedImageDigest == _options.ApprovedImageDigest) return null;
+        var revisionId = ProfileRevisionFor(enrollment);
+        var revision = Store().ListContainerProfiles()
+            .SelectMany(profile => Store().ListContainerProfileRevisions(profile.Id) ?? [])
+            .SingleOrDefault(item => item.Id == revisionId)
+            ?? throw new OrganizationStoreCorruptException("The enrollment's verified profile revision is missing.");
+        using var document = System.Text.Json.JsonDocument.Parse(revision.Definition);
+        if (!document.RootElement.TryGetProperty("containerEnv", out var environment)) return null;
+        return environment.EnumerateObject().ToDictionary(item => item.Name, item => item.Value.GetString() ?? string.Empty, StringComparer.Ordinal);
+    }
     private static string LabelsHash(WorkerResourceIdentity identity) => Hash(string.Join('\n', identity.Labels.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Key + "=" + x.Value)));
     private static string VolumeKind(WorkerEnrollmentRecord e, string name) => name == e.ControlVolumeName ? "control" : name == e.HomeVolumeName ? "home" : name == e.WorkspaceVolumeName ? "workspace" : "session";
     private ApprovedExecutionHost Approved(string id) => _options.ApprovedHosts.SingleOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException("Host is not approved.");

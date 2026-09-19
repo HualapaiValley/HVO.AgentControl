@@ -8,6 +8,7 @@ import re
 import selectors
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -37,7 +38,7 @@ server_password = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
 
 
 def employee_environment():
-    return {
+    result = {
         "HOME": "/home/worker",
         "XDG_CONFIG_HOME": "/home/worker/.config",
         "XDG_CACHE_HOME": "/home/worker/.cache",
@@ -48,6 +49,18 @@ def employee_environment():
         "OPENCODE_SERVER_USERNAME": server_username,
         "OPENCODE_SERVER_PASSWORD": server_password,
     }
+    # The controller supplies only ContainerProfileDefinition's closed
+    # containerEnv allowlist. Overlay those values into employee children only;
+    # PID 1 and the bridge do not inherit them as interpreter/runtime authority.
+    for name in (
+        "TZ", "LANG", "LC_ALL", "EDITOR", "VISUAL", "DOTNET_ROOT", "PATH",
+        "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+        "DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_NOLOGO", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
+        "NPM_CONFIG_UPDATE_NOTIFIER", "NPM_CONFIG_FUND", "PYTHONDONTWRITEBYTECODE", "PIP_DISABLE_PIP_VERSION_CHECK",
+    ):
+        if name in os.environ:
+            result[name] = os.environ[name]
+    return result
 
 
 def child_setup():
@@ -376,8 +389,34 @@ def bridge_key_present():
     return result == b"1"
 
 
+def prepare_volume_roots():
+    """Own and protect only the four named-volume roots.
+
+    `volume-nocopy` deliberately leaves a fresh Docker volume root-owned rather
+    than seeding it from the image. PID 1 is the trusted fixed supervisor, so it
+    initializes the mount root through an O_NOFOLLOW directory fd before any uid
+    drop. It never recurses: employee data already persisted below a mount is
+    neither re-owned nor rewritten during a container replacement.
+    """
+    for path, uid in (("/control", BRIDGE_UID), ("/home/worker", EMPLOYEE_UID),
+                      ("/workspace", EMPLOYEE_UID), ("/session", EMPLOYEE_UID)):
+        # Root PID 1 deliberately has CAP_CHOWN but not DAC_OVERRIDE/FOWNER. A
+        # bootstrapped /control is already 1101:1101/0700, so opening it would be
+        # denied. No child exists yet: reject symlinks/non-directories by lstat,
+        # use CAP_CHOWN to make root the owner, chmod as owner, then hand it to
+        # the fixed uid. Pathname operations touch only the mount root and never
+        # recurse into persistent contents.
+        value = os.lstat(path)
+        if not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode) or value.st_nlink < 2:
+            raise RuntimeError("unsafe worker volume root")
+        os.chown(path, 0, 0, follow_symlinks=False)
+        os.chmod(path, 0o700, follow_symlinks=False)
+        os.chown(path, uid, uid, follow_symlinks=False)
+
+
 def main():
     os.umask(0o077)
+    prepare_volume_roots()
     if not bridge_key_present():
         print("worker key is absent; run the documented stdin bootstrap command before starting the worker profile", file=sys.stderr, flush=True)
         return 78

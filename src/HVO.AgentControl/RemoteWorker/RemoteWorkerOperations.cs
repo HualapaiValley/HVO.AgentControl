@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
+using HVO.AgentControl.Organization;
 using Microsoft.Extensions.Options;
 
 namespace HVO.AgentControl.RemoteWorker;
@@ -43,7 +44,7 @@ public sealed record NamedVolumeMount(string Name, string ContainerPath, bool Re
 /// command is built: the configured base plus every verified profile build on
 /// that host. The command builder refuses any other digest.
 /// </summary>
-public sealed record ContainerCreateSpec(string Name, string ImageDigest, string Platform, WorkerResourceIdentity Identity, IReadOnlyList<NamedVolumeMount> Volumes, long MemoryBytes, decimal CpuLimit, int PidsLimit, IReadOnlyList<string>? ApprovedDigests = null);
+public sealed record ContainerCreateSpec(string Name, string ImageDigest, string Platform, WorkerResourceIdentity Identity, IReadOnlyList<NamedVolumeMount> Volumes, long MemoryBytes, decimal CpuLimit, int PidsLimit, IReadOnlyList<string>? ApprovedDigests = null, IReadOnlyDictionary<string, string>? EmployeeEnvironment = null);
 
 /// <summary>
 /// The ephemeral key-bootstrap container. It mounts only the control volume and
@@ -124,55 +125,18 @@ public static class RemoteWorkerCommandBuilder
             // /candidate, so no executable supplied by the candidate is ever run;
             // the base's python3 walks the mount, hashes the contract artifacts and
             // prints one JSON object. Tokens: candidate tag, base digest, platform.
-            RemoteDockerOperation.ImageVerify when tokens.Count == 3 => $"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --security-opt 'no-new-privileges' --pids-limit '32' --platform {QuotePlatform(tokens[2])} --mount {QuoteShell($"type=image,source={ValidatedImageReference(tokens[0])},target=/candidate,readonly")} --entrypoint '/usr/bin/python3' {QuoteDigest(tokens[1])} '-c' {QuoteShell(ImageVerifyProgram)}",
+            RemoteDockerOperation.ImageVerify when tokens.Count == 3 => $"docker run --rm --network 'none' --read-only --cap-drop 'ALL' --cap-add 'DAC_READ_SEARCH' --security-opt 'no-new-privileges' --pids-limit '32' --platform {QuotePlatform(tokens[2])} --mount {QuoteShell($"type=image,source={ValidatedImageReference(tokens[0])},target=/candidate,readonly")} --entrypoint '/usr/bin/python3' {QuoteDigest(tokens[1])} '-I' '-S' '/usr/local/bin/profile-image-verify'",
             RemoteDockerOperation.VolumeInspect when tokens.Count == 1 => $"docker volume inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerInspect when tokens.Count == 1 => $"docker container inspect --format '{{{{json .}}}}' {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerStart when tokens.Count == 1 => $"docker container start {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerStop when tokens.Count == 1 => $"docker container stop --time 10 {QuoteResource(tokens[0])}",
             RemoteDockerOperation.VolumeRemove when tokens.Count == 1 => $"docker volume rm {QuoteResource(tokens[0])}",
             RemoteDockerOperation.ContainerRemove when tokens.Count == 1 => $"docker container rm {QuoteResource(tokens[0])}",
-            RemoteDockerOperation.Connector when tokens.Count == 1 => $"docker container exec -i --user '1101:1101' {QuoteResource(tokens[0])} '/usr/bin/dotnet' {QuoteShell(options.WorkerTarget)} '--worker-pipe'",
+            RemoteDockerOperation.Connector when tokens.Count == 1 => $"docker container exec -i --user '1101:1101' {FixedDotnetEnvironment()} {QuoteResource(tokens[0])} '/usr/bin/dotnet' {QuoteShell(options.WorkerTarget)} '--worker-pipe'",
             _ => throw new WorkerControlConfigurationException("Remote operation arguments or operation kind are invalid."),
         };
         return BuildSsh(host, options, remote, stdin);
     }
-
-    /// <summary>
-    /// The verification program the built image must run to completion. It is a
-    /// fixed Python program (the base ships python3 and the trailer asserts it),
-    /// reads only the filesystem, and emits one JSON line. A profile cannot
-    /// influence it: it is a controller constant, not context. It is carried as
-    /// base64 inside a one-line bootstrap so the remote token contains no quotes
-    /// or control characters.
-    /// </summary>
-    public static readonly string ImageVerifyProgram =
-        "import base64;exec(base64.b64decode(" + '"' + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(ImageVerifyScript)) + '"' + ").decode())";
-
-    public const string ImageVerifyScript =
-        "import hashlib,json,os,stat\n" +
-        "C=\"/candidate\"\n" +
-        "def mode(p):\n  st=os.lstat(C+p); return {\"uid\":st.st_uid,\"gid\":st.st_gid,\"mode\":stat.S_IMODE(st.st_mode)}\n" +
-        "def sha(p):\n  st=os.lstat(p); h=hashlib.sha256((\"%d:%d:%o\\n\"%(st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))).encode())\n  try:\n    with open(p,\"rb\") as f:\n      for b in iter(lambda: f.read(1<<20), b\"\"): h.update(b)\n  except OSError: return \"unreadable:\"+p\n  return h.hexdigest()\n" +
-        "def dmeta(p):\n  st=os.lstat(p); return (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))\n" +
-        "def tree(p):\n  h=hashlib.sha256((\"D%s\\n\"%(dmeta(p),)).encode())\n  for root,dirs,files in os.walk(p):\n    dirs.sort()\n    for d in dirs:\n      q=os.path.join(root,d)\n      h.update(os.path.relpath(q,p).encode()); h.update((\"L%s\"%os.readlink(q) if os.path.islink(q) else \"D%s\"%(dmeta(q),)).encode())\n    for f in sorted(files):\n      q=os.path.join(root,f)\n      h.update(os.path.relpath(q,p).encode()); h.update((\"L%s\"%os.readlink(q) if os.path.islink(q) else sha(q)).encode())\n  return h.hexdigest()\n" +
-        "def same(p):\n  a=C+p\n  if not os.path.lexists(a) or not os.path.lexists(p): return False\n  if os.path.islink(a) or os.path.islink(p): return os.path.islink(a) and os.path.islink(p) and os.readlink(a)==os.readlink(p)\n  if os.path.isdir(a)!=os.path.isdir(p): return False\n  return (tree(a)==tree(p) and dmeta(a)==dmeta(p)) if os.path.isdir(a) else (sha(a)==sha(p))\n" +
-        "def superset(p):\n  a=C+p\n  if not os.path.isdir(a) or not os.path.isdir(p) or dmeta(a)!=dmeta(p): return False\n  for root,dirs,files in os.walk(p):\n    for d in dirs:\n      q=os.path.join(root,d); r=C+q\n      if os.path.islink(q):\n        if not os.path.islink(r) or os.readlink(r)!=os.readlink(q): return False\n      elif not os.path.isdir(r) or os.path.islink(r) or dmeta(r)!=dmeta(q): return False\n    for f in files:\n      q=os.path.join(root,f); r=C+q\n      if os.path.islink(q):\n        if not os.path.islink(r) or os.readlink(r)!=os.readlink(q): return False\n      elif not os.path.isfile(r) or os.path.islink(r) or sha(r)!=sha(q): return False\n  return True\n" +
-        "def resolve(p):\n  seen=0\n  while os.path.islink(C+p) and seen<8:\n    t=os.readlink(C+p); p=t if t.startswith(\"/\") else os.path.normpath(os.path.join(os.path.dirname(p),t)); seen+=1\n  return p\n" +
-        "def account(name):\n  try:\n    for line in open(C+\"/etc/passwd\"):\n      f=line.rstrip(\"\\n\").split(\":\")\n      if f[0]==name: return {\"uid\":int(f[2]),\"gid\":int(f[3]),\"home\":f[5],\"shell\":f[6]}\n  except OSError: pass\n  return None\n" +
-        "setuid=[];caps=[]\n" +
-        "for root,dirs,files in os.walk(C):\n  for f in files:\n    p=os.path.join(root,f)\n    try: st=os.lstat(p)\n    except OSError: continue\n    if stat.S_ISREG(st.st_mode) and st.st_mode & 0o6000: setuid.append(p[len(C):])\n    try:\n      if \"security.capability\" in os.listxattr(p, follow_symlinks=False): caps.append(p[len(C):])\n    except OSError: pass\n" +
-        "artifacts={p:same(p) for p in (\"/usr/local/bin/worker-supervisor\",\"/app\",\"/usr/share/dotnet\",\"/usr/local/lib/node_modules/opencode-ai\",\"/usr/local/bin/node\",\"/usr/bin/dotnet\",\"/usr/local/bin/opencode\",\"/usr/bin/python3\",\"/usr/bin/python3.12\",\"/usr/bin/env\",\"/bin/sh\",\"/usr/bin/dash\",\"/etc/ld.so.conf\",\"/etc/ld.so.conf.d\",\"/etc/nsswitch.conf\")}\n" +
-        "def cache_map(path):\n  import subprocess\n  out=subprocess.run([\"/sbin/ldconfig\",\"-p\",\"-C\",path],capture_output=True,text=True,timeout=30).stdout\n  m={}\n  for line in out.splitlines():\n    if \"=>\" not in line: continue\n    key,target=line.split(\"=>\",1); soname=key.strip().split(\" \",1)[0]; m.setdefault(soname,[]).append((key.strip(),target.strip()))\n  return m\n" +
-        "def cache_ok():\n  try: base=cache_map(\"/etc/ld.so.cache\"); cand=cache_map(C+\"/etc/ld.so.cache\")\n  except Exception: return False\n  for soname,entries in base.items():\n    if cand.get(soname)!=entries: return False\n    if not all(same(t) for _,t in entries): return False\n  for soname,entries in cand.items():\n    if soname in base: continue\n    for _,t in entries:\n      if not t.startswith(\"/\") or \"/../\" in t or not os.path.lexists(C+t): return False\n  return True\n" +
-        "artifacts[\"/etc/ld.so.cache\"]=cache_ok()\n" +
-        "artifacts[\"/usr/lib/python3.12\"]=superset(\"/usr/lib/python3.12\")\n" +
-        "artifacts[\"/lib\"]=os.readlink(C+\"/lib\")==os.readlink(\"/lib\") if os.path.islink(\"/lib\") else same(\"/lib\")\n" +
-        "artifacts[\"/lib64\"]=os.readlink(C+\"/lib64\")==os.readlink(\"/lib64\") if os.path.islink(\"/lib64\") else same(\"/lib64\")\n" +
-        "artifacts[\"/usr/lib/x86_64-linux-gnu\"]=superset(\"/usr/lib/x86_64-linux-gnu\") and superset(\"/usr/lib64\") if os.path.isdir(\"/usr/lib64\") else superset(\"/usr/lib/x86_64-linux-gnu\")\n" +
-        "artifacts[\"/usr/lib/aarch64-linux-gnu\"]=superset(\"/usr/lib/aarch64-linux-gnu\") if os.path.isdir(\"/usr/lib/aarch64-linux-gnu\") else True\n" +
-        "artifacts[\"/etc/ld.so.preload\"]=not os.path.lexists(C+\"/etc/ld.so.preload\")\n" +
-        "artifacts[\"/lib/python-shadow\"]=not any(os.path.lexists(C+d+\"/python3\") for d in (\"/usr/local/bin\",\"/usr/local/sbin\"))\n" +
-        "print(json.dumps({\"bridge\":account(\"bridge\"),\"employee\":account(\"employee\"),\"dirs\":{d:mode(d) for d in (\"/control\",\"/home/worker\",\"/workspace\",\"/session\")},\"app\":mode(\"/app\"),\"supervisor\":mode(\"/usr/local/bin/worker-supervisor\"),\"artifacts\":artifacts,\"setuid\":setuid[:16],\"fileCaps\":caps[:16],\"dockerSock\":os.path.exists(C+\"/var/run/docker.sock\")}))\n";
 
     /// <summary>
     /// <c>docker build</c> reading the deterministic tar context from standard
@@ -209,6 +173,12 @@ public static class RemoteWorkerCommandBuilder
     private static readonly System.Text.RegularExpressions.Regex ImageReference = new("^agentcontrol-[a-z0-9-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static string QuoteDigest(string value) { if (!Digest.IsMatch(value)) throw new WorkerControlConfigurationException("Image digest is invalid."); return QuoteShell(value); }
+    private static string FixedDotnetEnvironment() => string.Join(' ', new[]
+    {
+        "HOME=/control", "PATH=/usr/bin:/bin", "DOTNET_ROOT=/usr/share/dotnet",
+        "DOTNET_STARTUP_HOOKS=", "DOTNET_ADDITIONAL_DEPS=", "DOTNET_SHARED_STORE=",
+        "LD_PRELOAD=", "LD_AUDIT=", "LD_LIBRARY_PATH=",
+    }.Select(value => "--env " + QuoteShell(value)));
     private static string ValidatedImageReference(string value) { ValidateImageReference(value); return value; }
     private static void ValidateImageReference(string value) { if (!ImageReference.IsMatch(value) || value.Length > 200) throw new WorkerControlConfigurationException("Image reference is invalid."); }
     /// <summary>An exact digest or a controller-shaped <c>repository:tag</c> reference; never a registry path.</summary>
@@ -241,6 +211,15 @@ public static class RemoteWorkerCommandBuilder
             "--security-opt", "'no-new-privileges'",
             "--pids-limit", QuoteNumber(64),
             "--env", QuoteShell("WORKER_CONTROL_DIRECTORY=/control"),
+            "--env", QuoteShell("HOME=/control"),
+            "--env", QuoteShell("PATH=/usr/bin:/bin"),
+            "--env", QuoteShell("DOTNET_ROOT=/usr/share/dotnet"),
+            "--env", QuoteShell("DOTNET_STARTUP_HOOKS="),
+            "--env", QuoteShell("DOTNET_ADDITIONAL_DEPS="),
+            "--env", QuoteShell("DOTNET_SHARED_STORE="),
+            "--env", QuoteShell("LD_PRELOAD="),
+            "--env", QuoteShell("LD_AUDIT="),
+            "--env", QuoteShell("LD_LIBRARY_PATH="),
             "--mount", QuoteShell($"type=volume,src={spec.ControlVolumeName},dst=/control"),
             "--platform", QuotePlatform(spec.Platform),
             "--entrypoint", QuoteShell("/usr/bin/dotnet"),
@@ -258,11 +237,17 @@ public static class RemoteWorkerCommandBuilder
         if (spec.MemoryBytes != options.MemoryBytes || spec.CpuLimit != options.CpuLimit || spec.PidsLimit != options.PidsLimit) throw new WorkerControlConfigurationException("Container resource limits differ from controller policy.");
         if (spec.Volumes.Count != 4 || spec.Volumes.Select(x => x.ContainerPath).ToHashSet(StringComparer.Ordinal).SetEquals(ContainerPaths) is false) throw new WorkerControlConfigurationException("Container must use the four fixed named-volume mount points.");
         var parts = new List<string> { "docker container create", "--name", QuoteResource(spec.Name), "--network", QuoteShell(WorkerControlOptions.ContainerNetworkMode), "--read-only", "--cap-drop", "'ALL'", "--cap-add", "'CHOWN'", "--cap-add", "'SETUID'", "--cap-add", "'SETGID'", "--cap-add", "'KILL'", "--security-opt", "'no-new-privileges'", "--env", QuoteShell("WORKER_CONTROL_DIRECTORY=/control"), "--env", QuoteShell("WORKER_ID=" + spec.Identity.WorkerId), "--env", QuoteShell("WORKER_CONTROLLER_ID=" + spec.Identity.ControllerId), "--pids-limit", QuoteNumber(spec.PidsLimit), "--memory", QuoteNumber(spec.MemoryBytes), "--cpus", QuoteNumber(spec.CpuLimit), "--tmpfs", "'/tmp:rw,noexec,nosuid,nodev,size=64m'", "--tmpfs", "'/run:rw,noexec,nosuid,nodev,size=16m'", "--platform", QuotePlatform(spec.Platform) };
+        foreach (var variable in (spec.EmployeeEnvironment ?? new Dictionary<string, string>()).OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            try { ContainerProfileDefinition.ValidateEnvironmentEntry(variable.Key, variable.Value, "containerEnv"); }
+            catch (OrganizationValidationException exception) { throw new WorkerControlConfigurationException(exception.Message, exception); }
+            parts.Add("--env"); parts.Add(QuoteShell(variable.Key + "=" + variable.Value));
+        }
         foreach (var label in ExactLabels(spec.Identity)) { parts.Add("--label"); parts.Add(QuoteLabel(label.Key, label.Value)); }
         foreach (var mount in spec.Volumes.OrderBy(x => x.ContainerPath, StringComparer.Ordinal))
         {
             ValidateResource(mount.Name); if (!ContainerPaths.Contains(mount.ContainerPath)) throw new WorkerControlConfigurationException("Container mount path is not fixed.");
-            parts.Add("--mount"); parts.Add(QuoteShell($"type=volume,src={mount.Name},dst={mount.ContainerPath}{(mount.ReadOnly ? ",readonly" : string.Empty)}"));
+            parts.Add("--mount"); parts.Add(QuoteShell($"type=volume,src={mount.Name},dst={mount.ContainerPath},volume-nocopy{(mount.ReadOnly ? ",readonly" : string.Empty)}"));
         }
         parts.Add(QuoteShell(spec.ImageDigest));
         return BuildSsh(host, options, string.Join(' ', parts), null);

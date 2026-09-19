@@ -69,7 +69,7 @@ public static class ProfileBuildContext
         // package would re-point it to /usr/lib/dotnet. The SDK is therefore installed
         // side by side under /opt/dotnet-sdk with Microsoft's pinned, checksum-verified
         // install script, at the exact SDK version this repository pins, and reached
-        // through a /usr/local/bin shim that only the employee's PATH consults.
+        // through the employee-only DOTNET_ROOT/PATH profile environment.
         ["ghcr.io/devcontainers/features/dotnet:2"] = new(
             ["10.0", "latest"],
             _ => "RUN apt-get update && apt-get install -y --no-install-recommends curl libicu74 && rm -rf /var/lib/apt/lists/* \\\n"
@@ -77,8 +77,7 @@ public static class ProfileBuildContext
                + "    && echo \"" + DotnetInstallScriptSha256 + "  /tmp/dotnet-install.sh\" | sha256sum -c - \\\n"
                + "    && bash /tmp/dotnet-install.sh --version " + DotnetSdkVersion + " --install-dir /opt/dotnet-sdk --no-path \\\n"
                + "    && rm /tmp/dotnet-install.sh \\\n"
-               + "    && printf '#!/bin/sh\\nexport DOTNET_ROOT=/opt/dotnet-sdk\\nexec /opt/dotnet-sdk/dotnet \"$@\"\\n' > /usr/local/bin/dotnet && chmod 755 /usr/local/bin/dotnet \\\n"
-               + "    && test \"$(readlink /usr/bin/dotnet)\" = /usr/share/dotnet/dotnet && /usr/local/bin/dotnet --list-sdks\n"),
+               + "    && test \"$(readlink /usr/bin/dotnet)\" = /usr/share/dotnet/dotnet && /opt/dotnet-sdk/dotnet --list-sdks\n"),
         // The base already carries node 22 (copied from the OpenCode stage); npm is present with it.
         ["ghcr.io/devcontainers/features/node:1"] = new(
             ["22", "lts", "latest"],
@@ -158,12 +157,11 @@ public static class ProfileBuildContext
                     text.Append(recipe.Render(version)).Append('\n');
                 }
             }
-            if (root.TryGetProperty("containerEnv", out var env))
-            {
-                text.Append("# --- containerEnv ---\n");
-                foreach (var variable in env.EnumerateObject())
-                    text.Append("ENV ").Append(variable.Name).Append('=').Append(Quote(variable.Value.GetString() ?? string.Empty)).Append('\n');
-            }
+            // containerEnv is applied by the long-lived container-create command
+            // and overlaid only into employee processes by the supervisor. It is
+            // deliberately not image ENV: PID 1 and the bridge keep fixed trusted
+            // environments, and image inspection requires Config.Env to match the
+            // approved base exactly.
             foreach (var (key, label) in new[] { ("postCreateCommand", "agentcontrol.post-create"), ("postStartCommand", "agentcontrol.post-start"), ("remoteEnv", "agentcontrol.remote-env") })
             {
                 if (!root.TryGetProperty(key, out var value)) continue;
@@ -183,7 +181,7 @@ public static class ProfileBuildContext
         text.Append("    && test -x /usr/bin/dotnet && test -f /app/HVO.AgentControl.Worker.dll \\\n");
         text.Append("    && test -x /usr/local/bin/opencode && test -x /usr/bin/python3\n");
         text.Append("WORKDIR /workspace\n");
-        text.Append("ENTRYPOINT [\"/usr/local/bin/worker-supervisor\"]\n");
+        text.Append("ENTRYPOINT [\"/usr/bin/python3\", \"-I\", \"-S\", \"/usr/local/bin/worker-supervisor\"]\n");
 
         var rendered = text.ToString();
         if (Encoding.UTF8.GetByteCount(rendered) > MaximumDockerfileBytes)

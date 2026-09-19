@@ -594,30 +594,41 @@ image. The owner accepted this design on 2026-09-18.
   allowlisted id and version (nothing is fetched from ghcr.io; the dotnet feature
   installs the repository's pinned SDK side by side under `/opt/dotnet-sdk` with
   Microsoft's checksum-pinned install script, leaving the worker's
-  `/usr/bin/dotnet` untouched), `containerEnv`
-  as `ENV`, lifecycle commands and `remoteEnv` recorded as labels (the supervisor
-  runs them as the employee; the build never executes them), and a fixed trailer
+  `/usr/bin/dotnet` untouched), lifecycle commands and `remoteEnv` recorded as
+  labels, and a fixed trailer
   that re-strips setuid bits, re-owns `/app` and the supervisor to root, resets
   the four private directories to their fixed owners and 0700, asserts the two
-  uids and the worker binaries, and restores the supervisor entrypoint. The
+  uids and the worker binaries, and restores the exact isolated entrypoint
+  `[/usr/bin/python3,-I,-S,/usr/local/bin/worker-supervisor]`. The
   fragment runs before the trailer, so it cannot undo it.
+- Owner fragments may not use `ENV`. Structured `containerEnv` is validated
+  against a closed allowlist (with fixed `PATH`/`DOTNET_ROOT` values), applied
+  by container-create, and overlaid only into employee children by the fixed
+  supervisor; it is not image environment authority. Inspect requires the
+  candidate image `Config.Env` and `Cmd` to equal the approved base and the
+  working directory to be `/workspace`. The bridge, bootstrap and direct
+  worker-pipe connector run with fixed `HOME`/`PATH`/`DOTNET_ROOT` and cleared
+  dotnet/loader hook variables.
 - A build becomes `built`/verified only after two independent checks over what
   the host printed. `docker image inspect` must show the controller's three labels
   for this revision and context, the supervisor entrypoint, no default user, no
   exposed ports or anonymous volumes, the approved platform and a root filesystem
   whose layers start with the approved base's. Then a fixed verification program
-  (a controller constant, carried base64 so the remote token has no quotes) runs
+  (a checked-in base artifact, `/usr/local/bin/profile-image-verify`) runs
   **in the approved base image** — never the candidate — with the candidate's
   filesystem mounted read-only at `/candidate` (`--mount type=image`,
-  `--network none --read-only --cap-drop ALL`), so no executable supplied by a
-  fragment is ever run. It must report: the `bridge`/`employee` accounts with
+  `--network none --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH`), so no
+  executable supplied by a fragment is ever run; the single read-only
+  capability only traverses candidate 0700 directories. It must report: the
+  `bridge`/`employee` accounts with
   uid/gid 1101/1102 and their fixed home and shell; the four directories 0700
   with their owners; `/app` and the supervisor root-owned; **identical contract
   artifacts in content and uid/gid/mode** (an unreadable or non-executable
-  artifact is rejected like a replaced one) — the launch chain `/usr/bin/env`, `/bin/sh`,
+  artifact is rejected like a replaced one, and complete xattr maps match the
+  base on contract paths) — the launch chain `/usr/bin/env`, `/bin/sh`,
   `/usr/bin/dash`, `/usr/bin/python3`, `/usr/bin/python3.12`; the payloads
   `/usr/local/bin/worker-supervisor`, `/app`, `/usr/bin/dotnet`,
-  `/usr/share/dotnet`, `/usr/local/bin/node`,
+  `/usr/share/dotnet`, `/usr/local/bin/profile-image-verify`, `/usr/local/bin/node`,
   `/usr/local/lib/node_modules/opencode-ai`, `/usr/local/bin/opencode`; and,
   as *no base file altered or removed* (additions allowed), the Python standard
   library `/usr/lib/python3.12` and the loader/shared-library tree
@@ -629,10 +640,12 @@ image. The owner accepted this design on 2026-09-18.
   each pointing at a file identical to the base's (a recipe may add SONAMEs by
   installing a library; `ldconfig /opt/evil` prepending a plain or hwcap entry
   for a base SONAME cannot pass), directory uid/gid/mode preserved throughout
-  every pinned tree, no
+  every pinned tree, base-identical CA trust (`/etc/ssl`,
+  `/usr/share/ca-certificates`, `/etc/ca-certificates.conf`), no
   `/etc/ld.so.preload`, no `python3` shadowing `/usr/bin` under `/usr/local`,
   no setuid/setgid files, no file capabilities (`security.capability` xattr)
-  and no Docker socket path. The trailer restores metadata; the verifier proves
+  and no Docker socket path, no system/root OpenCode policy and no `/etc/dotnet`.
+  The four image mountpoint directories must be empty. The trailer restores metadata; the verifier proves
   content, because a fragment runs as root before the trailer and could
   otherwise replace PID 1's interpreter, the shell, the loader, a library, the
   supervisor, the worker dll or the runtime. Residual, accepted: a fragment may
@@ -646,6 +659,26 @@ image. The owner accepted this design on 2026-09-18.
   `uncertain` before anything else runs; within one process a build id has a
   single in-flight owner, so a concurrent request for a running build is refused
   rather than allowed to re-transition the row.
+- The four named-volume mounts use `volume-nocopy`, so candidate-baked files
+  cannot become durable state. The fixed root supervisor initializes only each
+  fresh mount root (reject symlink/non-directory, non-recursive chown/chmod to
+  the fixed uid and 0700) before dropping privileges; persisted contents below
+  the root are untouched on container replacement.
+
+**Accepted profile-image residuals.** Profile-controlled locale, terminfo,
+timezone and shell/profile files may change employee-facing presentation and
+tool behavior; the fixed launch path does not source them. `/etc/environment`
+is not read by the direct-exec supervisor/children, and environment startup
+selectors are forbidden by image-environment equality. Employee-owned
+`/home/worker` and `/workspace` may intentionally change later OpenCode
+configuration and instructions; verification protects image/runtime integrity,
+not employee-authored workspace policy. Docker supplies `/etc/hosts`,
+`/etc/hostname` and `/etc/resolv.conf` at runtime; DNS and broad bridge egress
+remain approved-host/network responsibilities. `binfmt_misc` is host kernel
+state and cannot persist in an OCI rootfs or be changed by the
+capability-restricted worker. Added tool files and unrelated `user.*` xattrs
+outside pinned paths are permitted; setuid/setgid and `security.capability` are
+globally rejected.
 - **Approved digests are per host**: the configured base plus every verified build
   on that host. The container-create command builder refuses any other digest;
   the key bootstrap always runs the configured base regardless of the enrollment's

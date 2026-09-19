@@ -871,6 +871,8 @@ public sealed class RemoteWorkerControlTests
     {
         var host = new ApprovedExecutionHost { Id = "host-a", Hostname = "worker.example", Username = "docker", KnownHostsPath = "/control/known_hosts", IdentityFilePath = "/control/id" }; var options = new WorkerControlOptions { ControllerId = "controller-a", ApprovedImageDigest = "sha256:" + new string('a', 64) };
         var command = RemoteWorkerCommandBuilder.Build(host, options, RemoteDockerOperation.Connector, ["agentcontrol-worker-a"]); Assert.Null(command.StandardInput); Assert.DoesNotContain("key", command.Arguments[^1], StringComparison.OrdinalIgnoreCase);
+        foreach (var value in new[] { "HOME=/control", "PATH=/usr/bin:/bin", "DOTNET_ROOT=/usr/share/dotnet", "DOTNET_STARTUP_HOOKS=", "DOTNET_ADDITIONAL_DEPS=", "DOTNET_SHARED_STORE=", "LD_PRELOAD=", "LD_AUDIT=", "LD_LIBRARY_PATH=" })
+            Assert.Contains($"--env '{value}'", command.Arguments[^1], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1444,6 +1446,8 @@ public sealed class RemoteWorkerControlTests
         Assert.Contains("--security-opt 'no-new-privileges'", remote, StringComparison.Ordinal);
         Assert.Contains("'type=volume,src=agentcontrol-control-a,dst=/control'", remote, StringComparison.Ordinal);
         Assert.Contains("'--worker-bootstrap-key'", remote, StringComparison.Ordinal);
+        foreach (var value in new[] { "HOME=/control", "PATH=/usr/bin:/bin", "DOTNET_ROOT=/usr/share/dotnet", "DOTNET_STARTUP_HOOKS=", "DOTNET_ADDITIONAL_DEPS=", "DOTNET_SHARED_STORE=", "LD_PRELOAD=", "LD_AUDIT=", "LD_LIBRARY_PATH=" })
+            Assert.Contains($"'{value}'", remote, StringComparison.Ordinal);
         Assert.Contains("'" + digest + "'", remote, StringComparison.Ordinal);
         // Only the control volume is mounted, and no long-lived container is touched.
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(remote, "--mount"));

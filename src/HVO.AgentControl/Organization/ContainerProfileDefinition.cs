@@ -101,15 +101,18 @@ public sealed partial class ContainerProfileDefinition
     /// <summary>Environment variable names a profile may set for the employee process.</summary>
     public static readonly IReadOnlyList<string> AllowedEnvironmentKeys =
     [
-        "TZ", "LANG", "LC_ALL", "EDITOR", "VISUAL",
+        "TZ", "LANG", "LC_ALL", "EDITOR", "VISUAL", "DOTNET_ROOT", "PATH",
         "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
         "DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_NOLOGO", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
         "NPM_CONFIG_UPDATE_NOTIFIER", "NPM_CONFIG_FUND", "PYTHONDONTWRITEBYTECODE", "PIP_DISABLE_PIP_VERSION_CHECK",
     ];
 
+    public const string EmployeeDotnetRoot = "/opt/dotnet-sdk";
+    public const string EmployeePath = "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin";
+
     /// <summary>Dockerfile instructions permitted in a fragment after the base FROM line.</summary>
     public static readonly IReadOnlyList<string> AllowedDockerfileInstructions =
-        ["RUN", "ENV", "ARG", "LABEL", "WORKDIR"];
+        ["RUN", "ARG", "LABEL", "WORKDIR"];
 
     private static readonly HashSet<string> AllowedKeySet = new(AllowedKeys, StringComparer.Ordinal);
     private static readonly HashSet<string> AllowedFeatureSet = new(AllowedFeatures, StringComparer.Ordinal);
@@ -280,16 +283,31 @@ public sealed partial class ContainerProfileDefinition
         RejectDuplicateKeys(environment, key);
         foreach (var variable in environment.EnumerateObject())
         {
-            if (!AllowedEnvironmentKeySet.Contains(variable.Name))
-                throw new OrganizationValidationException($"'{key}.{Sanitize(variable.Name)}' is not an allowed variable. Allowed: {string.Join(", ", AllowedEnvironmentKeys)}.");
             var value = RequireString(variable.Value, $"{key}.{variable.Name}");
-            if (value.Length > MaximumEnvironmentValueLength)
-                throw new OrganizationValidationException($"'{key}.{variable.Name}' must be at most {MaximumEnvironmentValueLength} characters.");
-            if (value.Any(c => char.IsControl(c) || c > 0x7E))
-                throw new OrganizationValidationException($"'{key}.{variable.Name}' must be printable ASCII without control characters.");
-            if (value.Contains("${", StringComparison.Ordinal) || value.Contains("$(", StringComparison.Ordinal))
-                throw new OrganizationValidationException($"'{key}.{variable.Name}' must not contain variable or command substitution.");
+            ValidateEnvironmentEntry(variable.Name, value, key);
         }
+    }
+
+    /// <summary>
+    /// Shared final-boundary validation for one structured employee environment
+    /// entry. Profile parsing and container command construction both call this,
+    /// so an internal caller or corrupt store cannot bypass the fixed PATH/root
+    /// contract after the definition was originally accepted.
+    /// </summary>
+    public static void ValidateEnvironmentEntry(string name, string value, string scope = "containerEnv")
+    {
+        if (!AllowedEnvironmentKeySet.Contains(name))
+            throw new OrganizationValidationException($"'{scope}.{Sanitize(name)}' is not an allowed variable. Allowed: {string.Join(", ", AllowedEnvironmentKeys)}.");
+        if (value.Length > MaximumEnvironmentValueLength)
+            throw new OrganizationValidationException($"'{scope}.{name}' must be at most {MaximumEnvironmentValueLength} characters.");
+        if (value.Any(c => char.IsControl(c) || c > 0x7E))
+            throw new OrganizationValidationException($"'{scope}.{name}' must be printable ASCII without control characters.");
+        if (value.Contains("${", StringComparison.Ordinal) || value.Contains("$(", StringComparison.Ordinal))
+            throw new OrganizationValidationException($"'{scope}.{name}' must not contain variable or command substitution.");
+        if (name == "PATH" && value != EmployeePath)
+            throw new OrganizationValidationException($"'{scope}.PATH' must be the fixed employee path.");
+        if (name == "DOTNET_ROOT" && value != EmployeeDotnetRoot)
+            throw new OrganizationValidationException($"'{scope}.DOTNET_ROOT' must be {EmployeeDotnetRoot}.");
     }
 
     private static void ValidateCommand(JsonElement command, string key)
@@ -410,8 +428,6 @@ public sealed partial class ContainerProfileDefinition
                 RejectRunHazards(arguments, lineNumber);
             if (instruction == "WORKDIR" && !(arguments is "/workspace" || arguments.StartsWith("/workspace/", StringComparison.Ordinal)))
                 throw new OrganizationValidationException($"Line {lineNumber}: WORKDIR must stay under /workspace.");
-            if (instruction == "ENV" && PathAssignment().IsMatch(arguments) && !arguments.Contains("$PATH", StringComparison.Ordinal) && !arguments.Contains("${PATH}", StringComparison.Ordinal))
-                throw new OrganizationValidationException($"Line {lineNumber}: replacing PATH is not allowed; append with ENV PATH=\"$PATH:...\".");
         }
 
         if (!sawFrom)
@@ -567,9 +583,6 @@ public sealed partial class ContainerProfileDefinition
 
     [GeneratedRegex("(?:^|\\s)--(?:mount|network|security)(?:=|\\s)", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex RunFlagPattern();
-
-    [GeneratedRegex("(?:^|\\s)PATH(?:=|\\s)", RegexOptions.CultureInvariant)]
-    private static partial Regex PathAssignment();
 
     [GeneratedRegex("<<-?\\s*['\"]?[A-Za-z_]", RegexOptions.CultureInvariant)]
     private static partial Regex HeredocPattern();

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Formats.Tar;
 using System.Text;
 using System.Text.Json;
 using Xunit;
@@ -244,6 +245,76 @@ public sealed class WorkerImageContractTests
         }
     }
 
+    [Fact]
+    public void ControllerVolumeMountsUseNoCopyAndCannotPersistImageBakedFiles()
+    {
+        if (!Available.Value) return;
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var tag = "agentcontrol-volume-nocopy:" + suffix;
+        var container = "agentcontrol-nocopy-" + suffix;
+        var volumes = new[] { "agentcontrol-nocopy-c-" + suffix, "agentcontrol-nocopy-h-" + suffix, "agentcontrol-nocopy-w-" + suffix, "agentcontrol-nocopy-s-" + suffix };
+        try
+        {
+            var dockerfile = $"FROM {Image}\nUSER root\nRUN printf evil >/control/baked && printf evil >/home/worker/baked && printf evil >/workspace/baked && printf evil >/session/baked\n";
+            var build = RunWithInput(["build", "--quiet", "--pull=false", "-t", tag, "-"], TarDockerfile(dockerfile), 300_000);
+            Assert.True(build.ExitCode == 0, build.Output);
+            foreach (var volume in volumes) Assert.True(Run(["volume", "create", volume]).ExitCode == 0);
+
+            var options = new HVO.AgentControl.RemoteWorker.WorkerControlOptions { ControllerId = "controller-nocopy", ApprovedImageDigest = ImageDigest(), ApprovedImagePlatform = Platform() };
+            var identity = new HVO.AgentControl.RemoteWorker.WorkerResourceIdentity("org", "controller-nocopy", "host", "worker", "binding", "operation");
+            var mounts = new[] { new HVO.AgentControl.RemoteWorker.NamedVolumeMount(volumes[0], "/control"), new(volumes[1], "/home/worker"), new(volumes[2], "/workspace"), new(volumes[3], "/session") };
+            // This test exercises mount behavior, so allow the derived local digest explicitly.
+            var digest = Run(["image", "inspect", "-f", "{{.Id}}", tag]).Output.Trim();
+            var key = HVO.AgentControl.RemoteWorker.WorkerBootstrapEncoding.Encode(new byte[32]);
+            var bootstrap = LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildBootstrap(
+                LocalHost(), options, new HVO.AgentControl.RemoteWorker.BootstrapSpec(volumes[0], options.ApprovedImageDigest, options.ApprovedImagePlatform, identity), key));
+            Assert.True(RunWithInput(bootstrap, key, 60_000).ExitCode == 0);
+            var command = HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.BuildContainerCreate(
+                LocalHost(), options, new(container, digest, options.ApprovedImagePlatform, identity, mounts, options.MemoryBytes, options.CpuLimit, options.PidsLimit, [options.ApprovedImageDigest, digest]));
+            var args = LocalArguments(command);
+            Assert.Equal(4, args.Count(value => value.Contains("volume-nocopy", StringComparison.Ordinal)));
+            Assert.True(Run(args).ExitCode == 0);
+            Assert.True(Run(["start", container]).ExitCode == 0);
+            var check = Run(["exec", container, "sh", "-c", "test ! -e /control/baked && test ! -e /home/worker/baked && test ! -e /workspace/baked && test ! -e /session/baked"]);
+            Assert.True(check.ExitCode == 0, check.Output);
+            Assert.All(volumes, volume => Assert.Equal("absent", Run(["run", "--rm", "-v", volume + ":/v", "--entrypoint", "/bin/sh", Image, "-c", "test ! -e /v/baked && echo absent"]).Output.Trim()));
+        }
+        finally
+        {
+            _ = Run(["rm", "-f", container]);
+            foreach (var volume in volumes) _ = Run(["volume", "rm", "-f", volume]);
+            _ = Run(["image", "rm", "-f", tag]);
+        }
+    }
+
+    [Fact]
+    public void ProductionPythonEntrypointIsIsolatedFromEnvironmentSiteAndWritableDirectories()
+    {
+        if (!Available.Value) return;
+        var suffix = Guid.NewGuid().ToString("N")[..12];
+        var tag = "agentcontrol-python-isolated:" + suffix;
+        try
+        {
+            var dockerfile = $"FROM {Image}\nUSER root\nRUN mkdir -p /opt/evil /usr/local/lib/python3.12/dist-packages && printf 'raise SystemExit(77)\\n' >/opt/evil/base64.py && printf 'raise SystemExit(78)\\n' >/usr/local/bin/base64.py && printf 'raise SystemExit(79)\\n' >/usr/local/lib/python3.12/dist-packages/sitecustomize.py && printf 'import sys;raise SystemExit(80)\\n' >/usr/local/lib/python3.12/dist-packages/00_evil.pth\n";
+            var build = RunWithInput(["build", "--quiet", "--pull=false", "-t", tag, "-"], TarDockerfile(dockerfile), 300_000);
+            Assert.True(build.ExitCode == 0, build.Output);
+            var script = "import json,sys;print(json.dumps({'isolated':sys.flags.isolated,'ignore_environment':sys.flags.ignore_environment,'no_user_site':sys.flags.no_user_site,'safe_path':sys.flags.safe_path,'no_site':sys.flags.no_site,'path':sys.path}))";
+            var run = Run(["run", "--rm", "--network", "none", "-e", "PYTHONPATH=/opt/evil", "-e", "PYTHONHOME=/opt/evil", "--entrypoint", "/usr/bin/python3", tag, "-I", "-S", "-c", script]);
+            Assert.True(run.ExitCode == 0, run.Output);
+            using var document = JsonDocument.Parse(run.Output.Trim());
+            Assert.Equal(1, document.RootElement.GetProperty("isolated").GetInt32());
+            Assert.Equal(1, document.RootElement.GetProperty("ignore_environment").GetInt32());
+            Assert.Equal(1, document.RootElement.GetProperty("no_user_site").GetInt32());
+            Assert.True(document.RootElement.GetProperty("safe_path").GetBoolean());
+            Assert.Equal(1, document.RootElement.GetProperty("no_site").GetInt32());
+            var path = document.RootElement.GetProperty("path").EnumerateArray().Select(item => item.GetString()).ToArray();
+            Assert.DoesNotContain("/opt/evil", path);
+            Assert.DoesNotContain("/usr/local/bin", path);
+            Assert.DoesNotContain("/workspace", path);
+        }
+        finally { _ = Run(["image", "rm", "-f", tag]); }
+    }
+
     /// <summary>
     /// The controller's own build path against the local daemon (#259): the
     /// seeded generic-employee revision is rendered to its deterministic context,
@@ -288,7 +359,7 @@ public sealed class WorkerImageContractTests
             HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.Output);
 
             // The generic profile's toolchain is really there, as the employee would see it.
-            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "export PATH=/usr/local/bin:/usr/bin:/bin; dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
+            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "/opt/dotnet-sdk/dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
             Assert.True(tools.ExitCode == 0, tools.Output);
 
             // Hostile fragments are built the same way and must be rejected by the same,
@@ -340,6 +411,15 @@ public sealed class WorkerImageContractTests
                 ("stdlib-dirmode", "RUN chmod 0777 /usr/lib/python3.12/json", "/usr/lib/python3.12 differs"),
                 ("app-dirmode", "RUN mkdir -p /app/sub && chmod 0777 /app/sub", "/app differs"),
                 ("libdir-mode", "RUN chmod 0777 /usr/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu differs"),
+                // Persistent-state and system-policy boundaries.
+                ("volume-seed", "RUN printf 'evil' > /workspace/seeded", "mountpoint contains"),
+                ("opencode-policy", "RUN mkdir -p /etc/opencode && printf '{}' > /etc/opencode/opencode.json", "OpenCode configuration"),
+                // Profiles have no approved custom-CA feature, so trust stays base-identical.
+                ("ca-bundle", "RUN printf 'evil' >> /etc/ssl/certs/ca-certificates.crt", "/etc/ssl differs"),
+                // Metadata includes all xattrs, not only file capabilities.
+                // OCI layer export commonly strips user.* xattrs; prove this does not create
+                // a false rejection. Pure verifier tests cover an observed xattr mismatch.
+                ("user-xattr", "RUN python3 -c 'import os;os.setxattr(\"/usr/bin/env\",\"user.agentcontrol-test\",b\"x\")'", "none"),
             };
             foreach (var (name, fragment, expect) in hostile)
             {
@@ -392,6 +472,21 @@ public sealed class WorkerImageContractTests
         var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
         if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
         return (process.ExitCode, output);
+    }
+
+    private static byte[] TarDockerfile(string dockerfile)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new TarWriter(stream, TarEntryFormat.Ustar, leaveOpen: true))
+        {
+            writer.WriteEntry(new UstarTarEntry(TarEntryType.RegularFile, "Dockerfile")
+            {
+                DataStream = new MemoryStream(Encoding.UTF8.GetBytes(dockerfile)),
+                Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead,
+                ModificationTime = DateTimeOffset.UnixEpoch,
+            });
+        }
+        return stream.ToArray();
     }
 
     private sealed class TempDirectory : IDisposable

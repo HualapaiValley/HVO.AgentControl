@@ -308,6 +308,8 @@ public static class ContainerProfileSeed
             "ghcr.io/devcontainers/features/github-cli:1": {}
           },
           "containerEnv": {
+            "DOTNET_ROOT": "/opt/dotnet-sdk",
+            "PATH": "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin",
             "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
             "DOTNET_NOLOGO": "1",
             "NPM_CONFIG_UPDATE_NOTIFIER": "false"

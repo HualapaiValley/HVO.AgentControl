@@ -209,13 +209,18 @@ public static class ImageContractVerifier
         if ((basis.RootElement.GetProperty("Id").GetString() ?? string.Empty) != baseDigest) throw new ImageContractException("The base image on the host is not the approved digest.");
 
         var config = built.RootElement.GetProperty("Config");
+        var baseConfig = basis.RootElement.GetProperty("Config");
         var labels = config.TryGetProperty("Labels", out var l) && l.ValueKind == JsonValueKind.Object ? l : throw new ImageContractException("The built image carries no labels.");
         Require(labels, ProfileBuildContext.ProfileLabel, revisionId);
         Require(labels, ProfileBuildContext.ContextHashLabel, contextHash);
         Require(labels, ProfileBuildContext.BaseDigestLabel, baseDigest);
 
         var entrypoint = config.TryGetProperty("Entrypoint", out var e) && e.ValueKind == JsonValueKind.Array ? e.EnumerateArray().Select(x => x.GetString()).ToArray() : [];
-        if (entrypoint.Length != 1 || entrypoint[0] != "/usr/local/bin/worker-supervisor") throw new ImageContractException("The built image does not keep the worker supervisor as its entrypoint.");
+        var expectedEntrypoint = new[] { "/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor" };
+        if (!entrypoint.SequenceEqual(expectedEntrypoint)) throw new ImageContractException("The built image does not keep the isolated worker-supervisor entrypoint.");
+        RequireSameEnvironment(config, baseConfig);
+        if ((config.TryGetProperty("WorkingDir", out var working) ? working.GetString() : null) != "/workspace") throw new ImageContractException("The built image working directory is not /workspace.");
+        if (!SameJson(config, baseConfig, "Cmd")) throw new ImageContractException("The built image changes the base command.");
         if (config.TryGetProperty("User", out var user) && !string.IsNullOrEmpty(user.GetString()) && user.GetString() != "root" && user.GetString() != "0")
             throw new ImageContractException("The built image sets a non-root default user; the supervisor must start as root.");
         if (config.TryGetProperty("ExposedPorts", out var ports) && ports.ValueKind == JsonValueKind.Object && ports.EnumerateObject().Any())
@@ -253,7 +258,7 @@ public static class ImageContractVerifier
         foreach (var (path, uid) in new[] { ("/control", 1101), ("/home/worker", 1102), ("/workspace", 1102), ("/session", 1102) })
         {
             var d = dirs.GetProperty(path);
-            if (d.GetProperty("uid").GetInt32() != uid || d.GetProperty("gid").GetInt32() != uid || d.GetProperty("mode").GetInt32() != 448)
+            if (d.GetProperty("uid").GetInt32() != uid || d.GetProperty("gid").GetInt32() != uid || d.GetProperty("mode").GetInt32() != 448 || d.GetProperty("xattrs").GetArrayLength() != 0)
                 throw new ImageContractException($"{path} is not owned {uid}:{uid} with mode 0700 (448).");
         }
         if (root.GetProperty("app").GetProperty("uid").GetInt32() != 0 || (root.GetProperty("app").GetProperty("mode").GetInt32() & 18) != 0) throw new ImageContractException("/app is not root-owned and group/other-unwritable.");
@@ -267,6 +272,8 @@ public static class ImageContractVerifier
         if (root.GetProperty("setuid").GetArrayLength() != 0) throw new ImageContractException("The built image contains setuid or setgid files.");
         if (root.GetProperty("fileCaps").GetArrayLength() != 0) throw new ImageContractException("The built image contains files with capability xattrs.");
         if (root.GetProperty("dockerSock").GetBoolean()) throw new ImageContractException("The built image contains a Docker socket path.");
+        if (!root.GetProperty("mountpointsEmpty").GetBoolean()) throw new ImageContractException("A worker volume mountpoint contains image-baked files that could seed persistent state.");
+        if (!root.GetProperty("systemPolicyAbsent").GetBoolean()) throw new ImageContractException("The built image contains system or root OpenCode configuration outside employee-owned volumes.");
     }
 
     /// <summary>
@@ -276,7 +283,7 @@ public static class ImageContractVerifier
     /// </summary>
     public static readonly IReadOnlyList<string> RequiredIdenticalArtifacts =
     [
-        "/usr/local/bin/worker-supervisor", "/app", "/usr/bin/dotnet", "/usr/share/dotnet",
+        "/usr/local/bin/worker-supervisor", "/usr/local/bin/profile-image-verify", "/app", "/usr/bin/dotnet", "/usr/share/dotnet",
         "/usr/local/bin/node", "/usr/local/lib/node_modules/opencode-ai", "/usr/local/bin/opencode",
         // PID 1 is `#!/usr/bin/env python3`: env, the interpreter and its symlink must
         // be byte-identical, and every standard-library file the base ships must be
@@ -302,11 +309,44 @@ public static class ImageContractVerifier
         // dependencies are all base SONAMEs). A crafted cache can therefore never
         // redirect a contract binary to an added library, by order or by hwcap.
         "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ld.so.cache", "/etc/nsswitch.conf",
+        // Profiles have no approved CA feature: outbound trust stays the
+        // approved base's. System/root OpenCode policy locations are required
+        // absent below; employee/project configuration lives on private volumes.
+        "/etc/ssl", "/usr/share/ca-certificates", "/etc/ca-certificates.conf",
         // Absent in the base and must stay absent: a preload would hijack every process,
         // and a python3 ahead of /usr/bin on the supervisor's PATH would replace PID 1's
         // interpreter (the SDK from apt lives under /usr/lib/dotnet and is allowed).
         "/etc/ld.so.preload", "/lib/python-shadow",
     ];
+
+    private static void RequireSameEnvironment(JsonElement candidate, JsonElement basis)
+    {
+        var actual = Environment(candidate);
+        var expected = Environment(basis);
+        if (actual.Count != expected.Count || actual.Any(item => !expected.TryGetValue(item.Key, out var value) || value != item.Value))
+            throw new ImageContractException("The built image environment differs from the approved base; profile variables must be applied only to employee processes.");
+    }
+
+    private static IReadOnlyDictionary<string, string> Environment(JsonElement config)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!config.TryGetProperty("Env", out var env) || env.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return result;
+        if (env.ValueKind != JsonValueKind.Array) throw new ImageContractException("The image environment is not an array.");
+        foreach (var item in env.EnumerateArray())
+        {
+            var text = item.GetString() ?? throw new ImageContractException("The image environment contains a non-string entry.");
+            var equals = text.IndexOf('=');
+            if (equals <= 0 || !result.TryAdd(text[..equals], text[(equals + 1)..])) throw new ImageContractException("The image environment contains a malformed or duplicate variable.");
+        }
+        return result;
+    }
+
+    private static bool SameJson(JsonElement candidate, JsonElement basis, string property)
+    {
+        var hasCandidate = candidate.TryGetProperty(property, out var left) && left.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined;
+        var hasBase = basis.TryGetProperty(property, out var right) && right.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined;
+        return hasCandidate == hasBase && (!hasCandidate || JsonElement.DeepEquals(left, right));
+    }
 
     private static void Account(JsonElement root, string name, int uid, string home, string shell)
     {
