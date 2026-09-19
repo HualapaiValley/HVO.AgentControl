@@ -20,15 +20,15 @@ revision-bound, same-origin owner action freezes one verified profile-revision
 build on a ready host, atomically creates the managed employee identity and
 DeveloperContainer binding, and a resumable coordinator drives
 `Approved → Provisioning → Orienting → Ready` from the frozen approval through
-remote orientation delivery and comprehension. The approval endpoint does not
-start provisioning at this revision; only the startup hosted service resumes an
-already-advanced request. It is **not operationally validated**: no live
+remote orientation delivery and comprehension. Approval commits the request to
+`Provisioning` and durably queues that work; it runs in the background and is
+rebuilt from persisted state after a restart. It is **not operationally
+validated**: no live
 owner-approved hire has been executed on any host, the
 `home-docker` execution-host enrollment is still held by the owner, and
-`WorkerControl` remains disabled by default. Approval is a host record of a
-verified selection, not a provisioned employee; approval and provisioning are
-separate operations, and a request left `Approved` is not provisioned until a
-later process resumes it. No request may auto-create an employee and profile updates
+`WorkerControl` remains disabled by default. Approval is an explicit owner act
+on a verified selection; nothing provisions without it. No request may
+auto-create an employee and profile updates
 never auto-rebuild employees; #261 (data-preserving rebuild) is out of scope and
 there is no termination or scheduling policy. Live provisioning and
 task routing are implemented hermetically, as are the viewer protocol and fixed

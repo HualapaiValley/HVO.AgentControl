@@ -21,10 +21,9 @@ Status reflects the active code, not the standalone POC.
    same-origin owner action freezes one verified profile-revision build on a ready
    host and atomically creates the managed employee identity and
    DeveloperContainer binding, and the resumable coordinator drives
-   `Approved → Provisioning → Orienting → Ready`. The approval endpoint does not
-   itself start provisioning at this revision; only the startup hosted service
-   resumes an already-advanced request, so an `Approved` hire is not provisioned
-   until a later process resumes it. It has **not** run a live
+   `Approved → Provisioning → Orienting → Ready`. Approval commits the request to
+   `Provisioning` and durably queues that work, which runs in the background and
+   is rebuilt from persisted state after a restart. It has **not** run a live
    owner-approved hire on any host and `WorkerControl` is off by default, so it is
    not operationally validated. #261 (data-preserving rebuild) remains. The schema
    also has a sanitized deduplicated controller event inbox, conditional
