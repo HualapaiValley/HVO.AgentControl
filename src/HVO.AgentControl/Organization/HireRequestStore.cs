@@ -97,6 +97,48 @@ public sealed partial class OrganizationStore
 
     private static string[] HireRequestSchemaV8Statements => [HireRequestsSchemaV8Statement, HireRequestEventsSchemaV8Statement];
 
+    /// <summary>
+    /// Schema v10 rebuilds <c>hire_requests</c> once more to add the bounded,
+    /// nullable <c>status_detail</c> that later lifecycle transitions sanitize
+    /// into. Every existing v9 hire survives with a NULL detail, and the events
+    /// table is recreated unchanged so its foreign key targets the rebuilt table.
+    /// The v8 statement above stays frozen for exact-signature migration.
+    /// </summary>
+    private static string HireRequestsSchemaV10Statement =>
+        """
+        CREATE TABLE hire_requests (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
+            requested_by_employee_id TEXT REFERENCES employees(id) ON DELETE RESTRICT,
+            requested_by_kind TEXT NOT NULL CHECK (requested_by_kind IN ('owner')),
+            idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+            requested_display_name TEXT NOT NULL CHECK (length(requested_display_name) BETWEEN 1 AND 128),
+            purpose TEXT NOT NULL CHECK (length(purpose) BETWEEN 1 AND 2048),
+            department_id TEXT NOT NULL,
+            role_id TEXT NOT NULL,
+            placement TEXT NOT NULL CHECK (placement IN ('InternalSharedContainer', 'DeveloperContainer')),
+            cpu_limit INTEGER NOT NULL CHECK (cpu_limit BETWEEN 1 AND 64),
+            memory_limit_mib INTEGER NOT NULL CHECK (memory_limit_mib BETWEEN 256 AND 131072),
+            pids_limit INTEGER NOT NULL CHECK (pids_limit BETWEEN 16 AND 4096),
+            state TEXT NOT NULL CHECK (state IN ('Requested', 'Approved', 'Provisioning', 'Orienting', 'Ready', 'Rejected', 'Failed', 'Interrupted', 'Uncertain')),
+            request_version_hash TEXT NOT NULL CHECK (length(request_version_hash) = 71 AND substr(request_version_hash, 1, 7) = 'sha256:'),
+            approved_request_version TEXT,
+            owner_approval TEXT,
+            container_profile_revision_id TEXT REFERENCES container_profile_revisions(id) ON DELETE RESTRICT,
+            status_detail TEXT CHECK (status_detail IS NULL OR length(status_detail) <= 512),
+            revision INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (department_id, organization_id) REFERENCES departments(id, organization_id) ON DELETE RESTRICT,
+            FOREIGN KEY (role_id, department_id) REFERENCES roles(id, department_id) ON DELETE RESTRICT
+        )
+        """;
+
+    private static string HireRequestEventsSchemaV10Statement => HireRequestSchemaV7Statements[1];
+
+    private static string[] HireRequestSchemaV10Statements => [HireRequestsSchemaV10Statement, HireRequestEventsSchemaV10Statement];
+
+
     public IReadOnlyList<HireRequestSummary> ListHireRequests()
     {
         return TranslateStoreFaults(() =>
@@ -279,10 +321,12 @@ public sealed partial class OrganizationStore
                    d.display_name, h.role_id, r.display_name, h.placement, h.cpu_limit,
                    h.memory_limit_mib, h.pids_limit, h.state, h.request_version_hash,
                    h.approved_request_version, h.owner_approval, h.revision, h.created_at, h.updated_at,
-                   h.container_profile_revision_id
+                   h.container_profile_revision_id, h.status_detail,
+                   a.profile_build_id, a.image_digest, a.host_id, a.employee_id, a.runtime_binding_id, a.worker_id
             FROM hire_requests h
             JOIN departments d ON d.id = h.department_id
             JOIN roles r ON r.id = h.role_id
+            LEFT JOIN hire_request_approvals a ON a.hire_request_id = h.id
             """;
         return command;
     }
@@ -296,7 +340,13 @@ public sealed partial class OrganizationStore
         reader.IsDBNull(18) ? null : reader.GetString(18), reader.GetInt32(19),
         DateTimeOffset.Parse(reader.GetString(20), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
         DateTimeOffset.Parse(reader.GetString(21), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-        reader.IsDBNull(22) ? null : reader.GetString(22));
+        reader.IsDBNull(22) ? null : reader.GetString(22),
+        reader.IsDBNull(23) ? null : reader.GetString(23),
+        reader.IsDBNull(24) ? null : reader.GetString(24),
+        reader.IsDBNull(25) ? null : reader.GetString(25),
+        reader.IsDBNull(26) ? null : reader.GetString(26),
+        reader.IsDBNull(27) ? null : reader.GetString(27),
+        reader.IsDBNull(28) ? null : reader.GetString(28));
 
     private static string ValidateIdempotencyKey(string? header, string? body)
     {

@@ -41,11 +41,18 @@ devcontainer subset and the seeded `generic-employee` profile, and schema v9
 adds per-host profile image builds: a revision is rendered to a deterministic
 build context, built on one approved host over the pinned SSH path, and
 contract-verified inside the image before its digest joins that host's
-approved set. Recording a profile or building it does **not** create an
-employee. The owner accepted the profile-based employee-creation design (epic
-#257): owner approval/provisioning/orientation (#260) and the explicit
-data-preserving rebuild (#261) are the remaining #219 slices. The #217 hermetic
-controller records are retained in the current schema-v9 store, including
+approved set. Control schema v10 adds owner approval and managed-employee
+creation: an owner-only, same-origin, revision-bound `POST
+/api/hire-requests/{id}/approve` freezes one hire revision against one verified
+profile build on one ready host, creates exactly one managed employee identity
+and DeveloperContainer binding with fixed safe defaults, and records the frozen
+per-binding resources a later provisioning run consumes. Recording a profile,
+building it, or approving a hire does **not** provision or orient a worker:
+approval leaves the request `Approved` and provisioning is a separate, resumable
+trigger that drives `Approved → Provisioning → Orienting → Ready`. The owner
+accepted the profile-based employee-creation design (epic #257); the explicit
+data-preserving rebuild (#261) is the remaining #219 slice. The #217 hermetic
+controller records are retained in the current schema-v10 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
@@ -91,8 +98,18 @@ model are hermetically code-complete; viewer input is owner-authorized
 interactive execution, not a sandbox boundary. Do not expose this portal to
 untrusted networks or the Internet.
 
-The accepted path does not validate key rotation or compromise re-enrollment and
-does not authorize production managed hiring/provisioning.
+The authorization to run the first managed disposable two-host path does not
+extend to a live owner-approved hire: the #260 approval, managed-provisioning
+and orientation slice is implemented and hermetically tested, but **no live
+owner-approved hire has been executed on any host**, the `home-docker`
+execution-host enrollment remains held by the owner, and `WorkerControl` remains
+disabled by default. The approval endpoint does not itself start provisioning:
+only the startup hosted service resumes an already-advanced request, so an
+`Approved` hire stays unprovisioned until a later process resumes it. #261 (the
+data-preserving rebuild) and any
+termination/scheduling policy are out of scope. The accepted path does not
+validate key rotation or compromise re-enrollment and does not authorize
+production managed hiring/provisioning.
 
 ### Run locally
 
@@ -367,7 +384,7 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics; approval action and provisioning remain unimplemented pending #219 owner discussion and approval. `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
+- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics. Hire approval is implemented as a revision-bound owner action (`POST /api/hire-requests/{id}/approve`) that freezes one verified profile-revision build on a ready host and creates the managed employee identity and binding; it does not provision or orient, and no live owner-approved hire has run (see the capability note above). `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.
@@ -394,10 +411,11 @@ because actual two-way TUI synchronization is not available; an acknowledged ACP
 model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/control.db` is the authoritative schema-v9 SQLite store for organization,
+`/control-data/control.db` is the authoritative schema-v10 SQLite store for organization,
 department, role, employee, runtime-binding and session identity; versioned
 orientation fragments/facts/assignments/evidence; layered permission policy/grants/audit;
-dispatch holds; remote-worker controller records; durable hire requests; immutable container profiles; and per-host profile builds in the
+dispatch holds; remote-worker controller records; durable hire requests and their
+immutable owner approvals and frozen managed-enrollment resources; immutable container profiles; and per-host profile builds in the
 controller-private volume; `/control-data/runtime.json` is retained as adoption
 evidence only. The database, its WAL/SHM sidecars and the writer lock are
 controller-only `0600`, and a fresh database is seed-published atomically so an

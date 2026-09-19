@@ -707,6 +707,69 @@ app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHo
     .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+// Owner approval is the durable freeze of one hire against one verified profile
+// build. It creates the managed employee and runtime binding from that freeze but
+// never provisions or orients a worker: provisioning resumes separately and the
+// hire stays Approved until that later slice moves it. Worker control must be
+// enabled with a usable configuration because the frozen selection is only
+// meaningful when the controller can actually consume it, and the requested
+// resources must sit inside the controller-wide ceilings.
+app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlHost host, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, HVO.AgentControl.Organization.HireRequestApprove request) =>
+{
+    if (!Program.IsValidHireRequestId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request id.", detail: "A bounded stable hire request id is required.");
+    if (Program.RejectCrossOrigin(context, "Hire request approval") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no approval was recorded.");
+    try
+    {
+        var current = store.GetHireRequest(id);
+        if (current is null)
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+        if (current.CpuLimit > workerOptions.CpuLimit)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested CPU limit exceeds the controller ceiling.");
+        if ((long)current.MemoryLimitMiB * 1024 * 1024 > workerOptions.MemoryBytes)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested memory limit exceeds the controller ceiling.");
+        if (current.PidsLimit > workerOptions.PidsLimit)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested PID limit exceeds the controller ceiling.");
+        // The approval identity is host-derived, never taken from the request
+        // body, so a caller cannot assert an arbitrary owner identity.
+        var approved = store.ApproveHireRequest(id, request, Program.HireApprovalIdentity);
+        store.CreateManagedEmployeeFromHire(approved.Id);
+        return Results.Ok(store.GetHireRequest(approved.Id) ?? approved);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request approval conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire request unavailable.");
+    }
+})
+    .WithName("ApproveHireRequest").WithTags("Hiring")
+    .WithSummary("Records the durable owner approval and creates the managed employee/binding for one DeveloperContainer hire against a verified profile build. It does not provision or orient the worker; provisioning resumes separately and the request remains Approved.")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapGet("/api/profiles", (AcpControlHost host) =>
 {
     if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
@@ -1615,6 +1678,13 @@ public partial class Program
     /// <summary>Maximum length accepted for a stable hire request id on the wire.</summary>
     public const int MaximumHireRequestIdLength = 64;
     public const int MaximumContainerProfileIdLength = 64;
+
+    /// <summary>
+    /// Fixed owner-approval identity recorded with every owner approval. It is
+    /// host-derived and deliberately not taken from the request body, so a caller
+    /// cannot assert an arbitrary owner identity into the immutable approval.
+    /// </summary>
+    public const string HireApprovalIdentity = "owner-basic-auth";
 
     /// <summary>
     /// Exact, stable scope label reported by <c>/api/info</c> for the worker-control

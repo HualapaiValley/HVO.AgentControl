@@ -11,13 +11,26 @@ Build a Docker-native controller for self-contained OpenCode workers using ACP.
 No Fleet dependency, Claude-specific adapter, shared worker checkout, or
 implicit reuse of existing infrastructure. The active baseline implements a
 single control-host portal plus a disabled-by-default hermetic remote-worker
-controller slice: schema-v8 records, approved-host validation, fixed SSH/Docker
+controller slice: schema-v10 records, approved-host validation, fixed SSH/Docker
 command construction and shared bridge protocol code. Durable hire request and
 revision-bound rejection are shipped, as are immutable container profiles with
-a constrained devcontainer subset (#258); approval and worker provisioning
-remain future work under the owner-accepted profile design (epic #257: #259
-build/verify, #260 approve/provision/orient, #261 rebuild). No request may
-auto-create an employee and profile updates never auto-rebuild employees. Live provisioning and
+a constrained devcontainer subset (#258) and per-host verified builds (#259).
+Owner approval (#260) is implemented as tested code capability: a
+revision-bound, same-origin owner action freezes one verified profile-revision
+build on a ready host, atomically creates the managed employee identity and
+DeveloperContainer binding, and a resumable coordinator drives
+`Approved → Provisioning → Orienting → Ready` from the frozen approval through
+remote orientation delivery and comprehension. The approval endpoint does not
+start provisioning at this revision; only the startup hosted service resumes an
+already-advanced request. It is **not operationally validated**: no live
+owner-approved hire has been executed on any host, the
+`home-docker` execution-host enrollment is still held by the owner, and
+`WorkerControl` remains disabled by default. Approval is a host record of a
+verified selection, not a provisioned employee; approval and provisioning are
+separate operations, and a request left `Approved` is not provisioned until a
+later process resumes it. No request may auto-create an employee and profile updates
+never auto-rebuild employees; #261 (data-preserving rebuild) is out of scope and
+there is no termination or scheduling policy. Live provisioning and
 task routing are implemented hermetically, as are the viewer protocol and fixed
 production worker PTY backend. The first managed disposable two-host path is now
 live-accepted on an authorized disposable topology: pinned ED25519/strict SSH to

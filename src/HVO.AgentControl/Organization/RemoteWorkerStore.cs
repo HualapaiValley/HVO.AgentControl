@@ -174,7 +174,37 @@ public sealed partial class OrganizationStore
     {
         ValidateIdentifier(bindingId, nameof(bindingId)); ValidateIdentifier(hostId, nameof(hostId)); ValidateIdentifier(controllerId, nameof(controllerId)); if (!Path.IsPathRooted(keyPath) || !IsHash(keyId) || !IsHash(digest) || platform is not ("linux/amd64" or "linux/arm64")) throw new OrganizationValidationException("Enrollment descriptor is invalid.");
         var worker = requested ?? "wrk-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant(); ValidateIdentifier(worker, nameof(worker)); var suffix = worker.ToLowerInvariant().Replace(':', '-').Replace('_', '-'); var container = "agentcontrol-worker-" + suffix; var control = "agentcontrol-control-" + suffix; var home = "agentcontrol-home-" + suffix; var workspace = "agentcontrol-workspace-" + suffix; var session = "agentcontrol-session-" + suffix; var labels = Hash($"{controllerId}\n{hostId}\n{worker}\n{bindingId}"); var organizationId = GetOverview().Id;
-        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var check = c.CreateCommand()) { check.Transaction = tx; check.CommandText = internalPlan ? "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.container_ref IS NOT NULL" : "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=e.id AND s.status='active' JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.container_ref IS NOT NULL AND b.session_ref IS NOT NULL"; Add(check, ("$host", hostId), ("$binding", bindingId)); if (Convert.ToInt64(check.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationConcurrencyException("The exact DeveloperContainer binding, active session, and ready host are required."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "INSERT INTO worker_enrollments VALUES($w,$b,$h,$org,$cn,NULL,$cv,NULL,$hv,NULL,$wv,NULL,$sv,NULL,$labels,$digest,$platform,$controller,$path,$key,'/control/bridge.sock','planned',0,0,0,1,$now,$now,1)"; Add(q, ("$w", worker), ("$b", bindingId), ("$h", hostId), ("$org", organizationId), ("$cn", container), ("$cv", control), ("$hv", home), ("$wv", workspace), ("$sv", session), ("$labels", labels), ("$digest", digest), ("$platform", platform), ("$controller", controllerId), ("$path", keyPath), ("$key", keyId), ("$now", Now())); q.ExecuteNonQuery(); tx.Commit(); return GetWorkerEnrollment(worker)!; }
+        // A plan never requires container_ref: for a managed DeveloperContainer hire the
+        // container does not exist until provisioning creates it, so requiring it here
+        // would be circular. The internal plan path resolves the exact employee-owned
+        // DeveloperContainer binding on a ready enabled host; the public path is stricter
+        // and additionally requires the binding's active ACP session. The container
+        // reference is deliberately not part of either predicate.
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            using (var check = c.CreateCommand())
+            {
+                check.Transaction = tx;
+                check.CommandText = internalPlan
+                    ? "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer'"
+                    : "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=e.id AND s.status='active' JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.session_ref IS NOT NULL";
+                Add(check, ("$host", hostId), ("$binding", bindingId));
+                if (Convert.ToInt64(check.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                    throw new OrganizationConcurrencyException(internalPlan
+                        ? "The exact employee-owned DeveloperContainer binding and a ready enabled host are required."
+                        : "The exact DeveloperContainer binding, its active session, and a ready enabled host are required.");
+            }
+            using var q = c.CreateCommand();
+            q.Transaction = tx;
+            q.CommandText = "INSERT INTO worker_enrollments VALUES($w,$b,$h,$org,$cn,NULL,$cv,NULL,$hv,NULL,$wv,NULL,$sv,NULL,$labels,$digest,$platform,$controller,$path,$key,'/control/bridge.sock','planned',0,0,0,1,$now,$now,1)";
+            Add(q, ("$w", worker), ("$b", bindingId), ("$h", hostId), ("$org", organizationId), ("$cn", container), ("$cv", control), ("$hv", home), ("$wv", workspace), ("$sv", session), ("$labels", labels), ("$digest", digest), ("$platform", platform), ("$controller", controllerId), ("$path", keyPath), ("$key", keyId), ("$now", Now()));
+            q.ExecuteNonQuery();
+            tx.Commit();
+            return GetWorkerEnrollment(worker)!;
+        }
     }
 
     public RemoteWorkerSessionRecord RecordRemoteWorkerSession(string bindingId, string workerId, string nativeSessionId, string? title)
@@ -225,7 +255,99 @@ public sealed partial class OrganizationStore
 
     public WorkerEnrollmentRecord UpdateEnrollmentLifecycle(string workerId, int expectedRevision, string from, string to, bool? enabled = null)
     { var allowed = (from, to) is ("planned", "provisioning") or ("provisioning", "held") or ("provisioning", "enrolled") or ("held", "provisioning") or ("enrolled", "stopped") or ("stopped", "provisioning") or (_, "failed"); if (!allowed) throw new OrganizationValidationException("Enrollment transition is invalid."); lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "UPDATE worker_enrollments SET lifecycle_status=$to,enabled=COALESCE($enabled,enabled),updated_at=$now,revision=revision+1 WHERE worker_id=$w AND revision=$r AND lifecycle_status=$from"; Add(q, ("$to", to), ("$enabled", enabled is null ? DBNull.Value : enabled.Value ? 1 : 0), ("$now", Now()), ("$w", workerId), ("$r", expectedRevision), ("$from", from)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Enrollment revision or lifecycle is stale."); return GetWorkerEnrollment(workerId)!; } }
-    public void SetEnrollmentResourceReference(string workerId, string kind, string reference) { var column = kind switch { "container" => "container_ref", "control" => "control_volume_ref", "home" => "home_volume_ref", "workspace" => "workspace_volume_ref", "session" => "session_volume_ref", _ => throw new OrganizationValidationException("Resource kind is invalid.") }; lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = $"UPDATE worker_enrollments SET {column}=$ref,updated_at=$now,revision=revision+1 WHERE worker_id=$w"; Add(q, ("$ref", reference), ("$now", Now()), ("$w", workerId)); if (q.ExecuteNonQuery() != 1) throw new OrganizationNotFoundException("Worker enrollment not found."); } }
+    /// <summary>
+    /// Records the remote reference for one enrolled resource. The worker
+    /// enrollment column and, for every kind except the session volume, the owning
+    /// runtime binding column are updated in one transaction. The binding's
+    /// <c>session_ref</c> is a foreign key to the ACP session and is never written
+    /// here; the session volume has no binding column, so it updates the enrollment
+    /// only. A column that already holds a different reference is a conflict, and a
+    /// binding that is not the enrollment's own is never touched.
+    /// </summary>
+    public void SetEnrollmentResourceReference(string workerId, string kind, string reference)
+    {
+        ValidateIdentifier(workerId, nameof(workerId));
+        if (string.IsNullOrEmpty(reference) || reference.Length > 256 || reference.Any(char.IsControl))
+            throw new OrganizationValidationException("Resource reference is invalid.");
+        var (enrollmentColumn, bindingColumn) = kind switch
+        {
+            "container" => ("container_ref", "container_ref"),
+            "control" => ("control_volume_ref", "volume_ref"),
+            "home" => ("home_volume_ref", "home_ref"),
+            "workspace" => ("workspace_volume_ref", "workspace_ref"),
+            "session" => ("session_volume_ref", (string?)null),
+            _ => throw new OrganizationValidationException("Resource kind is invalid."),
+        };
+
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+
+            using (var enrollment = c.CreateCommand())
+            {
+                enrollment.Transaction = tx;
+                // Only the documented column is interpolated (it comes from the fixed
+                // switch above); the reference itself is always parameterized. The row
+                // must belong to this exact worker and the column must be NULL or equal.
+                enrollment.CommandText = $"UPDATE worker_enrollments SET {enrollmentColumn}=$ref,updated_at=$now,revision=revision+1 WHERE worker_id=$w AND ({enrollmentColumn} IS NULL OR {enrollmentColumn}=$ref)";
+                Add(enrollment, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (enrollment.ExecuteNonQuery() != 1)
+                    throw new OrganizationConcurrencyException("The enrollment resource reference conflicts with a different retained reference or the worker does not exist.");
+            }
+
+            if (bindingColumn is not null)
+            {
+                using var binding = c.CreateCommand();
+                binding.Transaction = tx;
+                binding.CommandText = $"UPDATE runtime_bindings SET {bindingColumn}=$ref,updated_at=$now,revision=revision+1 WHERE id=(SELECT runtime_binding_id FROM worker_enrollments WHERE worker_id=$w) AND ({bindingColumn} IS NULL OR {bindingColumn}=$ref)";
+                Add(binding, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (binding.ExecuteNonQuery() != 1)
+                    throw new OrganizationConcurrencyException("The owning runtime binding reference conflicts with a different retained reference.");
+            }
+
+            tx.Commit();
+        }
+    }
+
+    /// <summary>
+    /// Deliberately overwrites the container reference of an existing enrollment
+    /// and its owning runtime binding in one transaction. This is the container
+    /// replacement path, not first provisioning: the old container was verified
+    /// owned and removed, so the stale reference is replaced rather than treated as
+    /// a conflict. Only the container column is writable here; volumes, session and
+    /// every other binding reference are untouched.
+    /// </summary>
+    public void ReplaceEnrollmentContainerReference(string workerId, string reference)
+    {
+        ValidateIdentifier(workerId, nameof(workerId));
+        if (string.IsNullOrEmpty(reference) || reference.Length > 256 || reference.Any(char.IsControl))
+            throw new OrganizationValidationException("Resource reference is invalid.");
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            using (var enrollment = c.CreateCommand())
+            {
+                enrollment.Transaction = tx;
+                enrollment.CommandText = "UPDATE worker_enrollments SET container_ref=$ref,updated_at=$now,revision=revision+1 WHERE worker_id=$w";
+                Add(enrollment, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (enrollment.ExecuteNonQuery() != 1)
+                    throw new OrganizationNotFoundException("Worker enrollment not found.");
+            }
+            using (var binding = c.CreateCommand())
+            {
+                binding.Transaction = tx;
+                binding.CommandText = "UPDATE runtime_bindings SET container_ref=$ref,updated_at=$now,revision=revision+1 WHERE id=(SELECT runtime_binding_id FROM worker_enrollments WHERE worker_id=$w)";
+                Add(binding, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (binding.ExecuteNonQuery() != 1)
+                    throw new OrganizationConcurrencyException("The owning runtime binding could not record the replaced container reference.");
+            }
+            tx.Commit();
+        }
+    }
 
     public void RecordWorkerConnectionState(string workerId, string state, long? epoch = null) { if (state is not ("disconnected" or "connecting" or "authenticated" or "expired" or "held")) throw new OrganizationValidationException("Connection state is invalid."); lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "INSERT INTO worker_cursors VALUES($w,0,0,0,0,COALESCE($e,0),'unknown',NULL,NULL,NULL,0,0,$s,NULL,$now,1) ON CONFLICT(worker_id) DO UPDATE SET connection_state=$s,observed_ownership_epoch=COALESCE($e,observed_ownership_epoch),viewer_available=CASE WHEN $s='authenticated' THEN viewer_available ELSE 0 END,updated_at=$now,revision=revision+1"; Add(q, ("$w", workerId), ("$e", epoch is null ? DBNull.Value : epoch.Value), ("$s", state), ("$now", Now())); q.ExecuteNonQuery(); } }
 
@@ -428,6 +550,31 @@ public sealed partial class OrganizationStore
         }
     }
     public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
+
+    /// <summary>
+    /// A provisioning step left in <c>Applying</c> by a previous process has an
+    /// unknown remote effect. On startup it is moved to <c>Uncertain</c> so the
+    /// next apply reconciles it by inspection instead of repeating the effect
+    /// blind. The transition is revision-checked and each row changes once, so a
+    /// restarted startup never double-applies or duplicates a step. Returns the
+    /// number of operations marked uncertain.
+    /// </summary>
+    public int MarkInterruptedProvisioningOperationsUncertain()
+    {
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            using var q = c.CreateCommand();
+            q.Transaction = tx;
+            q.CommandText = "UPDATE provisioning_operations SET state='Uncertain',error_category='controller-restarted-during-apply',updated_at=$now,revision=revision+1 WHERE state='Applying'";
+            q.Parameters.AddWithValue("$now", Now());
+            var affected = q.ExecuteNonQuery();
+            tx.Commit();
+            return affected;
+        }
+    }
 
     public ExecutionHostRecord DisableExecutionHost(string id, int expectedRevision, bool reconciledStop = false) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var active = c.CreateCommand()) { active.Transaction = tx; active.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE host_id=$id AND enabled=1 AND lifecycle_status NOT IN('stopped','failed')"; active.Parameters.AddWithValue("$id", id); if (Convert.ToInt64(active.ExecuteScalar(), CultureInfo.InvariantCulture) != 0 && !reconciledStop) throw new OrganizationConcurrencyException("Execution host has active enrollments and requires an explicit reconciled stop."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET enabled=0,status='disabled',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r"; Add(q, ("$id", id), ("$r", expectedRevision), ("$now", Now())); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host revision is stale."); tx.Commit(); return GetExecutionHost(id)!; } }
 
