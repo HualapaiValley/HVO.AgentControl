@@ -294,12 +294,13 @@ public static class ImageContractVerifier
         // running `ldconfig /opt/evil` would redirect a contract binary without
         // touching ld.so.conf. A recipe that installs a library package (libicu for
         // the SDK) legitimately regenerates the cache, so the invariant is on its
-        // contents, read with the BASE's ldconfig: every SONAME the base resolves
-        // must have exactly the same ordered entry list (the loader takes the first
-        // match, so an extra earlier entry is a redirection), each pointing at a
-        // path identical to the base's file; new SONAMEs may be added (a contract
-        // binary's dependencies are all base SONAMEs). A crafted cache can
-        // therefore never redirect a contract binary to an added library.
+        // contents, read with the BASE's ldconfig and keyed by bare SONAME (the
+        // loader prefers a hwcap/flags variant of the same SONAME, so variants are
+        // the same key): every SONAME the base resolves must have exactly the base's
+        // ordered entry list including flags, each pointing at a path identical to
+        // the base's file; new SONAMEs may be added (a contract binary's
+        // dependencies are all base SONAMEs). A crafted cache can therefore never
+        // redirect a contract binary to an added library, by order or by hwcap.
         "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ld.so.cache", "/etc/nsswitch.conf",
         // Absent in the base and must stay absent: a preload would hijack every process,
         // and a python3 ahead of /usr/bin on the supervisor's PATH would replace PID 1's

@@ -333,6 +333,8 @@ public sealed class WorkerImageContractTests
                 // Redirecting a base SONAME to an added file inside the pinned directory itself.
                 // Redirecting a base SONAME symlink to an added file inside the pinned directory
                 // (what a hostile ldconfig run would achieve in place): the symlink target changed.
+                // A hwcap variant of a base SONAME is preferred by the loader over the plain entry.
+                ("ldcache-hwcap", "RUN mkdir -p /opt/evil/glibc-hwcaps/x86-64-v2 && cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /opt/evil/glibc-hwcaps/x86-64-v2/libz.so.1 && ldconfig /opt/evil", "/etc/ld.so.cache differs"),
                 ("ldcache-inplace", "RUN cp /usr/lib/x86_64-linux-gnu/libz.so.1.3 /usr/lib/x86_64-linux-gnu/libz-evil.so.1.3 && ln -sfn libz-evil.so.1.3 /usr/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib/x86_64-linux-gnu differs"),
                 // Directory metadata: a contract tree made world-writable is rejected even though every file is identical.
                 ("stdlib-dirmode", "RUN chmod 0777 /usr/lib/python3.12/json", "/usr/lib/python3.12 differs"),
