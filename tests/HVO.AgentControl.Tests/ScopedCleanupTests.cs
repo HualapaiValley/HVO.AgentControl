@@ -290,6 +290,47 @@ public sealed class ScopedCleanupTests : IAsyncLifetime
     }
 
     [Fact]
+    public void ClaimRefusesATagHeldByAForeignClaimEvenWhenNoOtherBuildSharesIt()
+    {
+        // Exercise the ownership branch directly. The shared-tag guard only sees
+        // non-removed builds, so a claim whose owner row is absent (an orphan, as
+        // could only arise from corruption now that removal deletes its claim)
+        // must still be refused by the ownership comparison, never treated as the
+        // caller's own re-claim.
+        var failed = FailedBuild(OrphanDigest, OrphanTag);
+        var now = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        ExecuteRaw(
+            _temp.Path,
+            $"""
+            INSERT INTO profile_builds (
+                id, profile_revision_id, host_id, base_image_digest, platform, context_hash, result_tag, state,
+                image_digest, verified, failure_summary, evidence_hash, requested_by, revision, started_at, finished_at, created_at, updated_at)
+            VALUES ('pbld-claim-orphan-00000000000', '{failed.ProfileRevisionId}', '{ExecutionHosts.LocalDockerId}', '{BaseDigest}', 'linux/amd64', '{ContextHash}', '{OrphanTag}', 'removed',
+                NULL, 0, NULL, NULL, 'owner', 1, NULL, NULL, '{now}', '{now}');
+            INSERT INTO profile_build_removals (profile_build_id, host_id, result_tag, requested_by, created_at, revision)
+            VALUES ('pbld-claim-orphan-00000000000', '{ExecutionHosts.LocalDockerId}', '{OrphanTag}', 'owner', '{now}', 1);
+            """);
+
+        var refused = Assert.Throws<OrganizationConcurrencyException>(() => _store.ClaimProfileBuildRemoval(failed.Id, failed.Revision, "owner"));
+        Assert.Contains("another build", refused.Message, StringComparison.Ordinal);
+        Assert.Equal(ProfileBuildStates.Failed, _store.GetProfileBuild(failed.Id)!.State);
+    }
+
+    [Fact]
+    public void RemovingABuildDirectlyReleasesItsClaim()
+    {
+        // F9: the direct removal transition must not orphan a claim.
+        var failed = FailedBuild(OrphanDigest, OrphanTag);
+        _ = _store.ClaimProfileBuildRemoval(failed.Id, failed.Revision, "owner");
+        Assert.True(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+
+        var removed = _store.TransitionProfileBuildToRemoved(failed.Id, _store.GetProfileBuild(failed.Id)!.Revision, "owner", ContextHash);
+
+        Assert.Equal(ProfileBuildStates.Removed, removed.State);
+        Assert.False(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+    }
+
+    [Fact]
     public async Task CleanupRefusesUncertainLiveAndBuiltBuilds()
     {
         var remote = new RecordingProvisioner();

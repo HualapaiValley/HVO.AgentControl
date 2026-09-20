@@ -272,6 +272,9 @@ public sealed partial class OrganizationStore
                     """,
                     ("$state", ProfileBuildStates.Removed), ("$evidence", evidenceHash), ("$now", now), ("$id", id), ("$revision", expectedRevision));
                 if (affected != 1) throw new OrganizationConcurrencyException("The profile build changed before the transition.");
+                // A removed build must never leave a claim behind: nothing could
+                // release it afterwards and the (host, tag) pair would be wedged.
+                Execute(connection, transaction, "DELETE FROM profile_build_removals WHERE profile_build_id = $id", ("$id", id));
                 FoldRevisionBuildStatus(connection, transaction, current.ProfileRevisionId);
                 transaction.Commit();
                 return ReadBuilds(connection, null, null, null, id).Single();
