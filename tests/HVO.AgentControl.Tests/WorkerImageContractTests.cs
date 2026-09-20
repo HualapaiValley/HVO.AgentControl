@@ -352,13 +352,13 @@ public sealed class WorkerImageContractTests
             var inspect = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageInspect, [tag])));
             var baseInspect = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageInspect, [baseDigest])));
             Assert.True(inspect.ExitCode == 0 && baseInspect.ExitCode == 0, inspect.Output + baseInspect.Output);
-            var digest = HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckInspect(inspect.Output, baseInspect.Output, generic.Id, contextHash, baseDigest, platform);
+            var digest = HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckInspect(inspect.StandardOutput, baseInspect.StandardOutput, generic.Id, contextHash, baseDigest, platform);
             Assert.Matches("^sha256:[0-9a-f]{64}$", digest);
             Assert.NotEqual(baseDigest, digest);
 
             var verify = Run(LocalArguments(HVO.AgentControl.RemoteWorker.RemoteWorkerCommandBuilder.Build(host, options, HVO.AgentControl.RemoteWorker.RemoteDockerOperation.ImageVerify, [tag, baseDigest, platform])), null, 120_000);
             Assert.True(verify.ExitCode == 0, verify.Output);
-            HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.Output);
+            HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.StandardOutput);
 
             // The generic profile's toolchain is really there, as the employee would see it.
             var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "/opt/dotnet-sdk/dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
@@ -446,13 +446,13 @@ public sealed class WorkerImageContractTests
                     if (expect == "none")
                     {
                         // The trailer really undid the damage, so this one is clean and accepted.
-                        HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output);
+                        HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.StandardOutput);
                         if (name == "setuid") Assert.Equal("755", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%a", "/usr/local/bin/rootsh"]).Output.Trim());
                         if (name == "app-owner") Assert.Equal("0:0", Run(["run", "--rm", "--network", "none", "--entrypoint", "/usr/bin/stat", hTag, "-c", "%u:%g", "/app/HVO.AgentControl.Worker.dll"]).Output.Trim());
                     }
                     else
                     {
-                        var rejected = Assert.Throws<HVO.AgentControl.RemoteWorker.ImageContractException>(() => { try { HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.Output); } catch (HVO.AgentControl.RemoteWorker.ImageContractException) { throw; } catch { throw; } Assert.Fail("hostile fragment '" + name + "' was ACCEPTED; verify output: " + hVerify.Output); });
+                        var rejected = Assert.Throws<HVO.AgentControl.RemoteWorker.ImageContractException>(() => { try { HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(hVerify.StandardOutput); } catch (HVO.AgentControl.RemoteWorker.ImageContractException) { throw; } catch { throw; } Assert.Fail("hostile fragment '" + name + "' was ACCEPTED; verify output: " + hVerify.Output); });
                         Assert.Contains(expect, rejected.Message, StringComparison.Ordinal);
                     }
                 }
@@ -466,14 +466,20 @@ public sealed class WorkerImageContractTests
         }
     }
 
-    private static (int ExitCode, string Output) RunWithInput(string[] args, byte[] input, int timeout)
+    private sealed record CommandResult(int ExitCode, string StandardOutput, string StandardError)
+    {
+        public string Output => StandardOutput + StandardError;
+    }
+
+    private static CommandResult RunWithInput(string[] args, byte[] input, int timeout)
     {
         using var process = CreateProcess(args, null, redirectInput: true);
         process.Start();
         process.StandardInput.BaseStream.Write(input); process.StandardInput.Close();
-        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
-        return (process.ExitCode, output);
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(timeout)) { process.Kill(true); return new(-1, stdout, stderr + " timed out"); }
+        return new(process.ExitCode, stdout, stderr);
     }
 
     private static byte[] TarDockerfile(string dockerfile)
@@ -599,21 +605,24 @@ public sealed class WorkerImageContractTests
         return true;
     }
 
-    private static (int ExitCode, string Output) RunWithInput(string[] args, string input, string? workdir = null, int timeout = 60_000)
+    private static CommandResult RunWithInput(string[] args, string input, string? workdir = null, int timeout = 60_000)
     {
         using var process = CreateProcess(args, workdir, redirectInput: true);
         process.Start(); process.StandardInput.Write(input); process.StandardInput.Close();
-        var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
-        return (process.ExitCode, output);
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(timeout)) { process.Kill(true); return new(-1, stdout, stderr + " timed out"); }
+        return new(process.ExitCode, stdout, stderr);
     }
 
-    private static (int ExitCode, string Output) Run(string[] args, string? workdir = null, int timeout = 60_000)
+    private static CommandResult Run(string[] args, string? workdir = null, int timeout = 60_000)
     {
         using var process = CreateProcess(args, workdir, redirectInput: false);
-        process.Start(); var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
-        return (process.ExitCode, output);
+        process.Start();
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(timeout)) { process.Kill(true); return new(-1, stdout, stderr + " timed out"); }
+        return new(process.ExitCode, stdout, stderr);
     }
     private static Process CreateProcess(string[] args, string? workdir, bool redirectInput)
     {

@@ -15,10 +15,28 @@ const DLL = process.env.APP_DLL || join(PROJECT_DIR, 'bin', 'Release', 'net10.0'
 const FAKE_ACP = join(ROOT, 'tests', 'HVO.AgentControl.Tests', 'Fixtures', 'fake_acp.py');
 const OUT = process.env.ARTIFACTS_DIR || join(ROOT, 'artifacts', 'browser-organization');
 const PASSWORD = 'organization-browser-owner-password-0000';
+const BASIC_AUTH = 'Basic ' + Buffer.from(`owner:${PASSWORD}`, 'utf8').toString('base64');
 const results = [];
 const record = (name, passed, detail = {}) => { results.push({ name, passed: !!passed, detail }); console.log(`${passed ? 'PASS' : 'FAIL'}  ${name}${Object.keys(detail).length ? ' :: ' + JSON.stringify(detail) : ''}`); };
 const freePort = () => new Promise((resolve, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
 async function waitFor(base, timeout = 90000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { if ((await fetch(`${base}/health/live`)).ok) return true; } catch {} await sleep(200); } return false; }
+async function waitForOrganization(base, timeout = 90000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    try {
+      // Bound each fetch too: an accepted connection that never returns headers
+      // must not outlive the readiness deadline.
+      const response = await fetch(`${base}/api/organization/portal`, {
+        headers: { Authorization: BASIC_AUTH, Accept: 'application/json' },
+        signal: AbortSignal.timeout(Math.max(1, Math.min(5000, remaining))),
+      });
+      if (response.ok) return true;
+    } catch {}
+    await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
+  }
+  return false;
+}
 const departmentIdFromHref = (href, base) => new URL(href, base).searchParams.get('departmentId');
 
 mkdirSync(OUT, { recursive: true });
@@ -33,7 +51,11 @@ try {
   const env = { ...process.env }; for (const key of Object.keys(env)) if (/^Control__/i.test(key)) delete env[key];
   Object.assign(env, { Control__Enabled: 'true', Control__DataDirectory: join(runtime, 'data'), Control__PrivateDataDirectory: join(runtime, 'private'), Control__OpenCodeExecutable: fake, Control__OwnerPasswordFile: passwordPath, Control__EnableTerminal: 'false', Control__NativePort: String(port + 1), ASPNETCORE_URLS: base, ASPNETCORE_ENVIRONMENT: 'Development' });
   const log = createWriteStream(join(OUT, 'app.log')); child = spawn('dotnet', [DLL], { cwd: PROJECT_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] }); child.stdout.pipe(log); child.stderr.pipe(log);
-  const healthy = await waitFor(base); record('enabled app starts hermetically', healthy, { base }); if (!healthy) throw new Error('app did not start');
+  const healthy = await waitFor(base); record('enabled process becomes live', healthy, { base }); if (!healthy) throw new Error('app did not start');
+  // Liveness precedes organization-store adoption and ACP startup. Portal checks
+  // need the authoritative store, so wait for the exact authenticated API they
+  // consume rather than racing the asynchronous control-host initialization.
+  const organizationReady = await waitForOrganization(base); record('enabled organization store becomes ready', organizationReady, { base }); if (!organizationReady) throw new Error('organization store did not become ready');
   browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, httpCredentials: { username: 'owner', password: PASSWORD } });
   const page = await context.newPage(); const pageErrors = []; page.on('pageerror', (error) => pageErrors.push(error.message));
