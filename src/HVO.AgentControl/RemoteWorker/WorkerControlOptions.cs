@@ -32,6 +32,7 @@ public sealed class WorkerControlOptions
     public string ApprovedImagePlatform { get; set; } = "linux/amd64";
     public string ConnectorExecutable { get; set; } = "/usr/bin/ssh";
     public string WorkerTarget { get; set; } = "/app/HVO.AgentControl.Worker.dll";
+    public string LocalDockerHelperSocketPath { get; set; } = HVO.AgentControl.DockerHelper.Protocol.DockerHelperProtocol.DefaultSocketPath;
     public string ContainerPrefix { get; set; } = "agentcontrol-worker-";
     public string ControlVolumePrefix { get; set; } = "agentcontrol-control-";
     public string HomeVolumePrefix { get; set; } = "agentcontrol-home-";
@@ -41,6 +42,8 @@ public sealed class WorkerControlOptions
     public int ConnectTimeoutSeconds { get; set; } = 10;
     public int AuthenticationTimeoutSeconds { get; set; } = 10;
     public int OperationTimeoutSeconds { get; set; } = 60;
+    /// <summary>Bound for one profile image build or verification run; builds pull nothing but may run apt.</summary>
+    public int ImageBuildTimeoutSeconds { get; set; } = 900;
     public int ExpectedControllerUid { get; set; } = 1001;
     public long MemoryBytes { get; set; } = 2L * 1024 * 1024 * 1024;
     public decimal CpuLimit { get; set; } = 2;
@@ -52,14 +55,18 @@ public sealed class WorkerControlOptions
         if (!ValidId(ControllerId)) errors.Add("ControllerId must be a stable bounded identifier.");
         if (!Path.IsPathRooted(ConnectorExecutable) || ConnectorExecutable != "/usr/bin/ssh") errors.Add("ConnectorExecutable must be /usr/bin/ssh.");
         if (WorkerTarget != "/app/HVO.AgentControl.Worker.dll") errors.Add("WorkerTarget must be /app/HVO.AgentControl.Worker.dll.");
+        if (Enabled && !Path.IsPathRooted(LocalDockerHelperSocketPath)) errors.Add("LocalDockerHelperSocketPath must be absolute when WorkerControl is enabled.");
         if (!Regex.IsMatch(ApprovedImageDigest ?? string.Empty, "^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)) errors.Add("ApprovedImageDigest must be a lowercase sha256 digest.");
         if (ApprovedImagePlatform is not ("linux/amd64" or "linux/arm64")) errors.Add("ApprovedImagePlatform must be linux/amd64 or linux/arm64.");
         if (ConnectTimeoutSeconds is < 1 or > 60 || AuthenticationTimeoutSeconds is < 1 or > 60 || OperationTimeoutSeconds is < 1 or > 600) errors.Add("WorkerControl timeouts are outside their bounds.");
+        if (ImageBuildTimeoutSeconds is < 60 or > 3600) errors.Add("WorkerControl image build timeout is outside 60-3600 seconds.");
         if (ExpectedControllerUid < 0) errors.Add("ExpectedControllerUid is invalid.");
         if (MemoryBytes < 256L * 1024 * 1024 || CpuLimit is <= 0 or > 64 || PidsLimit is < 32 or > 4096) errors.Add("Worker resource limits are invalid.");
         foreach (var host in ApprovedHosts ?? []) errors.AddRange(host.Validate(Enabled && inspectFiles).Select(value => $"ApprovedHosts[{host.Id}]: {value}"));
         if ((ApprovedHosts ?? []).GroupBy(host => host.Id, StringComparer.Ordinal).Any(group => group.Count() != 1)) errors.Add("Approved host IDs must be unique.");
-        if (Enabled && (ApprovedHosts?.Length ?? 0) == 0) errors.Add("At least one approved host is required when enabled.");
+        // ApprovedHosts may be empty when enabled: managed hiring targets the
+        // controller-local Docker daemon, so no SSH host is required. The SSH
+        // manual path simply has no hosts to offer.
         return errors;
     }
 

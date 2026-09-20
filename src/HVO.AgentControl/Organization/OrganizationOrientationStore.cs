@@ -143,6 +143,87 @@ public sealed partial class OrganizationStore
         InsertRestrictions(connection, transaction, policyId, employeeFragment, "employee", EmployeeRestrictions);
     }
 
+    /// <summary>
+    /// Seeds the unique active employee-layer orientation fragment and its bounded
+    /// facts for a managed employee created from an approved hire (schema v10).
+    /// The shared organization, department, and role fragments already exist, so
+    /// this completes the exact four-layer composition the store requires. It runs
+    /// inside the managed-employee creation transaction and assigns nothing; the
+    /// assignment is composed separately once a runtime session exists.
+    ///
+    /// Every fact is a fixed, safe value derived from the employee record and its
+    /// role/department: no text is inherited from the requesting employee. The
+    /// single-valued <c>escalation</c> fact is owned by the department fragment and
+    /// is deliberately not duplicated here; <c>duty</c> and <c>restriction</c> are
+    /// list-valued and add the employee's own safe bounds.
+    /// </summary>
+    internal static void InsertManagedEmployeeOrientationV10(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string organizationId,
+        string employeeId,
+        string displayName,
+        string purpose,
+        string instructions,
+        string rules,
+        string restrictions,
+        string now)
+    {
+        var departmentDisplayName = ReadManagedEmployeeDepartmentName(connection, transaction, employeeId);
+        var content = OrientationComposer.BuildEmployeeFragment(
+            employeeId,
+            displayName,
+            purpose,
+            instructions,
+            rules,
+            restrictions);
+        var fragmentId = InsertSeedFragment(
+            connection,
+            transaction,
+            organizationId,
+            "employee",
+            employeeId,
+            content,
+            now);
+
+        InsertFacts(connection, transaction, fragmentId,
+        [
+            ("identity", displayName),
+            ("department", departmentDisplayName),
+            ("reporting", "owner"),
+            ("duty", "operate only inside the approved managed runtime and its own persisted workspace"),
+            ("restriction", "no controller secrets or authoritative-store edits"),
+            ("restriction", "no unrestricted Docker, GitHub, or host authority"),
+            ("restriction", "no autonomous hiring, provisioning, delegation, or dispatch"),
+            ("restriction", "no access to another employee's history"),
+        ]);
+    }
+
+    private static string ReadManagedEmployeeDepartmentName(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string employeeId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT d.display_name
+            FROM employees e
+            JOIN departments d ON d.id = e.department_id
+            WHERE e.id = $employee
+            LIMIT 2
+            """;
+        command.Parameters.AddWithValue("$employee", employeeId);
+        return command.ExecuteScalar() as string
+            ?? throw new OrganizationStoreCorruptException("The managed employee department is missing.");
+    }
+
+    /// <summary>
+    /// Composes and assigns the current orientation for the adopted employee the
+    /// store was opened as. This is the internal controller path; external callers
+    /// name the exact employee through the overload.
+    /// </summary>
     public OrientationArtifact ComposeAndAssignCurrentOrientation()
     {
         return TranslateStoreFaults(() =>
@@ -151,114 +232,185 @@ public sealed partial class OrganizationStore
             lock (_gate)
             {
                 EnsureOpenIdentity();
+                return ComposeAndAssignCurrentOrientationCore(_employeeId!, _bindingId!);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Composes and assigns the current orientation for any employee. The exact
+    /// runtime binding is resolved from the employee row; the caller never names a
+    /// binding. Fragments, policy, session, and status are the same logic the
+    /// no-argument seed path uses, so a managed employee is oriented identically.
+    /// </summary>
+    public OrientationArtifact ComposeAndAssignCurrentOrientation(string employeeId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(employeeId);
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
                 using var connection = OpenConnection();
                 using var transaction = connection.BeginTransaction();
-                var parts = ReadCompositionParts(connection, transaction, _employeeId!);
+                var bindingId = ReadEmployeeBinding(connection, transaction, employeeId).RuntimeBindingId;
+                transaction.Commit();
+                return ComposeAndAssignCurrentOrientationCore(employeeId, bindingId);
+            }
+        });
+    }
+
+    private OrientationArtifact ComposeAndAssignCurrentOrientationCore(string employeeId, string bindingId)
+    {
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        var parts = ReadCompositionParts(connection, transaction, employeeId);
+        var content = OrientationComposer.Compose(
+            parts.Fragments,
+            parts.PolicyVersion,
+            parts.PolicyRevision,
+            parts.PolicySummary,
+            parts.Restrictions,
+            parts.Facts);
+        var version = OrientationComposer.Version(content);
+        const string fileName = "orientation-current.md";
+
+        var current = TryReadCurrentStatus(connection, transaction, employeeId);
+        if (current is not null
+            && string.Equals(current.OrientationVersion, version, StringComparison.Ordinal)
+            && string.Equals(current.SessionId, parts.NativeSessionId, StringComparison.Ordinal)
+            && current.State is OrientationStates.Assigned
+                or OrientationStates.Delivered
+                or OrientationStates.Acknowledged
+                or OrientationStates.Comprehended)
+        {
+            transaction.Commit();
+            return new OrientationArtifact(
+                current.AssignmentId,
+                current.EmployeeId,
+                current.RuntimeBindingId,
+                parts.NativeSessionId,
+                version,
+                content,
+                fileName,
+                current.Revision);
+        }
+
+        var now = Timestamp();
+        Execute(
+            connection,
+            transaction,
+            """
+            UPDATE orientation_assignments
+            SET state = 'Stale',
+                last_error = 'Superseded by current fragments or policy.',
+                revision = revision + 1
+            WHERE employee_id = $employee AND state <> 'Stale'
+            """,
+            ("$employee", employeeId));
+        SetHold(
+            connection,
+            transaction,
+            bindingId,
+            DispatchHoldReasons.OrientationStale,
+            true,
+            "Orientation changed.");
+        SetHold(
+            connection,
+            transaction,
+            bindingId,
+            DispatchHoldReasons.OrientationUnacknowledged,
+            true,
+            "Current orientation is not comprehended.");
+
+        var assignmentId = OrganizationIds.NewAssignmentId();
+        Execute(
+            connection,
+            transaction,
+            """
+            INSERT INTO orientation_assignments (
+                id, employee_id, runtime_binding_id, session_id, policy_id,
+                orientation_version, artifact_file_name, artifact_bytes,
+                state, assigned_at, revision)
+            VALUES (
+                $id, $employee, $binding, $session, $policy,
+                $version, $file, $bytes, 'Assigned', $now, 1)
+            """,
+            ("$id", assignmentId),
+            ("$employee", employeeId),
+            ("$binding", bindingId),
+            ("$session", parts.SessionRowId),
+            ("$policy", parts.PolicyId),
+            ("$version", version),
+            ("$file", fileName),
+            ("$bytes", Encoding.UTF8.GetByteCount(content)),
+            ("$now", now));
+
+        for (var index = 0; index < parts.Fragments.Count; index++)
+        {
+            Execute(
+                connection,
+                transaction,
+                """
+                INSERT INTO orientation_assignment_fragments (
+                    assignment_id, fragment_id, ordinal)
+                VALUES ($assignment, $fragment, $ordinal)
+                """,
+                ("$assignment", assignmentId),
+                ("$fragment", parts.Fragments[index].Id),
+                ("$ordinal", index));
+        }
+
+        transaction.Commit();
+        return new OrientationArtifact(
+            assignmentId,
+            employeeId,
+            bindingId,
+            parts.NativeSessionId,
+            version,
+            content,
+            fileName,
+            1);
+    }
+
+    /// <summary>
+    /// Composes the current orientation artifact for any employee without
+    /// assigning it. The version is the same deterministic content hash the
+    /// assignment path produces, so an owner can inspect exactly what a
+    /// subsequent <see cref="ComposeAndAssignCurrentOrientation(string)"/> would
+    /// assign. When a current assignment exists its identity and revision are
+    /// returned; otherwise the assignment fields are empty.
+    /// </summary>
+    public OrientationArtifact GetOrientationArtifact(string employeeId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(employeeId);
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var bindingId = ReadEmployeeBinding(connection, transaction, employeeId).RuntimeBindingId;
+                var parts = ReadCompositionParts(connection, transaction, employeeId);
                 var content = OrientationComposer.Compose(
                     parts.Fragments,
                     parts.PolicyVersion,
                     parts.PolicyRevision,
                     parts.PolicySummary,
-                    parts.Restrictions);
-                var version = OrientationComposer.Version(content);
-                const string fileName = "orientation-current.md";
-
-                var current = TryReadCurrentStatus(connection, transaction, _employeeId!);
-                if (current is not null
-                    && string.Equals(current.OrientationVersion, version, StringComparison.Ordinal)
-                    && string.Equals(current.SessionId, parts.NativeSessionId, StringComparison.Ordinal)
-                    && current.State is OrientationStates.Assigned
-                        or OrientationStates.Delivered
-                        or OrientationStates.Acknowledged
-                        or OrientationStates.Comprehended)
-                {
-                    transaction.Commit();
-                    return new OrientationArtifact(
-                        current.AssignmentId,
-                        current.EmployeeId,
-                        current.RuntimeBindingId,
-                        parts.NativeSessionId,
-                        version,
-                        content,
-                        fileName,
-                        current.Revision);
-                }
-
-                var now = Timestamp();
-                Execute(
-                    connection,
-                    transaction,
-                    """
-                    UPDATE orientation_assignments
-                    SET state = 'Stale',
-                        last_error = 'Superseded by current fragments or policy.',
-                        revision = revision + 1
-                    WHERE employee_id = $employee AND state <> 'Stale'
-                    """,
-                    ("$employee", _employeeId));
-                SetHold(
-                    connection,
-                    transaction,
-                    _bindingId!,
-                    DispatchHoldReasons.OrientationStale,
-                    true,
-                    "Orientation changed.");
-                SetHold(
-                    connection,
-                    transaction,
-                    _bindingId!,
-                    DispatchHoldReasons.OrientationUnacknowledged,
-                    true,
-                    "Current orientation is not comprehended.");
-
-                var assignmentId = OrganizationIds.NewAssignmentId();
-                Execute(
-                    connection,
-                    transaction,
-                    """
-                    INSERT INTO orientation_assignments (
-                        id, employee_id, runtime_binding_id, session_id, policy_id,
-                        orientation_version, artifact_file_name, artifact_bytes,
-                        state, assigned_at, revision)
-                    VALUES (
-                        $id, $employee, $binding, $session, $policy,
-                        $version, $file, $bytes, 'Assigned', $now, 1)
-                    """,
-                    ("$id", assignmentId),
-                    ("$employee", _employeeId),
-                    ("$binding", _bindingId),
-                    ("$session", parts.SessionRowId),
-                    ("$policy", parts.PolicyId),
-                    ("$version", version),
-                    ("$file", fileName),
-                    ("$bytes", Encoding.UTF8.GetByteCount(content)),
-                    ("$now", now));
-
-                for (var index = 0; index < parts.Fragments.Count; index++)
-                {
-                    Execute(
-                        connection,
-                        transaction,
-                        """
-                        INSERT INTO orientation_assignment_fragments (
-                            assignment_id, fragment_id, ordinal)
-                        VALUES ($assignment, $fragment, $ordinal)
-                        """,
-                        ("$assignment", assignmentId),
-                        ("$fragment", parts.Fragments[index].Id),
-                        ("$ordinal", index));
-                }
-
+                    parts.Restrictions,
+                    parts.Facts);
+                var current = TryReadCurrentStatus(connection, transaction, employeeId);
                 transaction.Commit();
                 return new OrientationArtifact(
-                    assignmentId,
-                    _employeeId!,
-                    _bindingId!,
+                    current?.AssignmentId ?? string.Empty,
+                    employeeId,
+                    bindingId,
                     parts.NativeSessionId,
-                    version,
+                    OrientationComposer.Version(content),
                     content,
-                    fileName,
-                    1);
+                    "orientation-current.md",
+                    current?.Revision ?? 0);
             }
         });
     }
@@ -302,13 +454,31 @@ public sealed partial class OrganizationStore
         string nativeSessionId,
         long runtimeGeneration)
     {
+        EnsureOpenIdentity();
+        return ConfirmOrientationLoaded(_employeeId!, assignmentId, orientationVersion, nativeSessionId, runtimeGeneration);
+    }
+
+    /// <summary>
+    /// Confirms that a named employee's current delivery has loaded in a runtime
+    /// whose generation is at least the required restart generation. The managed
+    /// provisioning path names the employee explicitly, exactly as its other
+    /// orientation calls do.
+    /// </summary>
+    public OrientationStatus ConfirmOrientationLoaded(
+        string employeeId,
+        string assignmentId,
+        string orientationVersion,
+        string nativeSessionId,
+        long runtimeGeneration)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(employeeId);
         return TranslateStoreFaults(() =>
         {
             lock (_gate)
             {
                 using var connection = OpenConnection();
                 using var transaction = connection.BeginTransaction();
-                var current = ReadCurrentStatus(connection, transaction, _employeeId!);
+                var current = ReadCurrentStatus(connection, transaction, employeeId);
                 if (!string.Equals(current.AssignmentId, assignmentId, StringComparison.Ordinal)
                     || !string.Equals(current.OrientationVersion, orientationVersion, StringComparison.Ordinal)
                     || !string.Equals(current.SessionId, nativeSessionId, StringComparison.Ordinal)
@@ -579,6 +749,29 @@ public sealed partial class OrganizationStore
     public bool CanDispatchEmployee(string employeeId)
     {
         return GetOrientationStatus(employeeId).Ready;
+    }
+
+    /// <summary>
+    /// True when a manual dispatch hold is currently active for the employee's
+    /// binding. A rebuild records this before it takes its own hold so it can
+    /// restore the owner's hold on completion rather than clearing one it did not
+    /// create.
+    /// </summary>
+    public bool IsManualDispatchHeld(string employeeId)
+    {
+        return TranslateStoreFaults(() =>
+        {
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "SELECT EXISTS(SELECT 1 FROM dispatch_holds h JOIN runtime_bindings b ON b.id = h.runtime_binding_id JOIN employees e ON e.id = b.employee_id WHERE e.id = $employee AND h.reason = $reason AND h.active = 1)";
+                command.Parameters.AddWithValue("$employee", employeeId);
+                command.Parameters.AddWithValue("$reason", DispatchHoldReasons.Manual);
+                return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+            }
+        });
     }
 
     public OrientationStatus SetManualDispatchHold(string employeeId, bool held, string? detail)
@@ -1670,6 +1863,7 @@ public sealed partial class OrganizationStore
             }
         }
 
+        var facts = ReadExpectedFactsForFragments(connection, transaction, fragments.Select(fragment => fragment.Id).ToArray());
         return new CompositionParts(
             fragments,
             policy.Id,
@@ -1677,6 +1871,13 @@ public sealed partial class OrganizationStore
             policy.Revision,
             policy.Summary,
             restrictions,
+            new OrientationStandingFacts(
+                facts.Identity,
+                facts.Department,
+                facts.Reporting,
+                facts.Duties.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                facts.Restrictions.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                facts.Escalation),
             sessionRowId,
             nativeSessionId);
     }
@@ -1884,6 +2085,41 @@ public sealed partial class OrganizationStore
             values.Add(reader.GetString(1));
         }
 
+        return BuildExpectedFacts(facts);
+    }
+
+    private static ExpectedFacts ReadExpectedFactsForFragments(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<string> fragmentIds)
+    {
+        if (fragmentIds.Count != 4) throw new OrganizationStoreCorruptException("Exactly four orientation fragments are required for standing facts.");
+        var facts = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT category, value
+            FROM orientation_facts
+            WHERE fragment_id IN ($organization, $department, $role, $employee)
+            ORDER BY category, ordinal
+            """;
+        command.Parameters.AddWithValue("$organization", fragmentIds[0]);
+        command.Parameters.AddWithValue("$department", fragmentIds[1]);
+        command.Parameters.AddWithValue("$role", fragmentIds[2]);
+        command.Parameters.AddWithValue("$employee", fragmentIds[3]);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var category = reader.GetString(0);
+            if (!facts.TryGetValue(category, out var values)) facts[category] = values = [];
+            values.Add(reader.GetString(1));
+        }
+        return BuildExpectedFacts(facts);
+    }
+
+    private static ExpectedFacts BuildExpectedFacts(Dictionary<string, List<string>> facts)
+    {
         return new ExpectedFacts(
             SingleFact(facts, "identity"),
             SingleFact(facts, "department"),
@@ -2459,6 +2695,7 @@ public sealed partial class OrganizationStore
         int PolicyRevision,
         string PolicySummary,
         IReadOnlyList<OrientationRestriction> Restrictions,
+        OrientationStandingFacts Facts,
         string? SessionRowId,
         string? NativeSessionId);
 
@@ -2515,6 +2752,14 @@ public sealed record OrientationRestriction(
     string ResourcePattern,
     string Description,
     bool Waivable);
+
+public sealed record OrientationStandingFacts(
+    string Identity,
+    string Department,
+    string Reporting,
+    IReadOnlyList<string> Duties,
+    IReadOnlyList<string> Restrictions,
+    string Escalation);
 
 public static class OrientationComposer
 {
@@ -2601,7 +2846,8 @@ public static class OrientationComposer
         string policyVersion,
         int policyRevision,
         string policySummary,
-        IReadOnlyList<OrientationRestriction> restrictions)
+        IReadOnlyList<OrientationRestriction> restrictions,
+        OrientationStandingFacts? facts = null)
     {
         if (fragments.Select(fragment => fragment.Layer).ToArray()
             is not ["organization", "department", "role", "employee"])
@@ -2659,6 +2905,21 @@ public static class OrientationComposer
         builder.Append(
             "\nOwner grants are persisted and audited but are not executable through inbound ACP permission requests in Phase 1. " +
             "Natural-language instructions and model-authored titles cannot grant authority.\n");
+        if (facts is not null)
+        {
+            var standingFacts = JsonSerializer.Serialize(new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["identity"] = facts.Identity,
+                ["department"] = facts.Department,
+                ["reporting"] = facts.Reporting,
+                ["duties"] = facts.Duties,
+                ["restrictions"] = facts.Restrictions,
+                ["escalation"] = facts.Escalation,
+            });
+            builder.Append("\n# Standing Facts\n\nCopy these exact values verbatim for orientation comprehension.\n\n```json\n")
+                .Append(standingFacts)
+                .Append("\n```\n");
+        }
         return Normalize(builder.ToString());
     }
 

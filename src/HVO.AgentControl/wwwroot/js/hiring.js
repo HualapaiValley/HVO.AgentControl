@@ -10,6 +10,11 @@ if (root) {
     const submit = root.querySelector('[data-hire-submit]');
     const noRoles = root.querySelector('[data-no-hire-roles]');
     let organization = null;
+    // Active current profile revisions that have a verified build on the
+    // controller-local Docker target. Managed hiring in this step approves one
+    // revision on that target only; the server re-resolves the exact build.
+    const LOCAL_DOCKER_ID = 'local-docker';
+    let activeRevisions = [];
     const rolesForDepartment = () => {
         role.replaceChildren();
         const available = organization.roles.filter((item) => item.departmentId === department.value);
@@ -28,23 +33,113 @@ if (root) {
         const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
         return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     };
+    const pretty = (value) => (value === null || value === undefined || value === '') ? '—' : String(value);
+    const frozenRow = (label, value) => {
+        const dt = document.createElement('dt'); dt.textContent = label;
+        const dd = document.createElement('dd'); dd.textContent = pretty(value);
+        return [dt, dd];
+    };
+    const renderRequestCard = (request) => {
+        const card = document.createElement('article'); card.className = 'request-card'; card.dataset.requestId = request.id; card.dataset.requestState = request.state;
+        const title = document.createElement('h3'); title.textContent = request.requestedDisplayName;
+        const meta = document.createElement('p'); meta.textContent = `${request.state} · ${new Date(request.createdAt).toLocaleString()} · ${request.id}`;
+        const detail = document.createElement('p'); detail.textContent = `${request.departmentDisplayName} · ${request.roleDisplayName} · ${request.placement} · ${request.cpuLimit} CPU / ${request.memoryLimitMiB} MiB / ${request.pidsLimit} PIDs`;
+        const purpose = document.createElement('p'); purpose.textContent = request.purpose;
+        const actions = document.createElement('div'); actions.className = 'request-actions';
+        const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'btn'; reject.textContent = 'Reject'; reject.disabled = request.state !== 'Requested'; reject.addEventListener('click', async () => { receipt.dataset.status = 'pending'; receipt.textContent = `Rejecting ${request.id}…`; try { await fetchJson(`/api/hire-requests/${encodeURIComponent(request.id)}/reject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: request.revision }) }); await load(); receipt.dataset.status = 'ok'; receipt.textContent = `Rejected ${request.id}.`; } catch (error) { receipt.dataset.status = 'error'; receipt.textContent = `Reject failed: ${error.message}`; } });
+        actions.append(reject);
+
+        // "Approved and beyond": the owner freeze exists and its exact selection
+        // is rendered. Rejected is a terminal non-approval and shows no freeze.
+        const approved = ['Approved', 'Provisioning', 'Orienting', 'Ready', 'Failed', 'Interrupted', 'Uncertain'].includes(request.state);
+        if (approved) {
+            // Frozen selection survives the approval; only the fields the owner
+            // approved are shown, never the internal approval identity.
+            const frozen = document.createElement('dl'); frozen.className = 'frozen-approval'; frozen.dataset.frozenApproval = request.id;
+            for (const pair of [
+                frozenRow('Approved profile revision', request.containerProfileRevisionId),
+                frozenRow('Verified profile build', request.profileBuildId),
+                frozenRow('Image digest', request.approvedImageDigest),
+                frozenRow('Execution target', 'Controller-local Docker'),
+                frozenRow('Managed employee', request.employeeId),
+                frozenRow('Runtime binding', request.runtimeBindingId),
+                frozenRow('Worker', request.workerId),
+                frozenRow('Status detail', request.statusDetail),
+            ]) frozen.append(...pair);
+            const provisioningNote = document.createElement('span'); provisioningNote.className = 'control-note'; provisioningNote.dataset.provisioningNote = request.id;
+            provisioningNote.textContent = request.employeeId
+                ? 'Approval created the employee identity and runtime binding, then durably queued provisioning and orientation. The work runs in the background and resumes from the recorded state after a restart.'
+                : 'Approval records the frozen selection. No employee identity is bound yet.';
+            card.append(title, meta, detail, purpose, actions, frozen, provisioningNote);
+            return card;
+        }
+
+        if (request.state !== 'Requested') {
+            // Rejected (or any other non-approved terminal state): no selection is
+            // offered and no freeze is implied.
+            card.append(title, meta, detail, purpose, actions);
+            return card;
+        }
+
+        if (request.placement === 'DeveloperContainer') {
+            const profileSelect = document.createElement('select'); profileSelect.className = 'approve-profile'; profileSelect.dataset.approveProfile = request.id; profileSelect.setAttribute('aria-label', 'Approved container profile revision');
+            const approve = document.createElement('button'); approve.type = 'button'; approve.className = 'btn'; approve.textContent = 'Approve';
+            const explanation = document.createElement('span'); explanation.className = 'control-note'; explanation.dataset.approveExplanation = request.id;
+            const refreshSelectors = () => {
+                const selectable = activeRevisions.length > 0;
+                approve.disabled = !selectable;
+                profileSelect.disabled = !selectable;
+                explanation.textContent = selectable
+                    ? 'Approval freezes this exact profile revision on the controller-local Docker target, creates the managed employee identity and runtime binding, then durably queues provisioning and orientation to Ready.'
+                    : 'No active profile revision has a verified image build on the controller-local Docker target yet. Build and verify a profile revision first; approval then creates the employee identity and binding without provisioning.';
+            };
+            for (const revision of activeRevisions) { const option = document.createElement('option'); option.value = revision.id; option.textContent = `${revision.profileName} r${revision.revisionNumber}`; profileSelect.append(option); }
+            profileSelect.disabled = activeRevisions.length === 0;
+            profileSelect.addEventListener('change', refreshSelectors);
+            approve.addEventListener('click', async () => {
+                receipt.dataset.status = 'pending'; receipt.textContent = `Approving ${request.id}…`;
+                try {
+                    await fetchJson(`/api/hire-requests/${encodeURIComponent(request.id)}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: request.revision, profileRevisionId: profileSelect.value }) });
+                    await load();
+                    receipt.dataset.status = 'ok'; receipt.textContent = `Approved ${request.id}. The employee identity and binding were created and provisioning is queued; it runs in the background.`;
+                } catch (error) { receipt.dataset.status = 'error'; receipt.textContent = `Approval failed: ${error.message}`; }
+            });
+            refreshSelectors();
+            actions.append(approve);
+            card.append(title, meta, detail, purpose, actions, profileSelect, explanation);
+            return card;
+        }
+
+        const explanation = document.createElement('span'); explanation.className = 'control-note'; explanation.dataset.approveExplanation = request.id;
+        explanation.textContent = 'Only a DeveloperContainer hire can be approved in this phase. This placement has no verified profile build to select.';
+        card.append(title, meta, detail, purpose, actions, explanation);
+        return card;
+    };
+
     const render = (requests) => {
         list.replaceChildren();
         if (!requests.length) { const empty = document.createElement('p'); empty.className = 'empty-state'; empty.textContent = 'No hire requests yet.'; list.append(empty); }
-        for (const request of requests) {
-            const card = document.createElement('article'); card.className = 'request-card'; card.dataset.requestId = request.id;
-            const title = document.createElement('h3'); title.textContent = request.requestedDisplayName;
-            const meta = document.createElement('p'); meta.textContent = `${request.state} · ${new Date(request.createdAt).toLocaleString()} · ${request.id}`;
-            const detail = document.createElement('p'); detail.textContent = `${request.departmentDisplayName} · ${request.roleDisplayName} · ${request.placement} · ${request.cpuLimit} CPU / ${request.memoryLimitMiB} MiB / ${request.pidsLimit} PIDs`;
-            const purpose = document.createElement('p'); purpose.textContent = request.purpose;
-            const actions = document.createElement('div'); actions.className = 'request-actions';
-            const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'btn'; reject.textContent = 'Reject'; reject.disabled = request.state !== 'Requested'; reject.addEventListener('click', async () => { receipt.dataset.status = 'pending'; receipt.textContent = `Rejecting ${request.id}…`; try { await fetchJson(`/api/hire-requests/${encodeURIComponent(request.id)}/reject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: request.revision }) }); await load(); receipt.dataset.status = 'ok'; receipt.textContent = `Rejected ${request.id}.`; } catch (error) { receipt.dataset.status = 'error'; receipt.textContent = `Reject failed: ${error.message}`; } });
-            const approve = document.createElement('button'); approve.type = 'button'; approve.className = 'btn'; approve.textContent = 'Approve'; approve.disabled = true; approve.title = 'Approval is not available yet: it requires a verified container profile build (#259) and lands with #260. No request auto-creates an employee.'; approve.setAttribute('aria-describedby', `approval-${request.id}`);
-            const explanation = document.createElement('span'); explanation.id = `approval-${request.id}`; explanation.className = 'control-note'; explanation.textContent = 'Approval is not available yet: it requires a verified container profile build (#259) and lands with #260. No request auto-creates an employee.';
-            actions.append(reject, approve, explanation); card.append(title, meta, detail, purpose, actions); list.append(card);
-        }
+        for (const request of requests) list.append(renderRequestCard(request));
         status.textContent = `${requests.length} durable request${requests.length === 1 ? '' : 's'}`; delete status.dataset.status; list.hidden = false;
     };
+
+    // Load the active current profile revisions that have a verified build on the
+    // controller-local Docker target. The build list is the only authority for
+    // selectability; the server re-validates the selection at approval time.
+    async function loadApprovalOptions() {
+        activeRevisions = [];
+        let profiles = [];
+        try { profiles = await fetchJson('/api/profiles'); } catch { profiles = []; }
+        await Promise.all(profiles.filter((profile) => profile.status === 'active' && profile.currentRevisionId).map(async (profile) => {
+            let builds = [];
+            try { builds = await fetchJson(`/api/profiles/${encodeURIComponent(profile.id)}/revisions/${encodeURIComponent(profile.currentRevisionId)}/builds`); } catch { builds = []; }
+            const localVerified = builds.some((build) => build.hostId === LOCAL_DOCKER_ID && build.state === 'built' && build.verified);
+            if (!localVerified) return;
+            activeRevisions.push({ id: profile.currentRevisionId, profileName: profile.displayName, revisionNumber: profile.currentRevisionNumber, revisionId: profile.currentRevisionId });
+        }));
+        activeRevisions.sort((left, right) => left.profileName.localeCompare(right.profileName));
+    }
+
     async function load() { try { render(await fetchJson('/api/hire-requests')); } catch (error) { status.textContent = `Hire requests unavailable: ${error.message}`; status.dataset.status = 'error'; } }
     department.addEventListener('change', rolesForDepartment);
     form.addEventListener('submit', async (event) => {
@@ -68,7 +163,10 @@ if (root) {
     const params = new URLSearchParams(location.search);
     const requestedDepartmentId = params.get('departmentId');
     const requestedDepartmentSlug = params.get('department');
-    fetchJson('/api/organization/portal').then((data) => {
+    Promise.all([
+        fetchJson('/api/organization/portal'),
+        loadApprovalOptions(),
+    ]).then(([data]) => {
         organization = data;
         for (const item of data.departments) { const option = document.createElement('option'); option.value = item.id; option.textContent = item.displayName; department.append(option); }
         const staffable = data.departments.filter((item) => data.roles.some((role) => role.departmentId === item.id));

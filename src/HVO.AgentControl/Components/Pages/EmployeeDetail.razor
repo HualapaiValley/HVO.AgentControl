@@ -19,7 +19,20 @@
             <article><h2>Runtime binding</h2><dl data-employee-runtime></dl></article>
             <article><h2>Orientation</h2><dl data-employee-orientation></dl></article>
             <article><h2>Safe diagnostics</h2><dl data-employee-diagnostics></dl></article>
+            <article><h2>Container profile</h2><dl data-employee-profile></dl><p class="profile-update-note" data-profile-update-note hidden></p></article>
         </div>
+        <section class="employee-rebuild" data-employee-rebuild hidden>
+            <h2>Rebuild managed employee</h2>
+            <p>Rebuilds preserve workspace and home by default. A newer profile revision is never adopted automatically.</p>
+            <form class="panel-form" data-rebuild-form>
+                <label>Verified target revision<select name="targetProfileRevisionId" data-rebuild-target required></select></label>
+                <fieldset><legend>Optional destructive reset</legend><label><input type="checkbox" name="resetWorkspace" data-reset-workspace /> Reset workspace</label><label><input type="checkbox" name="resetHome" data-reset-home /> Reset home</label></fieldset>
+                <label data-reset-confirmation-wrap hidden>Type <code data-reset-confirmation-phrase></code> to confirm<input type="text" name="resetConfirmation" data-reset-confirmation autocomplete="off" /></label>
+                <button type="submit" class="btn btn-primary" data-rebuild-submit disabled>Rebuild</button>
+            </form>
+            <p class="receipt" data-rebuild-receipt role="status" aria-live="polite"></p>
+            <div class="request-list" data-rebuild-history></div>
+        </section>
         <div class="orientation-actions">
             <button type="button" class="btn" data-orientation-deliver disabled>Recompose &amp; deliver</button>
             <button type="button" class="btn" data-orientation-comprehension disabled>Run comprehension</button>

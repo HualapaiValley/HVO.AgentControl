@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 
 namespace HVO.AgentControl.Worker;
@@ -15,6 +16,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly IWorkerObservationSink _observations;
     private readonly Stream _acpInput;
     private readonly Stream _acpOutput;
+    private readonly IWorkerOrientationInstaller _orientationInstaller;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly SemaphoreSlim _promptLock = new(1, 1);
     private readonly SemaphoreSlim _sessionLock = new(1, 1);
@@ -27,6 +29,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly object _submitGate = new();
     private readonly object _cancellationGate = new();
     private ActivePromptContext? _activePrompt;
+    private OrientationTurnCapture? _activeComprehensionCapture;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly CancellationTokenSource _transportFault = new();
     private readonly NdjsonFrameReader _acpReader;
@@ -35,7 +38,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private int _disposed;
     private Task? _reader;
 
-    public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput, IWorkerObservationSink? observations = null) { _store = store; _observations = observations ?? store; _acpInput = acpInput; _acpOutput = acpOutput; _acpReader = WorkerProtocol.CreateAcpReader(acpInput); }
+    public WorkerRuntime(WorkerStore store, Stream acpInput, Stream acpOutput, IWorkerObservationSink? observations = null, IWorkerOrientationInstaller? orientationInstaller = null) { _store = store; _observations = observations ?? store; _acpInput = acpInput; _acpOutput = acpOutput; _orientationInstaller = orientationInstaller ?? new WorkerOrientationInstaller(); _acpReader = WorkerProtocol.CreateAcpReader(acpInput); }
     public void Start(long? employeePid = null) { _reader = Task.Run(ReadAcpAsync); }
 
     public async Task InitializeAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
@@ -126,7 +129,337 @@ public sealed class WorkerRuntime : IAsyncDisposable
         finally { _sessionLock.Release(); }
     }
 
+    /// <summary>
+    /// Installs one orientation artifact through the fixed supervisor write under
+    /// the exact bridge lease. The durable intent (<c>installing</c>) is recorded
+    /// before any file can exist; a replay of an already-installed identical
+    /// artifact is idempotent; a conflicting artifact for the same assignment is
+    /// rejected. Any failure after the supervisor request is recorded as
+    /// <c>uncertain</c> and never reported as a clean rejection.
+    /// </summary>
+    internal async Task<OrientationInstallRecord> InstallOrientationAsync(Lease lease, string assignmentId, string orientationVersion, string artifactFileName, string content, string contentHash, CancellationToken cancellationToken)
+    {
+        var bytes = WorkerProtocol.EncodeOrientationContent(content);
+        if (!string.Equals(WorkerProtocol.OrientationContentHash(bytes), contentHash, StringComparison.Ordinal))
+            throw new WorkerProtocolException("Orientation content hash does not match the content.");
+
+        var intent = _store.BeginOrientationInstall(lease.Epoch, lease.ConnectionNonce, assignmentId, orientationVersion, artifactFileName, contentHash);
+        if (intent.AlreadyInstalled) return intent;
+        try
+        {
+            var receipt = await _orientationInstaller.InstallAsync(assignmentId, orientationVersion, artifactFileName, bytes, contentHash, cancellationToken).ConfigureAwait(false);
+            return _store.CompleteOrientationInstall(lease.Epoch, lease.ConnectionNonce, assignmentId, orientationVersion, contentHash, receipt.InstalledPath);
+        }
+        catch (Exception exception)
+        {
+            _store.MarkOrientationUncertain(assignmentId, orientationVersion, contentHash);
+            if (exception is WorkerOperationUncertainException) throw;
+            throw new WorkerOperationUncertainException("Orientation installation completion is uncertain.", exception);
+        }
+    }
+
+    /// <summary>
+    /// Runs one bounded, tool-free `session/prompt` comprehension turn for the
+    /// exact installed orientation artifact and returns the validated structured
+    /// evidence. The raw response text is captured only in memory, is bounded to
+    /// 16 KiB, is never journaled, and only the validated JSON object crosses the
+    /// bridge. A replay of an already-comprehended assignment returns the retained
+    /// evidence without a second model turn; a running or uncertain operation is
+    /// refused so a duplicate remote effect is never issued.
+    /// </summary>
+    internal async Task<OrientationComprehensionRecord> RunOrientationComprehensionAsync(Lease lease, string assignmentId, string employeeId, string sessionId, string orientationVersion, CancellationToken cancellationToken)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateIdentifier(employeeId, WorkerProtocol.MaxIdentifierLength, "orientation employee id");
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "orientation session id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+
+        // The exact installed artifact must be current for this assignment and
+        // version, and the process/session must be the one the caller named.
+        var status = _store.Status();
+        if (status.OrientationState != "installed"
+            || !string.Equals(status.OrientationAssignmentId, assignmentId, StringComparison.Ordinal)
+            || !string.Equals(status.OrientationVersion, orientationVersion, StringComparison.Ordinal)
+            || status.OrientationArtifactFileName is not { } artifactFileName
+            || status.OrientationContentHash is not { } contentHash
+            || status.OrientationInstalledPath is not { })
+            throw new WorkerProtocolException("The requested orientation assignment is not the exact installed artifact.");
+        if (status.ProcessState != "running" || !status.AcpInitialized)
+            throw new WorkerProtocolException("A running, ACP-initialized process is required for comprehension.");
+        if (!string.Equals(status.SessionId, sessionId, StringComparison.Ordinal))
+            throw new WorkerProtocolException("The ACP process is not bound to the requested session.");
+
+        var state = _store.BeginOrientationComprehension(lease.Epoch, lease.ConnectionNonce, assignmentId, employeeId, sessionId, orientationVersion);
+        if (state.State == "comprehended" && state.EvidenceJson is { } retained && state.EvidenceHash is { } retainedHash)
+            return new OrientationComprehensionRecord(assignmentId, employeeId, sessionId, orientationVersion,
+                EvidenceField(retained, "identity"), EvidenceField(retained, "department"), EvidenceField(retained, "reporting"),
+                EvidenceList(retained, "duties"), EvidenceList(retained, "restrictions"), EvidenceField(retained, "escalation"),
+                "comprehended", retainedHash, true);
+        if (state.State is "running" or "uncertain" && !state.NewlyBegun)
+            throw new WorkerOperationUncertainException("A remote comprehension turn for this assignment is already recorded as in-flight.");
+
+        // The bridge uid cannot read the 0600 employee file, so the supervisor
+        // reads the exact installed artifact and returns its verified bytes.
+        var read = await _orientationInstaller.ReadAsync(assignmentId, orientationVersion, artifactFileName, contentHash, cancellationToken).ConfigureAwait(false);
+        var artifactContent = System.Text.Encoding.UTF8.GetString(read.Content);
+        if (read.Content.AsSpan().IndexOf((byte)0) >= 0) throw new WorkerProtocolException("The installed orientation content is invalid.");
+
+        var prompt = BuildComprehensionPrompt(assignmentId, employeeId, sessionId, orientationVersion, status.OrientationInstalledPath!, artifactContent);
+        var capture = new OrientationTurnCapture(sessionId, WorkerProtocol.MaxOrientationComprehensionBytes);
+        JsonElement result;
+        try
+        {
+            // A comprehension turn is not an owner submission: it holds the single
+            // prompt slot but has no active submit context, so any permission/tool
+            // request is unbound and refused by the existing permission flow.
+            if (!await _promptLock.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+            {
+                _store.FailOrientationComprehension(assignmentId, employeeId, sessionId, orientationVersion);
+                throw new WorkerProtocolException("Another prompt request is active.");
+            }
+            try
+            {
+                lock (_activePromptGate)
+                {
+                    if (_activeComprehensionCapture is not null) throw new WorkerProtocolException("A comprehension turn is already running.");
+                    _activeComprehensionCapture = capture;
+                }
+                try
+                {
+                    result = await InvokeFixedAsync(
+                        "session/prompt",
+                        new { sessionId, prompt = new object[] { new { type = "text", text = prompt } } },
+                        TimeSpan.FromSeconds(120),
+                        cancellationToken,
+                        uncertainAfterWrite: true,
+                        capture.BindRequest).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lock (_activePromptGate) if (ReferenceEquals(_activeComprehensionCapture, capture)) _activeComprehensionCapture = null;
+                }
+            }
+            finally { _promptLock.Release(); }
+        }
+        catch (WorkerOperationUncertainException)
+        {
+            _store.MarkOrientationComprehensionUncertain(assignmentId, employeeId, sessionId, orientationVersion);
+            throw;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
+        {
+            _store.MarkOrientationComprehensionUncertain(assignmentId, employeeId, sessionId, orientationVersion);
+            throw new WorkerOperationUncertainException("ACP comprehension request completion is uncertain.", exception);
+        }
+
+        var stopReason = result.TryGetProperty("result", out var resultBody) && resultBody.ValueKind == JsonValueKind.Object && resultBody.TryGetProperty("stopReason", out var stop)
+            ? stop.GetString()
+            : null;
+        if (!string.Equals(stopReason, "end_turn", StringComparison.Ordinal))
+        {
+            _store.FailOrientationComprehension(assignmentId, employeeId, sessionId, orientationVersion);
+            throw new WorkerProtocolException("The comprehension turn did not end normally.");
+        }
+        var captured = capture.Complete();
+        if (captured.Overflowed)
+        {
+            _store.FailOrientationComprehension(assignmentId, employeeId, sessionId, orientationVersion);
+            throw new WorkerProtocolException("The comprehension response exceeds the fixed size limit.");
+        }
+        if (string.IsNullOrWhiteSpace(captured.Text))
+        {
+            _store.FailOrientationComprehension(assignmentId, employeeId, sessionId, orientationVersion);
+            throw new WorkerProtocolException("The comprehension turn returned no structured evidence.");
+        }
+
+        JsonDocument document;
+        try { document = JsonDocument.Parse(captured.Text); }
+        catch (JsonException)
+        {
+            _store.FailOrientationComprehension(assignmentId, employeeId, sessionId, orientationVersion);
+            throw new WorkerProtocolException("The comprehension response was not valid unfenced JSON.");
+        }
+        using (document)
+        {
+            if (!OrientationEvidenceShape.TryValidate(document.RootElement, assignmentId, employeeId, sessionId, orientationVersion, out _))
+            {
+                _store.FailOrientationComprehension(assignmentId, employeeId, sessionId, orientationVersion);
+                throw new WorkerProtocolException("The comprehension response failed structural validation.");
+            }
+            var canonical = CanonicalizeEvidence(document.RootElement);
+            var evidenceHash = WorkerProtocol.OrientationContentHash(System.Text.Encoding.UTF8.GetBytes(canonical));
+            _store.CompleteOrientationComprehension(lease.Epoch, lease.ConnectionNonce, assignmentId, employeeId, sessionId, orientationVersion, evidenceHash, canonical);
+            TryAppendObservation("orientation-comprehension", JsonSerializer.Serialize(new { assignmentId, employeeId, sessionId, state = "comprehended", evidenceHash }, WorkerProtocol.JsonOptions));
+            return new OrientationComprehensionRecord(assignmentId, employeeId, sessionId, orientationVersion,
+                EvidenceField(canonical, "identity"), EvidenceField(canonical, "department"), EvidenceField(canonical, "reporting"),
+                EvidenceList(canonical, "duties"), EvidenceList(canonical, "restrictions"), EvidenceField(canonical, "escalation"),
+                "comprehended", evidenceHash, false);
+        }
+    }
+
+    private static string BuildComprehensionPrompt(string assignmentId, string employeeId, string sessionId, string orientationVersion, string installedPath, string content)
+    {
+        // The content is bounded (64 KiB) and carries no secrets; it is embedded so
+        // the tool-free turn can comprehend the orientation without any file read.
+        return string.Join('\n',
+            "Return ONLY one JSON object. Do not use any tools. Do not use markdown fences.",
+            "The object must have exactly these fields:",
+            "assignmentId, employeeId, sessionId, orientationVersion, identity, department, reporting, duties (array of strings), restrictions (array of strings), escalation.",
+            "Use these exact correlation values:",
+            $"assignmentId {assignmentId}",
+            $"employeeId {employeeId}",
+            $"sessionId {sessionId}",
+            $"orientationVersion {orientationVersion}",
+            $"The orientation artifact is installed at {installedPath}.",
+            "Copy identity, department, reporting, duties, restrictions, and escalation verbatim from the artifact's fenced JSON Standing Facts block. Do not infer or paraphrase them from prose.",
+            "Standing orientation artifact:",
+            content);
+    }
+
+    /// <summary>Serializes the validated evidence with the fixed field order for canonical hashing.</summary>
+    private static string CanonicalizeEvidence(JsonElement element)
+    {
+        // Use a stable ordered object so the hash never depends on model key order.
+        var ordered = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["assignmentId"] = element.GetProperty("assignmentId").GetString(),
+            ["employeeId"] = element.GetProperty("employeeId").GetString(),
+            ["sessionId"] = element.GetProperty("sessionId").GetString(),
+            ["orientationVersion"] = element.GetProperty("orientationVersion").GetString(),
+            ["identity"] = element.GetProperty("identity").GetString(),
+            ["department"] = element.GetProperty("department").GetString(),
+            ["reporting"] = element.GetProperty("reporting").GetString(),
+            ["duties"] = element.GetProperty("duties").EnumerateArray().Select(item => item.GetString()).ToArray(),
+            ["restrictions"] = element.GetProperty("restrictions").EnumerateArray().Select(item => item.GetString()).ToArray(),
+            ["escalation"] = element.GetProperty("escalation").GetString(),
+        };
+        return JsonSerializer.Serialize(ordered, WorkerProtocol.JsonOptions);
+    }
+
+    private static string EvidenceField(string json, string name)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.GetProperty(name).GetString()!;
+    }
+
+    private static IReadOnlyList<string> EvidenceList(string json, string name)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.GetProperty(name).EnumerateArray().Select(item => item.GetString()!).ToArray();
+    }
+
+    /// <summary>
+    /// Captures the text chunks of exactly one correlated ACP prompt turn. It
+    /// recognizes only <c>session/update</c> notifications whose
+    /// <c>sessionId</c> matches, whose <c>sessionUpdate</c> is
+    /// <c>agent_message_chunk</c>, and whose text is a string; the buffer is
+    /// bounded and overflows closed. It seals on the response frame whose id
+    /// matches the bound request, so late chunks cannot corrupt a completed turn.
+    /// </summary>
+    private sealed class OrientationTurnCapture(string sessionId, int maximumBytes)
+    {
+        private readonly object _gate = new();
+        private readonly StringBuilder _buffer = new();
+        private int _bytes;
+        private long? _requestId;
+        private bool _sealed;
+        private bool _overflowed;
+        private (string Text, bool Overflowed)? _snapshot;
+
+        public void BindRequest(long requestId)
+        {
+            lock (_gate)
+            {
+                if (_requestId is not null) throw new WorkerProtocolException("The comprehension capture is already request-bound.");
+                _requestId = requestId;
+            }
+        }
+
+        public void TryAppend(JsonElement frame)
+        {
+            if (frame.ValueKind != JsonValueKind.Object
+                || !frame.TryGetProperty("method", out var method)
+                || method.ValueKind != JsonValueKind.String
+                || !string.Equals(method.GetString(), "session/update", StringComparison.Ordinal)
+                || !frame.TryGetProperty("params", out var parameters)
+                || parameters.ValueKind != JsonValueKind.Object
+                || !parameters.TryGetProperty("sessionId", out var session)
+                || session.ValueKind != JsonValueKind.String
+                || !string.Equals(session.GetString(), sessionId, StringComparison.Ordinal)
+                || !parameters.TryGetProperty("update", out var update)
+                || update.ValueKind != JsonValueKind.Object
+                || !update.TryGetProperty("sessionUpdate", out var kind)
+                || kind.ValueKind != JsonValueKind.String
+                || !string.Equals(kind.GetString(), "agent_message_chunk", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            string? text = null;
+            if (update.TryGetProperty("content", out var content)
+                && content.ValueKind == JsonValueKind.Object
+                && content.TryGetProperty("text", out var nested)
+                && nested.ValueKind == JsonValueKind.String)
+            {
+                text = nested.GetString();
+            }
+            else if (update.TryGetProperty("text", out var direct) && direct.ValueKind == JsonValueKind.String)
+            {
+                text = direct.GetString();
+            }
+            if (text is null) return;
+
+            lock (_gate)
+            {
+                if (_sealed || _overflowed) return;
+                var bytes = System.Text.Encoding.UTF8.GetByteCount(text);
+                if (_bytes > maximumBytes - bytes) { _overflowed = true; _buffer.Clear(); return; }
+                _buffer.Append(text);
+                _bytes += bytes;
+            }
+        }
+
+        public void TrySeal(JsonElement frame)
+        {
+            if (frame.ValueKind != JsonValueKind.Object
+                || frame.TryGetProperty("method", out _)
+                || !frame.TryGetProperty("id", out var id)
+                || id.ValueKind != JsonValueKind.Number
+                || !id.TryGetInt64(out var responseId))
+            {
+                return;
+            }
+            lock (_gate)
+            {
+                if (_requestId == responseId && !_sealed)
+                {
+                    _sealed = true;
+                    _snapshot = (_buffer.ToString(), _overflowed);
+                }
+            }
+        }
+
+        public (string Text, bool Overflowed) Complete()
+        {
+            lock (_gate)
+            {
+                _sealed = true;
+                _snapshot ??= (_buffer.ToString(), _overflowed);
+                return _snapshot.Value;
+            }
+        }
+    }
+
     private async Task<JsonElement> InvokeFixedAsync(string method, object parameters, TimeSpan timeout, CancellationToken cancellationToken, bool uncertainAfterWrite = false)
+        => await InvokeFixedAsync(method, parameters, timeout, cancellationToken, uncertainAfterWrite, null).ConfigureAwait(false);
+
+    /// <summary>
+    /// The fixed-request path with an optional correlation callback. The callback
+    /// runs under the write lock immediately before the frame is written, so a
+    /// prompt capture can bind the allocated ACP id before any correlated
+    /// notification or response can be observed by the reader.
+    /// </summary>
+    private async Task<JsonElement> InvokeFixedAsync(string method, object parameters, TimeSpan timeout, CancellationToken cancellationToken, bool uncertainAfterWrite, Action<long>? registered)
     {
         if (_reader is null) throw new WorkerProtocolException("ACP reader is not running.");
         var id = Interlocked.Increment(ref _nextAcpId);
@@ -138,7 +471,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await WriteAcpObjectAsync(new { jsonrpc = "2.0", id, method, @params = parameters }, deadline.Token, () => writeAttempted = true).ConfigureAwait(false);
+            await WriteAcpObjectAsync(new { jsonrpc = "2.0", id, method, @params = parameters }, deadline.Token, () => { writeAttempted = true; registered?.Invoke(id); }).ConfigureAwait(false);
             return await completion.Task.WaitAsync(deadline.Token).ConfigureAwait(false);
         }
         catch (Exception exception) when (uncertainAfterWrite && writeAttempted)
@@ -339,6 +672,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 using (document)
                 {
                     var root = document.RootElement;
+                    ObserveComprehension(root);
                     if (root.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number && !root.TryGetProperty("method", out _) && _responses.TryRemove(id.GetInt64(), out var response)) { response.TrySetResult(root.Clone()); continue; }
                     if (root.TryGetProperty("method", out var method) && method.ValueKind == JsonValueKind.String && method.GetString() == "session/request_permission" && root.TryGetProperty("id", out _))
                         await HandlePermissionRequestAsync(root).ConfigureAwait(false);
@@ -354,6 +688,20 @@ public sealed class WorkerRuntime : IAsyncDisposable
             FailPendingResponses();
             if (_store.Status().ProcessState == "running") _store.SetProcessFailure("exited", "process-exited");
         }
+    }
+
+    /// <summary>
+    /// Feeds the active comprehension capture from every ACP frame before the
+    /// general observation path. Only correlated text chunks are retained in
+    /// memory, and the capture seals on the matching response id.
+    /// </summary>
+    private void ObserveComprehension(JsonElement frame)
+    {
+        OrientationTurnCapture? capture;
+        lock (_activePromptGate) capture = _activeComprehensionCapture;
+        if (capture is null) return;
+        capture.TryAppend(frame);
+        capture.TrySeal(frame);
     }
 
     private void FailPendingResponses()
@@ -746,7 +1094,7 @@ public sealed class WorkerBridge : IAsyncDisposable
         if (message.ValueKind != JsonValueKind.Object) throw new WorkerProtocolException("Control message must be an object.");
         var operation = Required(message, "operation");
         _store.RequireLease(socketLease.Epoch, socketLease.ConnectionNonce);
-        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "reconcile-journal" or "new-session" or "load-session" or "submit" or "cancel" or "permission" or "stop-process";
+        var mutation = operation is "heartbeat" or "hold" or "ack-events" or "reconcile-replay-loss" or "reconcile-replay-gap" or "reconcile-journal" or "new-session" or "load-session" or "submit" or "cancel" or "permission" or "stop-process" or "install-orientation" or "orientation-comprehension";
         if (mutation)
         {
             var epoch = RequiredInt64(message, "epoch", 1);
@@ -771,9 +1119,32 @@ public sealed class WorkerBridge : IAsyncDisposable
             "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken).ConfigureAwait(false),
             "cancel" => await _runtime.CancelAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "cancellationId"), RequiredBounded(message, "targetRequestId"), RequiredElement(message, "envelope", JsonValueKind.Object), connectionToken).ConfigureAwait(false),
             "permission" => await _runtime.DecidePermissionAsync(socketLease.Epoch, RequiredBounded(message, "decisionId"), RequiredInt64(message, "processGeneration", 0), RequiredBounded(message, "requestId"), RequiredBounded(message, "turnId"), RequiredBounded(message, "decision"), connectionToken).ConfigureAwait(false),
+            "install-orientation" => await InstallOrientationAsync(socketLease, message, connectionToken).ConfigureAwait(false),
+            "orientation-comprehension" => await RunComprehensionAsync(socketLease, message, connectionToken).ConfigureAwait(false),
             _ => throw new WorkerProtocolException("Unsupported operation.")
         };
         await WorkerProtocol.WriteFrameAsync(stream, new { type = "result", operation, result }, connectionToken);
+    }
+
+    private async Task<OrientationInstallRecord> InstallOrientationAsync(Lease socketLease, JsonElement message, CancellationToken connectionToken)
+    {
+        RequireExactControlFields(message, "operation", "epoch", "connectionNonce", "assignmentId", "orientationVersion", "artifactFileName", "contentHash", "content");
+        var assignmentId = RequiredBounded(message, "assignmentId");
+        var orientationVersion = RequiredOrientationVersion(message, "orientationVersion");
+        var artifactFileName = RequiredOrientationFileName(message, "artifactFileName");
+        var contentHash = RequiredOrientationContentHash(message, "contentHash");
+        var content = RequiredOrientationContent(message, "content");
+        return await _runtime.InstallOrientationAsync(socketLease, assignmentId, orientationVersion, artifactFileName, content, contentHash, connectionToken).ConfigureAwait(false);
+    }
+
+    private async Task<OrientationComprehensionRecord> RunComprehensionAsync(Lease socketLease, JsonElement message, CancellationToken connectionToken)
+    {
+        RequireExactControlFields(message, "operation", "epoch", "connectionNonce", "assignmentId", "employeeId", "sessionId", "orientationVersion");
+        var assignmentId = RequiredBounded(message, "assignmentId");
+        var employeeId = RequiredBounded(message, "employeeId");
+        var sessionId = RequiredBounded(message, "sessionId");
+        var orientationVersion = RequiredOrientationVersion(message, "orientationVersion");
+        return await _runtime.RunOrientationComprehensionAsync(socketLease, assignmentId, employeeId, sessionId, orientationVersion, connectionToken).ConfigureAwait(false);
     }
 
     private static async Task StopProcessAsync()
@@ -837,6 +1208,17 @@ public sealed class WorkerBridge : IAsyncDisposable
     private static async Task<object> RunAsync(Func<Task> action) { await action().ConfigureAwait(false); return new { ok = true }; }
     private static string Required(JsonElement element, string name) => element.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(property.GetString()) ? property.GetString()! : throw new WorkerProtocolException($"Missing {name}.");
     private static string RequiredBounded(JsonElement element, string name) { var value = Required(element, name); WorkerProtocol.ValidateIdentifier(value, WorkerProtocol.MaxIdentifierLength, name); return value; }
+    private static string RequiredOrientationVersion(JsonElement element, string name) { var value = Required(element, name); WorkerProtocol.ValidateOrientationVersion(value); return value; }
+    private static string RequiredOrientationFileName(JsonElement element, string name) { var value = Required(element, name); WorkerProtocol.ValidateOrientationFileName(value); return value; }
+    private static string RequiredOrientationContentHash(JsonElement element, string name) { var value = Required(element, name); WorkerProtocol.ValidateOrientationContentHash(value); return value; }
+    private static string RequiredOrientationContent(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.String || property.GetString() is not { } value)
+            throw new WorkerProtocolException($"Invalid {name}.");
+        _ = WorkerProtocol.EncodeOrientationContent(value);
+        return value;
+    }
+    private static void RequireExactControlFields(JsonElement element, params string[] fields) { if (element.ValueKind != JsonValueKind.Object || !element.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(fields.Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw new WorkerProtocolException("Control message fields are invalid."); }
     private static long RequiredInt64(JsonElement element, string name, long minimum) { if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Number || !property.TryGetInt64(out var value) || value < minimum) throw new WorkerProtocolException($"Invalid {name}."); return value; }
     private static bool RequiredBoolean(JsonElement element, string name) => element.TryGetProperty(name, out var property) && property.ValueKind is JsonValueKind.True or JsonValueKind.False ? property.GetBoolean() : throw new WorkerProtocolException($"Invalid {name}.");
     private static string? OptionalString(JsonElement element, string name, int maximum) { if (!element.TryGetProperty(name, out var property) || property.ValueKind == JsonValueKind.Null) return null; if (property.ValueKind != JsonValueKind.String || property.GetString() is not { } value || value.Length > maximum) throw new WorkerProtocolException($"Invalid {name}."); return value; }

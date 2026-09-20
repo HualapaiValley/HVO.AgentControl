@@ -33,12 +33,38 @@ from the `generation = 2` identity.
   (`ControlStatus.Error`) is exposed. Recent logs are explicitly unsupported
   because no employee-scoped safe log contract exists, so neither bulk logs nor
   another employee's logs are returned. Pending hire requests are real durable
-  records; approval/provisioning remain unavailable pending #219 owner approval
-  and discussion (the #217 two-host dependency is satisfied) and are never
-  represented as completed employee creation.
+  records; approval is implemented as a code capability (§10.2 of the contracts):
+  an owner-only, same-origin, revision-bound action freezes one hire revision
+  against one verified profile build on one ready host and atomically creates the
+  managed employee identity and DeveloperContainer binding. Approval does not
+  provision or orient — that is a separate trigger and the request stays
+  `Approved` until it runs. **No live owner-approved hire has been executed on any
+  host**, the `home-docker` execution-host enrollment is held by the owner, and
+  `WorkerControl` is disabled by default, so this is not operationally validated
+   and is never represented as completed employee creation. The employee detail
+  read model also exposes the current profile revision/digest and a newer verified
+  target without acting. `POST /api/employees/{id}/rebuild` is owner-only,
+  same-origin and employee-revision-bound. It synchronously drives the bounded,
+  idempotent coordinator after durable intent creation, preserving workspace and
+  home unless the exact reset phrase is supplied. The rebuild is single-flight,
+  holds dispatch, applies only after a fresh ownership epoch, and leaves uncertain
+  effects recoverable rather than retrying blind. No live rebuild has run on a
+  deployment host.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
-  Schema v8 migrates only the exact released v7 signature after creating and
-  verifying immutable `control.schema-v7.db` and SHA-256 evidence. It adds
+  Schema v12 adds immutable durable employee rebuild intents and staged states;
+  schema v11 adds the constrained local/SSH execution-host transport kind.
+  Schema v10 migrates only the exact released v9 signature after creating and
+
+  verifying immutable `control.schema-v9.db` and SHA-256 evidence; it adds
+  `hire_request_approvals` (the immutable owner freeze of one hire revision
+  against one verified profile build) and `managed_enrollment_resources` (the
+  frozen per-binding limits/digest/host a managed provisioning run consumes),
+  rebuilds `hire_requests` with a bounded sanitized nullable `status_detail`, and
+  installs triggers that abort any update/delete/replace of a freeze. Schema v9
+  migrated only the exact released v8 signature after verified
+  `control.schema-v8.db` evidence and added the per-host `profile_builds` table
+  (additive only). Schema v8 migrated only the exact released v7 signature after
+  verified `control.schema-v7.db` evidence. It added
   immutable container profiles and their append-only revision chain and seeds
   the `generic-employee` profile (see `docs/PHASE-1-CONTRACTS.md` §10.1); the
   seed never overwrites an existing slug. Schema v7 migrated only the exact
@@ -46,7 +72,8 @@ from the `generation = 2` identity.
   idempotent hire requests (bounded requested identity/purpose/placement/resources,
   immutable request-version hash, optimistic revision) and append-only state events
   containing hashes rather than raw secrets. The schema reserves later lifecycle
-  states, while this slice exposes only request and reject transitions. Existing
+  states; this slice exposes request, reject, approve and the post-approval
+  lifecycle transitions. Existing
   organization, policy, worker and recovery records are preserved. Key bytes and
   active connection nonces are never stored there. Semantic release `0.1.0`
   remains unreleased and has not been published or deployed as a release.
@@ -64,8 +91,11 @@ from the `generation = 2` identity.
   proxy needs explicit trusted forwarded-header support, not yet implemented.
 
 The runtime is disabled by default for host development; Compose enables it.
-This slice records and rejects owner hire requests but does not approve or
-provision developers, route tasks, or implement the full organization lifecycle.
+This slice records, rejects and (as code capability) approves owner hire requests,
+and can create the managed employee identity and binding from an approval, but it
+has no live owner-approved hire, does not route tasks, and does not implement the
+full organization lifecycle. `WorkerControl` remains the deployment gate and is
+false by default.
 Remote-worker reconciliation-integrity failures return a sanitized `502`
 ProblemDetails response titled `Remote worker reconciliation is invalid`; the
 detail states that correlation failed and dispatch remains held.
@@ -320,8 +350,37 @@ completed, so cancellation cleared the active request but was not rollback.
 The `home-docker` control portal was deployed with separate schema-v7 UI (schema v8 is not yet deployed) and is
 irrelevant to worker flags except portal inspection.
 
+**Three worker classes.** Do not collapse them. (1) The **automatic
+controller-local managed employee** is created by owner approval and provisioned
+through the privileged `docker-helper`; the control image itself has no Docker
+socket and no Docker CLI. (2) A **manually operated remote Docker worker** is
+reached by controller-initiated pinned SSH and `docker exec`; it is never created
+by hiring. (3) **Future manually enrolled standalone workers** that connect
+outbound are **not implemented**: no listener and no enrollment protocol exists.
+Class (2) is the first managed disposable two-host path accepted on 2026-09-18;
+class (1) is the #272 local managed path.
+
+The #272 slice freezes a managed hire to the controller-local Docker target
+(persisted `local-docker` transport kind, schema v11). Approval requires no SSH
+host input. Docker operations execute through
+`HVO.AgentControl.DockerHelper`, which is the only service mounting
+`/var/run/docker.sock`, publishes no ports, runs read-only with `cap_drop: ALL`,
+`no-new-privileges` and `init`, runs as uid 1002, and is the only writer of the
+helper-socket volume shared with control. The helper accepts only the shared
+argv grammar: employee containers receive exactly the four fixed named volumes
+and no bind or Docker-socket mount, and the helper fails closed while the
+approved base digest is empty. `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST`
+and the daemon `AGENTCONTROL_DOCKER_GID` are deployment inputs.
+
 **Still not implemented or operationally validated:** key rotation/compromise
-re-enrollment and production managed hiring/provisioning. `/api/info` reports
+re-enrollment, production managed hiring/provisioning at scale, and the approval
+and managed-provisioning/orientation slice (#260) itself, which is code-complete
+and hermetically tested but has never run a live owner-approved hire on a host
+(see `docs/PHASE-1-CONTRACTS.md` §10.2/§10.3). The local managed path has been
+exercised end to end on one development machine — a generic-employee build, a
+real helper-provisioned container, real OpenCode orientation and a hire reaching
+`Ready` in about 1m50s — but that is a local dev-machine result only, not a
+`home-docker` deployment and not the accepted two-host path. `/api/info` reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
 covering only the first managed disposable two-host path, and carries
 `workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
@@ -466,6 +525,24 @@ starts a shell and keeps `nologin`.
   rebuilding the image and preserves employee/session/history. OpenCode reads the
   generated file at process start, so affected-runtime restart is the reload mechanism.
   There is still no general task dispatcher.
+- **Remote managed orientation (#260, code capability).** For a managed
+  DeveloperContainer employee the authoritative store composes and assigns the
+  orientation, the controller delivers it over the authenticated bridge with the
+  fixed `install-orientation` mutation, and the worker's fixed supervisor writes
+  it atomically as the employee owner into
+  `/home/worker/.agentcontrol/orientation` (`O_NOFOLLOW` traversal, `0600`,
+  fsync, rename); the bridge journal records `installing`/`installed`/`uncertain`
+  and the bridge never writes employee-owned state directly. Because **ACP stdio
+  descriptors are handed to the bridge only at bridge start**, a running OpenCode
+  process cannot load a changed file, so the controller deliberately replaces the
+  container — preserving all four named volumes and the authoritative native
+  session — and requires the fresh process generation to have loaded the exact
+  assignment before comprehension. The bounded, tool-free
+  `orientation-comprehension` mutation runs inside that exact worker, captures at
+  most 16 KiB, returns only a structurally validated structured-evidence object,
+  and the store validates it as `live-model` before `Ready`. See
+  `docs/PHASE-1-CONTRACTS.md` §10.2. This path is hermetically tested but has not
+  run a live owner-approved hire.
 - **Permission policy.** Stable persisted restrictions are attached to host,
   organization, department, role and employee layers. Evaluation collects every
   active matching restriction; any non-waivable match rejects regardless of order,
@@ -543,12 +620,13 @@ The pre-isolation image understands only `runtime.json`, so republishing it
 would run old JSON-only code against stale session identity while the database
 held the real state. No compatible downgrade is provided; restoring a verified
 backup of the whole controller-private volume is the owner-run recovery path.
-Before the first live deployment of schema v8, stop/quiesce the controller and
+Before the first live deployment of schema v9, stop/quiesce the controller and
 snapshot the current private volume (including `control.db` and any SQLite
 sidecars) through the deployment's existing backup workflow, then verify that
-snapshot before starting the new image. The automatic schema-v7 backup is
-pre-migration evidence only; it is not a current schema-v8 recovery point and
-cannot recover container profiles or other writes made after migration.
+snapshot before starting the new image. The automatic schema-v7 and schema-v8
+backups are pre-migration evidence only; they are not a current schema-v9
+recovery point and cannot recover profiles, builds or other writes made after
+migration.
 `prepare-layout.py` likewise treats a JSON-only divergence as evidence rather
 than blocking the database-era start.
 
@@ -727,4 +805,8 @@ repository execution.
 V1 is reference only. No V1 database migration or runtime compatibility is
 promised. V2 starts with new state and explicitly provisioned environments.
 The accepted path does not validate key rotation or compromise re-enrollment and
-does not authorize production managed hiring/provisioning.
+does not authorize production managed hiring/provisioning. The #260 approval and
+managed-provisioning/orientation paths, the #272 controller-local helper path,
+and the #261 data-preserving rebuild path exist as tested code but have no live
+owner-approved hire or rebuild evidence on any deployment host. `home-docker`
+remains on `802eb6f` / schema v9.

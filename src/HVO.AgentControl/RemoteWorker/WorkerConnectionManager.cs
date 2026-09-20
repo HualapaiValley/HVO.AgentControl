@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,7 +14,7 @@ public sealed record BridgePendingPermission(long ProcessGeneration, long Owners
 public sealed record BridgeReplayLoss(long WorkerGeneration, long MarkerSequence, long DroppedCount, long DroppedBytes);
 public sealed record BridgeJournalFailure(string OperationId, long WorkerGeneration, string ErrorCategory);
 public sealed record BridgeReplayGap(string Id, string Kind, long WorkerGeneration, long AfterSequence, long FirstRetainedSequence, long LastSequence, long? LossMarkerGeneration, long? LossMarkerSequence);
-public sealed record BridgeWorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle, long? ObservedPid, string? ActiveRequestId, BridgePendingPermission? PendingPermission, long OwnershipEpoch, bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, BridgeReplayLoss? ReplayLoss, BridgeJournalFailure? JournalFailure, int ReplayGapCount, IReadOnlyList<BridgeReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false, bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null);
+public sealed record BridgeWorkerStatus(long WorkerGeneration, long ProcessGeneration, string ProcessState, string? LifecycleHandle, long? ObservedPid, string? ActiveRequestId, BridgePendingPermission? PendingPermission, long OwnershipEpoch, bool LeaseActive, bool DispatchHeld, string? HoldReason, IReadOnlyList<string> HoldReasons, long FirstRetainedSequence, long LastSequence, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, BridgeReplayLoss? ReplayLoss, BridgeJournalFailure? JournalFailure, int ReplayGapCount, IReadOnlyList<BridgeReplayGap> ReplayGaps, bool ViewerSupported = false, bool ViewerAvailable = false, bool AcpInitialized = false, string? SessionId = null, string SessionOperationState = "none", string? SessionOperationRequestId = null, string? OrientationAssignmentId = null, string? OrientationVersion = null, string? OrientationArtifactFileName = null, string? OrientationContentHash = null, string? OrientationState = null, string? OrientationInstalledPath = null, string? OrientationComprehensionState = null, string? OrientationComprehensionEvidenceHash = null);
 public sealed record BridgeWorkerEvent(long WorkerGeneration, long Sequence, string Kind, string PayloadJson, int ByteCount);
 public sealed record BridgeReplayPage(BridgeWorkerEvent?[]? Events, bool HasMore, long NextAfterSequence);
 public sealed record BridgeStoredRequest(string RequestId, string PayloadHash, string State, string? OutcomeJson, long ProcessGeneration, long OwnershipEpoch, string TurnId, string SessionId);
@@ -74,6 +75,10 @@ public sealed class WorkerConnectionLease : IAsyncDisposable
 
 public sealed class WorkerConnectionManager : IAsyncDisposable
 {
+    private static readonly ConditionalWeakTable<AcpControlHost, WorkerConnectionManager> Instances = new();
+
+    public static WorkerConnectionManager? InstanceFor(AcpControlHost control) =>
+        Instances.TryGetValue(control, out var manager) ? manager : null;
     public const int MaxPromptCharacters = 64 * 1024;
     public const int MaxReplayPages = 10_001;
     public const int MaxReplayEvents = 10_000;
@@ -94,7 +99,30 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     private bool _startupReconciled;
 
     public WorkerConnectionManager(AcpControlHost control, IWorkerBridgeSessionFactory sessions, IOptions<WorkerControlOptions> configured, IControllerClock clock, IWorkerDelay delay)
-    { _control = control; _sessions = sessions; _options = configured.Value; _clock = clock; _delay = delay; }
+    {
+        _control = control;
+        _sessions = sessions;
+        _options = configured.Value;
+        _clock = clock;
+        _delay = delay;
+        Instances.Remove(control);
+        Instances.Add(control, this);
+    }
+
+    /// <summary>
+    /// Drops the cached owner lease for one worker under the same per-worker gate
+    /// used by dispatch. A rebuild calls this before replacing the container so no
+    /// request can continue on the old process; the next manager operation must
+    /// authenticate a fresh lease and observe the worker's advanced ownership epoch.
+    /// </summary>
+    public async Task InvalidateCachedSessionAsync(string workerId, CancellationToken cancellationToken = default)
+    {
+        RequireEnabled();
+        var entry = Entry(workerId);
+        await entry.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { await LoseSessionLockedAsync(workerId, entry).ConfigureAwait(false); }
+        finally { entry.Gate.Release(); }
+    }
 
     public async Task<WorkerConnectionLease> ConnectAndSynchronizeAsync(string workerId, CancellationToken cancellationToken)
     {
@@ -948,6 +976,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             finally { item.Value.Gate.Release(); item.Value.Gate.Dispose(); }
         }
         _workers.Clear();
+        if (ReferenceEquals(InstanceFor(_control), this)) Instances.Remove(_control);
         _startupGate.Dispose();
         _stopping.Dispose();
     }

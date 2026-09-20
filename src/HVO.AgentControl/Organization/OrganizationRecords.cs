@@ -29,6 +29,8 @@ public static class OrganizationIds
     public const string HireRequestEventPrefix = "hevt-";
     public const string ContainerProfilePrefix = "prof-";
     public const string ContainerProfileRevisionPrefix = "prev-";
+    public const string ProfileBuildPrefix = "pbld-";
+    public const string RebuildPrefix = "rbld-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -50,6 +52,8 @@ public static class OrganizationIds
     public static string NewHireRequestEventId() => NewId(HireRequestEventPrefix);
     public static string NewContainerProfileId() => NewId(ContainerProfilePrefix);
     public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
+    public static string NewProfileBuildId() => NewId(ProfileBuildPrefix);
+    public static string NewEmployeeRebuildId() => NewId(RebuildPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -247,6 +251,75 @@ public sealed record HireRequestCreate(
 
 public sealed record HireRequestReject(int ExpectedRevision);
 
+/// <summary>
+/// An exact owner approval selection for one hire request. The server resolves
+/// the unique verified profile build for <see cref="ProfileRevisionId"/> on the
+/// controller-local Docker target; the caller never supplies a host or build id.
+/// </summary>
+public sealed record HireRequestApprove(int ExpectedRevision, string ProfileRevisionId);
+
+/// <summary>A frozen owner approval and its optional managed-employee links.</summary>
+public sealed record HireRequestApprovalRecord(
+    string HireRequestId,
+    string ApprovedRequestVersion,
+    int ApprovedRequestRevision,
+    string RequestVersionHash,
+    string ProfileRevisionId,
+    string ProfileBuildId,
+    string ImageDigest,
+    string HostId,
+    string Platform,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string ApprovalIdentity,
+    DateTimeOffset ApprovedAt,
+    string? EmployeeId,
+    string? RuntimeBindingId,
+    string? WorkerId,
+    int Revision);
+
+/// <summary>
+/// The frozen, per-binding resources a later provisioning run consumes. This is
+/// the durable bridge that avoids rebuilding the v4 <c>worker_enrollments</c>
+/// table: the owner approval freezes them once and provisioning reads them here.
+/// </summary>
+public sealed record ManagedEnrollmentResourcesRecord(
+    string RuntimeBindingId,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string ApprovedProfileRevisionId,
+    string ApprovedProfileBuildId,
+    string ApprovedImageDigest,
+    string ApprovedHostId,
+    string Platform,
+    DateTimeOffset CreatedAt,
+    int Revision);
+
+/// <summary>
+/// The result of creating the managed employee and binding from an approved
+/// hire. <see cref="Created"/> is false when the approval already carried links
+/// and the exact existing identities are returned instead (idempotent replay).
+/// </summary>
+public sealed record ManagedEmployeeCreation(
+    string HireRequestId,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string Slug,
+    string DisplayName,
+    string Placement,
+    bool Created,
+    string ApprovedProfileRevisionId,
+    string ApprovedProfileBuildId,
+    string ApprovedImageDigest,
+    string ApprovedHostId,
+    string Platform,
+    int CpuLimit,
+    int MemoryLimitMiB,
+    int PidsLimit,
+    string? WorkerId);
+
 public sealed record HireRequestSummary(
     string Id,
     string OrganizationId,
@@ -270,7 +343,14 @@ public sealed record HireRequestSummary(
     int Revision,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    string? ContainerProfileRevisionId = null);
+    string? ContainerProfileRevisionId = null,
+    string? StatusDetail = null,
+    string? ProfileBuildId = null,
+    string? ApprovedImageDigest = null,
+    string? ApprovedHostId = null,
+    string? EmployeeId = null,
+    string? RuntimeBindingId = null,
+    string? WorkerId = null);
 
 public static class ContainerProfileStatuses
 {
@@ -306,6 +386,8 @@ public static class ContainerProfileSeed
             "ghcr.io/devcontainers/features/github-cli:1": {}
           },
           "containerEnv": {
+            "DOTNET_ROOT": "/opt/dotnet-sdk",
+            "PATH": "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin",
             "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
             "DOTNET_NOLOGO": "1",
             "NPM_CONFIG_UPDATE_NOTIFIER": "false"
@@ -319,6 +401,195 @@ public static class ContainerProfileSeed
         }
         """;
 }
+
+/// <summary>Fixed state machine of one profile image build on one host.</summary>
+public static class ProfileBuildStates
+{
+    public const string Queued = "queued";
+    public const string Building = "building";
+    public const string Verifying = "verifying";
+    public const string Built = "built";
+    public const string Failed = "failed";
+    public const string Rejected = "rejected";
+    public const string Uncertain = "uncertain";
+    public const string Removed = "removed";
+
+    /// <summary>States that hold the per-(revision, host) live slot.</summary>
+    public static bool IsLive(string state) => state is Queued or Building or Verifying or Uncertain;
+
+    public static bool CanTransition(string from, string to) => (from, to) switch
+    {
+        (Queued, Building) => true,
+        (Queued, Failed) => true,
+        (Building, Verifying) => true,
+        (Building, Failed) => true,
+        (Building, Uncertain) => true,
+        (Verifying, Built) => true,
+        (Verifying, Rejected) => true,
+        (Verifying, Failed) => true,
+        (Verifying, Uncertain) => true,
+        // Reconciliation after a lost result: the image is either found by its labels
+        // (and re-verified) or provably absent.
+        (Uncertain, Verifying) => true,
+        (Uncertain, Failed) => true,
+        // Explicit scoped cleanup of a non-verified image (#261 exposes it).
+        (Failed, Removed) => true,
+        (Rejected, Removed) => true,
+        _ => false,
+    };
+}
+
+public sealed record ProfileBuildRecord(
+    string Id,
+    string ProfileRevisionId,
+    string HostId,
+    string BaseImageDigest,
+    string Platform,
+    string ContextHash,
+    string ResultTag,
+    string State,
+    string? ImageDigest,
+    bool Verified,
+    string? FailureSummary,
+    string? EvidenceHash,
+    string RequestedBy,
+    int Revision,
+    DateTimeOffset? StartedAt,
+    DateTimeOffset? FinishedAt,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record ProfileBuildRequest(string HostId);
+
+/// <summary>Fixed state machine of one durable employee-rebuild operation.</summary>
+public static class EmployeeRebuildStates
+{
+    public const string Intent = "Intent";
+    public const string Holding = "Holding";
+    public const string Replacing = "Replacing";
+    public const string Verifying = "Verifying";
+    public const string Applied = "Applied";
+    public const string Uncertain = "Uncertain";
+    public const string Failed = "Failed";
+
+    public static bool IsDefined(string state) =>
+        state is Intent or Holding or Replacing or Verifying or Applied or Uncertain or Failed;
+
+    /// <summary>States that hold the single active-rebuild slot for a worker.</summary>
+    public static bool IsActive(string state) => state is Intent or Holding or Replacing or Verifying or Uncertain;
+
+    public static bool CanTransition(string from, string to) => (from, to) switch
+    {
+        (Intent, Holding) => true,
+        (Intent, Failed) => true,
+        (Holding, Replacing) => true,
+        (Holding, Failed) => true,
+        (Holding, Uncertain) => true,
+        (Replacing, Verifying) => true,
+        (Replacing, Failed) => true,
+        (Replacing, Uncertain) => true,
+        (Verifying, Applied) => true,
+        (Verifying, Failed) => true,
+        (Verifying, Uncertain) => true,
+        // Reconciliation after a lost result. Uncertain -> Applied is allowed only
+        // when the controller proves the target digest is the one now running; the
+        // caller owns that evidence, and the Applied transition requires it.
+        (Uncertain, Replacing) => true,
+        (Uncertain, Applied) => true,
+        (Uncertain, Failed) => true,
+        _ => false,
+    };
+}
+
+/// <summary>
+/// The frozen intent to rebuild one managed worker. <c>dispatch_hold_reason</c>
+/// is fixed to the existing manual hold and <c>requested_by</c> to the owner, so
+/// neither is caller-supplied.
+/// </summary>
+public sealed record EmployeeRebuildCreate(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string HostId,
+    string FromProfileRevisionId,
+    string FromImageDigest,
+    int FromRevisionNumber,
+    string ToProfileRevisionId,
+    string ToProfileBuildId,
+    string ToImageDigest,
+    string ToPlatform,
+    bool ResetWorkspace,
+    bool ResetHome,
+    string? ResetConfirmation,
+    long OwnershipEpochBefore,
+    bool HoldPreexisting = false);
+
+/// <summary>
+/// Owner-facing profile status for one managed employee: the profile revision the
+/// enrollment is currently frozen to, its image digest, whether the profile has a
+/// newer revision with a verified build ready on the employee's host, and the
+/// active rebuild operation when one exists. It is a read-only projection over
+/// the immutable approval, profile and worker records; it mutates nothing. A
+/// non-managed (or base) employee has no managed enrollment resources and yields
+/// null from the store helper.
+/// </summary>
+public sealed record EmployeeRebuildRequest(
+    int ExpectedRevision,
+    string? TargetProfileRevisionId,
+    bool ResetWorkspace = false,
+    bool ResetHome = false,
+    string? ResetConfirmation = null);
+
+public sealed record EmployeeRebuildResponse(
+    EmployeeRebuildRecord Rebuild,
+    EmployeeProfileStatusDetail ProfileStatus);
+
+public sealed record EmployeeProfileStatus(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string? WorkerId,
+    string HostId,
+    string CurrentProfileRevisionId,
+    int CurrentRevisionNumber,
+    string CurrentProfileId,
+    string CurrentProfileDisplayName,
+    string CurrentImageDigest,
+    string CurrentPlatform,
+    bool NewerRevisionAvailable,
+    string? NewerRevisionId,
+    int? NewerRevisionNumber,
+    string? NewerVerifiedBuildId,
+    string? NewerVerifiedImageDigest,
+    EmployeeRebuildRecord? ActiveRebuild);
+
+public sealed record EmployeeRebuildRecord(
+    string Id,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string HostId,
+    string FromProfileRevisionId,
+    string FromImageDigest,
+    int FromRevisionNumber,
+    string ToProfileRevisionId,
+    string ToProfileBuildId,
+    string ToImageDigest,
+    string ToPlatform,
+    bool ResetWorkspace,
+    bool ResetHome,
+    string? ResetConfirmation,
+    bool HoldPreexisting,
+    string State,
+    long OwnershipEpochBefore,
+    long? OwnershipEpochAfter,
+    string DispatchHoldReason,
+    string RequestedBy,
+    string? EvidenceHash,
+    string? FailureSummary,
+    int Revision,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
 
 public sealed record ContainerProfileCreate(
     string? IdempotencyKey,
@@ -414,10 +685,17 @@ public sealed record EmployeeSummary(
     string? SessionRecordId,
     string? NativeSessionId,
     string? SessionTitle,
+    int Revision,
     OrientationStatus? Orientation = null)
 {
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionRecordId, string? nativeSessionId, string? sessionTitle, OrientationStatus? orientation)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionRecordId, nativeSessionId, sessionTitle, 1, orientation) { }
+
     public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, OrientationStatus? orientation = null)
-        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, orientation) { }
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, 1, orientation) { }
+
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, int revision, OrientationStatus? orientation = null)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, revision, orientation) { }
 
     // Backward-compatible API alias. SessionId has always meant the ACP-native
     // identity on the wire; database relationships must use SessionRecordId.

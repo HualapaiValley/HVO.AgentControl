@@ -37,8 +37,10 @@ const EMPLOYEE = {
   availability: 'ready',
   runtime: { bindingId: 'binding-1', placement: 'InternalSharedContainer', hostOwned: true, remoteOwned: false, remoteHostId: null, nativeSessionId: 'session-1', sessionTitle: 'Ops session', controlModel: 'stub/model', controlStatus: 'authenticated', sessionState: 'running', terminalAvailable: true, sanitizedError: null },
   orientation: { assignmentId: 'assign-1', orientationVersion: 1, state: 'delivered', revision: 2, restartRequired: false, dispatchHeld: false, holdReasons: [], evidenceSource: 'owner', lastError: null },
+  revision: 3,
   terminal: { supported: true, available: true, reason: '', url: '/terminal/emp-1' },
   recentLogs: { supported: false, reason: 'Recent logs are not supported.' },
+  profileStatus: { currentProfileId: 'prof-1', currentProfileDisplayName: 'Developer', currentProfileRevisionId: 'prev-current', currentRevisionNumber: 1, currentImageDigest: `sha256:${'1'.repeat(64)}`, currentPlatform: 'linux/amd64', workerId: 'wrk-1', hostId: 'local-docker', newerRevisionAvailable: true, newerRevisionId: 'prev-newer', newerRevisionNumber: 2, activeRebuildState: null, activeRebuildId: null },
 };
 
 const DEPARTMENT = { id: 'dept-ops', slug: 'operations', displayName: 'Operations' };
@@ -50,7 +52,8 @@ const EMPLOYEE_HARNESS = `<!doctype html><html lang="en"><head><meta charset="ut
   <p class="page-status" data-page-status role="status">Loading exact employee…</p>
   <div data-employee-content hidden>
     <h1 data-employee-name>Employee</h1><span data-employee-availability data-availability="unknown">Loading</span>
-    <dl data-employee-identity></dl><dl data-employee-runtime></dl><dl data-employee-orientation></dl><dl data-employee-diagnostics></dl>
+    <dl data-employee-identity></dl><dl data-employee-runtime></dl><dl data-employee-orientation></dl><dl data-employee-diagnostics></dl><dl data-employee-profile></dl><p data-profile-update-note hidden></p>
+    <section data-employee-rebuild hidden><form data-rebuild-form><select name="targetProfileRevisionId" data-rebuild-target></select><input type="checkbox" name="resetWorkspace" data-reset-workspace><input type="checkbox" name="resetHome" data-reset-home><label data-reset-confirmation-wrap hidden><code data-reset-confirmation-phrase></code><input name="resetConfirmation" data-reset-confirmation></label><button type="submit" data-rebuild-submit disabled>Rebuild</button></form><p class="receipt" data-rebuild-receipt></p><div data-rebuild-history></div></section>
     <button type="button" data-orientation-deliver disabled>Recompose &amp; deliver</button>
     <button type="button" data-orientation-comprehension disabled>Run comprehension</button>
     <button type="button" data-orientation-hold disabled>Set manual hold</button>
@@ -100,11 +103,17 @@ const state = {
   hirePlans: [],
   createPlans: [],
   rejectPlans: [],
+  approvePlans: [],
   profilePlans: [],
   profileCreatePlans: [],
+  buildPlans: [],
+  rebuildPlans: [],
+  rebuildHistory: [{ id: 'reb-applied', state: 'Applied', toProfileRevisionId: 'prev-newer', resetWorkspace: false, resetHome: false, failureSummary: null, updatedAt: '2026-09-19T00:00:00Z' }],
+  lastRebuildBody: null,
   mutationDelayMs: 0,
   createDelayMs: 0,
   profileCreateDelayMs: 0,
+  approveDelayMs: 0,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,13 +133,21 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/__stub' && req.method === 'POST') {
     const patch = JSON.parse((await readBody(req)) || '{}');
-    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'profilePlans', 'profileCreatePlans'];
+    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'approvePlans', 'profilePlans', 'profileCreatePlans', 'buildPlans', 'rebuildPlans'];
     if (patch.resetPlans) for (const key of keys) state[key].length = 0;
     for (const key of keys) if (patch[key]) state[key].push(...patch[key]);
     if (typeof patch.mutationDelayMs === 'number') state.mutationDelayMs = patch.mutationDelayMs;
     if (typeof patch.createDelayMs === 'number') state.createDelayMs = patch.createDelayMs;
     if (typeof patch.profileCreateDelayMs === 'number') state.profileCreateDelayMs = patch.profileCreateDelayMs;
-    return send(res, 200, { ok: true });
+    if (typeof patch.approveDelayMs === 'number') state.approveDelayMs = patch.approveDelayMs;
+    if (patch.rebuildHistory) state.rebuildHistory = patch.rebuildHistory;
+    return send(res, 200, { ok: true, lastRebuildBody: state.lastRebuildBody });
+  }
+  if (url.pathname === '/api/employees/emp-1/rebuilds' && req.method === 'GET') return send(res, 200, state.rebuildHistory);
+  if (url.pathname === '/api/employees/emp-1/rebuild' && req.method === 'POST') {
+    state.lastRebuildBody = JSON.parse((await readBody(req)) || '{}');
+    const plan = consume(state.rebuildPlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || {}) : send(res, 200, { rebuild: { id: 'reb-new', state: 'Applied' }, profileStatus: EMPLOYEE.profileStatus });
   }
   if (url.pathname === '/api/employees/emp-1' && req.method === 'GET') {
     const plan = consume(state.employeePlans, null);
@@ -151,6 +168,15 @@ const server = createServer(async (req, res) => {
   if (url.pathname.startsWith('/api/hire-requests/') && url.pathname.endsWith('/reject')) {
     const plan = consume(state.rejectPlans, null);
     return plan ? send(res, plan.status || 200, plan.body || {}) : send(res, 200, { state: 'Rejected' });
+  }
+  if (url.pathname.startsWith('/api/hire-requests/') && url.pathname.endsWith('/approve')) {
+    if (state.approveDelayMs) await sleep(state.approveDelayMs);
+    const plan = consume(state.approvePlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || {}) : send(res, 200, { state: 'Approved' });
+  }
+  if (url.pathname.startsWith('/api/profiles/') && url.pathname.endsWith('/builds') && req.method === 'GET') {
+    const plan = consume(state.buildPlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || []) : send(res, 200, []);
   }
   if (url.pathname === '/api/profiles' && req.method === 'GET') {
     const plan = consume(state.profilePlans, null);
@@ -192,6 +218,24 @@ try {
   record('a successful employee-detail load leaves the page status neutral',
     (await statusAttr('[data-page-status]')) === null && (await pageStatusText()).includes('Exact employee emp-1'),
     { status: await statusAttr('[data-page-status]'), text: await pageStatusText() });
+  record('newer profile revision note renders without acting',
+    (await page.locator('[data-profile-update-note]').innerText()).includes('will not be adopted automatically') && state.lastRebuildBody === null);
+  record('applied rebuild history renders', (await page.locator('[data-rebuild-history]').innerText()).includes('Applied'));
+  await page.check('[data-reset-workspace]');
+  record('reset rebuild requires the exact typed confirmation', await page.locator('[data-rebuild-submit]').isDisabled() && (await page.locator('[data-reset-confirmation-phrase]').innerText()) === 'reset-workspace');
+  await page.fill('[data-reset-confirmation]', 'reset-workspace');
+  record('reset rebuild enables only after exact confirmation', !(await page.locator('[data-rebuild-submit]').isDisabled()));
+  await page.click('[data-rebuild-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-rebuild-receipt]').dataset.status === 'ok');
+  const rebuildStub = await (await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+  record('rebuild POST includes employee revision and target profile revision', rebuildStub.lastRebuildBody?.expectedRevision === 3 && rebuildStub.lastRebuildBody?.targetProfileRevisionId === 'prev-newer', rebuildStub.lastRebuildBody || {});
+  await stub({ rebuildHistory: [
+    { id: 'reb-uncertain', state: 'Uncertain', toProfileRevisionId: 'prev-newer', resetWorkspace: false, resetHome: false, failureSummary: 'remote-effect-uncertain', updatedAt: '2026-09-19T00:00:00Z' },
+    { id: 'reb-failed', state: 'Failed', toProfileRevisionId: 'prev-newer', resetWorkspace: false, resetHome: false, failureSummary: 'deterministic-rebuild-validation-failed', updatedAt: '2026-09-18T00:00:00Z' },
+  ] });
+  await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('[data-employee-content]:not([hidden])');
+  const historyText = await page.locator('[data-rebuild-history]').innerText();
+  record('uncertain and failed rebuild history render sanitized summaries', historyText.includes('Uncertain') && historyText.includes('Failed') && historyText.includes('remote-effect-uncertain') && historyText.includes('deterministic-rebuild-validation-failed'));
 
   await stub({ resetPlans: true, employeePlans: [{ status: 503, body: { title: 'employee store down' } }] });
   await page.reload({ waitUntil: 'domcontentloaded' });
@@ -261,6 +305,60 @@ try {
   record('a successful hire create after a failure clears the receipt to ok',
     (await statusAttr('[data-hire-receipt]')) === 'ok' && (await page.locator('[data-hire-receipt]').innerText()).includes('No employee has been created.'),
     { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
+
+  // ---- approval -------------------------------------------------------
+  // A Requested DeveloperContainer request is selectable only when an active
+  // current profile revision has a verified built row on a ready host. The
+  // harness serves one of each so the exact selection reaches the approve body.
+  const approvable = [{
+    id: 'hire-approve', state: 'Requested', revision: 4, createdAt: '2026-01-01T00:00:00.0000000+00:00', requestedDisplayName: 'Approve Me',
+    departmentDisplayName: 'Operations', roleDisplayName: 'Operations / IT', placement: 'DeveloperContainer',
+    cpuLimit: 2, memoryLimitMiB: 2048, pidsLimit: 256, purpose: 'Approve this developer container.',
+  }];
+  const activeProfiles = [{ id: 'prof-1', slug: 'generic-employee', displayName: 'Generic Employee', status: 'active', currentRevisionId: 'prev-1', currentRevisionNumber: 1 }];
+  const verifiedBuilds = [{ id: 'build-1', profileRevisionId: 'prev-1', hostId: 'local-docker', state: 'built', verified: true, imageDigest: 'sha256:' + '9'.repeat(64) }];
+  const approvedSummary = [{ ...approvable[0], state: 'Approved', revision: 5, containerProfileRevisionId: 'prev-1', profileBuildId: 'build-1', approvedImageDigest: 'sha256:' + '9'.repeat(64), approvedHostId: 'local-docker', employeeId: 'emp-managed', runtimeBindingId: 'rtb-managed', workerId: null, statusDetail: null }];
+
+  await stub({ resetPlans: true, hirePlans: [{ status: 200, body: approvable }], profilePlans: [{ status: 200, body: activeProfiles }], buildPlans: [{ status: 200, body: verifiedBuilds }] });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.request-card[data-request-id="hire-approve"] [data-approve-profile]:not([disabled])');
+  record('a verified build on the controller-local Docker target enables the approval selection',
+    await page.locator('[data-approve-host="hire-approve"]').count() === 0 && await page.locator('[data-approve-profile="hire-approve"] option').count() === 1,
+    { profileOptions: await page.locator('[data-approve-profile="hire-approve"] option').allTextContents() });
+
+  await stub({ resetPlans: true, approveDelayMs: 400 });
+  const approvalRequest = page.waitForRequest((request) => request.url().endsWith('/api/hire-requests/hire-approve/approve'));
+  await page.click('.request-card[data-request-id="hire-approve"] button:text("Approve")');
+  const approveBody = (await approvalRequest).postDataJSON();
+  await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').dataset.status === 'pending');
+  record('an in-flight approval reports a pending receipt and sends the exact selection',
+    (await statusAttr('[data-hire-receipt]')) === 'pending' && (await page.locator('[data-hire-receipt]').innerText()).includes('Approving hire-approve')
+      && approveBody.expectedRevision === 4 && approveBody.profileRevisionId === 'prev-1' && approveBody.hostId === undefined,
+    { receipt: await page.locator('[data-hire-receipt]').innerText(), approveBody });
+
+  await stub({ resetPlans: true, approveDelayMs: 0, approvePlans: [{ status: 409, body: { title: 'Hire request approval conflicted.', detail: 'The hire request changed; reload and retry.' } }] });
+  await page.click('.request-card[data-request-id="hire-approve"] button:text("Approve")');
+  await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').dataset.status === 'error');
+  record('a failed approval reports an error receipt with the server detail',
+    (await statusAttr('[data-hire-receipt]')) === 'error' && (await page.locator('[data-hire-receipt]').innerText()).includes('The hire request changed'),
+    { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
+
+  await stub({ resetPlans: true, approveDelayMs: 0, approvePlans: [{ status: 200, body: approvedSummary[0] }], hirePlans: [{ status: 200, body: approvable }, { status: 200, body: approvedSummary }], profilePlans: [{ status: 200, body: activeProfiles }], buildPlans: [{ status: 200, body: verifiedBuilds }] });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.request-card[data-request-id="hire-approve"] [data-approve-profile]:not([disabled])');
+  await page.click('.request-card[data-request-id="hire-approve"] button:text("Approve")');
+  await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').textContent.includes('Approved hire-approve'));
+  record('a successful approval clears the receipt and names the created identity without provisioning',
+    (await statusAttr('[data-hire-receipt]')) === 'ok' && (await page.locator('[data-hire-receipt]').innerText()).includes('provisioning is queued; it runs in the background'),
+    { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
+  const frozenText = await page.locator('.request-card[data-request-id="hire-approve"] [data-frozen-approval]').innerText();
+  record('the approved card renders the frozen build, digest, target, employee and binding',
+    frozenText.includes('prev-1') && frozenText.includes('build-1') && frozenText.includes('emp-managed') && frozenText.includes('rtb-managed') && frozenText.includes('Controller-local Docker'),
+    { frozenText });
+  record('the approved card states provisioning is durably queued and never exposes the owner identity',
+    (await page.locator('.request-card[data-request-id="hire-approve"] [data-provisioning-note]').innerText()).includes('durably queued provisioning and orientation')
+      && !(await page.locator('[data-hiring-page]').innerText()).includes('owner-basic-auth'),
+    { provisioningNote: await page.locator('.request-card[data-request-id="hire-approve"] [data-provisioning-note]').innerText() });
 
   await stub({ resetPlans: true, hirePlans: [{ status: 503, body: { title: 'hire list down' } }] });
   await page.reload({ waitUntil: 'domcontentloaded' });

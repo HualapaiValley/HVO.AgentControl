@@ -37,16 +37,57 @@ idempotent hire requests with append-only hashed
 state events and owner rejection; a request does **not** create an employee.
 Control schema v8 adds immutable, content-addressed container profiles
 (`/profiles`, `/profiles/{id}`, `/api/profiles`) with a constrained
-devcontainer subset and the seeded `generic-employee` profile; recording a
-profile does **not** build an image or create an employee. The owner accepted
-the profile-based employee-creation design (epic #257): image build and
-verification (#259), owner approval/provisioning/orientation (#260) and the
-explicit data-preserving rebuild (#261) are the remaining #219 slices. The #217 hermetic
-controller records are retained in the current schema-v8 store, including
+devcontainer subset and the seeded `generic-employee` profile, and schema v9
+adds per-host profile image builds: a revision is rendered to a deterministic
+build context, built on one approved host over the pinned SSH path, and
+contract-verified inside the image before its digest joins that host's
+approved set. Control schema v10 adds owner approval and managed-employee
+creation: an owner-only, same-origin, revision-bound `POST
+/api/hire-requests/{id}/approve` freezes one hire revision against one verified
+profile build, creates exactly one managed employee identity
+and DeveloperContainer binding with fixed safe defaults, and records the frozen
+per-binding resources a later provisioning run consumes. Control schema v11
+gives an execution host a constrained transport kind (`local-docker` or
+`ssh-docker`) and seeds one reserved `local-docker` host. The #272 work freezes a
+managed hire to the **controller-local** Docker target: approval takes no SSH
+host input, and every Docker operation is executed by a privileged
+`docker-helper` process over a Unix socket. The control image contains neither
+the Docker daemon socket nor a Docker CLI; the helper is the only service that
+mounts the daemon socket, publishes no ports, runs read-only with
+`cap_drop: ALL`, `no-new-privileges` and `init`, runs as uid 1002, and is the
+    only writer of the helper-socket volume shared with control. Control schema
+v12 adds durable single-flight managed-employee rebuild records. The owner-only,
+same-origin `POST /api/employees/{id}/rebuild` is employee-revision-bound,
+selects a newer verified revision of the same profile on the employee's host,
+preserves workspace and home by default, and requires the exact typed phrase for
+workspace, home, or combined reset. It records intent before effects, holds
+dispatch, fences application on a fresh ownership epoch, and returns recovery
+conflict for uncertain effects; profile revisions are never auto-adopted.
+Recorded in
+
+compose, `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST` and
+`AGENTCONTROL_DOCKER_GID` must be supplied for deployment; the helper fails
+closed while the approved digest is empty. Recording a profile,
+building it, or approving a hire does **not** provision or orient a worker:
+approval leaves the request `Approved` and provisioning is a separate, resumable
+trigger that drives `Approved → Provisioning → Orienting → Ready`. The owner
+accepted the profile-based employee-creation design (epic #257); the explicit
+data-preserving rebuild (#261) is now implemented as code capability. The #217
+hermetic controller records are retained in the current schema-v12 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
 minimal same-origin owner control routes.
+
+Keep the three worker classes distinct. (1) An **automatic controller-local
+managed employee** is provisioned through the `docker-helper` by an approved
+hire. (2) A **manually operated remote Docker worker** is reached by
+controller-initiated pinned SSH and `docker exec`; it is never created by
+hiring. (3) **Future manually enrolled standalone workers** that connect outbound
+are **not implemented** — no listener or enrollment protocol exists. Only class
+(1) is the subject of the local managed path described here; class (2) is the
+first managed disposable two-host acceptance below, and class (3) is direction,
+not capability.
 
 **#217 operational acceptance (2026-09-18).** The first managed disposable
 two-host path was accepted on source `main` at `c4a7966` with worker OpenCode
@@ -66,8 +107,9 @@ permission handling covered `[once, always, reject]` and safe-reject
 `[reject]`, with a same-lease reject moving pending→decided and the prompt
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
-control portal on `home-docker` was deployed with separate schema-v7 UI (schema v8 not yet deployed) and is
-irrelevant to worker flags except portal inspection.
+control portal on `home-docker` currently runs `802eb6f` (schema v9; this branch's
+schema v10/v11/v12 and the helper are not deployed there) and is irrelevant to worker
+flags except portal inspection.
 
 This path remains disabled by default. `/api/info` now reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
@@ -88,8 +130,28 @@ model are hermetically code-complete; viewer input is owner-authorized
 interactive execution, not a sandbox boundary. Do not expose this portal to
 untrusted networks or the Internet.
 
-The accepted path does not validate key rotation or compromise re-enrollment and
-does not authorize production managed hiring/provisioning.
+The authorization to run the first managed disposable two-host path does not
+extend to a production live owner-approved hire: the #260 approval,
+managed-provisioning
+and orientation slice is implemented and hermetically tested, but **no live
+owner-approved hire has been executed on any host**, the `home-docker`
+execution-host enrollment remains held by the owner, and `WorkerControl` remains
+disabled by default. Approval commits the request to `Provisioning` and queues
+the remote workflow durably; the work itself runs asynchronously and is resumed
+from persisted state after a restart, so a queued hire is never lost and never
+repeated. The #261 data-preserving rebuild is implemented and hermetically
+covered, but no live rebuild has run on a deployment host. Any
+termination/scheduling policy remains out of scope.
+
+The local managed path has additionally been exercised end to end on one
+development machine: a generic-employee profile build, a real container
+provision through the `docker-helper`, real OpenCode ACP orientation delivery and
+comprehension, and a hire reaching `Ready` in about 1m50s. That is a **local
+development-machine** result only. It is **not** a `home-docker` deployment
+(this work is not deployed there), `WorkerControl` is still off by default
+there, and it does not lift any exclusion below. The accepted path
+does not validate key rotation or compromise re-enrollment
+and does not authorize production managed hiring/provisioning.
 
 ### Run locally
 
@@ -160,6 +222,43 @@ docker --context home-docker compose build
 python3 scripts/init-secrets.py --context home-docker
 docker --context home-docker compose up -d
 ```
+
+#### Local managed-hiring deployment inputs
+
+Controller-local managed hiring runs Docker operations through the privileged
+`docker-helper` service, never through the control container. Before
+`compose up` an operator supplies two inputs, normally in a `.env` file beside
+`compose.yaml` (Compose reads it automatically; both are interpolated with an
+empty/default fallback in `compose.yaml`, so an unconfigured deployment starts
+but cannot provision):
+
+```bash
+# The host daemon socket's group id, so the helper's uid 1002 can reach it.
+echo "AGENTCONTROL_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" >> .env
+# The approved worker base image digest. Build the worker image first, then pin
+# its exact id; the helper refuses every container-create while this is empty.
+docker --context home-docker build --target worker --tag hvo-agentcontrol:worker .
+echo "AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST=$(docker --context home-docker image inspect --format '{{.Id}}' hvo-agentcontrol:worker)" >> .env
+```
+
+Then, with the controller running:
+
+1. Build both images (`docker compose build`); `docker-helper` is the only
+   service that mounts `/var/run/docker.sock`.
+2. Set `AGENTCONTROL_DOCKER_GID` and
+   `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST` in `.env`.
+3. `docker compose up -d`.
+4. Probe the local Docker target from the UI/API
+   (`POST /api/hosts/{id}/probe` for `local-docker`) and confirm it reports
+   `ready`/`valid`.
+5. Build the `generic-employee` profile on the `local-docker` host and confirm
+   the build verifies.
+6. Approve a hire against the verified profile-revision build; provisioning
+   runs through the helper to `Ready`.
+
+The `docker-helper` service fails closed: with no approved base digest it
+rejects every container-create rather than approving an unpinned image, and the
+control service has neither the daemon socket nor a Docker CLI.
 
 Open `http://home-docker.home.lan:5054` on the trusted LAN. The username is
 `owner`; retrieve the password locally with:
@@ -364,7 +463,7 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics; approval action and provisioning remain unimplemented pending #219 owner discussion and approval. `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
+- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics. Hire approval is implemented as a revision-bound owner action (`POST /api/hire-requests/{id}/approve`) that freezes one verified profile-revision build on a ready host, creates the managed employee identity and binding, and durably queues provisioning and orientation to Ready; no live owner-approved hire has run (see the capability note above). `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.
@@ -391,10 +490,11 @@ because actual two-way TUI synchronization is not available; an acknowledged ACP
 model-setting RPC alone does not update the native session or the TUI picker. See
 [external issue tracking](docs/EXTERNAL-ISSUES.md).
 
-`/control-data/control.db` is the authoritative schema-v8 SQLite store for organization,
+`/control-data/control.db` is the authoritative schema-v10 SQLite store for organization,
 department, role, employee, runtime-binding and session identity; versioned
 orientation fragments/facts/assignments/evidence; layered permission policy/grants/audit;
-dispatch holds; remote-worker controller records; durable hire requests; and immutable container profiles in the
+dispatch holds; remote-worker controller records; durable hire requests and their
+immutable owner approvals and frozen managed-enrollment resources; immutable container profiles; and per-host profile builds in the
 controller-private volume; `/control-data/runtime.json` is retained as adoption
 evidence only. The database, its WAL/SHM sidecars and the writer lock are
 controller-only `0600`, and a fresh database is seed-published atomically so an

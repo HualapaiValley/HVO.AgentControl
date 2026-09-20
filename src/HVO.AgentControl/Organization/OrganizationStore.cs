@@ -92,12 +92,28 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 8 adds immutable container profiles and their revision chain and
-    /// seeds the <c>generic-employee</c> profile. Migration accepts only the exact
-    /// released schema-v7 signature and creates verified, immutable source
-    /// evidence before changing the authoritative store.
+    /// Schema 12 adds the durable employee-rebuild operation record
+    /// (<c>employee_rebuilds</c>, additive only). It records the exact source
+    /// revision/digest a worker is running, the verified target revision/build/
+    /// digest and host, the destructive-reset authorization, and one fixed state
+    /// machine from <c>Intent</c> to <c>Applied</c>/<c>Failed</c>. One active
+    /// rebuild per worker is enforced by a partial unique index and no
+    /// image/container work moves through this slice. Schema 11 permitted managed
+    /// hiring against the controller-local Docker daemon: it rebuilt
+    /// <c>execution_hosts</c> with a constrained <c>transport_kind</c>
+    /// (<c>local-docker</c> or <c>ssh-docker</c>), a CHECK that an SSH host carries
+    /// all four endpoint columns and a local host none of them, and seeded the
+    /// reserved <c>local-docker</c> row. Schema 10 added atomic owner approval and
+    /// managed-employee creation (<c>hire_request_approvals</c>,
+    /// <c>managed_enrollment_resources</c>) and rebuilt <c>hire_requests</c> with a
+    /// bounded nullable <c>status_detail</c>. Schema 9 added per-host profile image
+    /// builds (additive only). Schema 8 added immutable container profiles and
+    /// their revision chain and seeded the <c>generic-employee</c> profile. Each
+    /// migration accepts only the exact released signature of the previous version
+    /// and creates verified, immutable source evidence before changing the
+    /// authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 8;
+    public const int CurrentSchemaVersion = 12;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -117,6 +133,16 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV6BackupHashFileName = "control.schema-v6.sha256";
     public const string SchemaV7BackupFileName = "control.schema-v7.db";
     public const string SchemaV7BackupHashFileName = "control.schema-v7.sha256";
+    public const string SchemaV8BackupFileName = "control.schema-v8.db";
+    public const string SchemaV8BackupHashFileName = "control.schema-v8.sha256";
+    public const string SchemaV9BackupFileName = "control.schema-v9.db";
+    public const string SchemaV9BackupHashFileName = "control.schema-v9.sha256";
+    public const string SchemaV10BackupFileName = "control.schema-v10.db";
+    public const string SchemaV10BackupHashFileName = "control.schema-v10.sha256";
+    public const string SchemaV11BackupFileName = "control.schema-v11.db";
+    public const string SchemaV11BackupHashFileName = "control.schema-v11.sha256";
+    public const string SchemaV12BackupFileName = "control.schema-v12.db";
+    public const string SchemaV12BackupHashFileName = "control.schema-v12.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -510,6 +536,28 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV8Statements =
         [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV8Statements, .. ContainerProfileImmutabilityV8Statements];
 
+    private static readonly string[] SchemaV9Statements =
+        [.. SchemaV8Statements, .. ProfileBuildSchemaV9Statements];
+
+    // v10 = v6 + profile tables + the rebuilt v10 hire tables + profile
+    // immutability + profile builds + approval/resources tables and triggers. The
+    // v8/v9 hire and profile statements stay frozen for exact-signature migration.
+    private static readonly string[] SchemaV10Statements =
+        [.. SchemaV6Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements];
+
+    // v11 = v6 with the rebuilt execution_hosts (via RemoteWorkerSchemaV11Statements)
+    // + profile tables + the v10 hire tables + profile immutability + profile builds
+    // + approval/resources tables. The frozen v4 execution_hosts statement stays in
+    // RemoteWorkerSchemaV4Statements for exact v3-v10 signature migration.
+    private static readonly string[] SchemaV11Statements =
+        [.. SchemaV3Statements, .. RemoteWorkerSchemaV11Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements];
+
+    // v12 = v11 + the additive durable employee-rebuild operation record (table,
+    // partial active index and immutability/no-delete/no-replace triggers). The
+    // frozen v11 statements above stay intact for exact-signature migration.
+    private static readonly string[] SchemaV12Statements =
+        [.. SchemaV11Statements, .. RebuildSchemaV12Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -525,8 +573,20 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV7 =
         BuildExpectedSchema(SchemaV7Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV8 =
         BuildExpectedSchema(SchemaV8Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV9 =
+        BuildExpectedSchema(SchemaV9Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV10 =
+        BuildExpectedSchema(SchemaV10Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV11 =
+        BuildExpectedSchema(SchemaV11Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV12Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -558,7 +618,14 @@ public sealed partial class OrganizationStore : IDisposable
     }
 
     private static string NormalizeSchemaSql(string sql) =>
-        System.Text.RegularExpressions.Regex.Replace(sql.Trim(), @"\s+", " ").Trim();
+        // SQLite renders a table that was renamed into place with its name quoted
+        // (`CREATE TABLE "execution_hosts"`). Identifier quotes are not part of the
+        // definition, so they are removed before comparison; schema string literals
+        // use single quotes and are left intact.
+        System.Text.RegularExpressions.Regex.Replace(
+            System.Text.RegularExpressions.Regex.Replace(sql.Trim(), "\"", string.Empty),
+            @"\s+",
+            " ").Trim();
 
     private readonly string _databasePath;
     private readonly TimeSpan _lockTimeout;
@@ -1515,6 +1582,50 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV7ToV8(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV8);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 8)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV8);
+            EnsureSchemaV8Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV8ToV9(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV9);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 9)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV9);
+            EnsureSchemaV9Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV9ToV10(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV10);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 10)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV10);
+            EnsureSchemaV10Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV10ToV11(connection);
+            ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV11);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 11)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV11);
+            EnsureSchemaV11Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV11ToV12(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -1977,6 +2088,171 @@ public sealed partial class OrganizationStore : IDisposable
         transaction.Commit();
     }
 
+    private void EnsureSchemaV8Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 8, SchemaV8BackupFileName, SchemaV8BackupHashFileName, ExpectedSchemaV8);
+
+    private void MigrateV8ToV9(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in ProfileBuildSchemaV9Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 9 WHERE version = 8");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
+    private void EnsureSchemaV9Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 9, SchemaV9BackupFileName, SchemaV9BackupHashFileName, ExpectedSchemaV9);
+
+    private void MigrateV9ToV10(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+
+        // Rebuild hire_requests once more to add the bounded nullable
+        // status_detail. The referencing events table is renamed first so SQLite
+        // rewrites its foreign key to the renamed source, then both are copied
+        // into the exact v10 definitions; every existing hire survives with a
+        // NULL detail. The approval tables are created afterwards because they
+        // reference the rebuilt hire_requests.
+        Execute(connection, transaction, "ALTER TABLE hire_request_events RENAME TO hire_request_events_v9");
+        Execute(connection, transaction, "ALTER TABLE hire_requests RENAME TO hire_requests_v9");
+        foreach (var statement in HireRequestSchemaV10Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction,
+            """
+            INSERT INTO hire_requests (
+                id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
+                memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
+                owner_approval, container_profile_revision_id, status_detail, revision, created_at, updated_at)
+            SELECT id, organization_id, requested_by_employee_id, requested_by_kind, idempotency_key,
+                   requested_display_name, purpose, department_id, role_id, placement, cpu_limit,
+                   memory_limit_mib, pids_limit, state, request_version_hash, approved_request_version,
+                   owner_approval, container_profile_revision_id, NULL, revision, created_at, updated_at
+            FROM hire_requests_v9
+            """);
+        Execute(connection, transaction, "INSERT INTO hire_request_events SELECT * FROM hire_request_events_v9");
+        Execute(connection, transaction, "DROP TABLE hire_request_events_v9");
+        Execute(connection, transaction, "DROP TABLE hire_requests_v9");
+        foreach (var statement in HireApprovalSchemaV10Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 10 WHERE version = 9");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
+    private void EnsureSchemaV10Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 10, SchemaV10BackupFileName, SchemaV10BackupHashFileName, ExpectedSchemaV10);
+
+    private void EnsureSchemaV11Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 11, SchemaV11BackupFileName, SchemaV11BackupHashFileName, ExpectedSchemaV11);
+
+    /// <summary>
+    /// Adds the durable employee-rebuild operation record. The migration is
+    /// additive: no existing table is rebuilt, so every profile build, approval,
+    /// enrollment and host row survives byte-for-byte. The table, its partial
+    /// active-worker index and its immutability triggers are created in one
+    /// transaction with the version bump.
+    /// </summary>
+    private void MigrateV11ToV12(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in RebuildSchemaV12Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 12 WHERE version = 11");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
+    /// <summary>The v11 execution_hosts definition created under a staging name during migration.</summary>
+    private static string ExecutionHostsV11StagingStatement =>
+        ExecutionHostsSchemaV11Statement.Replace("CREATE TABLE execution_hosts (", "CREATE TABLE execution_hosts_v11 (", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Rebuilds <c>execution_hosts</c> to admit the controller-local Docker
+    /// transport and seeds its reserved row. Seven tables reference
+    /// <c>execution_hosts(id)</c>, and renaming the old table would make SQLite
+    /// rewrite those references to the temporary name. The replacement is
+    /// therefore built under a staging name, the rows are copied, the old table is
+    /// dropped, and the staging table is renamed into <c>execution_hosts</c>, so
+    /// every child foreign key keeps naming <c>execution_hosts</c> and resolves to
+    /// the new table. Foreign keys are switched off only for that swap and
+    /// restored before <c>PRAGMA foreign_key_check</c> proves every reference.
+    /// </summary>
+    private void MigrateV10ToV11(SqliteConnection connection)
+    {
+        // Seven tables reference execution_hosts(id). Renaming the old table makes
+        // SQLite rewrite those foreign keys to the temporary name, so instead the
+        // replacement is built under a temporary name, the old table is dropped and
+        // the replacement is renamed into "execution_hosts". Every reference still
+        // names "execution_hosts" throughout and resolves to the new table, which
+        // foreign_key_check proves after commit. Foreign keys are disabled only for
+        // the switch (dropping the referenced old table would otherwise violate the
+        // immediate constraints of its children) and restored before the check.
+        ExecutePragma(connection, "foreign_keys = OFF");
+        using var transaction = connection.BeginTransaction();
+        try
+        {
+            Execute(connection, transaction, ExecutionHostsV11StagingStatement);
+            Execute(connection, transaction,
+                """
+                INSERT INTO execution_hosts_v11 (
+                    id, slug, display_name, transport_kind, endpoint_host, endpoint_port, endpoint_user,
+                    known_hosts_path, host_key_algorithm, host_key_fingerprint, known_hosts_hash, docker_version,
+                    docker_api_version, os, architecture, storage_driver, backing_filesystem, shared_storage,
+                    free_bytes, memory_bytes, cpu_count, limits_supported, image_platform, capability_status,
+                    last_probe_utc, enabled, enrolled, status, created_at, updated_at, revision)
+                SELECT id, slug, display_name, transport_kind, endpoint_host, endpoint_port, endpoint_user,
+                       known_hosts_path, host_key_algorithm, host_key_fingerprint, known_hosts_hash, docker_version,
+                       docker_api_version, os, architecture, storage_driver, backing_filesystem, shared_storage,
+                       free_bytes, memory_bytes, cpu_count, limits_supported, image_platform, capability_status,
+                       last_probe_utc, enabled, enrolled, status, created_at, updated_at, revision
+                FROM execution_hosts
+                """);
+            Execute(connection, transaction, "DROP TABLE execution_hosts");
+            Execute(connection, transaction, "ALTER TABLE execution_hosts_v11 RENAME TO execution_hosts");
+            SeedLocalDockerExecutionHostV11(connection, transaction);
+            Execute(connection, transaction, "UPDATE schema_version SET version = 11 WHERE version = 10");
+            BeforeMigrationCommit?.Invoke();
+            transaction.Commit();
+        }
+        finally
+        {
+            ExecutePragma(connection, "foreign_keys = ON");
+        }
+    }
+
+    /// <summary>
+    /// Seeds the single reserved controller-local Docker execution host. The row
+    /// is structural: it is the only execution target a managed hire may use, so a
+    /// store missing it is partial. Re-running is idempotent and never overwrites
+    /// an existing probed row.
+    /// </summary>
+    private static void SeedLocalDockerExecutionHostV11(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        var now = Timestamp();
+        Execute(connection, transaction,
+            """
+            INSERT INTO execution_hosts (
+                id, slug, display_name, transport_kind, endpoint_host, endpoint_port, endpoint_user,
+                known_hosts_path, os, capability_status, enabled, enrolled, status, created_at, updated_at, revision)
+            VALUES ($id, $slug, $name, 'local-docker', NULL, NULL, NULL, NULL, 'linux', 'unprobed', 1, 0, 'registered', $now, $now, 1)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            ("$id", ExecutionHosts.LocalDockerId),
+            ("$slug", ExecutionHosts.LocalDockerSlug),
+            ("$name", ExecutionHosts.LocalDockerDisplayName),
+            ("$now", now));
+    }
+
     private void ValidateExistingStore(SqliteConnection connection)
     {
         ValidateIntegrity(connection);
@@ -1988,7 +2264,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v7 file is pre-migration evidence only and restoring it would lose container profiles recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v11 file is pre-migration evidence only and restoring it would lose employee-rebuild operations recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2130,7 +2406,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV8Statements)
+        foreach (var statement in SchemaV12Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -2140,6 +2416,8 @@ public sealed partial class OrganizationStore : IDisposable
             transaction,
             "INSERT INTO schema_version (version) VALUES ($version)",
             ("$version", CurrentSchemaVersion));
+
+        SeedLocalDockerExecutionHostV11(connection, transaction);
 
         Execute(
             connection,
@@ -2523,7 +2801,7 @@ public sealed partial class OrganizationStore : IDisposable
                 SELECT e.id, e.slug, e.display_name, e.purpose, e.instructions, e.rules, e.restrictions, e.organization_id,
                         d.id, d.slug, d.display_name,
                        r.id, r.slug, r.display_name,
-                       b.id, b.placement, s.id, s.native_session_id, s.title
+                       b.id, b.placement, s.id, s.native_session_id, s.title, e.revision
                 FROM employees e
                 JOIN departments d ON d.id = e.department_id
                 JOIN roles r ON r.id = e.role_id
@@ -2555,7 +2833,8 @@ public sealed partial class OrganizationStore : IDisposable
                     reader.GetString(15),
                     reader.IsDBNull(16) ? null : reader.GetString(16),
                     reader.IsDBNull(17) ? null : reader.GetString(17),
-                    reader.IsDBNull(18) ? null : reader.GetString(18)));
+                    reader.IsDBNull(18) ? null : reader.GetString(18),
+                    reader.GetInt32(19)));
             }
         }
 

@@ -9,7 +9,14 @@ if (root) {
     const form = root.querySelector('[data-revision-form]');
     const definitionInput = form.elements.definition;
     const fragmentInput = form.elements.dockerfileFragment;
+    const buildForm = root.querySelector('[data-build-form]');
+    const buildHost = buildForm.elements.hostId;
+    const buildSubmit = root.querySelector('[data-build-submit]');
+    const buildReceipt = root.querySelector('[data-build-receipt]');
+    const noBuildHosts = root.querySelector('[data-no-build-hosts]');
     let profile = null;
+    let hosts = [];
+    const buildsByRevision = new Map();
 
     const pretty = (json) => { try { return JSON.stringify(JSON.parse(json), null, 2); } catch { return json; } };
     const renderRevision = (revision) => {
@@ -27,7 +34,15 @@ if (root) {
             ['Created', new Date(revision.createdAt).toLocaleString()],
         ]);
         const definition = document.createElement('pre'); definition.className = 'profile-definition'; definition.textContent = pretty(revision.definition);
-        card.append(heading, list, definition);
+        const builds = document.createElement('div'); builds.className = 'build-list'; builds.dataset.revisionBuilds = revision.id;
+        const known = buildsByRevision.get(revision.id) || [];
+        if (!known.length) { const none = document.createElement('p'); none.className = 'control-note'; none.textContent = 'No builds recorded on any host.'; builds.append(none); }
+        for (const build of known) {
+            const row = document.createElement('p'); row.dataset.buildId = build.id; row.dataset.buildState = build.state;
+            row.textContent = `${build.hostId}: ${build.state}${build.verified ? ' (verified)' : ''}${build.imageDigest ? ' · ' + build.imageDigest : ''}${build.failureSummary ? ' · ' + build.failureSummary : ''} · ${new Date(build.updatedAt).toLocaleString()}`;
+            builds.append(row);
+        }
+        card.append(heading, list, definition, builds);
         if (revision.dockerfileFragment) { const fragment = document.createElement('pre'); fragment.className = 'profile-definition'; fragment.textContent = revision.dockerfileFragment; card.append(fragment); }
         return card;
     };
@@ -63,8 +78,27 @@ if (root) {
         content.hidden = false;
     };
 
+    const renderHosts = () => {
+        buildHost.replaceChildren();
+        const ready = hosts.filter((h) => h.enabled && h.status === 'ready');
+        for (const h of ready) { const option = document.createElement('option'); option.value = h.id; option.textContent = `${h.displayName} (${h.id})`; buildHost.append(option); }
+        const usable = ready.length > 0 && profile && profile.status === 'active';
+        buildHost.disabled = !usable; buildSubmit.disabled = !usable; noBuildHosts.hidden = ready.length > 0;
+    };
+    async function loadBuilds(data) {
+        buildsByRevision.clear();
+        await Promise.all(data.revisions.map(async (revision) => {
+            try { buildsByRevision.set(revision.id, await fetchJson(`/api/profiles/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revision.id)}/builds`)); }
+            catch { buildsByRevision.set(revision.id, []); }
+        }));
+    }
     async function load() {
-        try { render(await fetchJson(`/api/profiles/${encodeURIComponent(id)}`)); }
+        try {
+            const data = await fetchJson(`/api/profiles/${encodeURIComponent(id)}`);
+            await loadBuilds(data);
+            try { hosts = await fetchJson('/api/execution-hosts'); } catch { hosts = []; }
+            render(data); renderHosts();
+        }
         catch (error) {
             status.textContent = error.status === 404
                 ? 'Profile not found. No container profile carries that stable id.'
@@ -87,6 +121,20 @@ if (root) {
             await load();
             receipt.dataset.status = 'ok'; receipt.textContent = `Created revision ${created.revisionNumber} (${created.id}). Existing employees were not rebuilt.`;
         } catch (error) { receipt.dataset.status = 'error'; receipt.textContent = `Revision failed: ${error.message}`; }
+    });
+
+    buildForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (!profile || buildSubmit.disabled) return;
+        try {
+            buildReceipt.dataset.status = 'pending'; buildReceipt.textContent = `Building revision ${profile.currentRevisionNumber} on ${buildHost.value}… this runs docker build on the host and can take several minutes.`;
+            const build = await fetchJson(`/api/profiles/${encodeURIComponent(id)}/revisions/${encodeURIComponent(profile.currentRevisionId)}/builds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hostId: buildHost.value }) });
+            await load();
+            buildReceipt.dataset.status = build.state === 'built' && build.verified ? 'ok' : 'error';
+            buildReceipt.textContent = build.state === 'built' && build.verified
+                ? `Built and verified on ${build.hostId}: ${build.imageDigest}. No employee was provisioned.`
+                : `Build ${build.state} on ${build.hostId}${build.failureSummary ? ': ' + build.failureSummary : ''}.`;
+        } catch (error) { buildReceipt.dataset.status = 'error'; buildReceipt.textContent = `Build failed: ${error.message}`; }
     });
 
     retire.addEventListener('click', async () => {

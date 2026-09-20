@@ -9,11 +9,13 @@ namespace HVO.AgentControl.Worker;
 
 public sealed class WorkerStore : IDisposable, IWorkerObservationSink
 {
-    public const int SchemaVersion = 9;
-    public const string SchemaSignature = "hvo-worker-bridge-v9-20260916";
+    public const int SchemaVersion = 11;
+    public const string SchemaSignature = "hvo-worker-bridge-v11-20260919";
     public const int ReplayGapLimit = 128;
     internal const string SchemaV7Signature = "hvo-worker-bridge-v7-20260915";
     internal const string SchemaV8Signature = "hvo-worker-bridge-v8-20260915";
+    internal const string SchemaV9Signature = "hvo-worker-bridge-v9-20260916";
+    internal const string SchemaV10Signature = "hvo-worker-bridge-v10-20260919";
     internal const string SchemaV7BackupFileName = "bridge.schema-v7.db";
     internal const string SchemaV7BackupHashFileName = "bridge.schema-v7.db.sha256";
     private static readonly string[] LegacyHoldNames = ["manual", "replay-gap", "replay-loss", "process", "permission", "ownership", "transport", "journal"];
@@ -159,6 +161,8 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             CREATE TABLE pending_permissions(decision_id TEXT PRIMARY KEY, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), request_id TEXT NOT NULL, turn_id TEXT NOT NULL, payload_hash TEXT NOT NULL, option_ids_json TEXT NOT NULL, byte_count INTEGER NOT NULL CHECK(byte_count>=0), state TEXT NOT NULL CHECK(state IN('pending','deciding','decided','uncertain','invalidated')), decision TEXT, created_utc TEXT NOT NULL);
             CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL);
             CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL);
+            CREATE TABLE orientation_artifacts(assignment_id TEXT PRIMARY KEY, orientation_version TEXT NOT NULL, artifact_file_name TEXT NOT NULL, content_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('installing','installed','uncertain')), installed_path TEXT, updated_utc TEXT NOT NULL);
+            CREATE TABLE orientation_comprehension(assignment_id TEXT PRIMARY KEY, employee_id TEXT NOT NULL, session_id TEXT NOT NULL, orientation_version TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('running','comprehended','uncertain','failed')), evidence_hash TEXT, evidence_json TEXT, updated_utc TEXT NOT NULL);
             CREATE TABLE holds(name TEXT PRIMARY KEY, held INTEGER NOT NULL CHECK(held IN(0,1)), reason TEXT);
             CREATE INDEX ix_pending_permissions_state ON pending_permissions(state, created_utc);
             """, tx);
@@ -173,11 +177,13 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         tx.Commit();
     }
 
-    private static IReadOnlyDictionary<string, string> ExpectedSchemaV9 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: true);
-    private static IReadOnlyDictionary<string, string> ExpectedSchemaV8 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: false);
-    private static IReadOnlyDictionary<string, string> ExpectedSchemaV7 { get; } = BuildExpectedSchema(includeSessionId: false, includeSessionOperation: false);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV11 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: true, includeOrientationArtifacts: true, includeOrientationComprehension: true);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV10 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: true, includeOrientationArtifacts: true, includeOrientationComprehension: false);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV9 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: true, includeOrientationArtifacts: false, includeOrientationComprehension: false);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV8 { get; } = BuildExpectedSchema(includeSessionId: true, includeSessionOperation: false, includeOrientationArtifacts: false, includeOrientationComprehension: false);
+    private static IReadOnlyDictionary<string, string> ExpectedSchemaV7 { get; } = BuildExpectedSchema(includeSessionId: false, includeSessionOperation: false, includeOrientationArtifacts: false, includeOrientationComprehension: false);
 
-    private static IReadOnlyDictionary<string, string> BuildExpectedSchema(bool includeSessionId, bool includeSessionOperation)
+    private static IReadOnlyDictionary<string, string> BuildExpectedSchema(bool includeSessionId, bool includeSessionOperation, bool includeOrientationArtifacts, bool includeOrientationComprehension)
     {
         var expected = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -199,6 +205,8 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
             ["table:requests"] = "CREATE TABLE requests(request_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('forwarding','forwarded','completed','failed','uncertain')), outcome_json TEXT, process_generation INTEGER NOT NULL CHECK(process_generation>=0), ownership_epoch INTEGER NOT NULL CHECK(ownership_epoch>0), turn_id TEXT NOT NULL, session_id TEXT NOT NULL, created_utc TEXT NOT NULL)",
         };
         if (includeSessionOperation) expected["table:session_operation"] = "CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL)";
+        if (includeOrientationArtifacts) expected["table:orientation_artifacts"] = "CREATE TABLE orientation_artifacts(assignment_id TEXT PRIMARY KEY, orientation_version TEXT NOT NULL, artifact_file_name TEXT NOT NULL, content_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('installing','installed','uncertain')), installed_path TEXT, updated_utc TEXT NOT NULL)";
+        if (includeOrientationComprehension) expected["table:orientation_comprehension"] = "CREATE TABLE orientation_comprehension(assignment_id TEXT PRIMARY KEY, employee_id TEXT NOT NULL, session_id TEXT NOT NULL, orientation_version TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('running','comprehended','uncertain','failed')), evidence_hash TEXT, evidence_json TEXT, updated_utc TEXT NOT NULL)";
         return expected;
     }
 
@@ -220,16 +228,30 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         {
             7 when signature == SchemaV7Signature => ExpectedSchemaV7,
             8 when signature == SchemaV8Signature => ExpectedSchemaV8,
+            9 when signature == SchemaV9Signature => ExpectedSchemaV9,
+            10 when signature == SchemaV10Signature => ExpectedSchemaV10,
             _ => throw new WorkerStoreException("Worker journal schema version or signature is unsupported."),
         };
-        ValidateSchemaShape(expected, LegacyHoldNames, version, signature);
+        ValidateSchemaShape(expected, version >= 9 ? HoldNames : LegacyHoldNames, version, signature);
         if (version == 7) EnsureSchemaV7Backup();
         using var tx = _connection.BeginTransaction();
         if (version == 7)
         {
             Execute("ALTER TABLE process_slot RENAME TO process_slot_v7; CREATE TABLE process_slot(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('stopped','starting','running','exited','protocol-failed','transport-uncertain')), lifecycle_handle TEXT, active_request_id TEXT, session_id TEXT, pid INTEGER, updated_utc TEXT NOT NULL); INSERT INTO process_slot(singleton,state,lifecycle_handle,active_request_id,session_id,pid,updated_utc) SELECT singleton,state,lifecycle_handle,active_request_id,NULL,pid,updated_utc FROM process_slot_v7; DROP TABLE process_slot_v7", tx);
         }
-        Execute("CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL); INSERT INTO session_operation VALUES(1,'none',NULL,NULL,$now); INSERT INTO holds VALUES('session-operation',0,NULL); UPDATE meta SET value=$version WHERE key='schema_version'; UPDATE meta SET value=$signature WHERE key='schema_signature'", tx, ("$now", Now()), ("$version", SchemaVersion.ToString(CultureInfo.InvariantCulture)), ("$signature", SchemaSignature));
+        if (version <= 8)
+        {
+            Execute("CREATE TABLE session_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), state TEXT NOT NULL CHECK(state IN('none','creating','loading','uncertain','bound')), request_id TEXT, expected_session_id TEXT, updated_utc TEXT NOT NULL); INSERT INTO session_operation VALUES(1,'none',NULL,NULL,$now); INSERT INTO holds VALUES('session-operation',0,NULL)", tx, ("$now", Now()));
+        }
+        if (version <= 9)
+        {
+            Execute("CREATE TABLE orientation_artifacts(assignment_id TEXT PRIMARY KEY, orientation_version TEXT NOT NULL, artifact_file_name TEXT NOT NULL, content_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('installing','installed','uncertain')), installed_path TEXT, updated_utc TEXT NOT NULL)", tx);
+        }
+        if (version <= 10)
+        {
+            Execute("CREATE TABLE orientation_comprehension(assignment_id TEXT PRIMARY KEY, employee_id TEXT NOT NULL, session_id TEXT NOT NULL, orientation_version TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('running','comprehended','uncertain','failed')), evidence_hash TEXT, evidence_json TEXT, updated_utc TEXT NOT NULL)", tx);
+        }
+        Execute("UPDATE meta SET value=$version WHERE key='schema_version'; UPDATE meta SET value=$signature WHERE key='schema_signature'", tx, ("$version", SchemaVersion.ToString(CultureInfo.InvariantCulture)), ("$signature", SchemaSignature));
         tx.Commit();
     }
 
@@ -318,7 +340,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
     {
         try
         {
-            var expected = ExpectedSchemaV9;
+            var expected = ExpectedSchemaV11;
             using var command = _connection.CreateCommand();
             command.CommandText = "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_autoindex_%' AND name NOT LIKE 'sqlite_%' ORDER BY type,name";
             using var reader = command.ExecuteReader();
@@ -595,6 +617,245 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         WorkerProtocol.ValidateIdentifier(requestId, WorkerProtocol.MaxIdentifierLength, "session operation request id");
         lock (_databaseGate) Execute("UPDATE session_operation SET state='none',request_id=NULL,expected_session_id=NULL,updated_utc=$u WHERE singleton=1 AND request_id=$request AND state IN('creating','loading')", null, ("$request", requestId), ("$u", Now()));
     }
+
+    /// <summary>
+    /// Fences the intent to install one orientation artifact under the live lease
+    /// and records it as <c>installing</c> before any file is written. A replay of
+    /// the exact same artifact that is already <c>installed</c> is idempotent; a
+    /// different artifact for the same assignment is rejected so a single
+    /// assignment can never be repointed by a stale or conflicting delivery.
+    /// </summary>
+    public OrientationInstallRecord BeginOrientationInstall(long epoch, string nonce, string assignmentId, string orientationVersion, string artifactFileName, string contentHash)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+        WorkerProtocol.ValidateOrientationFileName(artifactFileName);
+        WorkerProtocol.ValidateOrientationContentHash(contentHash);
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, nonce);
+            using var tx = _connection.BeginTransaction();
+            var existing = QueryOrientation(assignmentId, tx);
+            if (existing is not null)
+            {
+                if (!string.Equals(existing.OrientationVersion, orientationVersion, StringComparison.Ordinal)
+                    || !string.Equals(existing.ArtifactFileName, artifactFileName, StringComparison.Ordinal)
+                    || !string.Equals(existing.ContentHash, contentHash, StringComparison.Ordinal))
+                    throw new WorkerProtocolException("A different orientation artifact is already recorded for this assignment.");
+                if (existing.State == "installed" && existing.InstalledPath is not null)
+                {
+                    tx.Commit();
+                    return existing with { AlreadyInstalled = true };
+                }
+                Execute("UPDATE orientation_artifacts SET state='installing',installed_path=NULL,updated_utc=$u WHERE assignment_id=$a", tx, ("$a", assignmentId), ("$u", Now()));
+                tx.Commit();
+                return existing with { State = "installing", InstalledPath = null, AlreadyInstalled = false };
+            }
+            Execute("INSERT INTO orientation_artifacts VALUES($a,$v,$f,$h,'installing',NULL,$u)", tx, ("$a", assignmentId), ("$v", orientationVersion), ("$f", artifactFileName), ("$h", contentHash), ("$u", Now()));
+            tx.Commit();
+            return new OrientationInstallRecord(assignmentId, orientationVersion, artifactFileName, contentHash, "installing", null, false);
+        }
+    }
+
+    public OrientationInstallRecord CompleteOrientationInstall(long epoch, string nonce, string assignmentId, string orientationVersion, string contentHash, string installedPath)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+        WorkerProtocol.ValidateOrientationContentHash(contentHash);
+        if (installedPath is not { Length: > 0 and <= 512 } || installedPath.IndexOf('\0') >= 0) throw new WorkerProtocolException("Invalid orientation installed path.");
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, nonce);
+            using var tx = _connection.BeginTransaction();
+            var existing = QueryOrientation(assignmentId, tx) ?? throw new WorkerProtocolException("Orientation install intent is unknown.");
+            if (!string.Equals(existing.OrientationVersion, orientationVersion, StringComparison.Ordinal)
+                || !string.Equals(existing.ContentHash, contentHash, StringComparison.Ordinal))
+                throw new WorkerProtocolException("Orientation install intent changed before completion.");
+            if (existing.State == "installed")
+            {
+                if (!string.Equals(existing.InstalledPath, installedPath, StringComparison.Ordinal)) throw new WorkerProtocolException("Orientation artifact is already installed at a different path.");
+                tx.Commit();
+                return existing with { AlreadyInstalled = true };
+            }
+            Execute("UPDATE orientation_artifacts SET state='installed',installed_path=$p,updated_utc=$u WHERE assignment_id=$a AND state IN('installing','uncertain')", tx, ("$a", assignmentId), ("$p", installedPath), ("$u", Now()));
+            if (Convert.ToInt64(Scalar("SELECT changes()", tx), CultureInfo.InvariantCulture) != 1) throw new WorkerProtocolException("Orientation install completion does not match a pending install.");
+            tx.Commit();
+            return new OrientationInstallRecord(assignmentId, orientationVersion, existing.ArtifactFileName, contentHash, "installed", installedPath, false);
+        }
+    }
+
+    /// <summary>
+    /// Records that the orientation file write may have taken effect but could not
+    /// be confirmed. It is deliberately not lease-fenced: the lease that began the
+    /// install is exactly the one that may have been lost while the write was in
+    /// flight, and the uncertainty must survive that loss.
+    /// </summary>
+    public void MarkOrientationUncertain(string assignmentId, string orientationVersion, string contentHash)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+        WorkerProtocol.ValidateOrientationContentHash(contentHash);
+        lock (_databaseGate)
+        {
+            Execute("UPDATE orientation_artifacts SET state='uncertain',updated_utc=$u WHERE assignment_id=$a AND orientation_version=$v AND content_hash=$h AND state IN('installing','uncertain')", null, ("$a", assignmentId), ("$v", orientationVersion), ("$h", contentHash), ("$u", Now()));
+        }
+    }
+
+    private OrientationInstallRecord? QueryOrientation(string assignmentId, SqliteTransaction? tx)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = "SELECT orientation_version,artifact_file_name,content_hash,state,installed_path FROM orientation_artifacts WHERE assignment_id=$a";
+        command.Parameters.AddWithValue("$a", assignmentId);
+        using var reader = command.ExecuteReader();
+        return !reader.Read()
+            ? null
+            : new OrientationInstallRecord(assignmentId, reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4));
+    }
+
+    private OrientationInstallRecord? CurrentOrientationLocked()
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = "SELECT assignment_id,orientation_version,artifact_file_name,content_hash,state,installed_path FROM orientation_artifacts ORDER BY updated_utc DESC, rowid DESC LIMIT 1";
+        using var reader = command.ExecuteReader();
+        return !reader.Read()
+            ? null
+            : new OrientationInstallRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5));
+    }
+
+    /// <summary>
+    /// Fences the intent to run one remote comprehension turn for the exact
+    /// installed assignment under the live lease. A replay that is already
+    /// <c>comprehended</c> returns the retained canonical evidence and must not
+    /// run a second model turn; an in-flight (<c>running</c>) or unconfirmed
+    /// (<c>uncertain</c>) operation is refused so a duplicate model call is never
+    /// issued; a deterministic <c>failed</c> turn may be retried.
+    /// </summary>
+    public OrientationComprehensionState BeginOrientationComprehension(long epoch, string nonce, string assignmentId, string employeeId, string sessionId, string orientationVersion)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateIdentifier(employeeId, WorkerProtocol.MaxIdentifierLength, "orientation employee id");
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "orientation session id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, nonce);
+            using var tx = _connection.BeginTransaction();
+            var existing = QueryComprehension(assignmentId, tx);
+            if (existing is not null)
+            {
+                if (!string.Equals(existing.EmployeeId, employeeId, StringComparison.Ordinal)
+                    || !string.Equals(existing.SessionId, sessionId, StringComparison.Ordinal)
+                    || !string.Equals(existing.OrientationVersion, orientationVersion, StringComparison.Ordinal))
+                    throw new WorkerProtocolException("A different comprehension operation is already recorded for this assignment.");
+                if (existing.State == "comprehended" && existing.EvidenceJson is not null && existing.EvidenceHash is not null)
+                {
+                    tx.Commit();
+                    return existing with { State = "comprehended" };
+                }
+                if (existing.State is "running" or "uncertain")
+                {
+                    tx.Commit();
+                    return existing;
+                }
+                Execute("UPDATE orientation_comprehension SET state='running',evidence_hash=NULL,evidence_json=NULL,updated_utc=$u WHERE assignment_id=$a", tx, ("$a", assignmentId), ("$u", Now()));
+                tx.Commit();
+                return existing with { State = "running", EvidenceHash = null, EvidenceJson = null, NewlyBegun = true };
+            }
+            Execute("INSERT INTO orientation_comprehension VALUES($a,$e,$s,$v,'running',NULL,NULL,$u)", tx, ("$a", assignmentId), ("$e", employeeId), ("$s", sessionId), ("$v", orientationVersion), ("$u", Now()));
+            tx.Commit();
+            return new OrientationComprehensionState(assignmentId, employeeId, sessionId, orientationVersion, "running", null, null, true);
+        }
+    }
+
+    public OrientationComprehensionState CompleteOrientationComprehension(long epoch, string nonce, string assignmentId, string employeeId, string sessionId, string orientationVersion, string evidenceHash, string evidenceJson)
+    {
+        WorkerProtocol.ValidateOrientationContentHash(evidenceHash);
+        if (evidenceJson is not { Length: > 0 } || evidenceJson.Length > WorkerProtocol.MaxOrientationComprehensionBytes || evidenceJson.IndexOf('\0') >= 0)
+            throw new WorkerProtocolException("Comprehension evidence is invalid.");
+        lock (_databaseGate)
+        {
+            RequireLeaseLocked(epoch, nonce);
+            using var tx = _connection.BeginTransaction();
+            var existing = QueryComprehension(assignmentId, tx) ?? throw new WorkerProtocolException("Comprehension intent is unknown.");
+            if (!string.Equals(existing.EmployeeId, employeeId, StringComparison.Ordinal)
+                || !string.Equals(existing.SessionId, sessionId, StringComparison.Ordinal)
+                || !string.Equals(existing.OrientationVersion, orientationVersion, StringComparison.Ordinal))
+                throw new WorkerProtocolException("Comprehension intent changed before completion.");
+            if (existing.State == "comprehended")
+            {
+                if (!string.Equals(existing.EvidenceHash, evidenceHash, StringComparison.Ordinal)
+                    || !string.Equals(existing.EvidenceJson, evidenceJson, StringComparison.Ordinal))
+                    throw new WorkerProtocolException("Comprehension evidence is already recorded differently.");
+                tx.Commit();
+                return existing;
+            }
+            Execute("UPDATE orientation_comprehension SET state='comprehended',evidence_hash=$h,evidence_json=$j,updated_utc=$u WHERE assignment_id=$a AND state='running'", tx, ("$a", assignmentId), ("$h", evidenceHash), ("$j", evidenceJson), ("$u", Now()));
+            if (Convert.ToInt64(Scalar("SELECT changes()", tx), CultureInfo.InvariantCulture) != 1) throw new WorkerProtocolException("Comprehension completion does not match a running operation.");
+            tx.Commit();
+            return new OrientationComprehensionState(assignmentId, employeeId, sessionId, orientationVersion, "comprehended", evidenceHash, evidenceJson);
+        }
+    }
+
+    /// <summary>
+    /// Records a deterministic malformed/validation failure. It is deliberately
+    /// not lease-fenced: a post-write malformed result is exactly the case where
+    /// the lease may have been lost while the model turn was in flight, and the
+    /// retained <c>failed</c> state allows an owner-authorized retry.
+    /// </summary>
+    public void FailOrientationComprehension(string assignmentId, string employeeId, string sessionId, string orientationVersion)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateIdentifier(employeeId, WorkerProtocol.MaxIdentifierLength, "orientation employee id");
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "orientation session id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+        lock (_databaseGate)
+        {
+            Execute("UPDATE orientation_comprehension SET state='failed',evidence_hash=NULL,evidence_json=NULL,updated_utc=$u WHERE assignment_id=$a AND employee_id=$e AND session_id=$s AND orientation_version=$v AND state='running'", null,
+                ("$a", assignmentId), ("$e", employeeId), ("$s", sessionId), ("$v", orientationVersion), ("$u", Now()));
+        }
+    }
+
+    /// <summary>
+    /// Records that the model turn may have taken effect but its result could not
+    /// be confirmed. Like the install uncertainty, it is not lease-fenced so a
+    /// lost lease cannot hide the unconfirmed remote effect.
+    /// </summary>
+    public void MarkOrientationComprehensionUncertain(string assignmentId, string employeeId, string sessionId, string orientationVersion)
+    {
+        WorkerProtocol.ValidateIdentifier(assignmentId, WorkerProtocol.MaxIdentifierLength, "orientation assignment id");
+        WorkerProtocol.ValidateIdentifier(employeeId, WorkerProtocol.MaxIdentifierLength, "orientation employee id");
+        WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "orientation session id");
+        WorkerProtocol.ValidateOrientationVersion(orientationVersion);
+        lock (_databaseGate)
+        {
+            Execute("UPDATE orientation_comprehension SET state='uncertain',updated_utc=$u WHERE assignment_id=$a AND employee_id=$e AND session_id=$s AND orientation_version=$v AND state IN('running','uncertain')", null,
+                ("$a", assignmentId), ("$e", employeeId), ("$s", sessionId), ("$v", orientationVersion), ("$u", Now()));
+        }
+    }
+
+    private OrientationComprehensionState? QueryComprehension(string assignmentId, SqliteTransaction? tx)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = "SELECT employee_id,session_id,orientation_version,state,evidence_hash,evidence_json FROM orientation_comprehension WHERE assignment_id=$a";
+        command.Parameters.AddWithValue("$a", assignmentId);
+        using var reader = command.ExecuteReader();
+        return !reader.Read()
+            ? null
+            : new OrientationComprehensionState(assignmentId, reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5));
+    }
+
+    private OrientationComprehensionState? CurrentComprehensionLocked()
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = "SELECT assignment_id,employee_id,session_id,orientation_version,state,evidence_hash,evidence_json FROM orientation_comprehension ORDER BY updated_utc DESC, rowid DESC LIMIT 1";
+        using var reader = command.ExecuteReader();
+        return !reader.Read()
+            ? null
+            : new OrientationComprehensionState(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6));
+    }
+
     /// <summary>
     /// Records that a viewer stop could not be confirmed, so a viewer may still be
     /// attached to the session.
@@ -1024,7 +1285,11 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         var acpInitialized = processState == "running" && string.Equals(MetaOptionalLocked("acp_initialized"), "1", StringComparison.Ordinal);
         using var sessionOperation = _connection.CreateCommand(); sessionOperation.CommandText = "SELECT state,request_id FROM session_operation WHERE singleton=1"; using var operationReader = sessionOperation.ExecuteReader(); operationReader.Read();
         var sessionOperationState = operationReader.GetString(0); var sessionOperationRequestId = operationReader.IsDBNull(1) ? null : operationReader.GetString(1);
-        return new WorkerStatus(workerGeneration, processGeneration, processState, lifecycleHandle, observedPid, activeRequestId, CurrentPermissionLocked(), epoch, active, held || Volatile.Read(ref _journalFailClosed) != 0, reason, holdReasons, first, last, ackGeneration, ackSequence, CurrentReplayLossLocked(), CurrentJournalFailureLocked(), replayGapCount, replayGaps, false, false, acpInitialized, sessionId, sessionOperationState, sessionOperationRequestId);
+        var orientation = CurrentOrientationLocked();
+        var comprehension = CurrentComprehensionLocked();
+        return new WorkerStatus(workerGeneration, processGeneration, processState, lifecycleHandle, observedPid, activeRequestId, CurrentPermissionLocked(), epoch, active, held || Volatile.Read(ref _journalFailClosed) != 0, reason, holdReasons, first, last, ackGeneration, ackSequence, CurrentReplayLossLocked(), CurrentJournalFailureLocked(), replayGapCount, replayGaps, false, false, acpInitialized, sessionId, sessionOperationState, sessionOperationRequestId,
+            orientation?.AssignmentId, orientation?.OrientationVersion, orientation?.ArtifactFileName, orientation?.ContentHash, orientation?.State, orientation?.InstalledPath,
+            comprehension?.State, comprehension?.EvidenceHash);
     }
 
     public void SetHold(bool held, string? reason)

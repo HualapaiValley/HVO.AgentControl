@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>HVO.AgentControl.DockerHelper</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../HVO.AgentControl.DockerGrammar/HVO.AgentControl.DockerGrammar.csproj" />
+    <ProjectReference Include="../HVO.AgentControl.WorkerProtocol/HVO.AgentControl.WorkerProtocol.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="HVO.AgentControl.Tests" />
+  </ItemGroup>
+</Project>

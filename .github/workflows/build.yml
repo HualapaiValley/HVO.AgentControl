@@ -50,6 +50,7 @@ jobs:
       - name: Test
         run: >-
           dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --filter "FullyQualifiedName!~AgentIsolationContainerTests&FullyQualifiedName!~WorkerImageContractTests&FullyQualifiedName!~DockerHelperIntegrationTests&FullyQualifiedName!~LocalManagedHiringDockerIntegrationTests&FullyQualifiedName!~OpenCodeOutboundIntegrationTests"
           --logger "trx;LogFileName=test-results.trx"
           --results-directory artifacts/test-results
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -88,6 +89,8 @@ jobs:
         run: docker build --tag hvo-agentcontrol:ci .
       - name: Build worker image without publishing
         run: docker build --target worker --tag hvo-agentcontrol:worker-tests .
+      - name: Build Docker helper image without publishing
+        run: docker build --target docker-helper --tag hvo-agentcontrol:docker-helper-tests .
       # Controller/agent OS isolation (#240) is enforced by the kernel, so it can
       # only be proven by running real processes under both UIDs in the built
       # image. The suite reuses the image built above via
@@ -183,11 +186,12 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          # 4 image/lifecycle cases plus the fixed container-command contract test
-          # (RealContainerCommandAppliesTheFixedIsolationBootstrapAndLabels), which
-          # runs the controller's own bootstrap and container-create construction
-          # against a real local daemon using only disposable local resources.
-          EXPECTED = 5
+          # The class currently discovers eight real/structural cases: image and
+          # lifecycle contracts, the fixed controller container-command path, the
+          # deterministic profile build/verifier matrix, and isolated-Python startup.
+          # Keep this exact so a renamed, skipped, added or removed case is an
+          # explicit CI change rather than a false green.
+          EXPECTED = 8
           files = glob.glob("artifacts/worker-image-results/*.trx")
           if len(files) != 1:
               sys.exit(f"expected exactly one worker-image TRX, found {len(files)}")

@@ -7,8 +7,23 @@ using Microsoft.Data.Sqlite;
 namespace HVO.AgentControl.Organization;
 
 public sealed record ExecutionHostRegistration(string ApprovedHostId, string Slug, string DisplayName);
-public sealed record ExecutionHostRecord(string Id, string Slug, string DisplayName, string TransportKind, string EndpointHost, int EndpointPort, string EndpointUser, string KnownHostsReferenceStatus, string? HostKeyAlgorithm, string? HostKeyFingerprint, string? KnownHostsHash, string? DockerVersion, string? DockerApiVersion, string Os, string? Architecture, string? StorageDriver, string? BackingFilesystem, bool? SharedStorage, long? FreeBytes, long? MemoryBytes, int? CpuCount, bool? LimitsSupported, string? ImagePlatform, string CapabilityStatus, DateTimeOffset? LastProbeUtc, bool Enabled, bool Enrolled, string Status, int Revision);
+public sealed record ExecutionHostRecord(string Id, string Slug, string DisplayName, string TransportKind, string? EndpointHost, int? EndpointPort, string? EndpointUser, string KnownHostsReferenceStatus, string? HostKeyAlgorithm, string? HostKeyFingerprint, string? KnownHostsHash, string? DockerVersion, string? DockerApiVersion, string Os, string? Architecture, string? StorageDriver, string? BackingFilesystem, bool? SharedStorage, long? FreeBytes, long? MemoryBytes, int? CpuCount, bool? LimitsSupported, string? ImagePlatform, string CapabilityStatus, DateTimeOffset? LastProbeUtc, bool Enabled, bool Enrolled, string Status, int Revision);
 public sealed record ExecutionHostProbe(string HostKeyAlgorithm, string HostKeyFingerprint, string KnownHostsHash, string DockerVersion, string DockerApiVersion, string Architecture, string StorageDriver, string BackingFilesystem, bool SharedStorage, long FreeBytes, long MemoryBytes, int CpuCount, bool LimitsSupported, string ImagePlatform, string CapabilityStatus);
+/// <summary>
+/// A controller-local Docker probe result. The local target has no SSH endpoint,
+/// known_hosts or host-key identity, so those fields are deliberately absent
+/// rather than recorded as empty strings.
+/// </summary>
+public sealed record LocalExecutionHostProbe(string DockerVersion, string DockerApiVersion, string Architecture, string StorageDriver, string BackingFilesystem, bool SharedStorage, long FreeBytes, long MemoryBytes, int CpuCount, bool LimitsSupported, string ImagePlatform, string CapabilityStatus);
+
+/// <summary>Stable identities for execution hosts that are not owner-registered.</summary>
+public static class ExecutionHosts
+{
+    /// <summary>The single reserved controller-local Docker execution host.</summary>
+    public const string LocalDockerId = "local-docker";
+    public const string LocalDockerSlug = "local-docker";
+    public const string LocalDockerDisplayName = "Controller-local Docker";
+}
 public sealed record WorkerEnrollmentRecord(string WorkerId, string RuntimeBindingId, string HostId, string OrganizationId, string ContainerName, string? ContainerRef, string ControlVolumeName, string? ControlVolumeRef, string HomeVolumeName, string? HomeVolumeRef, string WorkspaceVolumeName, string? WorkspaceVolumeRef, string SessionVolumeName, string? SessionVolumeRef, string ResourceLabelsHash, string ExpectedImageDigest, string ExpectedPlatform, string ControllerId, string KeyFilePath, string KeyId, string BridgeSocketPath, string LifecycleStatus, long WorkerGeneration, long ProcessGeneration, long OwnershipEpoch, bool Enabled, int Revision);
 public sealed record RemoteWorkerSessionRecord(string Id, string NativeSessionId);
 public sealed record RemoteBindingSessionRecord(string BindingId, string EmployeeId, string Placement, string? SessionRecordId, string? NativeSessionId);
@@ -93,6 +108,67 @@ public sealed partial class OrganizationStore
             .. RemoteWorkerSchemaV4Statements[12..],
         ];
 
+    /// <summary>
+    /// Schema v11 rebuilds <c>execution_hosts</c> so a managed hire can target the
+    /// controller-local Docker daemon without inventing an SSH endpoint. Transport
+    /// kind is constrained to <c>local-docker</c> or <c>ssh-docker</c>, the four
+    /// SSH endpoint columns are nullable, and a CHECK keeps the two shapes exact:
+    /// an ssh-docker row carries all four, a local-docker row carries none.
+    /// </summary>
+    public static string ExecutionHostsSchemaV11Statement =>
+        """
+        CREATE TABLE execution_hosts (
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            transport_kind TEXT NOT NULL CHECK (transport_kind IN ('local-docker', 'ssh-docker')),
+            endpoint_host TEXT,
+            endpoint_port INTEGER CHECK (endpoint_port IS NULL OR endpoint_port BETWEEN 1 AND 65535),
+            endpoint_user TEXT,
+            known_hosts_path TEXT,
+            host_key_algorithm TEXT,
+            host_key_fingerprint TEXT,
+            known_hosts_hash TEXT,
+            docker_version TEXT,
+            docker_api_version TEXT,
+            os TEXT NOT NULL CHECK (os = 'linux'),
+            architecture TEXT,
+            storage_driver TEXT,
+            backing_filesystem TEXT,
+            shared_storage INTEGER CHECK (shared_storage IN (0, 1)),
+            free_bytes INTEGER CHECK (free_bytes >= 0),
+            memory_bytes INTEGER CHECK (memory_bytes >= 0),
+            cpu_count INTEGER CHECK (cpu_count > 0),
+            limits_supported INTEGER CHECK (limits_supported IN (0, 1)),
+            image_platform TEXT,
+            capability_status TEXT NOT NULL CHECK (capability_status IN ('unprobed', 'valid', 'invalid', 'unavailable')),
+            last_probe_utc TEXT,
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            enrolled INTEGER NOT NULL CHECK (enrolled IN (0, 1)),
+            status TEXT NOT NULL CHECK (status IN ('registered', 'ready', 'disabled', 'held')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            CHECK (
+                (transport_kind = 'ssh-docker'
+                    AND endpoint_host IS NOT NULL AND endpoint_port IS NOT NULL
+                    AND endpoint_user IS NOT NULL AND known_hosts_path IS NOT NULL)
+                OR (transport_kind = 'local-docker'
+                    AND endpoint_host IS NULL AND endpoint_port IS NULL
+                    AND endpoint_user IS NULL AND known_hosts_path IS NULL)
+            )
+        )
+        """;
+
+    /// <summary>The exact frozen schema-v10 (released v4) execution_hosts definition.</summary>
+    internal static string ExecutionHostsSchemaV10StatementForTest => RemoteWorkerSchemaV4Statements[0];
+
+    private static string[] RemoteWorkerSchemaV11Statements =>
+        [
+            ExecutionHostsSchemaV11Statement,
+            .. RemoteWorkerSchemaV6Statements[1..],
+        ];
+
     public IReadOnlyList<ExecutionHostRecord> ListExecutionHosts() => Query("SELECT id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,host_key_algorithm,host_key_fingerprint,known_hosts_hash,docker_version,docker_api_version,os,architecture,storage_driver,backing_filesystem,shared_storage,free_bytes,memory_bytes,cpu_count,limits_supported,image_platform,capability_status,last_probe_utc,enabled,enrolled,status,revision FROM execution_hosts ORDER BY slug COLLATE BINARY", ReadHost);
     public ExecutionHostRecord? GetExecutionHost(string id) => ListExecutionHosts().SingleOrDefault(x => x.Id == id);
     public IReadOnlyList<WorkerEnrollmentRecord> ListWorkerEnrollments() => Query("SELECT worker_id,runtime_binding_id,host_id,organization_id,container_name,container_ref,control_volume_name,control_volume_ref,home_volume_name,home_volume_ref,workspace_volume_name,workspace_volume_ref,session_volume_name,session_volume_ref,resource_labels_hash,expected_image_digest,expected_platform,controller_id,key_file_path,key_id,bridge_socket_path,lifecycle_status,worker_generation,process_generation,ownership_epoch,enabled,revision FROM worker_enrollments ORDER BY worker_id", ReadEnrollment);
@@ -160,12 +236,25 @@ public sealed partial class OrganizationStore
     public ExecutionHostRecord RegisterExecutionHost(string configuredId, string hostname, int port, string username, string knownHostsPath, ExecutionHostRegistration registration)
     {
         ValidateIdentifier(configuredId, nameof(configuredId)); ValidateSlug(registration.Slug); ValidateHostDisplayName(registration.DisplayName);
-        lock (_gate) { RequireOpen(); using var connection = OpenConnection(_databasePath); using var transaction = connection.BeginTransaction(); var now = Now(); using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "INSERT INTO execution_hosts(id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,os,capability_status,enabled,enrolled,status,created_at,updated_at,revision) VALUES($id,$slug,$name,'ssh-docker',$host,$port,$user,$known,'linux','unprobed',1,0,'registered',$now,$now,1) ON CONFLICT(id) DO UPDATE SET slug=$slug,display_name=$name,updated_at=$now,revision=revision+1 WHERE endpoint_host=$host AND endpoint_port=$port AND endpoint_user=$user AND known_hosts_path=$known"; Add(command, ("$id", configuredId), ("$slug", registration.Slug), ("$name", registration.DisplayName), ("$host", hostname), ("$port", port), ("$user", username), ("$known", knownHostsPath), ("$now", now)); if (command.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The configured execution host identity does not match the retained registration."); transaction.Commit(); return GetExecutionHost(configuredId)!; }
+        if (string.Equals(configuredId, ExecutionHosts.LocalDockerId, StringComparison.Ordinal)
+            || string.Equals(registration.Slug, ExecutionHosts.LocalDockerSlug, StringComparison.Ordinal))
+            throw new OrganizationValidationException("The reserved controller-local Docker host cannot be registered as an SSH execution host.");
+        lock (_gate) { RequireOpen(); using var connection = OpenConnection(_databasePath); using var transaction = connection.BeginTransaction(); var now = Now(); using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "INSERT INTO execution_hosts(id,slug,display_name,transport_kind,endpoint_host,endpoint_port,endpoint_user,known_hosts_path,os,capability_status,enabled,enrolled,status,created_at,updated_at,revision) VALUES($id,$slug,$name,'ssh-docker',$host,$port,$user,$known,'linux','unprobed',1,0,'registered',$now,$now,1) ON CONFLICT(id) DO UPDATE SET slug=$slug,display_name=$name,updated_at=$now,revision=revision+1 WHERE endpoint_host=$host AND endpoint_port=$port AND endpoint_user=$user AND known_hosts_path=$known AND transport_kind='ssh-docker'"; Add(command, ("$id", configuredId), ("$slug", registration.Slug), ("$name", registration.DisplayName), ("$host", hostname), ("$port", port), ("$user", username), ("$known", knownHostsPath), ("$now", now)); if (command.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("The configured execution host identity does not match the retained registration."); transaction.Commit(); return GetExecutionHost(configuredId)!; }
     }
 
     public ExecutionHostRecord RecordExecutionHostProbe(string id, int expectedRevision, ExecutionHostProbe probe)
     {
-        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET host_key_algorithm=$a,host_key_fingerprint=$f,known_hosts_hash=$h,docker_version=$d,docker_api_version=$api,architecture=$arch,storage_driver=$sd,backing_filesystem=$bf,shared_storage=$shared,free_bytes=$free,memory_bytes=$memory,cpu_count=$cpu,limits_supported=$limits,image_platform=$platform,capability_status=$cap,status=CASE WHEN $cap='valid' THEN 'ready' ELSE 'held' END,last_probe_utc=$now,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND enabled=1"; Add(q, ("$a", probe.HostKeyAlgorithm), ("$f", probe.HostKeyFingerprint), ("$h", probe.KnownHostsHash), ("$d", probe.DockerVersion), ("$api", probe.DockerApiVersion), ("$arch", probe.Architecture), ("$sd", probe.StorageDriver), ("$bf", probe.BackingFilesystem), ("$shared", probe.SharedStorage ? 1 : 0), ("$free", probe.FreeBytes), ("$memory", probe.MemoryBytes), ("$cpu", probe.CpuCount), ("$limits", probe.LimitsSupported ? 1 : 0), ("$platform", probe.ImagePlatform), ("$cap", probe.CapabilityStatus), ("$now", Now()), ("$id", id), ("$revision", expectedRevision)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host probe revision is stale or the host is disabled."); tx.Commit(); return GetExecutionHost(id)!; }
+        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET host_key_algorithm=$a,host_key_fingerprint=$f,known_hosts_hash=$h,docker_version=$d,docker_api_version=$api,architecture=$arch,storage_driver=$sd,backing_filesystem=$bf,shared_storage=$shared,free_bytes=$free,memory_bytes=$memory,cpu_count=$cpu,limits_supported=$limits,image_platform=$platform,capability_status=$cap,status=CASE WHEN $cap='valid' THEN 'ready' ELSE 'held' END,last_probe_utc=$now,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND enabled=1 AND transport_kind='ssh-docker'"; Add(q, ("$a", probe.HostKeyAlgorithm), ("$f", probe.HostKeyFingerprint), ("$h", probe.KnownHostsHash), ("$d", probe.DockerVersion), ("$api", probe.DockerApiVersion), ("$arch", probe.Architecture), ("$sd", probe.StorageDriver), ("$bf", probe.BackingFilesystem), ("$shared", probe.SharedStorage ? 1 : 0), ("$free", probe.FreeBytes), ("$memory", probe.MemoryBytes), ("$cpu", probe.CpuCount), ("$limits", probe.LimitsSupported ? 1 : 0), ("$platform", probe.ImagePlatform), ("$cap", probe.CapabilityStatus), ("$now", Now()), ("$id", id), ("$revision", expectedRevision)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host probe revision is stale, the host is disabled, or it is not an SSH transport."); tx.Commit(); return GetExecutionHost(id)!; }
+    }
+
+    /// <summary>
+    /// Records a controller-local Docker probe. The local target has no SSH
+    /// endpoint or host-key identity, so the SSH columns are explicitly NULL and
+    /// the transport must already be <c>local-docker</c>.
+    /// </summary>
+    public ExecutionHostRecord RecordLocalExecutionHostProbe(string id, int expectedRevision, LocalExecutionHostProbe probe)
+    {
+        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET docker_version=$d,docker_api_version=$api,architecture=$arch,storage_driver=$sd,backing_filesystem=$bf,shared_storage=$shared,free_bytes=$free,memory_bytes=$memory,cpu_count=$cpu,limits_supported=$limits,image_platform=$platform,capability_status=$cap,status=CASE WHEN $cap='valid' THEN 'ready' ELSE 'held' END,last_probe_utc=$now,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND enabled=1 AND transport_kind='local-docker'"; Add(q, ("$d", probe.DockerVersion), ("$api", probe.DockerApiVersion), ("$arch", probe.Architecture), ("$sd", probe.StorageDriver), ("$bf", probe.BackingFilesystem), ("$shared", probe.SharedStorage ? 1 : 0), ("$free", probe.FreeBytes), ("$memory", probe.MemoryBytes), ("$cpu", probe.CpuCount), ("$limits", probe.LimitsSupported ? 1 : 0), ("$platform", probe.ImagePlatform), ("$cap", probe.CapabilityStatus), ("$now", Now()), ("$id", id), ("$revision", expectedRevision)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Local execution host probe revision is stale, the host is disabled, or it is not the local transport."); tx.Commit(); return GetExecutionHost(id)!; }
     }
 
     public WorkerEnrollmentRecord CreateWorkerEnrollment(string runtimeBindingId, string hostId, string controllerId, string imageDigest, string platform, string keyFilePath, string keyId, string? workerId = null) => CreateEnrollment(runtimeBindingId, hostId, controllerId, imageDigest, platform, keyFilePath, keyId, workerId, false);
@@ -174,7 +263,37 @@ public sealed partial class OrganizationStore
     {
         ValidateIdentifier(bindingId, nameof(bindingId)); ValidateIdentifier(hostId, nameof(hostId)); ValidateIdentifier(controllerId, nameof(controllerId)); if (!Path.IsPathRooted(keyPath) || !IsHash(keyId) || !IsHash(digest) || platform is not ("linux/amd64" or "linux/arm64")) throw new OrganizationValidationException("Enrollment descriptor is invalid.");
         var worker = requested ?? "wrk-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant(); ValidateIdentifier(worker, nameof(worker)); var suffix = worker.ToLowerInvariant().Replace(':', '-').Replace('_', '-'); var container = "agentcontrol-worker-" + suffix; var control = "agentcontrol-control-" + suffix; var home = "agentcontrol-home-" + suffix; var workspace = "agentcontrol-workspace-" + suffix; var session = "agentcontrol-session-" + suffix; var labels = Hash($"{controllerId}\n{hostId}\n{worker}\n{bindingId}"); var organizationId = GetOverview().Id;
-        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var check = c.CreateCommand()) { check.Transaction = tx; check.CommandText = internalPlan ? "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.container_ref IS NOT NULL" : "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=e.id AND s.status='active' JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.container_ref IS NOT NULL AND b.session_ref IS NOT NULL"; Add(check, ("$host", hostId), ("$binding", bindingId)); if (Convert.ToInt64(check.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationConcurrencyException("The exact DeveloperContainer binding, active session, and ready host are required."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "INSERT INTO worker_enrollments VALUES($w,$b,$h,$org,$cn,NULL,$cv,NULL,$hv,NULL,$wv,NULL,$sv,NULL,$labels,$digest,$platform,$controller,$path,$key,'/control/bridge.sock','planned',0,0,0,1,$now,$now,1)"; Add(q, ("$w", worker), ("$b", bindingId), ("$h", hostId), ("$org", organizationId), ("$cn", container), ("$cv", control), ("$hv", home), ("$wv", workspace), ("$sv", session), ("$labels", labels), ("$digest", digest), ("$platform", platform), ("$controller", controllerId), ("$path", keyPath), ("$key", keyId), ("$now", Now())); q.ExecuteNonQuery(); tx.Commit(); return GetWorkerEnrollment(worker)!; }
+        // A plan never requires container_ref: for a managed DeveloperContainer hire the
+        // container does not exist until provisioning creates it, so requiring it here
+        // would be circular. The internal plan path resolves the exact employee-owned
+        // DeveloperContainer binding on a ready enabled host; the public path is stricter
+        // and additionally requires the binding's active ACP session. The container
+        // reference is deliberately not part of either predicate.
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            using (var check = c.CreateCommand())
+            {
+                check.Transaction = tx;
+                check.CommandText = internalPlan
+                    ? "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer'"
+                    : "SELECT COUNT(*) FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id JOIN acp_sessions s ON s.id=b.session_ref AND s.employee_id=e.id AND s.status='active' JOIN execution_hosts h ON h.id=$host AND h.enabled=1 AND h.status='ready' WHERE b.id=$binding AND b.placement='DeveloperContainer' AND b.session_ref IS NOT NULL";
+                Add(check, ("$host", hostId), ("$binding", bindingId));
+                if (Convert.ToInt64(check.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                    throw new OrganizationConcurrencyException(internalPlan
+                        ? "The exact employee-owned DeveloperContainer binding and a ready enabled host are required."
+                        : "The exact DeveloperContainer binding, its active session, and a ready enabled host are required.");
+            }
+            using var q = c.CreateCommand();
+            q.Transaction = tx;
+            q.CommandText = "INSERT INTO worker_enrollments VALUES($w,$b,$h,$org,$cn,NULL,$cv,NULL,$hv,NULL,$wv,NULL,$sv,NULL,$labels,$digest,$platform,$controller,$path,$key,'/control/bridge.sock','planned',0,0,0,1,$now,$now,1)";
+            Add(q, ("$w", worker), ("$b", bindingId), ("$h", hostId), ("$org", organizationId), ("$cn", container), ("$cv", control), ("$hv", home), ("$wv", workspace), ("$sv", session), ("$labels", labels), ("$digest", digest), ("$platform", platform), ("$controller", controllerId), ("$path", keyPath), ("$key", keyId), ("$now", Now()));
+            q.ExecuteNonQuery();
+            tx.Commit();
+            return GetWorkerEnrollment(worker)!;
+        }
     }
 
     public RemoteWorkerSessionRecord RecordRemoteWorkerSession(string bindingId, string workerId, string nativeSessionId, string? title)
@@ -225,7 +344,99 @@ public sealed partial class OrganizationStore
 
     public WorkerEnrollmentRecord UpdateEnrollmentLifecycle(string workerId, int expectedRevision, string from, string to, bool? enabled = null)
     { var allowed = (from, to) is ("planned", "provisioning") or ("provisioning", "held") or ("provisioning", "enrolled") or ("held", "provisioning") or ("enrolled", "stopped") or ("stopped", "provisioning") or (_, "failed"); if (!allowed) throw new OrganizationValidationException("Enrollment transition is invalid."); lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "UPDATE worker_enrollments SET lifecycle_status=$to,enabled=COALESCE($enabled,enabled),updated_at=$now,revision=revision+1 WHERE worker_id=$w AND revision=$r AND lifecycle_status=$from"; Add(q, ("$to", to), ("$enabled", enabled is null ? DBNull.Value : enabled.Value ? 1 : 0), ("$now", Now()), ("$w", workerId), ("$r", expectedRevision), ("$from", from)); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Enrollment revision or lifecycle is stale."); return GetWorkerEnrollment(workerId)!; } }
-    public void SetEnrollmentResourceReference(string workerId, string kind, string reference) { var column = kind switch { "container" => "container_ref", "control" => "control_volume_ref", "home" => "home_volume_ref", "workspace" => "workspace_volume_ref", "session" => "session_volume_ref", _ => throw new OrganizationValidationException("Resource kind is invalid.") }; lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = $"UPDATE worker_enrollments SET {column}=$ref,updated_at=$now,revision=revision+1 WHERE worker_id=$w"; Add(q, ("$ref", reference), ("$now", Now()), ("$w", workerId)); if (q.ExecuteNonQuery() != 1) throw new OrganizationNotFoundException("Worker enrollment not found."); } }
+    /// <summary>
+    /// Records the remote reference for one enrolled resource. The worker
+    /// enrollment column and, for every kind except the session volume, the owning
+    /// runtime binding column are updated in one transaction. The binding's
+    /// <c>session_ref</c> is a foreign key to the ACP session and is never written
+    /// here; the session volume has no binding column, so it updates the enrollment
+    /// only. A column that already holds a different reference is a conflict, and a
+    /// binding that is not the enrollment's own is never touched.
+    /// </summary>
+    public void SetEnrollmentResourceReference(string workerId, string kind, string reference)
+    {
+        ValidateIdentifier(workerId, nameof(workerId));
+        if (string.IsNullOrEmpty(reference) || reference.Length > 256 || reference.Any(char.IsControl))
+            throw new OrganizationValidationException("Resource reference is invalid.");
+        var (enrollmentColumn, bindingColumn) = kind switch
+        {
+            "container" => ("container_ref", "container_ref"),
+            "control" => ("control_volume_ref", "volume_ref"),
+            "home" => ("home_volume_ref", "home_ref"),
+            "workspace" => ("workspace_volume_ref", "workspace_ref"),
+            "session" => ("session_volume_ref", (string?)null),
+            _ => throw new OrganizationValidationException("Resource kind is invalid."),
+        };
+
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+
+            using (var enrollment = c.CreateCommand())
+            {
+                enrollment.Transaction = tx;
+                // Only the documented column is interpolated (it comes from the fixed
+                // switch above); the reference itself is always parameterized. The row
+                // must belong to this exact worker and the column must be NULL or equal.
+                enrollment.CommandText = $"UPDATE worker_enrollments SET {enrollmentColumn}=$ref,updated_at=$now,revision=revision+1 WHERE worker_id=$w AND ({enrollmentColumn} IS NULL OR {enrollmentColumn}=$ref)";
+                Add(enrollment, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (enrollment.ExecuteNonQuery() != 1)
+                    throw new OrganizationConcurrencyException("The enrollment resource reference conflicts with a different retained reference or the worker does not exist.");
+            }
+
+            if (bindingColumn is not null)
+            {
+                using var binding = c.CreateCommand();
+                binding.Transaction = tx;
+                binding.CommandText = $"UPDATE runtime_bindings SET {bindingColumn}=$ref,updated_at=$now,revision=revision+1 WHERE id=(SELECT runtime_binding_id FROM worker_enrollments WHERE worker_id=$w) AND ({bindingColumn} IS NULL OR {bindingColumn}=$ref)";
+                Add(binding, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (binding.ExecuteNonQuery() != 1)
+                    throw new OrganizationConcurrencyException("The owning runtime binding reference conflicts with a different retained reference.");
+            }
+
+            tx.Commit();
+        }
+    }
+
+    /// <summary>
+    /// Deliberately overwrites the container reference of an existing enrollment
+    /// and its owning runtime binding in one transaction. This is the container
+    /// replacement path, not first provisioning: the old container was verified
+    /// owned and removed, so the stale reference is replaced rather than treated as
+    /// a conflict. Only the container column is writable here; volumes, session and
+    /// every other binding reference are untouched.
+    /// </summary>
+    public void ReplaceEnrollmentContainerReference(string workerId, string reference)
+    {
+        ValidateIdentifier(workerId, nameof(workerId));
+        if (string.IsNullOrEmpty(reference) || reference.Length > 256 || reference.Any(char.IsControl))
+            throw new OrganizationValidationException("Resource reference is invalid.");
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            using (var enrollment = c.CreateCommand())
+            {
+                enrollment.Transaction = tx;
+                enrollment.CommandText = "UPDATE worker_enrollments SET container_ref=$ref,updated_at=$now,revision=revision+1 WHERE worker_id=$w";
+                Add(enrollment, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (enrollment.ExecuteNonQuery() != 1)
+                    throw new OrganizationNotFoundException("Worker enrollment not found.");
+            }
+            using (var binding = c.CreateCommand())
+            {
+                binding.Transaction = tx;
+                binding.CommandText = "UPDATE runtime_bindings SET container_ref=$ref,updated_at=$now,revision=revision+1 WHERE id=(SELECT runtime_binding_id FROM worker_enrollments WHERE worker_id=$w)";
+                Add(binding, ("$ref", reference), ("$now", Now()), ("$w", workerId));
+                if (binding.ExecuteNonQuery() != 1)
+                    throw new OrganizationConcurrencyException("The owning runtime binding could not record the replaced container reference.");
+            }
+            tx.Commit();
+        }
+    }
 
     public void RecordWorkerConnectionState(string workerId, string state, long? epoch = null) { if (state is not ("disconnected" or "connecting" or "authenticated" or "expired" or "held")) throw new OrganizationValidationException("Connection state is invalid."); lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = "INSERT INTO worker_cursors VALUES($w,0,0,0,0,COALESCE($e,0),'unknown',NULL,NULL,NULL,0,0,$s,NULL,$now,1) ON CONFLICT(worker_id) DO UPDATE SET connection_state=$s,observed_ownership_epoch=COALESCE($e,observed_ownership_epoch),viewer_available=CASE WHEN $s='authenticated' THEN viewer_available ELSE 0 END,updated_at=$now,revision=revision+1"; Add(q, ("$w", workerId), ("$e", epoch is null ? DBNull.Value : epoch.Value), ("$s", state), ("$now", Now())); q.ExecuteNonQuery(); } }
 
@@ -429,7 +640,37 @@ public sealed partial class OrganizationStore
     }
     public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
 
-    public ExecutionHostRecord DisableExecutionHost(string id, int expectedRevision, bool reconciledStop = false) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var active = c.CreateCommand()) { active.Transaction = tx; active.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE host_id=$id AND enabled=1 AND lifecycle_status NOT IN('stopped','failed')"; active.Parameters.AddWithValue("$id", id); if (Convert.ToInt64(active.ExecuteScalar(), CultureInfo.InvariantCulture) != 0 && !reconciledStop) throw new OrganizationConcurrencyException("Execution host has active enrollments and requires an explicit reconciled stop."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET enabled=0,status='disabled',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r"; Add(q, ("$id", id), ("$r", expectedRevision), ("$now", Now())); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host revision is stale."); tx.Commit(); return GetExecutionHost(id)!; } }
+    /// <summary>
+    /// A provisioning step left in <c>Applying</c> by a previous process has an
+    /// unknown remote effect. On startup it is moved to <c>Uncertain</c> so the
+    /// next apply reconciles it by inspection instead of repeating the effect
+    /// blind. The transition is revision-checked and each row changes once, so a
+    /// restarted startup never double-applies or duplicates a step. Returns the
+    /// number of operations marked uncertain.
+    /// </summary>
+    public int MarkInterruptedProvisioningOperationsUncertain()
+    {
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            using var q = c.CreateCommand();
+            q.Transaction = tx;
+            q.CommandText = "UPDATE provisioning_operations SET state='Uncertain',error_category='controller-restarted-during-apply',updated_at=$now,revision=revision+1 WHERE state='Applying'";
+            q.Parameters.AddWithValue("$now", Now());
+            var affected = q.ExecuteNonQuery();
+            tx.Commit();
+            return affected;
+        }
+    }
+
+    public ExecutionHostRecord DisableExecutionHost(string id, int expectedRevision, bool reconciledStop = false)
+    {
+        if (string.Equals(id, ExecutionHosts.LocalDockerId, StringComparison.Ordinal))
+            throw new OrganizationValidationException("The reserved controller-local Docker host cannot be disabled.");
+        lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var active = c.CreateCommand()) { active.Transaction = tx; active.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE host_id=$id AND enabled=1 AND lifecycle_status NOT IN('stopped','failed')"; active.Parameters.AddWithValue("$id", id); if (Convert.ToInt64(active.ExecuteScalar(), CultureInfo.InvariantCulture) != 0 && !reconciledStop) throw new OrganizationConcurrencyException("Execution host has active enrollments and requires an explicit reconciled stop."); } using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "UPDATE execution_hosts SET enabled=0,status='disabled',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$r"; Add(q, ("$id", id), ("$r", expectedRevision), ("$now", Now())); if (q.ExecuteNonQuery() != 1) throw new OrganizationConcurrencyException("Execution host revision is stale."); tx.Commit(); return GetExecutionHost(id)!; }
+    }
 
     private IReadOnlyList<T> Query<T>(string sql, Func<SqliteDataReader, T> read, string? id = null) { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var q = c.CreateCommand(); q.CommandText = sql; if (id is not null) q.Parameters.AddWithValue("$id", id); using var r = q.ExecuteReader(); var list = new List<T>(); while (r.Read()) list.Add(read(r)); return list; } }
     private static WorkerEnrollmentRecord ReadEnrollment(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), N(r, 5), r.GetString(6), N(r, 7), r.GetString(8), N(r, 9), r.GetString(10), N(r, 11), r.GetString(12), N(r, 13), r.GetString(14), r.GetString(15), r.GetString(16), r.GetString(17), r.GetString(18), r.GetString(19), r.GetString(20), r.GetString(21), r.GetInt64(22), r.GetInt64(23), r.GetInt64(24), r.GetBoolean(25), r.GetInt32(26));
@@ -452,7 +693,7 @@ public sealed partial class OrganizationStore
     }
     private sealed record PendingPermissionOptionsEnvelope(int Version, IReadOnlyList<string> OfferedIds, IReadOnlyList<string> SafeRejectIds);
     private static WorkerRequestRecord ReadRequest(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), r.GetString(7), r.GetString(8), r.GetInt64(9), r.GetInt64(10), r.GetString(11), N(r, 12), N(r, 13), I(r, 14), r.GetString(15), r.GetInt32(16));
-    private static ExecutionHostRecord ReadHost(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetInt32(5), r.GetString(6), "configured", N(r, 8), N(r, 9), N(r, 10), N(r, 11), N(r, 12), r.GetString(13), N(r, 14), N(r, 15), N(r, 16), B(r, 17), L(r, 18), L(r, 19), I(r, 20), B(r, 21), N(r, 22), r.GetString(23), N(r, 24) is { } d ? DateTimeOffset.Parse(d, CultureInfo.InvariantCulture) : null, r.GetBoolean(25), r.GetBoolean(26), r.GetString(27), r.GetInt32(28));
+    private static ExecutionHostRecord ReadHost(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), N(r, 4), I(r, 5), N(r, 6), N(r, 7) is null ? "unconfigured" : "configured", N(r, 8), N(r, 9), N(r, 10), N(r, 11), N(r, 12), r.GetString(13), N(r, 14), N(r, 15), N(r, 16), B(r, 17), L(r, 18), L(r, 19), I(r, 20), B(r, 21), N(r, 22), r.GetString(23), N(r, 24) is { } d ? DateTimeOffset.Parse(d, CultureInfo.InvariantCulture) : null, r.GetBoolean(25), r.GetBoolean(26), r.GetString(27), r.GetInt32(28));
     private static WorkerRequestRecord GetWorkerRequestIn(SqliteConnection c, SqliteTransaction tx, string id) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,revision FROM worker_requests WHERE id=$id"; q.Parameters.AddWithValue("$id", id); using var r = q.ExecuteReader(); if (!r.Read()) throw new OrganizationNotFoundException("Worker request not found."); return ReadRequest(r); }
     private static void RequireEnrollment(SqliteConnection c, SqliteTransaction tx, string worker) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE worker_id=$w AND enabled=1 AND lifecycle_status='enrolled'"; q.Parameters.AddWithValue("$w", worker); if (Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationConcurrencyException("Worker enrollment is not current and verified."); }
     private static WorkerCursorRecord? ReadCursorIn(SqliteConnection c, SqliteTransaction tx, string worker) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT worker_id,acknowledged_worker_generation,acknowledged_sequence,observed_worker_generation,observed_process_generation,observed_ownership_epoch,status,hold_summary,active_request_id,pending_permission_hash,viewer_supported,viewer_available,connection_state,observed_at,revision FROM worker_cursors WHERE worker_id=$w"; q.Parameters.AddWithValue("$w", worker); using var r = q.ExecuteReader(); return r.Read() ? ReadCursor(r) : null; }

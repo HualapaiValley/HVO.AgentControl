@@ -47,10 +47,10 @@ public sealed class ContainerProfileDefinitionTests
     [Fact]
     public void BuildFormAcceptsAConstrainedFragmentAndNormalizesLineEndings()
     {
-        var fragment = "FROM agentcontrol-worker-base\r\nRUN apt-get update \\\r\n  && apt-get install -y jq   \r\nENV PATH=\"$PATH:/opt/tools\"\r\nWORKDIR /workspace/app\r\n";
+        var fragment = "FROM agentcontrol-worker-base\r\nRUN apt-get update \\\r\n  && apt-get install -y jq   \r\nWORKDIR /workspace/app\r\n";
         var definition = ContainerProfileDefinition.Parse("""{"build":{"dockerfile":"Dockerfile"},"postCreateCommand":["dotnet","--info"]}""", fragment);
         Assert.True(definition.UsesBuild);
-        Assert.Equal("FROM agentcontrol-worker-base\nRUN apt-get update \\\n  && apt-get install -y jq\nENV PATH=\"$PATH:/opt/tools\"\nWORKDIR /workspace/app\n", definition.DockerfileFragment);
+        Assert.Equal("FROM agentcontrol-worker-base\nRUN apt-get update \\\n  && apt-get install -y jq\nWORKDIR /workspace/app\n", definition.DockerfileFragment);
         var crlfHash = definition.ContentHash;
         var lfHash = ContainerProfileDefinition.Parse("""{"build":{"dockerfile":"Dockerfile"},"postCreateCommand":["dotnet","--info"]}""", fragment.Replace("\r\n", "\n", StringComparison.Ordinal)).ContentHash;
         Assert.Equal(crlfHash, lfHash);
@@ -110,7 +110,8 @@ public sealed class ContainerProfileDefinitionTests
     [InlineData("""{"image":"agentcontrol-worker-base","features":{"ghcr.io/devcontainers/features/node:1":{"nvmVersion":"x"}}}""", "only 'version' is supported")]
     [InlineData("""{"image":"agentcontrol-worker-base","features":{"ghcr.io/devcontainers/features/node:1":{"version":"22; rm -rf /"}}}""", "version must match")]
     [InlineData("""{"image":"agentcontrol-worker-base","features":["ghcr.io/devcontainers/features/node:1"]}""", "'features' must be an object")]
-    [InlineData("""{"image":"agentcontrol-worker-base","containerEnv":{"PATH":"/evil"}}""", "not an allowed variable")]
+    [InlineData("""{"image":"agentcontrol-worker-base","containerEnv":{"PATH":"/evil"}}""", "fixed employee path")]
+    [InlineData("""{"image":"agentcontrol-worker-base","containerEnv":{"DOTNET_ROOT":"/evil"}}""", "must be /opt/dotnet-sdk")]
     [InlineData("""{"image":"agentcontrol-worker-base","containerEnv":{"LD_PRELOAD":"/x.so"}}""", "not an allowed variable")]
     [InlineData("""{"image":"agentcontrol-worker-base","containerEnv":{"WORKER_CONTROL_DIRECTORY":"/tmp"}}""", "not an allowed variable")]
     [InlineData("""{"image":"agentcontrol-worker-base","containerEnv":{"TZ":"$(id)"}}""", "must not contain variable or command substitution")]
@@ -167,6 +168,8 @@ public sealed class ContainerProfileDefinitionTests
     [InlineData("FROM --platform=linux/amd64 agentcontrol-worker-base\n", "FROM must be exactly")]
     [InlineData("FROM agentcontrol-worker-base\nFROM agentcontrol-worker-base\n", "only one FROM")]
     [InlineData("FROM agentcontrol-worker-base\nUSER root\n", "'USER' is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nENV PYTHONPATH=/opt/evil\n", "'ENV' is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nENV PATH=/evil:$PATH\n", "'ENV' is not allowed")]
     [InlineData("FROM agentcontrol-worker-base\nENTRYPOINT [\"/bin/sh\"]\n", "'ENTRYPOINT' is not allowed")]
     [InlineData("FROM agentcontrol-worker-base\nCMD [\"/bin/sh\"]\n", "'CMD' is not allowed")]
     [InlineData("FROM agentcontrol-worker-base\nVOLUME /data\n", "'VOLUME' is not allowed")]
@@ -184,8 +187,8 @@ public sealed class ContainerProfileDefinitionTests
     [InlineData("FROM agentcontrol-worker-base\nRUN ls /var/run/docker.sock\n", "Docker socket")]
     [InlineData("FROM agentcontrol-worker-base\nWORKDIR /\n", "WORKDIR must stay under /workspace")]
     [InlineData("FROM agentcontrol-worker-base\nWORKDIR /workspaces\n", "WORKDIR must stay under /workspace")]
-    [InlineData("FROM agentcontrol-worker-base\nENV PATH=/evil\n", "replacing PATH is not allowed")]
-    [InlineData("FROM agentcontrol-worker-base\nENV PATH /evil\n", "replacing PATH is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nENV PATH=/evil\n", "'ENV' is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nENV PATH /evil\n", "'ENV' is not allowed")]
     [InlineData("# syntax=docker/dockerfile:1\nFROM agentcontrol-worker-base\n", "parser directives are not allowed")]
     [InlineData("# escape=`\nFROM agentcontrol-worker-base\n", "parser directives are not allowed")]
     [InlineData("FROM agentcontrol-worker-base\nRUN true \\\n", "ends inside a line continuation")]
@@ -214,7 +217,7 @@ public sealed class ContainerProfileDefinitionTests
     [InlineData("FROM agentcontrol-worker-base\nUS\\\nER root\n", "'USER' is not allowed")]
     [InlineData("FROM agentcontrol-worker-base\nENTRY\\\nPOINT [\"/bin/sh\"]\n", "'ENTRYPOINT' is not allowed")]
     [InlineData("FROM agentcontrol-worker-base\nWORKDIR /work\\\nspaces\n", "WORKDIR must stay under /workspace")]
-    [InlineData("FROM agentcontrol-worker-base\nENV PA\\\nTH=/evil\n", "replacing PATH is not allowed")]
+    [InlineData("FROM agentcontrol-worker-base\nENV PA\\\nTH=/evil\n", "'ENV' is not allowed")]
     [InlineData("FROM \\\nubuntu\n", "FROM must be exactly")]
     [InlineData("FROM agentcontrol-worker-base \\\nAS stage\n", "FROM must be exactly")]
     public void HazardsSplitAcrossContinuationsAreSeenAsTheJoinedInstruction(string fragment, string expected)

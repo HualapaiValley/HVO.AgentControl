@@ -61,6 +61,12 @@ public sealed class OrientationTests
         Assert.Contains("No worker runtime exists yet", artifact.Content, StringComparison.Ordinal);
         Assert.Contains("Do not perform code work", artifact.Content, StringComparison.Ordinal);
         Assert.Contains("Prefer plain informational answers", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("# Standing Facts\n\nCopy these exact values verbatim for orientation comprehension.\n\n```json\n", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"identity\":\"" + OrganizationSeed.AdoptedEmployeeDisplayName + "\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"department\":\"Operations\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"reporting\":\"owner\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"escalation\":\"escalate uncertainty, failed controls, suspected secret exposure, and irreversible effects before retrying\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"no secrets or controller-private state\"", artifact.Content, StringComparison.Ordinal);
     }
 
     [Fact]

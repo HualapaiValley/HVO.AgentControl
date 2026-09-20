@@ -882,6 +882,14 @@ body {
     }
 }
 
+.employee-rebuild { margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.employee-rebuild .panel-form { margin: 12px 0; }
+.employee-rebuild fieldset { display: flex; flex-wrap: wrap; gap: 12px; border: 1px solid var(--line); border-radius: 7px; padding: 12px; }
+.employee-rebuild fieldset label { display: flex; align-items: center; gap: 7px; }
+.employee-rebuild fieldset input { width: auto; }
+.profile-update-note { color: var(--amber); }
+.rebuild-failure { color: var(--red); overflow-wrap: anywhere; }
+
 .orientation-actions {
     display: flex;
     flex-wrap: wrap;
@@ -963,6 +971,10 @@ input, textarea, select { width: 100%; padding: 10px 11px; border: 1px solid var
 .request-card[data-profile-status="retired"] { opacity: 0.7; }
 .profile-definition { margin: 10px 0 0; padding: 12px; max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: #09101a; color: var(--ink); font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .profile-detail .panel-form { margin: 18px 0; }
+.build-list { margin-top: 10px; display: grid; gap: 4px; }
+.build-list p { margin: 0; font-size: 13px; color: var(--ink-dim); overflow-wrap: anywhere; }
+.build-list p[data-build-state="built"] { color: var(--ink); }
+.build-list p[data-build-state="rejected"], .build-list p[data-build-state="failed"] { color: var(--red); }
 .profile-detail textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 .panel-form textarea[name="definition"] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 .system-forms { display: grid; gap: 18px; }

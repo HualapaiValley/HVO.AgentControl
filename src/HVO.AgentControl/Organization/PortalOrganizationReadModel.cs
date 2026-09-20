@@ -46,6 +46,26 @@ public sealed record EmployeeRuntimeDetail(
 
 public sealed record WorkerPermissionsProjection(bool Supported, IReadOnlyList<WorkerPendingPermissionRecord> Items, string Reason);
 
+/// <summary>
+/// The owner-facing profile revision status appended to one employee detail. All
+/// fields are null/false for a non-managed employee or the internal seed
+/// employee, which has no managed enrollment resources.
+/// </summary>
+public sealed record EmployeeProfileStatusDetail(
+    string? CurrentProfileId,
+    string? CurrentProfileDisplayName,
+    string? CurrentProfileRevisionId,
+    int? CurrentRevisionNumber,
+    string? CurrentImageDigest,
+    string? CurrentPlatform,
+    string? WorkerId,
+    string? HostId,
+    bool NewerRevisionAvailable,
+    string? NewerRevisionId,
+    int? NewerRevisionNumber,
+    string? ActiveRebuildState,
+    string? ActiveRebuildId);
+
 public sealed record PortalEmployeeDetail(
     string Id,
     string Slug,
@@ -61,12 +81,14 @@ public sealed record PortalEmployeeDetail(
     string Instructions,
     string Rules,
     string Restrictions,
+    int Revision,
     string Availability,
     EmployeeRuntimeDetail Runtime,
     OrientationStatus? Orientation,
     TerminalDescriptor Terminal,
     WorkerPermissionsProjection PendingWorkerPermissions,
-    UnsupportedFeature RecentLogs);
+    UnsupportedFeature RecentLogs,
+    EmployeeProfileStatusDetail ProfileStatus);
 
 public sealed record OwnerAttentionItem(
     string EmployeeId,
@@ -141,14 +163,15 @@ public static class PortalOrganizationReadModel
         OrganizationRuntimeIdentity? identity,
         ControlStatus status,
         IRemoteWorkerStatusProvider? remoteProvider = null,
-        IReadOnlyList<HireRequestSummary>? hireRequests = null)
+        IReadOnlyList<HireRequestSummary>? hireRequests = null,
+        OrganizationStore? store = null)
     {
         ArgumentNullException.ThrowIfNull(overview);
         ArgumentNullException.ThrowIfNull(status);
 
         var remote = remoteProvider?.Snapshot(overview) ?? new Dictionary<string, RemoteWorkerSnapshot>(StringComparer.Ordinal);
         var employees = overview.Employees
-            .Select(employee => BuildEmployee(employee, identity, status, remote.GetValueOrDefault(employee.Id)))
+            .Select(employee => BuildEmployee(employee, identity, status, remote.GetValueOrDefault(employee.Id), store))
             .ToArray();
         var departments = overview.Departments
             .Select(department => new PortalDepartmentSummary(
@@ -186,7 +209,7 @@ public static class PortalOrganizationReadModel
                 Supported: true,
                 Count: (hireRequests ?? []).Count(request => request.State == HireRequestStates.Requested),
                 Items: (hireRequests ?? []).Where(request => request.State == HireRequestStates.Requested).Cast<object>().ToArray(),
-                Reason: "Hire requests can be requested or rejected. Approval requires a verified container profile build (#259) and lands with #260; the #217 two-host dependency is satisfied and no request auto-creates an employee."),
+                Reason: "Hire requests can be requested, approved or rejected. Approval selects a verified container profile revision build on a ready host, requires WorkerControl enabled with a usable configuration and resources within the controller ceilings, and creates the managed employee identity and runtime binding, then durably queues provisioning and orientation to Ready as background work."),
             new PendingApprovalsSummary(
                 Supported: employees.Any(x => x.PendingWorkerPermissions.Supported),
                 Count: employees.Sum(x => x.PendingWorkerPermissions.Items.Count),
@@ -200,12 +223,13 @@ public static class PortalOrganizationReadModel
         OrganizationRuntimeIdentity? identity,
         ControlStatus status,
         string employeeId,
-        IRemoteWorkerStatusProvider? remoteProvider = null)
+        IRemoteWorkerStatusProvider? remoteProvider = null,
+        OrganizationStore? store = null)
     {
         var employee = overview.Employees.SingleOrDefault(item => item.Id == employeeId);
         if (employee is null) return null;
         var remote = remoteProvider?.Snapshot(overview).GetValueOrDefault(employeeId);
-        return BuildEmployee(employee, identity, status, remote);
+        return BuildEmployee(employee, identity, status, remote, store);
     }
 
     /// <summary>
@@ -219,7 +243,8 @@ public static class PortalOrganizationReadModel
         OrganizationRuntimeIdentity? identity,
         ControlStatus status,
         string departmentId,
-        IRemoteWorkerStatusProvider? remoteProvider = null)
+        IRemoteWorkerStatusProvider? remoteProvider = null,
+        OrganizationStore? store = null)
     {
         ArgumentNullException.ThrowIfNull(overview);
         ArgumentNullException.ThrowIfNull(status);
@@ -230,7 +255,7 @@ public static class PortalOrganizationReadModel
         var remote = remoteProvider?.Snapshot(overview) ?? new Dictionary<string, RemoteWorkerSnapshot>(StringComparer.Ordinal);
         var employees = overview.Employees
             .Where(employee => employee.DepartmentId == departmentId)
-            .Select(employee => BuildEmployee(employee, identity, status, remote.GetValueOrDefault(employee.Id)))
+            .Select(employee => BuildEmployee(employee, identity, status, remote.GetValueOrDefault(employee.Id), store))
             .ToArray();
         var roles = overview.Roles
             .Where(role => role.DepartmentId == departmentId)
@@ -315,7 +340,8 @@ public static class PortalOrganizationReadModel
         EmployeeSummary employee,
         OrganizationRuntimeIdentity? identity,
         ControlStatus status,
-        RemoteWorkerSnapshot? remote)
+        RemoteWorkerSnapshot? remote,
+        OrganizationStore? store)
     {
         var hostOwned = identity is not null
             && string.Equals(employee.Id, identity.EmployeeId, StringComparison.Ordinal)
@@ -353,6 +379,7 @@ public static class PortalOrganizationReadModel
             employee.Instructions,
             employee.Rules,
             employee.Restrictions,
+            employee.Revision,
             availability,
             new EmployeeRuntimeDetail(
                 employee.RuntimeBindingId,
@@ -379,8 +406,54 @@ public static class PortalOrganizationReadModel
                 Reason: remoteOwned ? "Reject-only worker permission decisions use the authoritative stored projection." : "Internal runtime pending approvals remain a separate unsupported feature."),
             new UnsupportedFeature(
                 Supported: false,
-                Reason: "Recent runtime logs are not exposed because a safe employee-scoped log contract is not implemented."));
+                Reason: "Recent runtime logs are not exposed because a safe employee-scoped log contract is not implemented."),
+            BuildProfileStatus(store, employee.Id));
     }
+
+    /// <summary>
+    /// The profile revision status for one employee, or an all-null projection
+    /// when the store is unavailable or the employee is not a managed employee
+    /// (including the internal seed employee). Never throws for a non-managed
+    /// employee and never mutates anything.
+    /// </summary>
+    private static EmployeeProfileStatusDetail BuildProfileStatus(OrganizationStore? store, string employeeId)
+    {
+        if (store is null) return EmptyProfileStatus();
+        var status = store.GetEmployeeProfileStatus(employeeId);
+        return status is null
+            ? EmptyProfileStatus()
+            : ToProfileStatusDetail(status);
+    }
+
+    public static EmployeeProfileStatusDetail ToProfileStatusDetail(EmployeeProfileStatus status) => new(
+        status.CurrentProfileId,
+        status.CurrentProfileDisplayName,
+        status.CurrentProfileRevisionId,
+        status.CurrentRevisionNumber,
+        status.CurrentImageDigest,
+        status.CurrentPlatform,
+        status.WorkerId,
+        status.HostId,
+        status.NewerRevisionAvailable,
+        status.NewerRevisionId,
+        status.NewerRevisionNumber,
+        status.ActiveRebuild?.State,
+        status.ActiveRebuild?.Id);
+
+    private static EmployeeProfileStatusDetail EmptyProfileStatus() => new(
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        NewerRevisionAvailable: false,
+        null,
+        null,
+        null,
+        null);
 
     private static string ClassifyRemote(RemoteWorkerSnapshot remote) => remote.LifecycleStatus switch
     {

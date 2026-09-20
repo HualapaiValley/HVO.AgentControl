@@ -320,7 +320,7 @@ app.MapPost("/api/execution-hosts/{id}/probe", async (HttpContext context, AcpCo
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 })
     .WithName("ProbeExecutionHost").WithTags("Remote workers")
-    .WithSummary("Runs the fixed approved-host capability probe only when WorkerControl is explicitly enabled.");
+    .WithSummary("Runs the fixed execution-target capability probe only when WorkerControl is explicitly enabled.");
 
 app.MapPost("/api/execution-hosts/{id}/disable", (HttpContext context, AcpControlHost control, ExecutionHostRegistry registry, string id, DisableExecutionHostRequest request) =>
 {
@@ -343,7 +343,7 @@ app.MapPost("/api/workers/enroll/plan", async (HttpContext context, AcpControlHo
 {
     if (Program.RejectCrossOrigin(context, "Worker enrollment planning") is { } rejection) return rejection;
     if (control.Organization is null) return Program.WorkerStoreUnavailable();
-    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, context.RequestAborted)); }
+    try { return Results.Ok(await coordinator.PlanAsync(request.RuntimeBindingId, request.HostId, request.ImageDigest, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("PlanRemoteWorkerEnrollment").WithTags("Remote workers");
 
@@ -355,11 +355,11 @@ app.MapPost("/api/workers/{workerId}/enroll/apply", async (HttpContext context, 
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("ApplyRemoteWorkerEnrollment").WithTags("Remote workers");
 
-app.MapPost("/api/workers/{workerId}/cleanup", async (HttpContext context, AcpControlHost control, RemoteWorkerProvisioningCoordinator coordinator, string workerId) =>
+app.MapPost("/api/workers/{workerId}/cleanup", async (HttpContext context, AcpControlHost control, HVO.AgentControl.RemoteWorker.CleanupCoordinator cleanup, string workerId) =>
 {
     if (Program.RejectCrossOrigin(context, "Worker cleanup") is { } rejection) return rejection;
     if (control.Organization is null) return Program.WorkerStoreUnavailable();
-    try { await coordinator.CleanupAsync(workerId, context.RequestAborted); return Results.Ok(); }
+    try { await cleanup.CleanupFailedProvisioningAsync(workerId, context.RequestAborted); return Results.Ok(); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("CleanupRemoteWorker").WithTags("Remote workers");
 
@@ -483,7 +483,8 @@ app.MapGet("/api/organization/portal", (AcpControlHost host, HVO.AgentControl.Re
             host.OrganizationIdentity,
             host.GetStatus(),
             remoteWorkers,
-            store.ListHireRequests());
+            store.ListHireRequests(),
+            store);
         return Results.Ok(result);
     }
     catch (HVO.AgentControl.Organization.OrganizationStoreException)
@@ -527,7 +528,8 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
             host.OrganizationIdentity,
             host.GetStatus(),
             id,
-            remoteWorkers);
+            remoteWorkers,
+            store);
         return employee is null
             ? Results.Problem(
                 statusCode: StatusCodes.Status404NotFound,
@@ -550,6 +552,222 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Rebuilds run synchronously after BeginEmployeeRebuild commits the durable
+// intent. The coordinator is bounded, idempotent and resumable; a second hosted
+// queue would add another recovery path without making the intent more durable.
+app.MapPost("/api/employees/{id}/rebuild", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, HVO.AgentControl.Organization.EmployeeRebuildRequest request) =>
+{
+    if (!Program.IsValidEmployeeId(id))
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: "A bounded stable employee id is required.");
+    if (request.ExpectedRevision < 1 || !Program.IsValidContainerProfileRevisionId(request.TargetProfileRevisionId))
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: "The current employee revision and a bounded target profile revision id are required.");
+    if (Program.RejectCrossOrigin(context, "Employee rebuild") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so no employee rebuild was recorded.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no employee rebuild was recorded.");
+
+    try
+    {
+        var employee = store.GetOverview().Employees.SingleOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal));
+        if (employee is null) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee not found.");
+        if (employee.Revision != request.ExpectedRevision)
+            return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: "The employee changed; reload and retry with its current revision.");
+        var profile = store.GetEmployeeProfileStatus(id);
+        if (profile is null)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: "Only a managed employee with enrollment resources can be rebuilt.");
+
+        var rebuild = await coordinator.RebuildAsync(id, request.TargetProfileRevisionId!, request.ResetWorkspace, request.ResetHome, request.ResetConfirmation, context.RequestAborted);
+        var updated = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The rebuilt employee profile status is missing.");
+        return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(rebuild, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(updated)));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild target.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: $"Reconcile the open '{exception.Kind}' recovery obligation before retrying.");
+    }
+    catch (Exception exception) when (Program.IsEmployeeRebuildEffectUncertain(exception))
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: "The durable rebuild intent has an uncertain remote effect. Reconcile or resume it before starting another rebuild.");
+    }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("RebuildEmployee").WithTags("Organization")
+    .WithSummary("Synchronously drives one revision-bound owner rebuild after durably recording its intent. Workspace and home are preserved unless the exact reset confirmation is supplied; uncertain effects require recovery.")
+    .Produces<HVO.AgentControl.Organization.EmployeeRebuildResponse>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/employees/{id}/rebuilds", (AcpControlHost host, string id) =>
+{
+    if (!Program.IsValidEmployeeId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee id.", detail: "A bounded stable employee id is required.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        if (!store.GetOverview().Employees.Any(item => string.Equals(item.Id, id, StringComparison.Ordinal)))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee not found.");
+        var status = store.GetEmployeeProfileStatus(id);
+        return Results.Ok(status?.WorkerId is { } workerId ? store.ListEmployeeRebuilds(workerId) : []);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Employee rebuild history unavailable.");
+    }
+})
+    .WithName("ListEmployeeRebuilds").WithTags("Organization")
+    .WithSummary("Lists the durable rebuild history for one employee, newest first.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.EmployeeRebuildRecord>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Resumes one durable rebuild from wherever it lies, including an Intent or
+// Uncertain row a previous process left behind. This is the recovery trigger the
+// employee page offers when a rebuild did not reach a terminal state.
+app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/resume", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, string rebuildId) =>
+{
+    if (!Program.IsValidEmployeeId(id) || !Program.IsValidEmployeeRebuildId(rebuildId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee rebuild.", detail: "A bounded stable employee and rebuild id are required.");
+    if (Program.RejectCrossOrigin(context, "Employee rebuild resume") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not resumed.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not resumed.");
+    try
+    {
+        var rebuild = store.GetEmployeeRebuild(rebuildId);
+        if (rebuild is null || !string.Equals(rebuild.EmployeeId, id, StringComparison.Ordinal))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+        var result = await coordinator.ResumeAsync(rebuildId, context.RequestAborted);
+        var resumedStatus = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The resumed employee profile status is missing.");
+        return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(result.Rebuild, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(resumedStatus)));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: $"Reconcile the open '{exception.Kind}' recovery obligation before retrying.");
+    }
+    catch (Exception exception) when (Program.IsEmployeeRebuildEffectUncertain(exception))
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: "The durable rebuild intent has an uncertain remote effect. Reconcile or resume it before starting another rebuild.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlDisabledException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not resumed.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not resumed.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status502BadGateway, title: "Employee rebuild transport failed.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Employee rebuild unavailable.");
+    }
+})
+    .WithName("ResumeEmployeeRebuild").WithTags("Organization")
+    .WithSummary("Resumes one durable employee rebuild from Intent, Holding, Replacing, Verifying or Uncertain and drives it toward Applied or a sanitized terminal outcome.")
+    .Produces<HVO.AgentControl.Organization.EmployeeRebuildResponse>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Owner-explicit abandonment of a rebuild that cannot complete. It records a
+// sanitized Failed outcome and releases the rebuild hold, restoring any owner
+// hold that predated it, so an employee is never stranded behind a hold no one
+// can clear. It never touches a container or volume.
+app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/abandon", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, string rebuildId) =>
+{
+    if (!Program.IsValidEmployeeId(id) || !Program.IsValidEmployeeRebuildId(rebuildId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee rebuild.", detail: "A bounded stable employee and rebuild id are required.");
+    if (Program.RejectCrossOrigin(context, "Employee rebuild abandon") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not abandoned.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not abandoned.");
+    try
+    {
+        var rebuild = store.GetEmployeeRebuild(rebuildId);
+        if (rebuild is null || !string.Equals(rebuild.EmployeeId, id, StringComparison.Ordinal))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+        var abandoned = coordinator.AbandonAsync(rebuildId, "owner-abandoned-rebuild");
+        var abandonedStatus = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The abandoned employee profile status is missing.");
+        return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(abandoned, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(abandonedStatus)));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlDisabledException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not abandoned.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not abandoned.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Employee rebuild unavailable.");
+    }
+})
+    .WithName("AbandonEmployeeRebuild").WithTags("Organization")
+    .WithSummary("Records a sanitized Failed outcome for one non-terminal employee rebuild and releases its dispatch hold, restoring any owner hold that predated it. Never touches a container or volume.")
+    .Produces<HVO.AgentControl.Organization.EmployeeRebuildResponse>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapGet("/api/departments/{id}", (AcpControlHost host, IRemoteWorkerStatusProvider remoteWorkers, string id) =>
@@ -578,7 +796,8 @@ app.MapGet("/api/departments/{id}", (AcpControlHost host, IRemoteWorkerStatusPro
             host.OrganizationIdentity,
             host.GetStatus(),
             id,
-            remoteWorkers);
+            remoteWorkers,
+            store);
         return department is null
             ? Results.Problem(
                 statusCode: StatusCodes.Status404NotFound,
@@ -698,6 +917,77 @@ app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHo
     }
 })
     .WithName("RejectHireRequest").WithTags("Hiring")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Owner approval is the durable freeze of one hire against one verified profile
+// build. It creates the managed employee and runtime binding from that freeze,
+// commits the request to Provisioning, then queues the idempotent local managed workflow.
+// Worker control must be
+// enabled with a usable configuration because the frozen selection is only
+// meaningful when the controller can actually consume it, and the requested
+// resources must sit inside the controller-wide ceilings.
+app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlHost host, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, HVO.AgentControl.RemoteWorker.HireProvisioningHostedService provisioning, string id, HVO.AgentControl.Organization.HireRequestApprove request) =>
+{
+    if (!Program.IsValidHireRequestId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request id.", detail: "A bounded stable hire request id is required.");
+    if (Program.RejectCrossOrigin(context, "Hire request approval") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no approval was recorded.");
+    try
+    {
+        var current = store.GetHireRequest(id);
+        if (current is null)
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+        if (current.CpuLimit > workerOptions.CpuLimit)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested CPU limit exceeds the controller ceiling.");
+        if ((long)current.MemoryLimitMiB * 1024 * 1024 > workerOptions.MemoryBytes)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested memory limit exceeds the controller ceiling.");
+        if (current.PidsLimit > workerOptions.PidsLimit)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: "The requested PID limit exceeds the controller ceiling.");
+        // The approval identity is host-derived, never taken from the request
+        // body, so a caller cannot assert an arbitrary owner identity.
+        var approved = store.ApproveHireRequest(id, request, Program.HireApprovalIdentity);
+        store.CreateManagedEmployeeFromHire(approved.Id);
+        var queued = store.GetHireRequest(approved.Id) ?? approved;
+        if (queued.State == HVO.AgentControl.Organization.HireRequestStates.Approved)
+            queued = store.TransitionHireRequestState(approved.Id, queued.Revision, HVO.AgentControl.Organization.HireRequestStates.Approved, HVO.AgentControl.Organization.HireRequestStates.Provisioning, "Provisioning queued from owner approval.");
+        if (queued.State is HVO.AgentControl.Organization.HireRequestStates.Provisioning
+            or HVO.AgentControl.Organization.HireRequestStates.Orienting
+            or HVO.AgentControl.Organization.HireRequestStates.Interrupted
+            or HVO.AgentControl.Organization.HireRequestStates.Uncertain)
+            provisioning.Queue(approved.Id);
+        return Results.Ok(queued);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request approval.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request approval conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Hire request unavailable.");
+    }
+})
+    .WithName("ApproveHireRequest").WithTags("Hiring")
+    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build on the controller-local Docker target.")
     .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
@@ -865,6 +1155,92 @@ app.MapPost("/api/profiles/{id}/retire", (HttpContext context, AcpControlHost ho
     .WithName("RetireContainerProfile").WithTags("Profiles")
     .WithSummary("Retires a profile so it cannot receive new revisions or be selected for new approvals. Existing revisions remain readable.")
     .Produces<HVO.AgentControl.Organization.ContainerProfileSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/profiles/{id}/revisions/{revisionId}/builds", (AcpControlHost host, string id, string revisionId) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile or revision id.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        return Results.Ok(store.ListProfileBuilds(revisionId));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException) { return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Profile builds unavailable."); }
+})
+    .WithName("ListProfileBuilds").WithTags("Profiles")
+    .WithSummary("Lists the per-host image builds of one immutable profile revision, newest first.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.ProfileBuildRecord>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.ProfileBuildCoordinator builds, string id, string revisionId, HVO.AgentControl.Organization.ProfileBuildRequest request) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile or revision id.");
+    if (Program.RejectCrossOrigin(context, "Profile image build") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        // Queue returns the verified build if one exists, else the live row (new,
+        // uncertain or interrupted); running a live row resumes or reconciles it.
+        var queued = builds.Queue(revisionId, request.HostId);
+        var result = HVO.AgentControl.Organization.ProfileBuildStates.IsLive(queued.State)
+            ? await builds.RunAsync(queued.Id, context.RequestAborted)
+            : queued;
+        return Results.Ok(result);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception) { return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid profile build.", detail: exception.Message); }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException) { return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found."); }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception) { return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Profile build conflicted.", detail: exception.Message); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("BuildProfileRevision").WithTags("Profiles")
+    .WithSummary("Builds and verifies the revision's image on one approved, ready execution host and records the result; called again for an uncertain or interrupted build it reconciles by tag instead of rebuilding. A verified digest joins that host's approved set; nothing is provisioned.")
+    .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds/{buildId}/remove", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.CleanupCoordinator cleanup, string id, string revisionId, string buildId, CancellationToken cancellationToken) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId) || !Program.IsValidProfileBuildId(buildId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile, revision or build id.");
+    if (Program.RejectCrossOrigin(context, "Profile build removal") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        var build = store.GetProfileBuild(buildId);
+        if (build is null || !string.Equals(build.ProfileRevisionId, revisionId, StringComparison.Ordinal))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Profile build not found.");
+        return Results.Ok(await cleanup.CleanupProfileBuildAsync(buildId, "owner", cancellationToken));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception) { return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Profile build removal is invalid.", detail: exception.Message); }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException) { return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Profile build not found."); }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception) { return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Profile build removal conflicted.", detail: exception.Message); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("RemoveProfileBuild").WithTags("Profiles")
+    .WithSummary("Removes the result tag and image of one failed or rejected profile build. Refuses an image an enrollment, frozen approval or active/applied rebuild still uses, and refuses a live, built or uncertain build; an uncertain transport leaves the build unremoved for a safe retry.")
+    .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status403Forbidden)
@@ -1562,6 +1938,13 @@ public partial class Program
     public const int MaximumContainerProfileIdLength = 64;
 
     /// <summary>
+    /// Fixed owner-approval identity recorded with every owner approval. It is
+    /// host-derived and deliberately not taken from the request body, so a caller
+    /// cannot assert an arbitrary owner identity into the immutable approval.
+    /// </summary>
+    public const string HireApprovalIdentity = "owner-basic-auth";
+
+    /// <summary>
     /// Exact, stable scope label reported by <c>/api/info</c> for the worker-control
     /// capability that <see cref="InfoResponse.WorkerControlImplemented"/> and
     /// <see cref="InfoResponse.WorkerControlOperationallyValidated"/> describe. It
@@ -1796,6 +2179,15 @@ public partial class Program
     /// translate into the single RFC 9457 error contract. Used as an exception
     /// filter so unexpected failures still reach the sanitized 500 handler.
     /// </summary>
+    internal static bool IsEmployeeRebuildEffectUncertain(Exception exception) => exception is
+        HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException
+        or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException
+        or HVO.AgentControl.Worker.WorkerOperationUncertainException
+        or IOException
+        or ObjectDisposedException
+        or HVO.AgentControl.RemoteWorker.WorkerRemoteException { Code: "worker-operation-uncertain" }
+        or HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException { Transport: true };
+
     public static bool IsRemoteWorkerFailure(Exception exception) =>
         exception is HVO.AgentControl.Organization.OrganizationStoreException
             or HVO.AgentControl.RemoteWorker.RemoteWorkerException
@@ -1849,18 +2241,18 @@ public partial class Program
             title: "Remote worker record not found."),
         HVO.AgentControl.RemoteWorker.WorkerControlDisabledException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
-            title: "Remote worker control is disabled.",
-            detail: "Worker control is switched off, so no host operation was executed."),
+            title: "Worker control is disabled.",
+            detail: "Worker control is switched off, so no execution-target operation was executed."),
         HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
-            title: "Remote worker configuration is invalid.",
-            detail: "Worker control is enabled but its configuration is not usable, so no host operation was executed."),
+            title: "Worker control configuration is invalid.",
+            detail: "Worker control is enabled but its configuration is not usable, so no execution-target operation was executed."),
         HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException unavailable => Results.Problem(
             statusCode: unavailable.Transport ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable,
-            title: unavailable.Transport ? "Remote worker host is unreachable." : "Remote worker host is unavailable.",
+            title: unavailable.Transport ? "Worker execution target is unreachable." : "Worker execution target is unavailable.",
             detail: unavailable.Transport
-                ? "The fixed connector could not reach the approved host."
-                : "The approved host did not return a usable result."),
+                ? "The fixed transport could not reach the execution target."
+                : "The execution target did not return a usable result."),
         HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException => Results.Problem(
             statusCode: StatusCodes.Status502BadGateway,
             title: "Remote worker reconciliation is invalid",
@@ -1974,6 +2366,17 @@ public partial class Program
     public static bool IsValidContainerProfileId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfilePrefix, MaximumContainerProfileIdLength);
 
+    public static bool IsValidContainerProfileRevisionId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfileRevisionPrefix, MaximumContainerProfileIdLength);
+
+    /// <summary>Validates the bounded stable ID used by profile build routes.</summary>
+    public static bool IsValidProfileBuildId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ProfileBuildPrefix, MaximumContainerProfileIdLength);
+
+    /// <summary>Validates the bounded stable ID used by employee rebuild routes.</summary>
+    public static bool IsValidEmployeeRebuildId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.RebuildPrefix, MaximumContainerProfileIdLength);
+
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > maximumLength)
@@ -2024,7 +2427,7 @@ public partial class Program
     }
 }
 
-public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId);
+public sealed record WorkerEnrollPlanRequest(string RuntimeBindingId, string HostId, string? ImageDigest = null);
 public sealed record WorkerPromptRequest(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt);
 public sealed record WorkerRecoveryRequest(string ObligationId, int ExpectedRevision);
 public sealed record WorkerRecoveryAcknowledgementRequest(int ExpectedRevision, string EvidenceHash, string Disposition);

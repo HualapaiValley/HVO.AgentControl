@@ -65,10 +65,10 @@ public static class RemoteWorkerApi
     /// </summary>
     public static TheoryData<Exception, int, string> TypedFailures => new()
     {
-        { new HVO.AgentControl.RemoteWorker.WorkerControlDisabledException(SecretDetail), 409, "Remote worker control is disabled." },
-        { new HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException(SecretDetail), 409, "Remote worker configuration is invalid." },
-        { new HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException(SecretDetail, transport: true), 502, "Remote worker host is unreachable." },
-        { new HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException(SecretDetail), 503, "Remote worker host is unavailable." },
+        { new HVO.AgentControl.RemoteWorker.WorkerControlDisabledException(SecretDetail), 409, "Worker control is disabled." },
+        { new HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException(SecretDetail), 409, "Worker control configuration is invalid." },
+        { new HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException(SecretDetail, transport: true), 502, "Worker execution target is unreachable." },
+        { new HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException(SecretDetail), 503, "Worker execution target is unavailable." },
         { new HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException(SecretDetail), 502, "Remote worker reconciliation is invalid" },
         { new HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException(SecretDetail, "replay-gap"), 409, "Remote worker recovery is required." },
         { new HVO.AgentControl.RemoteWorker.ForeignResourceException(SecretDetail), 409, "Remote resource is not owned by this controller." },

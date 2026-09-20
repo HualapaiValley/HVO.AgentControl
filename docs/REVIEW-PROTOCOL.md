@@ -91,6 +91,8 @@ operator account; they remain valid records for the heads they reviewed.
 
 Each round posts one parent review summary. Every finding from that review is one resolvable child review thread. The parent indexes the child IDs and links; it does not duplicate all evidence.
 
+**Keep the parent short.** It is a header plus an index: range, one line per verified claim (what was checked and how, not prose), the findings table (ID, severity, one-line summary, status) and the verdict. Finding bodies, reproductions and suggested fixes live only in the thread. A correction parent is shorter still: one status line per prior finding and the index of any new threads. A parent that restates its threads is a defect in the review, not thoroughness.
+
 Finding IDs are stable across the PR: `F1`, `F2`, and so on. New correction-round findings receive the next unused ID. A finding thread contains:
 
 - finding ID and severity;
@@ -188,6 +190,25 @@ Disposition: resolved.
 Correction review covers the previous reviewed head to the current head, the interactions introduced by that delta, and every unresolved finding. It must disposition every prior finding. Omitted findings remain open.
 
 The parent correction review indexes existing finding threads instead of recreating them. New findings get new child threads.
+
+```markdown
+## Review (correction)
+
+Review ID: `PR-123-R1-def5678`
+Mode: `Correction`
+Reviewed range: `abc1234..def5678`
+Reviewer: `<identity>`
+
+| ID | Status |
+| --- | --- |
+| F1 | VERIFIED_CORRECTED |
+| F2 | STILL_OPEN |
+| F3 | new — OPEN |
+
+Verdict: `APPROVE | CHANGES_REQUIRED | BLOCKED`
+```
+
+The `VERIFIED_*` reasoning goes in each finding's thread (via `reply-thread`), not in the parent.
 
 ## Convergence
 
