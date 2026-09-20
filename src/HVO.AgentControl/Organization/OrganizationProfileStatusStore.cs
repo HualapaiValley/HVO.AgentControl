@@ -57,12 +57,18 @@ public sealed partial class OrganizationStore
             command.CommandText =
                 """
                 SELECT b.id, w.worker_id,
-                       m.approved_profile_revision_id, m.approved_image_digest, m.approved_host_id, m.platform,
+                       COALESCE(er.to_profile_revision_id, m.approved_profile_revision_id),
+                       COALESCE(er.to_image_digest, m.approved_image_digest),
+                       m.approved_host_id, COALESCE(er.to_platform, m.platform),
                        r.profile_id, r.revision_number, p.display_name, p.current_revision_number
                 FROM runtime_bindings b
                 JOIN managed_enrollment_resources m ON m.runtime_binding_id = b.id
                 LEFT JOIN worker_enrollments w ON w.runtime_binding_id = b.id
-                LEFT JOIN container_profile_revisions r ON r.id = m.approved_profile_revision_id
+                LEFT JOIN employee_rebuilds er ON er.id = (
+                    SELECT applied.id FROM employee_rebuilds applied
+                    WHERE applied.runtime_binding_id = b.id AND applied.state = 'Applied'
+                    ORDER BY applied.updated_at DESC, applied.id DESC LIMIT 1)
+                LEFT JOIN container_profile_revisions r ON r.id = COALESCE(er.to_profile_revision_id, m.approved_profile_revision_id)
                 LEFT JOIN container_profiles p ON p.id = r.profile_id
                 WHERE b.employee_id = $employee
                 ORDER BY b.id

@@ -182,7 +182,12 @@ public sealed partial class OrganizationStore
                         JOIN worker_enrollments w
                           ON w.worker_id = $worker AND w.runtime_binding_id = b.id AND w.host_id = $host AND w.enabled = 1
                         WHERE e.id = $employee
-                          AND w.expected_image_digest = $fromDigest
+                          AND COALESCE((
+                              SELECT applied.to_image_digest
+                              FROM employee_rebuilds applied
+                              WHERE applied.worker_id = w.worker_id AND applied.state = 'Applied'
+                              ORDER BY applied.updated_at DESC, applied.id DESC LIMIT 1),
+                              w.expected_image_digest) = $fromDigest
                           AND w.ownership_epoch = $epoch
                         """;
                     consistency.Parameters.AddWithValue("$binding", request.RuntimeBindingId);

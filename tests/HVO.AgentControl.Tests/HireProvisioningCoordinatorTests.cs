@@ -23,6 +23,7 @@ public sealed class HireProvisioningCoordinatorTests
     private const string BaseDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111";
     private const string BuiltDigest = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222";
     private const string ContextHash = "sha256:" + "3333333333333333333333333333333333333333333333333333333333333333";
+    private const string RebuildDigest = "sha256:" + "4444444444444444444444444444444444444444444444444444444444444444";
 
     [Fact]
     public async Task ReplaceRemovesAndRecreatesTheExactOwnedContainerAndLoadsTheAuthoritativeSession()
@@ -246,6 +247,140 @@ public sealed class HireProvisioningCoordinatorTests
         Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
     }
 
+    [Fact]
+    public async Task EmployeeRebuildUsesNewVerifiedDigestPreservesVolumesAndSessionAndClearsHold()
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "rebuild");
+        var effectsBefore = fixture.Provisioner.Effects.Count;
+
+        var result = await fixture.RebuildCoordinator.RebuildAsync(fixture.EmployeeId, target.Id, false, false, null, CancellationToken.None);
+
+        Assert.Equal(EmployeeRebuildStates.Applied, result.State);
+        Assert.NotNull(result.EvidenceHash);
+        Assert.True(result.OwnershipEpochAfter > result.OwnershipEpochBefore);
+        var created = fixture.Provisioner.Containers.Last();
+        Assert.Equal(RebuildDigest, created.ImageDigest);
+        Assert.Equal(target.Id, created.Identity.ProfileRevisionId);
+        Assert.Equal([enrollment.ControlVolumeName, enrollment.HomeVolumeName, enrollment.WorkspaceVolumeName, enrollment.SessionVolumeName], created.Volumes.Select(x => x.Name).ToArray());
+        Assert.DoesNotContain(fixture.Provisioner.Effects.Skip(effectsBefore), x => x.StartsWith("remove-volume:", StringComparison.Ordinal));
+        Assert.Equal(fixture.NativeSessionId, fixture.Process.LoadedSessionId);
+        Assert.False(fixture.ManualHoldActive());
+        Assert.Equal(BuiltDigest, fixture.Store.GetWorkerEnrollment(enrollment.WorkerId)!.ExpectedImageDigest);
+        Assert.Equal(RebuildDigest, fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!.CurrentImageDigest);
+    }
+
+    [Theory]
+    [InlineData(true, false, OrganizationStore.EmployeeRebuildResetConfirmation.Workspace)]
+    [InlineData(false, true, OrganizationStore.EmployeeRebuildResetConfirmation.Home)]
+    public async Task EmployeeRebuildResetsOnlyTheConfirmedVolume(bool resetWorkspace, bool resetHome, string confirmation)
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "reset");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var result = await fixture.RebuildCoordinator.RebuildAsync(fixture.EmployeeId, target.Id, resetWorkspace, resetHome, confirmation, CancellationToken.None);
+
+        Assert.Equal(EmployeeRebuildStates.Applied, result.State);
+        var effects = fixture.Provisioner.Effects.Skip(before).ToArray();
+        var expected = resetWorkspace ? enrollment.WorkspaceVolumeName : enrollment.HomeVolumeName;
+        var untouched = resetWorkspace ? enrollment.HomeVolumeName : enrollment.WorkspaceVolumeName;
+        Assert.Contains("remove-volume:" + expected, effects);
+        Assert.Contains("volume:" + expected, effects);
+        Assert.DoesNotContain("remove-volume:" + untouched, effects);
+        Assert.DoesNotContain("remove-volume:" + enrollment.ControlVolumeName, effects);
+        Assert.DoesNotContain("remove-volume:" + enrollment.SessionVolumeName, effects);
+    }
+
+    [Fact]
+    public async Task EmployeeRebuildRefusesMissingResetConfirmationBeforeRemoteEffects()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "confirmation");
+        var before = fixture.Provisioner.Effects.Count;
+
+        await Assert.ThrowsAsync<OrganizationValidationException>(() =>
+            fixture.RebuildCoordinator.RebuildAsync(fixture.EmployeeId, target.Id, true, false, null, CancellationToken.None));
+
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+        Assert.Empty(fixture.Store.ListEmployeeRebuilds());
+    }
+
+    [Fact]
+    public async Task EmployeeRebuildRefusesSameRevisionAndCrossProfileWithoutRemoteEffects()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var before = fixture.Provisioner.Effects.Count;
+        var current = fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!;
+
+        await Assert.ThrowsAsync<OrganizationValidationException>(() =>
+            fixture.RebuildCoordinator.RebuildAsync(fixture.EmployeeId, current.CurrentProfileRevisionId, false, false, null, CancellationToken.None));
+
+        var other = fixture.CreateOtherProfileVerifiedRevision(RebuildDigest);
+        await Assert.ThrowsAsync<OrganizationValidationException>(() =>
+            fixture.RebuildCoordinator.RebuildAsync(fixture.EmployeeId, other.Id, false, false, null, CancellationToken.None));
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task EmployeeRebuildForeignContainerFailsClosedAndRetainsHoldAsUncertain()
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "foreign");
+        fixture.Provisioner.OwnerOverride = "another-owner";
+
+        await Assert.ThrowsAsync<ForeignResourceException>(() =>
+            fixture.RebuildCoordinator.RebuildAsync(fixture.EmployeeId, target.Id, false, false, null, CancellationToken.None));
+
+        var rebuild = Assert.Single(fixture.Store.ListEmployeeRebuilds(enrollment.WorkerId));
+        Assert.Equal(EmployeeRebuildStates.Uncertain, rebuild.State);
+        Assert.True(fixture.ManualHoldActive());
+        Assert.DoesNotContain(fixture.Provisioner.Effects, x => x == "remove-container:" + enrollment.ContainerName);
+    }
+
+    [Fact]
+    public async Task EmployeeRebuildStartupReconciliationAppliesRunningTargetOrLeavesAbsenceUncertain()
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "restart");
+        var intent = fixture.BeginRebuild(target.Id, RebuildDigest);
+        fixture.Store.SetManualDispatchHold(fixture.EmployeeId, true, "rebuild " + intent.Id);
+        var holding = fixture.Store.TransitionEmployeeRebuild(intent.Id, intent.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
+        var replacing = fixture.Store.TransitionEmployeeRebuild(intent.Id, holding.Revision, EmployeeRebuildStates.Holding, EmployeeRebuildStates.Replacing);
+        await fixture.Provisioning.ReplaceContainerAsync(enrollment.WorkerId, new(RebuildDigest, "linux/amd64", target.Id), CancellationToken.None);
+
+        var reconciled = await fixture.RebuildCoordinator.ReconcileInterruptedOnStartup();
+        Assert.Contains(replacing.Id, reconciled);
+        Assert.Equal(EmployeeRebuildStates.Applied, fixture.Store.GetEmployeeRebuild(replacing.Id)!.State);
+        Assert.False(fixture.ManualHoldActive());
+
+        using var absentFixture = new Fixture();
+        var absentEnrollment = await absentFixture.EnrollAsync();
+        await absentFixture.MakeOrientationReadyAsync();
+        var absentTarget = absentFixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "absent");
+        var absent = absentFixture.BeginRebuild(absentTarget.Id, RebuildDigest);
+        absentFixture.Store.SetManualDispatchHold(absentFixture.EmployeeId, true, "rebuild " + absent.Id);
+        var absentHolding = absentFixture.Store.TransitionEmployeeRebuild(absent.Id, absent.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
+        absentFixture.Store.TransitionEmployeeRebuild(absent.Id, absentHolding.Revision, EmployeeRebuildStates.Holding, EmployeeRebuildStates.Replacing);
+        absentFixture.Provisioner.SimulateAbsentContainer(absentEnrollment.ContainerName);
+
+        await absentFixture.RebuildCoordinator.ReconcileInterruptedOnStartup();
+        Assert.Equal(EmployeeRebuildStates.Uncertain, absentFixture.Store.GetEmployeeRebuild(absent.Id)!.State);
+        Assert.True(absentFixture.ManualHoldActive());
+    }
+
     // ---------------------------------------------------------------- fixture
 
     private sealed class Fixture : IDisposable
@@ -279,6 +414,7 @@ public sealed class HireProvisioningCoordinatorTests
         public RemoteWorkerProvisioningCoordinator Provisioning { get; }
         public RemoteOrientationCoordinator Orientation { get; }
         public HireProvisioningCoordinator Coordinator => new(_control, Provisioning, Orientation, Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<HireProvisioningCoordinator>.Instance);
+        public EmployeeRebuildCoordinator RebuildCoordinator => new(_control, Provisioning, new FixedFactory(VerificationSession), Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<EmployeeRebuildCoordinator>.Instance);
         public string NativeSessionId { get; } = "native-managed";
         public string HireId { get; private set; } = string.Empty;
         public string EmployeeId { get; private set; } = string.Empty;
@@ -338,6 +474,70 @@ public sealed class HireProvisioningCoordinatorTests
             Store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner");
             EmployeeId = Store.CreateManagedEmployeeFromHire(hire.Id).EmployeeId;
             OrientationSession.Comprehension = BuildComprehension;
+        }
+
+        public async Task MakeOrientationReadyAsync()
+        {
+            try
+            {
+                if (Store.GetOrientationStatus(EmployeeId).Ready) return;
+            }
+            catch (OrganizationNotFoundException)
+            {
+                // The focused rebuild fixture has provisioned the worker but has
+                // not run the hire coordinator's orientation phase yet.
+            }
+            var artifact = Store.ComposeAndAssignCurrentOrientation(EmployeeId);
+            var sessionId = artifact.SessionId ?? throw new InvalidOperationException("Fixture orientation has no native session.");
+            Store.MarkOrientationDelivered(artifact.AssignmentId, artifact.OrientationVersion, sessionId, artifact.AssignmentRevision, Process.ProcessGeneration);
+            Store.ConfirmOrientationLoaded(EmployeeId, artifact.AssignmentId, artifact.OrientationVersion, sessionId, Process.ProcessGeneration);
+            var record = BuildComprehension(artifact.AssignmentId);
+            var statusAfterLoad = Store.GetOrientationStatus(EmployeeId);
+            Store.ValidateAndRecordComprehension(new OrientationEvidenceRequest(
+                record.AssignmentId, record.EmployeeId, record.SessionId, record.OrientationVersion,
+                record.Identity, record.Department, record.Reporting, record.Duties, record.Restrictions, record.Escalation,
+                statusAfterLoad.Revision), OrientationEvidenceSource.LiveModel);
+            await Task.CompletedTask;
+        }
+
+        public ContainerProfileRevisionSummary CreateVerifiedRevision(string digest, string platform, string suffix)
+        {
+            var profile = Store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
+            var revision = Store.CreateContainerProfileRevision(profile.Id, new ContainerProfileRevisionCreate(
+                Store.GetContainerProfile(profile.Id)!.Profile.Revision,
+                JsonSerializer.Serialize(new { image = "agentcontrol-worker-base", name = suffix, containerEnv = new Dictionary<string, string> { ["EDITOR"] = suffix } }),
+                null));
+            BuildVerified(revision.Id, digest, platform, "agentcontrol-profile:" + suffix);
+            return revision;
+        }
+
+        public ContainerProfileRevisionSummary CreateOtherProfileVerifiedRevision(string digest)
+        {
+            var profile = Store.CreateContainerProfile(new ContainerProfileCreate(Guid.NewGuid().ToString("N"), "other-profile", "Other profile", "Cross-profile test.", """{"image":"agentcontrol-worker-base","name":"Other"}""", null), null);
+            var revision = Store.GetContainerProfile(profile.Id)!.Revisions.Single();
+            BuildVerified(revision.Id, digest, "linux/amd64", "agentcontrol-profile:other");
+            return revision;
+        }
+
+        public EmployeeRebuildRecord BeginRebuild(string targetRevisionId, string targetDigest)
+        {
+            var status = Store.GetEmployeeProfileStatus(EmployeeId)!;
+            var enrollment = Store.GetWorkerEnrollment(status.WorkerId!)!;
+            var build = Store.GetVerifiedProfileBuild(targetRevisionId, enrollment.HostId)!;
+            return Store.BeginEmployeeRebuild(new(
+                EmployeeId, status.RuntimeBindingId, enrollment.WorkerId, enrollment.HostId,
+                status.CurrentProfileRevisionId, status.CurrentImageDigest, status.CurrentRevisionNumber,
+                targetRevisionId, build.Id, targetDigest, build.Platform, false, false, null, enrollment.OwnershipEpoch));
+        }
+
+        public bool ManualHoldActive() => Raw("SELECT CAST(COUNT(*) AS TEXT) FROM dispatch_holds WHERE runtime_binding_id='" + BindingId + "' AND reason='manual' AND active=1;") != "0";
+
+        private ProfileBuildRecord BuildVerified(string revisionId, string digest, string platform, string tag)
+        {
+            var queued = Store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, BaseDigest, platform, ContextHash, tag);
+            var building = Store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+            var verifying = Store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+            return Store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: digest, verified: true, evidenceHash: ContextHash);
         }
 
         /// <summary>

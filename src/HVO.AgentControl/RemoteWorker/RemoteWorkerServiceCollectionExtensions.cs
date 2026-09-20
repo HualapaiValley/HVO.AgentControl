@@ -25,6 +25,7 @@ public static class RemoteWorkerServiceCollectionExtensions
         services.AddSingleton<RemoteWorkerProvisioningCoordinator>();
         services.AddSingleton<RemoteOrientationCoordinator>();
         services.AddSingleton<HireProvisioningCoordinator>();
+        services.AddSingleton<EmployeeRebuildCoordinator>();
         services.AddSingleton<HireProvisioningHostedService>();
         services.AddHostedService(static services => services.GetRequiredService<HireProvisioningHostedService>());
         services.AddSingleton<IRemoteWorkerStatusProvider, RemoteWorkerStatusProvider>();
