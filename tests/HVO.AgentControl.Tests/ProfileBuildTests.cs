@@ -616,6 +616,17 @@ public sealed class ProfileBuildTests : IDisposable
         public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken cancellationToken)
+        {
+            RemoveRequests.Add(imageReference);
+            if (RemovalTransportLoss) return Task.FromResult(new RemoteOperationResult(255, "", "transport"));
+            if (ImageMissing) return Task.FromResult(new RemoteOperationResult(1, "", "not-found"));
+            return Task.FromResult(new RemoteOperationResult(0, imageReference + "\n", "none"));
+        }
+
+        public List<string> RemoveRequests { get; } = [];
+        public bool RemovalTransportLoss { get; set; }
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 

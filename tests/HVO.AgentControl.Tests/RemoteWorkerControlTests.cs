@@ -73,14 +73,16 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public void FreshSchemaIsV11AndCarriesRemoteWorkerHiringProfileBuildAndApprovalTablesWithoutSeededEnrollment()
+    public void FreshSchemaIsV12AndCarriesRemoteWorkerHiringProfileBuildApprovalAndEmployeeRebuildTablesWithoutSeededEnrollment()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(11L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
-        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "hire_request_approvals", "managed_enrollment_resources", "container_profiles", "container_profile_revisions", "profile_builds" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
+        Assert.Equal(12L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "hire_request_approvals", "managed_enrollment_resources", "container_profiles", "container_profile_revisions", "profile_builds", "employee_rebuilds", "profile_build_removals" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
+        Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM employee_rebuilds")));
+        Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM profile_build_removals")));
         // The reserved controller-local Docker row is seeded by a fresh create.
         Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM execution_hosts WHERE id='{ExecutionHosts.LocalDockerId}' AND slug='{ExecutionHosts.LocalDockerSlug}' AND transport_kind='local-docker' AND endpoint_host IS NULL AND endpoint_port IS NULL AND endpoint_user IS NULL AND known_hosts_path IS NULL AND os='linux' AND capability_status='unprobed' AND enabled=1 AND enrolled=0 AND status='registered'")));
     }
@@ -92,8 +94,8 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var trigger in new[] { "hire_request_approvals_frozen_immutable", "hire_request_approvals_no_delete", "hire_request_approvals_no_replace", "managed_enrollment_resources_frozen_immutable", "managed_enrollment_resources_no_delete", "managed_enrollment_resources_no_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
-            foreach (var table in new[] { "hire_request_approvals", "managed_enrollment_resources" }) connection.Execute($"DROP TABLE {table}");
+            foreach (var trigger in new[] { "hire_request_approvals_frozen_immutable", "hire_request_approvals_no_delete", "hire_request_approvals_no_replace", "managed_enrollment_resources_frozen_immutable", "managed_enrollment_resources_no_delete", "managed_enrollment_resources_no_replace", "employee_rebuilds_identity_immutable", "employee_rebuilds_no_delete", "employee_rebuilds_no_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
+            foreach (var table in new[] { "profile_build_removals", "hire_request_approvals", "managed_enrollment_resources", "employee_rebuilds" }) connection.Execute($"DROP TABLE {table}");
             foreach (var index in new[] { "one_active_profile_build_per_revision_host", "one_verified_profile_build_per_revision_host" }) connection.Execute($"DROP INDEX {index}");
             foreach (var trigger in new[] { "profile_builds_identity_immutable", "profile_builds_no_delete", "profile_builds_no_replace", "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
             foreach (var table in new[] { "profile_builds", "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
@@ -2189,6 +2191,7 @@ public sealed class RemoteWorkerControlTests
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ContainerCreate, [specification.Name], null, cancellationToken);
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.Bootstrap, [specification.ControlVolumeName], standardInput, cancellationToken);
         public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageBuild, [specification.ResultTag], contextTar, cancellationToken);
+        public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageRemove, [imageReference], null, cancellationToken);
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) { Calls.Add($"{name}:{target.Id}:Probe"); return Task.FromResult(new HostProbePayload("{}", "{}", "/var/lib/docker", 0)); }
     }
 
@@ -2208,6 +2211,7 @@ public sealed class RemoteWorkerControlTests
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
@@ -2430,6 +2434,8 @@ public sealed class RemoteWorkerControlTests
         public Task StopAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("stop:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "stopped"; return Task.CompletedTask; }
         public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
         public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token) { Targets.Add(host); Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
+        public Task RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken token) { Targets.Add(host); Effects.Add("remove-image:" + imageReference); return Task.CompletedTask; }
+        public Task<string?> InspectImageAsync(ExecutionTarget host, string imageReference, CancellationToken token) { Targets.Add(host); return Task.FromResult(imageReference.StartsWith("sha256:", StringComparison.Ordinal) ? imageReference : null); }
 
         public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, "present"); }
         public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running"); }

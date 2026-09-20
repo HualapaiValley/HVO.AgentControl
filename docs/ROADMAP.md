@@ -9,7 +9,7 @@ Status reflects the active code, not the standalone POC.
    portal, owner Basic auth, embedded terminal, one owned OpenCode ACP runtime,
    loopback native HTTP, and an authoritative SQLite organization/session store
    at `/control-data/control.db` (with `runtime.json` retained as evidence).
-3. **Durable controller — partial:** schema v10 preserves organization/session
+3. **Durable controller — partial:** schema v12 preserves organization/session
    and #213 policy identity and adds remote host/enrollment, cursor, task/request,
    provisioning/resource and recovery-obligation records with exact-signature
    chained migration and verified v3–v9 backups. Durable hire request creation
@@ -35,8 +35,13 @@ Status reflects the active code, not the standalone POC.
    helper; manually operated remote Docker workers reached by controller-initiated
    pinned SSH + `docker exec`, never created by hiring; and future manually
    enrolled standalone workers that connect outbound, which are **not
-   implemented** (no listener or enrollment protocol). #261 (data-preserving
-   rebuild) remains. The schema
+   implemented** (no listener or enrollment protocol). #261 adds the explicit
+   data-preserving rebuild: an owner-only, same-origin, employee-revision-bound
+   action selects a newer verified same-profile build, preserves workspace/home
+   by default, requires exact typed confirmation for resets, and synchronously
+   drives a durable single-flight, dispatch-held, epoch-fenced staged operation.
+   It never auto-adopts a profile revision. No live rebuild has run on a
+   deployment host, and `home-docker` remains on `802eb6f` / schema v9. The schema
    also has a sanitized deduplicated controller event inbox, conditional
    request/cancellation/provisioning transitions, exact recovery markers and
    restart reconciliation. The first managed disposable two-host path was

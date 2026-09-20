@@ -146,6 +146,19 @@ public sealed partial class OrganizationStore
                 var live = existing.FirstOrDefault(b => ProfileBuildStates.IsLive(b.State));
                 if (live is not null) { transaction.Commit(); return live; }
 
+                // A tag claimed for removal is in flight: a new build must not reuse
+                // it until the claim finalizes, or a cleanup could detach the new
+                // image.
+                using (var claimed = connection.CreateCommand())
+                {
+                    claimed.Transaction = transaction;
+                    claimed.CommandText = "SELECT EXISTS(SELECT 1 FROM profile_build_removals WHERE host_id = $host AND result_tag = $tag)";
+                    claimed.Parameters.AddWithValue("$host", hostId);
+                    claimed.Parameters.AddWithValue("$tag", resultTag);
+                    if (Convert.ToInt64(claimed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+                        throw new OrganizationConcurrencyException("The result tag is claimed for removal; reconcile that cleanup before building it again.");
+                }
+
                 var id = OrganizationIds.NewProfileBuildId();
                 var now = Timestamp();
                 Execute(connection, transaction,
@@ -188,6 +201,16 @@ public sealed partial class OrganizationStore
                 if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
                 if (!ProfileBuildStates.CanTransition(current.State, toState)) throw new OrganizationConcurrencyException($"A profile build cannot move from {current.State} to {toState}.");
                 if (toState == ProfileBuildStates.Built && imageDigest is null) throw new OrganizationValidationException("A built image needs its digest.");
+                if (toState == ProfileBuildStates.Built)
+                {
+                    using var claimed = connection.CreateCommand();
+                    claimed.Transaction = transaction;
+                    claimed.CommandText = "SELECT EXISTS(SELECT 1 FROM profile_build_removals WHERE host_id = $host AND result_tag = $tag)";
+                    claimed.Parameters.AddWithValue("$host", current.HostId);
+                    claimed.Parameters.AddWithValue("$tag", current.ResultTag);
+                    if (Convert.ToInt64(claimed.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+                        throw new OrganizationConcurrencyException("The result tag is claimed for removal; the build cannot become verified until that cleanup is reconciled.");
+                }
                 if (verified && (toState != ProfileBuildStates.Built || evidenceHash is null)) throw new OrganizationValidationException("Verification requires a built image and its evidence hash.");
                 var now = Timestamp();
                 var affected = Execute(connection, transaction,
@@ -208,6 +231,333 @@ public sealed partial class OrganizationStore
                 return ReadBuilds(connection, null, null, null, id).Single();
             }
         });
+    }
+
+    /// <summary>
+    /// Explicit scoped cleanup of one non-verified build. Only a <c>failed</c> or
+    /// <c>rejected</c> build can be removed: a <c>queued</c>/<c>building</c>/
+    /// <c>verifying</c> build is still live, a <c>built</c>/verified image is
+    /// provisionable, and an <c>uncertain</c> row must be reconciled first so an
+    /// image that was actually produced is never orphaned. The transition is
+    /// revision-bound and records the acting owner; the requested evidence hash is
+    /// preserved. Identity columns and the no-delete guard are unchanged: removal
+    /// is a state, never a row deletion.
+    /// </summary>
+    public ProfileBuildRecord TransitionProfileBuildToRemoved(string id, int expectedRevision, string requestedBy, string? evidenceHash = null)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ProfileBuildPrefix) || expectedRevision < 1) throw new OrganizationValidationException("A stable profile build id and current revision are required.");
+        if (!string.Equals(requestedBy, "owner", StringComparison.Ordinal)) throw new OrganizationValidationException("Only the owner may remove a failed profile build.");
+        if (evidenceHash is not null && !IsHash(evidenceHash)) throw new OrganizationValidationException("Evidence hash must be an exact sha256 value.");
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadBuilds(connection, transaction, null, null, id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Profile build '{id}' does not exist.");
+                if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
+                if (!ProfileBuildStates.CanTransition(current.State, ProfileBuildStates.Removed))
+                    throw new OrganizationConcurrencyException($"A profile build cannot move from {current.State} to {ProfileBuildStates.Removed}; only failed or rejected builds may be removed.");
+                var now = Timestamp();
+                var affected = Execute(connection, transaction,
+                    """
+                    UPDATE profile_builds
+                    SET state = $state, evidence_hash = COALESCE($evidence, evidence_hash),
+                        finished_at = COALESCE(finished_at, $now),
+                        revision = revision + 1, updated_at = $now
+                    WHERE id = $id AND revision = $revision
+                    """,
+                    ("$state", ProfileBuildStates.Removed), ("$evidence", evidenceHash), ("$now", now), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1) throw new OrganizationConcurrencyException("The profile build changed before the transition.");
+                // A removed build must never leave a claim behind: nothing could
+                // release it afterwards and the (host, tag) pair would be wedged.
+                Execute(connection, transaction, "DELETE FROM profile_build_removals WHERE profile_build_id = $id", ("$id", id));
+                FoldRevisionBuildStatus(connection, transaction, current.ProfileRevisionId);
+                transaction.Commit();
+                return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Durably claims one failed/rejected build for image removal. The claim and
+    /// the guarding checks run in one transaction: the build must still be
+    /// failed/rejected, no other non-removed build on the host may share the result
+    /// tag, the build's recorded digest must not be in use, and no existing claim
+    /// may already hold the <c>(host, tag)</c> pair. The caller performs the remote
+    /// effect only after the claim succeeds and then finalizes or fails it. This is
+    /// what closes the preflight race: a concurrent build cannot reuse the tag
+    /// while the claim exists.
+    /// </summary>
+    public ProfileBuildRecord ClaimProfileBuildRemoval(string id, int expectedRevision, string requestedBy)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ProfileBuildPrefix) || expectedRevision < 1) throw new OrganizationValidationException("A stable profile build id and current revision are required.");
+        if (!string.Equals(requestedBy, "owner", StringComparison.Ordinal)) throw new OrganizationValidationException("Only the owner may remove a failed profile build.");
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadBuilds(connection, transaction, null, null, id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Profile build '{id}' does not exist.");
+                if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
+                if (current.State is not (ProfileBuildStates.Failed or ProfileBuildStates.Rejected))
+                    throw new OrganizationConcurrencyException($"A profile build in state {current.State} cannot be claimed for removal; only failed or rejected builds may be removed.");
+                if (current.ImageDigest is { } digest)
+                {
+                    var usage = ImageDigestUsageIn(connection, transaction, digest);
+                    if (usage.Count > 0)
+                        throw new OrganizationValidationException($"The build's image is still in use ({string.Join(", ", usage)}); it cannot be removed.");
+                }
+                using (var shared = connection.CreateCommand())
+                {
+                    shared.Transaction = transaction;
+                    shared.CommandText = "SELECT COUNT(*) FROM profile_builds WHERE host_id = $host AND result_tag = $tag AND id <> $id AND state <> 'removed'";
+                    shared.Parameters.AddWithValue("$host", current.HostId);
+                    shared.Parameters.AddWithValue("$tag", current.ResultTag);
+                    shared.Parameters.AddWithValue("$id", id);
+                    if (Convert.ToInt64(shared.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                        throw new OrganizationValidationException("Another non-removed build on this host shares the result tag; removing it could detach an image still in use.");
+                }
+
+                // A claim held by a different build for the same (host, tag) means a
+                // removal is genuinely in flight elsewhere; refuse. A claim held by
+                // THIS build is an idempotent re-claim: a previous attempt failed on
+                // transport and kept its claim, so a retry must be able to reuse it
+                // rather than deadlock forever.
+                using (var existingClaim = connection.CreateCommand())
+                {
+                    existingClaim.Transaction = transaction;
+                    existingClaim.CommandText = "SELECT profile_build_id FROM profile_build_removals WHERE host_id = $host AND result_tag = $tag";
+                    existingClaim.Parameters.AddWithValue("$host", current.HostId);
+                    existingClaim.Parameters.AddWithValue("$tag", current.ResultTag);
+                    if (existingClaim.ExecuteScalar() is string owner)
+                    {
+                        if (!string.Equals(owner, id, StringComparison.Ordinal))
+                            throw new OrganizationConcurrencyException("A removal is already claimed for this build's result tag by another build; reconcile it before retrying.");
+                        transaction.Commit();
+                        return current;
+                    }
+                }
+
+                var now = Timestamp();
+                using (var claim = connection.CreateCommand())
+                {
+                    claim.Transaction = transaction;
+                    claim.CommandText = "INSERT INTO profile_build_removals (profile_build_id, host_id, result_tag, requested_by, created_at, revision) VALUES ($id, $host, $tag, 'owner', $now, 1)";
+                    claim.Parameters.AddWithValue("$id", id);
+                    claim.Parameters.AddWithValue("$host", current.HostId);
+                    claim.Parameters.AddWithValue("$tag", current.ResultTag);
+                    claim.Parameters.AddWithValue("$now", now);
+                    try { claim.ExecuteNonQuery(); }
+                    catch (SqliteException exception) when (IsUniqueConstraint(exception))
+                    {
+                        throw new OrganizationConcurrencyException("A removal is already claimed for this build's result tag; reconcile it before retrying.");
+                    }
+                }
+
+                transaction.Commit();
+                return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Finalizes a claimed removal after the transport confirmed the effect. The
+    /// state change to <c>removed</c> and the claim release happen in one
+    /// transaction, so a crash cannot leave a build marked removed while its claim
+    /// still blocks the tag, or a released claim while the build stays failed.
+    /// </summary>
+    public ProfileBuildRecord FinalizeProfileBuildRemoval(string id, int expectedRevision, string requestedBy, string? evidenceHash = null)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ProfileBuildPrefix) || expectedRevision < 1) throw new OrganizationValidationException("A stable profile build id and current revision are required.");
+        if (!string.Equals(requestedBy, "owner", StringComparison.Ordinal)) throw new OrganizationValidationException("Only the owner may remove a failed profile build.");
+        if (evidenceHash is not null && !IsHash(evidenceHash)) throw new OrganizationValidationException("Evidence hash must be an exact sha256 value.");
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadBuilds(connection, transaction, null, null, id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Profile build '{id}' does not exist.");
+                if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
+                if (!ProfileBuildStates.CanTransition(current.State, ProfileBuildStates.Removed))
+                    throw new OrganizationConcurrencyException($"A profile build cannot move from {current.State} to {ProfileBuildStates.Removed}; only failed or rejected builds may be removed.");
+                var now = Timestamp();
+                var affected = Execute(connection, transaction,
+                    """
+                    UPDATE profile_builds
+                    SET state = $state, evidence_hash = COALESCE($evidence, evidence_hash),
+                        finished_at = COALESCE(finished_at, $now),
+                        revision = revision + 1, updated_at = $now
+                    WHERE id = $id AND revision = $revision
+                    """,
+                    ("$state", ProfileBuildStates.Removed), ("$evidence", evidenceHash), ("$now", now), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1) throw new OrganizationConcurrencyException("The profile build changed before the transition.");
+                Execute(connection, transaction, "DELETE FROM profile_build_removals WHERE profile_build_id = $id", ("$id", id));
+                FoldRevisionBuildStatus(connection, transaction, current.ProfileRevisionId);
+                transaction.Commit();
+                return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Releases a claimed removal without marking the build removed. The build stays
+    /// in its terminal failed/rejected state (only its sanitized reason is updated),
+    /// so a retry can re-claim it once the refusal is resolved. Returns the build.
+    /// </summary>
+    public ProfileBuildRecord FailProfileBuildRemoval(string id, int expectedRevision, string failureSummary)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ProfileBuildPrefix) || expectedRevision < 1) throw new OrganizationValidationException("A stable profile build id and current revision are required.");
+        var summary = ValidateOptionalBoundedText(failureSummary, 512);
+        var result = TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadBuilds(connection, transaction, null, null, id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Profile build '{id}' does not exist.");
+                if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
+                if (current.State is not (ProfileBuildStates.Failed or ProfileBuildStates.Rejected))
+                    throw new OrganizationConcurrencyException($"A profile build in state {current.State} cannot have its removal released.");
+                Execute(connection, transaction,
+                    "UPDATE profile_builds SET failure_summary = $summary, revision = revision + 1, updated_at = $now WHERE id = $id AND revision = $revision",
+                    ("$summary", summary), ("$now", Timestamp()), ("$id", id), ("$revision", expectedRevision));
+                Execute(connection, transaction, "DELETE FROM profile_build_removals WHERE profile_build_id = $id", ("$id", id));
+                transaction.Commit();
+                return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
+        return result;
+    }
+
+    /// <summary>True when the <c>(host, tag)</c> pair is claimed for removal, so a build may not reuse it.</summary>
+    public bool IsResultTagClaimedForRemoval(string hostId, string resultTag)
+    {
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT EXISTS(SELECT 1 FROM profile_build_removals WHERE host_id = $host AND result_tag = $tag)";
+                command.Parameters.AddWithValue("$host", hostId);
+                command.Parameters.AddWithValue("$tag", resultTag);
+                return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+            }
+        });
+    }
+
+    private static IReadOnlyList<string> ImageDigestUsageIn(SqliteConnection connection, SqliteTransaction transaction, string imageDigest)
+    {
+        var reasons = new List<string>();
+        static bool Exists(SqliteConnection c, SqliteTransaction tx, string sql, string digest)
+        {
+            using var command = c.CreateCommand();
+            command.Transaction = tx;
+            command.CommandText = sql;
+            command.Parameters.AddWithValue("$digest", digest);
+            return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+        }
+        if (Exists(connection, transaction, "SELECT EXISTS(SELECT 1 FROM worker_enrollments WHERE expected_image_digest = $digest)", imageDigest)) reasons.Add("enrollment");
+        if (Exists(connection, transaction, "SELECT EXISTS(SELECT 1 FROM managed_enrollment_resources WHERE approved_image_digest = $digest)", imageDigest)) reasons.Add("managed-enrollment");
+        if (Exists(connection, transaction, "SELECT EXISTS(SELECT 1 FROM employee_rebuilds WHERE (state IN ('Intent', 'Holding', 'Replacing', 'Verifying', 'Uncertain') OR state = 'Applied') AND (from_image_digest = $digest OR to_image_digest = $digest))", imageDigest)) reasons.Add("employee-rebuild");
+        return reasons;
+    }
+
+    /// <summary>
+    /// Builds whose image may be explicitly removed: <c>failed</c> or
+    /// <c>rejected</c> rows that have not already been <c>removed</c>. A live,
+    /// verified or uncertain build is never listed, so cleanup cannot select an
+    /// image that is still in use or whose result is unknown.
+    /// </summary>
+    public IReadOnlyList<ProfileBuildRecord> ListRemovableProfileBuilds(string? profileRevisionId = null, string? hostId = null)
+    {
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                return ReadBuilds(connection, null, profileRevisionId, hostId, null)
+                    .Where(b => b.State is ProfileBuildStates.Failed or ProfileBuildStates.Rejected).ToArray();
+            }
+        });
+    }
+
+    /// <summary>
+    /// The reason categories for which an image digest is still in use, or empty
+    /// when it is safe to remove. A digest is in use when an enrollment expects it,
+    /// a frozen managed approval pins it, or an active or applied employee rebuild
+    /// names it as either the source or the target. Only category names are
+    /// returned; no digest, worker, employee or secret is included, so a caller can
+    /// refuse cleanup without leaking which record holds it.
+    /// </summary>
+    public IReadOnlyList<string> ImageDigestUsage(string imageDigest)
+    {
+        if (!IsHash(imageDigest)) throw new OrganizationValidationException("Image digest must be an exact sha256 value.");
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                var reasons = new List<string>();
+                if (Exists(connection, "SELECT EXISTS(SELECT 1 FROM worker_enrollments WHERE expected_image_digest = $digest)", imageDigest)) reasons.Add("enrollment");
+                if (Exists(connection, "SELECT EXISTS(SELECT 1 FROM managed_enrollment_resources WHERE approved_image_digest = $digest)", imageDigest)) reasons.Add("managed-enrollment");
+                if (Exists(connection, "SELECT EXISTS(SELECT 1 FROM employee_rebuilds WHERE (state IN ('Intent', 'Holding', 'Replacing', 'Verifying', 'Uncertain') OR state = 'Applied') AND (from_image_digest = $digest OR to_image_digest = $digest))", imageDigest)) reasons.Add("employee-rebuild");
+                return (IReadOnlyList<string>)reasons;
+            }
+        });
+    }
+
+    /// <summary>
+    /// True when any build other than <paramref name="profileBuildId"/> that has not
+    /// already been <c>removed</c> shares the same <c>result_tag</c> on the same
+    /// host. The tag is derived from the revision and context, so a failed build and
+    /// a later verified build of the same revision/context share one tag; removing
+    /// that tag from the failed row would detach the image the verified row still
+    /// names. Cleanup must refuse in that case rather than guess.
+    /// </summary>
+    public bool IsResultTagShared(string profileBuildId, string hostId, string resultTag)
+    {
+        if (!IsBoundedIdentifier(profileBuildId, OrganizationIds.ProfileBuildPrefix) || string.IsNullOrEmpty(resultTag))
+            return true;
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT EXISTS(SELECT 1 FROM profile_builds WHERE host_id = $host AND result_tag = $tag AND id <> $id AND state <> 'removed')";
+                command.Parameters.AddWithValue("$host", hostId);
+                command.Parameters.AddWithValue("$tag", resultTag);
+                command.Parameters.AddWithValue("$id", profileBuildId);
+                return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+            }
+        });
+    }
+
+    private static bool Exists(SqliteConnection connection, string sql, string digest)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$digest", digest);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
     }
 
     /// <summary>

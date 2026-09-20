@@ -55,7 +55,16 @@ host input, and every Docker operation is executed by a privileged
 the Docker daemon socket nor a Docker CLI; the helper is the only service that
 mounts the daemon socket, publishes no ports, runs read-only with
 `cap_drop: ALL`, `no-new-privileges` and `init`, runs as uid 1002, and is the
-only writer of the helper-socket volume shared with control. Recorded in
+    only writer of the helper-socket volume shared with control. Control schema
+v12 adds durable single-flight managed-employee rebuild records. The owner-only,
+same-origin `POST /api/employees/{id}/rebuild` is employee-revision-bound,
+selects a newer verified revision of the same profile on the employee's host,
+preserves workspace and home by default, and requires the exact typed phrase for
+workspace, home, or combined reset. It records intent before effects, holds
+dispatch, fences application on a fresh ownership epoch, and returns recovery
+conflict for uncertain effects; profile revisions are never auto-adopted.
+Recorded in
+
 compose, `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST` and
 `AGENTCONTROL_DOCKER_GID` must be supplied for deployment; the helper fails
 closed while the approved digest is empty. Recording a profile,
@@ -63,8 +72,8 @@ building it, or approving a hire does **not** provision or orient a worker:
 approval leaves the request `Approved` and provisioning is a separate, resumable
 trigger that drives `Approved → Provisioning → Orienting → Ready`. The owner
 accepted the profile-based employee-creation design (epic #257); the explicit
-data-preserving rebuild (#261) is the remaining #219 slice. The #217 hermetic
-controller records are retained in the current schema-v11 store, including
+data-preserving rebuild (#261) is now implemented as code capability. The #217
+hermetic controller records are retained in the current schema-v12 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
@@ -99,7 +108,7 @@ permission handling covered `[once, always, reject]` and safe-reject
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
 control portal on `home-docker` currently runs `802eb6f` (schema v9; this branch's
-schema v10/v11 and the helper are not deployed there) and is irrelevant to worker
+schema v10/v11/v12 and the helper are not deployed there) and is irrelevant to worker
 flags except portal inspection.
 
 This path remains disabled by default. `/api/info` now reports
@@ -130,8 +139,9 @@ execution-host enrollment remains held by the owner, and `WorkerControl` remains
 disabled by default. Approval commits the request to `Provisioning` and queues
 the remote workflow durably; the work itself runs asynchronously and is resumed
 from persisted state after a restart, so a queued hire is never lost and never
-repeated. #261 (the data-preserving rebuild) and any termination/scheduling
-policy are out of scope.
+repeated. The #261 data-preserving rebuild is implemented and hermetically
+covered, but no live rebuild has run on a deployment host. Any
+termination/scheduling policy remains out of scope.
 
 The local managed path has additionally been exercised end to end on one
 development machine: a generic-employee profile build, a real container

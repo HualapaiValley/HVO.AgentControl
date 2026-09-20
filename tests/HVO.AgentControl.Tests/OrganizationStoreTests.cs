@@ -13,6 +13,10 @@ namespace HVO.AgentControl.Tests;
 /// </summary>
 public sealed class OrganizationStoreTests
 {
+    private const string V12BaseDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111";
+    private const string V12BuiltDigest = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222";
+    private const string V12ContextHash = "sha256:" + "3333333333333333333333333333333333333333333333333333333333333333";
+
     [Fact]
     public void FreshStoreSeedsExactlyTheApprovedBaseline()
     {
@@ -162,7 +166,7 @@ public sealed class OrganizationStoreTests
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
         Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -186,7 +190,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(obligation.Id, audit.ObligationId);
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_obligations'"), StringComparison.Ordinal);
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var v4Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
@@ -230,7 +234,7 @@ public sealed class OrganizationStoreTests
         using (var migrated = Open(root))
             migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupHashFileName);
@@ -307,7 +311,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -356,7 +360,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -492,7 +496,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -809,11 +813,11 @@ public sealed class OrganizationStoreTests
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Contains("unexpected table shape", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("current authoritative schema-v11 backup or source", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("No schema-v11 backup is created automatically", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("schema-v10 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("lose owner approvals recorded after migration", exception.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("Restore the verified schema-v10 backup", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("current authoritative schema-v12 backup or source", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("No schema-v12 backup is created automatically", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("schema-v11 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("lose employee-rebuild operations recorded after migration", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restore the verified schema-v11 backup", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1370,7 +1374,7 @@ public sealed class OrganizationStoreTests
             Assert.Empty(migrated.ListHireRequests());
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupHashFileName);
         Assert.True(File.Exists(backup));
@@ -1414,7 +1418,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("seed", Assert.Single(migrated.GetContainerProfile(profile.Id)!.Revisions).CreatedBy);
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM hire_request_events WHERE hire_request_id = '{hireId}';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'container_profile_revision_id';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_list('hire_requests') WHERE \"table\" = 'container_profile_revisions';"));
@@ -1456,7 +1460,7 @@ public sealed class OrganizationStoreTests
             Assert.Empty(migrated.ListProfileBuilds());
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_builds';"));
         Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'profile_builds%';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hire_request_approvals';"));
@@ -1491,7 +1495,7 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
-    public void ExactSchemaV9MigratesThroughV10ToV11WithVerifiedCreateOnceBackupsAndPreservesProfilesBuildsAndHires()
+    public void ExactSchemaV9MigratesThroughV10AndV11ToV12WithVerifiedCreateOnceBackupsAndPreservesProfilesBuildsAndHires()
     {
         using var root = new TempStore();
         string hireId;
@@ -1532,7 +1536,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(profileId, migrated.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug).Id);
         }
 
-        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'status_detail';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hire_request_approvals';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'managed_enrollment_resources';"));
@@ -1566,12 +1570,36 @@ public sealed class OrganizationStoreTests
         Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}' AND transport_kind = 'local-docker';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM execution_hosts WHERE id = 'host-a' AND transport_kind = 'ssh-docker';"));
 
+        // The v11 backup is the exact pre-v12 evidence: it carries the v11 host
+        // shape (local row plus ssh host) and none of the v12 rebuild objects.
+        var v11Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV11BackupFileName);
+        var v11Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV11BackupHashFileName);
+        Assert.True(File.Exists(v11Backup));
+        AssertNoBackupSidecars(v11Backup);
+        Assert.Equal(11, RawScalar(v11Backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(v11Backup, $"SELECT COUNT(*) FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}' AND transport_kind = 'local-docker';"));
+        Assert.Equal(1, RawScalar(v11Backup, "SELECT COUNT(*) FROM execution_hosts WHERE id = 'host-a';"));
+        Assert.Equal(0, RawScalar(v11Backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'employee_rebuilds';"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v11Backup))).ToLowerInvariant(), File.ReadAllText(v11Hash).Trim());
+
+        // The v12 migration is additive: the table, index and triggers exist and
+        // the preserved profile build is still exactly one built, verified row.
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'employee_rebuilds';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'one_active_employee_rebuild_per_worker';"));
+        Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'employee_rebuilds%';"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM employee_rebuilds;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_build_removals';"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM profile_build_removals;"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
+
         var retained = File.ReadAllBytes(backup);
         var retainedV10 = File.ReadAllBytes(v10Backup);
+        var retainedV11 = File.ReadAllBytes(v11Backup);
         using var restarted = Open(root);
         restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(retained, File.ReadAllBytes(backup));
         Assert.Equal(retainedV10, File.ReadAllBytes(v10Backup));
+        Assert.Equal(retainedV11, File.ReadAllBytes(v11Backup));
     }
 
     [Fact]
@@ -1585,6 +1613,117 @@ public sealed class OrganizationStoreTests
         Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Equal(9, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV9BackupFileName)));
+    }
+
+    [Fact]
+    public void FreshStoreIsSchemaV12WithEmployeeRebuildTable()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'employee_rebuilds';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'one_active_employee_rebuild_per_worker';"));
+        Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'employee_rebuilds%';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_build_removals';"));
+    }
+
+    [Fact]
+    public void ExactSchemaV11MigratesToV12WithVerifiedCreateOnceBackupAndPreservesApprovalsEnrollmentsBuildsAndHosts()
+    {
+        using var root = new TempStore();
+        string revisionId;
+        string buildId;
+        string hireId;
+        string employeeId;
+        string bindingId;
+        using (var store = Open(root))
+        {
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+
+            // A verified image build on the reserved controller-local target.
+            var localHost = store.GetExecutionHost(ExecutionHosts.LocalDockerId)!;
+            store.RecordLocalExecutionHostProbe(ExecutionHosts.LocalDockerId, localHost.Revision, new LocalExecutionHostProbe(
+                "29.0", "1.51", "x86_64", "overlay2", "ext4", false, 64L << 30, 16L << 30, 8, true, "linux/amd64", "valid"));
+            var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
+            revisionId = store.GetContainerProfile(profile.Id)!.Revisions.Single().Id;
+            var queued = store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, V12BaseDigest, "linux/amd64", V12ContextHash, "agentcontrol-profile:x");
+            var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+            var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+            buildId = store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: V12BuiltDigest, verified: true, evidenceHash: V12ContextHash).Id;
+
+            // An owner-approved managed hire and its employee/binding.
+            var overview = store.GetOverview();
+            var department = overview.Departments.Single(x => x.Slug == OrganizationSeed.OperationsSlug);
+            var role = Assert.Single(overview.Roles);
+            var hire = store.CreateHireRequest(new HireRequestCreate("v11-hire", "Kept V11 Hire", "Survives migration.", department.Id, role.Id, RuntimePlacements.DeveloperContainer, 2, 2048, 256), null);
+            hireId = hire.Id;
+            store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner");
+            var creation = store.CreateManagedEmployeeFromHire(hire.Id);
+            employeeId = creation.EmployeeId;
+            bindingId = creation.RuntimeBindingId;
+
+            // Both host shapes (ssh-docker and local-docker) are preserved.
+            store.RegisterExecutionHost("host-a", "host-a.example", 22, "roys", "/known", new ExecutionHostRegistration("host-a", "host-a", "Host A"));
+
+            // The managed worker enrollment a provisioning run would record.
+            SeedV11WorkerEnrollment(root.Path, bindingId, "wrk-v11", V12BuiltDigest);
+        }
+
+        DowngradeToCanonicalV11(root.Path);
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        var before = SnapshotCoreData(root.Path);
+
+        using (var migrated = Open(root))
+        {
+            migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+            Assert.Equal(before, SnapshotCoreData(root.Path));
+            Assert.NotNull(migrated.GetHireRequestApproval(hireId));
+            Assert.Equal(ProfileBuildStates.Built, migrated.GetProfileBuild(buildId)!.State);
+            Assert.True(migrated.GetProfileBuild(buildId)!.Verified);
+            Assert.Equal(employeeId, Assert.Single(migrated.GetOverview().Employees, e => e.Id == employeeId).Id);
+            Assert.Equal(bindingId, migrated.GetWorkerEnrollment("wrk-v11")!.RuntimeBindingId);
+            Assert.Equal("wrk-v11", migrated.GetWorkerEnrollment("wrk-v11")!.WorkerId);
+            Assert.Empty(migrated.ListEmployeeRebuilds());
+        }
+
+        Assert.Equal(12, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'employee_rebuilds';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM hire_request_approvals;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM worker_enrollments WHERE worker_id = 'wrk-v11';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM profile_builds WHERE id = '" + buildId + "' AND state = 'built' AND verified = 1;"));
+        Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}' AND transport_kind = 'local-docker';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM execution_hosts WHERE id = 'host-a' AND transport_kind = 'ssh-docker';"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
+
+        // The retained v11 evidence is verified and carries none of the v12 objects.
+        var v11Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV11BackupFileName);
+        var v11Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV11BackupHashFileName);
+        Assert.True(File.Exists(v11Backup));
+        AssertNoBackupSidecars(v11Backup);
+        Assert.Equal(11, RawScalar(v11Backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(0, RawScalar(v11Backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'employee_rebuilds';"));
+        Assert.Equal(1, RawScalar(v11Backup, "SELECT COUNT(*) FROM hire_request_approvals;"));
+        Assert.Equal(1, RawScalar(v11Backup, "SELECT COUNT(*) FROM profile_builds WHERE id = '" + buildId + "';"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v11Backup))).ToLowerInvariant(), File.ReadAllText(v11Hash).Trim());
+
+        var retained = File.ReadAllBytes(v11Backup);
+        using var restarted = Open(root);
+        restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(retained, File.ReadAllBytes(v11Backup));
+    }
+
+    [Fact]
+    public void UnknownSchemaV11ShapeFailsBeforeBackupOrMigration()
+    {
+        using var root = new TempStore();
+        using (var store = Open(root)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        DowngradeToCanonicalV11(root.Path);
+        ExecuteRaw(root.Path, "ALTER TABLE execution_hosts ADD COLUMN unknown_v11_value TEXT;");
+        using var reopened = Open(root);
+        Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.False(File.Exists(Path.Combine(root.Directory, OrganizationStore.SchemaV11BackupFileName)));
     }
 
     [Fact]
@@ -1791,14 +1930,38 @@ public sealed class OrganizationStoreTests
     /// downgrade runs this first so it never has to know about the v10 objects.
     /// </summary>
     /// <summary>
+    /// Removes the schema-v12 employee-rebuild table, index and triggers and
+    /// restores the version to 11. Every older canonical downgrade runs this
+    /// first, so the exact v11 signature is what the next rung consumes.
+    /// </summary>
+    private static void DowngradeToCanonicalV11(string path)
+    {
+        ExecuteRaw(
+            path,
+            """
+            PRAGMA foreign_keys = OFF;
+            DROP TABLE profile_build_removals;
+            DROP TRIGGER employee_rebuilds_identity_immutable;
+            DROP TRIGGER employee_rebuilds_no_delete;
+            DROP TRIGGER employee_rebuilds_no_replace;
+            DROP INDEX one_active_employee_rebuild_per_worker;
+            DROP TABLE employee_rebuilds;
+            UPDATE schema_version SET version = 11;
+            PRAGMA foreign_keys = ON;
+            """);
+    }
+
+    /// <summary>
     /// Restores the exact v10 <c>execution_hosts</c> shape (an ssh-docker-only
     /// CHECK with non-null endpoints) and removes the reserved controller-local
     /// Docker row, so every older canonical downgrade starts from v10. The
     /// replacement is built under a staging name and renamed into place so the
-    /// referencing foreign keys never point at a temporary name.
+    /// referencing foreign keys never point at a temporary name. The v12 objects
+    /// are removed first, so this works on a current store.
     /// </summary>
     private static void DowngradeToCanonicalV10(string path)
     {
+        DowngradeToCanonicalV11(path);
         var createV10 = OrganizationStore.ExecutionHostsSchemaV10StatementForTest
             .Replace("CREATE TABLE execution_hosts", "CREATE TABLE execution_hosts_v10", StringComparison.Ordinal);
         ExecuteRaw(
@@ -2071,6 +2234,25 @@ public sealed class OrganizationStoreTests
             FROM runtime_bindings b JOIN employees e ON e.id=b.employee_id LIMIT 1;
             INSERT INTO worker_recovery_obligations VALUES('rec-v4','wrk-v4','controller','ownership-changed','sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',1,7,0,NULL,NULL,'2026-09-16T00:00:00.0000000+00:00','2026-09-16T00:01:00.0000000+00:00',2);
             INSERT INTO worker_recovery_audit VALUES('audit-v4','rec-v4','wrk-v4','ownership-changed','sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd','sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee','acknowledged-after-external-reconciliation','2026-09-16T00:01:00.0000000+00:00');
+            """);
+    }
+
+    private static void SeedV11WorkerEnrollment(string path, string bindingId, string workerId, string expectedImageDigest)
+    {
+        var now = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        ExecuteRaw(
+            path,
+            $"""
+            INSERT INTO worker_enrollments (
+                worker_id, runtime_binding_id, host_id, organization_id,
+                container_name, control_volume_name, home_volume_name, workspace_volume_name, session_volume_name,
+                resource_labels_hash, expected_image_digest, expected_platform, controller_id, key_file_path, key_id,
+                bridge_socket_path, lifecycle_status, worker_generation, process_generation, ownership_epoch, enabled,
+                created_at, updated_at, revision)
+            VALUES ('{workerId}', '{bindingId}', '{ExecutionHosts.LocalDockerId}', (SELECT id FROM organizations LIMIT 1),
+                'container-{workerId}', 'control-{workerId}', 'home-{workerId}', 'workspace-{workerId}', 'session-{workerId}',
+                'sha256:{new string('a', 64)}', '{expectedImageDigest}', 'linux/amd64', 'controller-v11', '/control/key',
+                'sha256:{new string('c', 64)}', '/control/bridge.sock', 'planned', 0, 0, 0, 1, '{now}', '{now}', 1)
             """);
     }
 

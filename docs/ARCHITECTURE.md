@@ -41,9 +41,20 @@ from the `generation = 2` identity.
   `Approved` until it runs. **No live owner-approved hire has been executed on any
   host**, the `home-docker` execution-host enrollment is held by the owner, and
   `WorkerControl` is disabled by default, so this is not operationally validated
-  and is never represented as completed employee creation.
+   and is never represented as completed employee creation. The employee detail
+  read model also exposes the current profile revision/digest and a newer verified
+  target without acting. `POST /api/employees/{id}/rebuild` is owner-only,
+  same-origin and employee-revision-bound. It synchronously drives the bounded,
+  idempotent coordinator after durable intent creation, preserving workspace and
+  home unless the exact reset phrase is supplied. The rebuild is single-flight,
+  holds dispatch, applies only after a fresh ownership epoch, and leaves uncertain
+  effects recoverable rather than retrying blind. No live rebuild has run on a
+  deployment host.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
+  Schema v12 adds immutable durable employee rebuild intents and staged states;
+  schema v11 adds the constrained local/SSH execution-host transport kind.
   Schema v10 migrates only the exact released v9 signature after creating and
+
   verifying immutable `control.schema-v9.db` and SHA-256 evidence; it adds
   `hire_request_approvals` (the immutable owner freeze of one hire revision
   against one verified profile build) and `managed_enrollment_resources` (the
@@ -795,6 +806,7 @@ V1 is reference only. No V1 database migration or runtime compatibility is
 promised. V2 starts with new state and explicitly provisioned environments.
 The accepted path does not validate key rotation or compromise re-enrollment and
 does not authorize production managed hiring/provisioning. The #260 approval and
-managed-provisioning/orientation paths, and the #272 controller-local helper
-path, exist as tested code but have no live owner-approved hire evidence on any
-host.
+managed-provisioning/orientation paths, the #272 controller-local helper path,
+and the #261 data-preserving rebuild path exist as tested code but have no live
+owner-approved hire or rebuild evidence on any deployment host. `home-docker`
+remains on `802eb6f` / schema v9.

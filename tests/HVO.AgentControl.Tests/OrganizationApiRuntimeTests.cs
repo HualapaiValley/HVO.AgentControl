@@ -100,6 +100,17 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         Assert.False(detail.GetProperty("terminal").GetProperty("available").GetBoolean());
         Assert.DoesNotContain(_factory.Host.OrganizationIdentity.TmuxOwnerToken, detailBody, StringComparison.Ordinal);
         Assert.DoesNotContain("tmuxOwnerToken", detailBody, StringComparison.Ordinal);
+
+        // The additive profile-status projection is present and all-null for the
+        // internal seed employee, which is not a managed employee.
+        var profileStatus = detail.GetProperty("profileStatus");
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("currentProfileRevisionId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("currentRevisionNumber").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("currentImageDigest").ValueKind);
+        Assert.False(profileStatus.GetProperty("newerRevisionAvailable").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("newerRevisionNumber").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("activeRebuildState").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("activeRebuildId").ValueKind);
     }
 
     [Fact]
@@ -658,6 +669,94 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
     }
 
     [Fact]
+    public async Task EmployeeRebuildApiEnforcesAuthenticationOriginIdentityAndWorkerControlGate()
+    {
+        using var client = await ReadyClientAsync(_valid);
+        var origin = _valid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority);
+        var body = new { expectedRevision = 1, targetProfileRevisionId = "prev-0000000000000000" };
+
+        using var unauthenticated = _valid.CreateClient();
+        using var unauthenticatedResponse = await unauthenticated.PostAsJsonAsync("/api/employees/emp-0000000000000000/rebuild", body);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResponse.StatusCode);
+
+        using var malformed = new HttpRequestMessage(HttpMethod.Post, "/api/employees/not-an-employee/rebuild") { Content = JsonContent.Create(body) };
+        malformed.Headers.Add("Origin", origin);
+        using var malformedResponse = await client.SendAsync(malformed);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, malformedResponse.StatusCode);
+
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/employees/emp-0000000000000000/rebuild") { Content = JsonContent.Create(body) };
+        crossOrigin.Headers.Add("Origin", "https://other.example");
+        using var crossOriginResponse = await client.SendAsync(crossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        using var unknown = new HttpRequestMessage(HttpMethod.Post, "/api/employees/emp-0000000000000000/rebuild") { Content = JsonContent.Create(body) };
+        unknown.Headers.Add("Origin", origin);
+        using var unknownResponse = await client.SendAsync(unknown);
+        Assert.Equal(HttpStatusCode.NotFound, unknownResponse.StatusCode);
+
+        using var disabled = new EnabledRuntimeFactory();
+        using var disabledClient = await ReadyClientAsync(disabled);
+        using var disabledOverviewResponse = await disabledClient.GetAsync("/api/organization");
+        using var disabledOverview = JsonDocument.Parse(await disabledOverviewResponse.Content.ReadAsStringAsync());
+        var seedEmployee = disabledOverview.RootElement.GetProperty("employees").EnumerateArray().Single();
+        using var disabledRequest = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedEmployee.GetProperty("id").GetString()}/rebuild")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1, targetProfileRevisionId = "prev-0000000000000000" }),
+        };
+        disabledRequest.Headers.Add("Origin", disabled.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var disabledResponse = await disabledClient.SendAsync(disabledRequest);
+        Assert.Equal(HttpStatusCode.Conflict, disabledResponse.StatusCode);
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(disabledResponse)).GetProperty("title").GetString());
+
+        var seedId = seedEmployee.GetProperty("id").GetString();
+        using var invalidTarget = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuild")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1, targetProfileRevisionId = "invalid-target" }),
+        };
+        invalidTarget.Headers.Add("Origin", origin);
+        using var invalidTargetResponse = await client.SendAsync(invalidTarget);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidTargetResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task RebuildResumeAndAbandonEndpointsValidateIdentityOriginAndConfiguration()
+    {
+        using var disabled = new EnabledRuntimeFactory();
+        using var disabledClient = await ReadyClientAsync(disabled);
+        using var overviewResponse = await disabledClient.GetAsync("/api/organization/portal");
+        using var overview = JsonDocument.Parse(await overviewResponse.Content.ReadAsStringAsync());
+        var seedEmployee = overview.RootElement.GetProperty("employees").EnumerateArray().Single();
+        var seedId = seedEmployee.GetProperty("id").GetString();
+        var origin = disabled.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority);
+
+        // Unauthenticated, malformed and cross-origin requests are refused before any
+        // configuration check for both recovery endpoints.
+        using var anonymousClient = disabled.CreateClient();
+        using var unauthenticatedResume = await anonymousClient.PostAsync($"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/resume", null);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResume.StatusCode);
+        using var malformedResume = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/not-a-rebuild/resume");
+        malformedResume.Headers.Add("Origin", origin);
+        using var malformedResumeResponse = await disabledClient.SendAsync(malformedResume);
+        Assert.Equal(HttpStatusCode.BadRequest, malformedResumeResponse.StatusCode);
+        using var crossOriginAbandon = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/abandon");
+        crossOriginAbandon.Headers.Add("Origin", "https://example.invalid");
+        using var crossOriginAbandonResponse = await disabledClient.SendAsync(crossOriginAbandon);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginAbandonResponse.StatusCode);
+
+        // With valid origin and identifiers, the disabled gate answers 409 for both.
+        using var disabledResume = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/resume");
+        disabledResume.Headers.Add("Origin", origin);
+        using var disabledResumeResponse = await disabledClient.SendAsync(disabledResume);
+        Assert.Equal(HttpStatusCode.Conflict, disabledResumeResponse.StatusCode);
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(disabledResumeResponse)).GetProperty("title").GetString());
+        using var disabledAbandon = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/abandon");
+        disabledAbandon.Headers.Add("Origin", origin);
+        using var disabledAbandonResponse = await disabledClient.SendAsync(disabledAbandon);
+        Assert.Equal(HttpStatusCode.Conflict, disabledAbandonResponse.StatusCode);
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(disabledAbandonResponse)).GetProperty("title").GetString());
+    }
+
+    [Fact]
     public async Task ApproveIs409WhenWorkerControlIsDisabled()
     {
         using var disabled = new EnabledRuntimeFactory();
@@ -738,6 +837,83 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM employees WHERE id = @id", employeeId!));
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM managed_enrollment_resources WHERE runtime_binding_id = @id", bindingId!));
         Assert.Equal(0, CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments", null));
+    }
+
+    [Fact]
+    public async Task EmployeeDetailIncludesAdditiveManagedProfileStatus()
+    {
+        // A dedicated runtime so creating a newer profile revision does not
+        // disturb the class fixture's shared store used by the other tests.
+        using var factory = new WorkerControlValidRuntimeFactory();
+        using var client = await ReadyClientAsync(factory);
+        var store = factory.Host.Organization!;
+        var build = SeedVerifiedBuild(store);
+        var id = await CreateDevHireAsync(client, "Profile Status Developer");
+
+        using (var before = await client.GetAsync($"/api/hire-requests/{id}"))
+        using (var beforeDocument = JsonDocument.Parse(await before.Content.ReadAsStringAsync()))
+        {
+            var expectedRevision = beforeDocument.RootElement.GetProperty("revision").GetInt32();
+            using var approve = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve")
+            {
+                Content = JsonContent.Create(new { expectedRevision, profileRevisionId = build.ProfileRevisionId }),
+            };
+            approve.Headers.Add("Origin", factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+            using var approved = await client.SendAsync(approve);
+            Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
+        }
+
+        var employeeId = store.GetHireRequestApproval(id)!.EmployeeId;
+        Assert.NotNull(employeeId);
+
+        // The additive projection reports the frozen revision/digest and no newer
+        // target while the profile's current revision is the frozen one.
+        using (var response = await client.GetAsync($"/api/employees/{employeeId}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var status = document.RootElement.GetProperty("profileStatus");
+            Assert.Equal(build.ProfileRevisionId, status.GetProperty("currentProfileRevisionId").GetString());
+            Assert.Equal(1, status.GetProperty("currentRevisionNumber").GetInt32());
+            Assert.Equal(build.ImageDigest, status.GetProperty("currentImageDigest").GetString());
+            Assert.False(status.GetProperty("newerRevisionAvailable").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("newerRevisionNumber").ValueKind);
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("activeRebuildState").ValueKind);
+        }
+
+        // A newer revision with a verified build on the host becomes the offered
+        // ready target; the existing detail fields are unchanged.
+        var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
+        var newerRevision = store.CreateContainerProfileRevision(profile.Id, new ContainerProfileRevisionCreate(
+            store.GetContainerProfile(profile.Id)!.Profile.Revision,
+            """{"image":"agentcontrol-worker-base","name":"API Newer Target"}""",
+            null));
+        var newerBuild = BuildVerifiedFor(store, newerRevision.Id);
+        Assert.NotNull(newerBuild);
+        using (var response = await client.GetAsync($"/api/employees/{employeeId}"))
+        using (var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
+        {
+            var root = document.RootElement;
+            Assert.Equal(employeeId, root.GetProperty("id").GetString());
+            var status = root.GetProperty("profileStatus");
+            // The frozen current revision is unchanged; only the newer target is added.
+            Assert.Equal(build.ProfileRevisionId, status.GetProperty("currentProfileRevisionId").GetString());
+            Assert.Equal(1, status.GetProperty("currentRevisionNumber").GetInt32());
+            Assert.Equal(build.ImageDigest, status.GetProperty("currentImageDigest").GetString());
+            Assert.True(status.GetProperty("newerRevisionAvailable").GetBoolean());
+            Assert.Equal(2, status.GetProperty("newerRevisionNumber").GetInt32());
+        }
+    }
+
+    private static ProfileBuildRecord BuildVerifiedFor(OrganizationStore store, string revisionId)
+    {
+        const string baseDigest = "sha256:" + "4444444444444444444444444444444444444444444444444444444444444444";
+        const string builtDigest = "sha256:" + "5555555555555555555555555555555555555555555555555555555555555555";
+        const string contextHash = "sha256:" + "6666666666666666666666666666666666666666666666666666666666666666";
+        var queued = store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, baseDigest, "linux/amd64", contextHash, "agentcontrol-profile:api-newer");
+        var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+        var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+        return store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: builtDigest, verified: true, evidenceHash: contextHash);
     }
 
     private static async Task<HttpClient> ReadyClientAsync(EnabledRuntimeFactory factory)

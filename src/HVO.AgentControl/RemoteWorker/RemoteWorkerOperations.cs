@@ -23,6 +23,14 @@ public interface IRemoteWorkerOperations
     Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken);
     Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken);
     Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes one image by exact digest or controller-shaped local tag. The fixed
+    /// grammar validates the reference; absence is reported as <c>not-found</c> and
+    /// a transport failure remains an uncertain effect. The caller is responsible
+    /// for proving the image is not in use before asking the transport to remove it.
+    /// </summary>
+    Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken);
     Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken);
 }
 
@@ -228,6 +236,7 @@ public sealed class LocalDockerExecutionOperations(LocalDockerHelperClient clien
     public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => client.CreateContainerAsync(target, specification, cancellationToken);
     public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => client.BootstrapAsync(target, specification, standardInput, cancellationToken);
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => client.BuildImageAsync(target, specification, contextTar, cancellationToken);
+    public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageRemove, [imageReference], null, cancellationToken);
     public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => client.ProbeAsync(target, cancellationToken);
 }
 
@@ -239,6 +248,7 @@ public sealed class RoutingExecutionOperations(ISshExecutionOperations ssh, ILoc
     public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => Select(target).CreateContainerAsync(target, specification, cancellationToken);
     public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => Select(target).BootstrapAsync(target, specification, standardInput, cancellationToken);
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => Select(target).BuildImageAsync(target, specification, contextTar, cancellationToken);
+    public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => Select(target).RemoveImageAsync(target, imageReference, cancellationToken);
     public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => Select(target).ProbeHostAsync(target, cancellationToken);
 }
 
@@ -251,6 +261,7 @@ public sealed class ProcessRemoteWorkerOperations(IOptions<WorkerControlOptions>
     public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildContainerCreate(host, _options, specification), RemoteDockerOperation.ContainerCreate, cancellationToken); }
     public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildBootstrap(host, _options, specification, standardInput), RemoteDockerOperation.Bootstrap, cancellationToken); }
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.BuildImageBuild(host, _options, specification, contextTar), RemoteDockerOperation.ImageBuild, cancellationToken); }
+    public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) { var host = RequireSsh(target); return RunAsync(host, RemoteWorkerCommandBuilder.Build(host, _options, RemoteDockerOperation.ImageRemove, [imageReference], null), RemoteDockerOperation.ImageRemove, cancellationToken); }
 
     /// <summary>
     /// Runs the fixed probe sequence and returns only what the host actually

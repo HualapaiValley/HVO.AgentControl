@@ -21,6 +21,22 @@ public sealed record ContainerReplacementResult(
     long ProcessGeneration,
     string NativeSessionId);
 
+/// <summary>The immutable image/profile target for an employee rebuild.</summary>
+public sealed record ContainerTarget(
+    string ImageDigest,
+    string Platform,
+    string ProfileRevisionId,
+    bool ResetWorkspace = false,
+    bool ResetHome = false,
+    string? SourceProfileRevisionId = null);
+
+/// <summary>The exact observed state of the rebuild container name.</summary>
+public sealed record RebuildContainerInspection(
+    bool Exists,
+    bool IsTarget,
+    bool IsOriginal,
+    bool Running);
+
 /// <summary>
 /// Provisioning operations addressed by an <see cref="ExecutionTarget"/> and
 /// routed to either the controller-local Docker helper or pinned SSH transport.
@@ -37,6 +53,14 @@ public interface IRemoteWorkerProvisioner
     Task StopAsync(ExecutionTarget target, string container, CancellationToken token);
     Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token);
     Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token);
+    Task RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken token);
+    /// <summary>
+    /// Inspects one image reference (tag or digest). Returns null when the image
+    /// does not exist; a transport failure is raised as an uncertain effect. Used
+    /// by cleanup to resolve a tag to the digest it currently names before any
+    /// destructive step.
+    /// </summary>
+    Task<string?> InspectImageAsync(ExecutionTarget target, string imageReference, CancellationToken token);
 }
 
 public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations operations) : IRemoteWorkerProvisioner
@@ -71,6 +95,43 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
     public async Task StopAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerStop, [container], null, token));
     public async Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerRemove, [container], null, token));
     public async Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeRemove, [volume], null, token));
+
+    /// <summary>
+    /// Removes one image by digest or controller-shaped local tag. Absence is
+    /// tolerated: a <c>not-found</c> answer means the image is already gone, so the
+    /// caller can finish cleanup. Any transport failure is raised unchanged as an
+    /// uncertain effect. The caller must prove the image is not in use first; this
+    /// transport never decides that.
+    /// </summary>
+    public async Task RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken token)
+    {
+        var result = await operations.RemoveImageAsync(target, imageReference, token).ConfigureAwait(false);
+        if (result.ExitCode == 0 || result.ErrorCategory == "not-found") return;
+        throw new RemoteWorkerUnavailableException("Worker provisioning image removal failed.", result.ErrorCategory == "transport");
+    }
+
+    public async Task<string?> InspectImageAsync(ExecutionTarget target, string imageReference, CancellationToken token)
+    {
+        var result = await operations.ExecuteAsync(target, RemoteDockerOperation.ImageInspect, [imageReference], null, token).ConfigureAwait(false);
+        if (result.ErrorCategory == "not-found") return null;
+        if (result.ExitCode != 0) throw new RemoteWorkerUnavailableException("Worker provisioning image inspect failed.", result.ErrorCategory == "transport");
+        string? digest;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+            digest = document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && document.RootElement.GetArrayLength() > 0
+                ? document.RootElement[0].TryGetProperty("Id", out var id) ? id.GetString() : null
+                : document.RootElement.TryGetProperty("Id", out var single) ? single.GetString() : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            throw new RemoteWorkerUnavailableException("Worker provisioning image inspect output was not valid JSON.", transport: false);
+        }
+        if (digest is null || digest.Length == 0) return null;
+        if (!digest.StartsWith("sha256:", StringComparison.Ordinal) || digest.Length != 71)
+            throw new RemoteWorkerUnavailableException("Worker provisioning image inspect did not return an exact digest.", transport: false);
+        return digest;
+    }
 
     private static string Require(RemoteOperationResult result)
     {
@@ -407,10 +468,18 @@ public sealed class RemoteWorkerProvisioningCoordinator
             }
 
             // The persisted enrollment carries the organization that owns it, so a
-            // renamed or replaced current organization cannot widen this match.
-            var identity = Identity(enrollment, resource.OperationId);
-            try { RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, identity); }
-            catch (ForeignResourceException) { store.TransitionResource(resource.Id, resource.Revision, resource.State, "foreign"); continue; }
+            // renamed or replaced current organization cannot widen this match. A
+            // rebuilt container carries the target revision's profile label while
+            // the enrollment's frozen digest still names the original revision, so
+            // an owned container is accepted under either label. Anything that
+            // matches neither is foreign and is never removed.
+            var currentRevision = CurrentProfileRevisionFor(store, enrollment);
+            var originalRevision = enrollment.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(enrollment);
+            if (!IsOwnedUnderEitherRevision(inspection.Labels, enrollment, resource.OperationId, currentRevision, originalRevision))
+            {
+                store.TransitionResource(resource.Id, resource.Revision, resource.State, "foreign");
+                continue;
+            }
 
             try
             {
@@ -526,7 +595,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
         var resource = store.ListWorkerResources(workerId).SingleOrDefault(x => x.ResourceKind == "container")
             ?? throw new OrganizationConcurrencyException("The worker has no owned container resource to replace.");
         var host = _targets.Resolve(enrollment.HostId);
-        var identity = Identity(enrollment, resource.OperationId);
+        var identity = Identity(enrollment, resource.OperationId, CurrentProfileRevisionFor(store, enrollment));
 
         // Inspect before touching anything. Absence is only concluded from the exact
         // Docker "no such" answer; a foreign object at the name fails closed.
@@ -587,6 +656,120 @@ public sealed class RemoteWorkerProvisioningCoordinator
     }
 
     /// <summary>
+    /// Replaces an enrolled managed worker with an explicit verified rebuild
+    /// target. Unlike orientation replacement this path does not consult or mutate
+    /// the enrollment's frozen expected digest. A present target container is
+    /// converged by starting it; a present original container is stopped and
+    /// removed before the target is created; any other object at the name fails
+    /// closed. Requested workspace/home resets remove and recreate only those exact
+    /// owned volumes after the old container has been removed.
+    /// </summary>
+    public async Task ReplaceContainerAsync(string workerId, ContainerTarget target, CancellationToken token)
+    {
+        RequireEnabled();
+        var store = Store();
+        var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+        if (enrollment.LifecycleStatus != "enrolled") throw new OrganizationConcurrencyException("Container replacement requires an enrolled worker.");
+        ValidateTarget(store, enrollment, target);
+
+        var resource = store.ListWorkerResources(workerId).SingleOrDefault(x => x.ResourceKind == "container")
+            ?? throw new OrganizationConcurrencyException("The worker has no owned container resource to replace.");
+        var host = _targets.Resolve(enrollment.HostId);
+        var originalIdentity = Identity(enrollment, resource.OperationId, target.SourceProfileRevisionId ?? CurrentProfileRevisionFor(store, enrollment));
+        var targetIdentity = Identity(enrollment, resource.OperationId, target.ProfileRevisionId);
+        var inspection = await _remote.InspectContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        var needsCreate = false;
+        if (inspection.Exists)
+        {
+            if (HasOwnedLabels(inspection, targetIdentity))
+            {
+                if (!inspection.State.Contains("running", StringComparison.OrdinalIgnoreCase))
+                    await _remote.StartAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+            }
+            else
+            {
+                RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, originalIdentity);
+                if (inspection.State.Contains("running", StringComparison.OrdinalIgnoreCase))
+                    await _remote.StopAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+                await _remote.RemoveContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+                needsCreate = true;
+            }
+        }
+        else
+        {
+            needsCreate = true;
+        }
+
+        if (needsCreate)
+        {
+            await ResetVolumeIfRequestedAsync(store, enrollment, host, enrollment.WorkspaceVolumeName, target.ResetWorkspace, token).ConfigureAwait(false);
+            await ResetVolumeIfRequestedAsync(store, enrollment, host, enrollment.HomeVolumeName, target.ResetHome, token).ConfigureAwait(false);
+            var reference = await _remote.CreateContainerAsync(host, ContainerSpecFor(store, enrollment, host, targetIdentity, target), token).ConfigureAwait(false);
+            store.TransitionResource(resource.Id, resource.Revision, resource.State, "present", reference);
+            store.ReplaceEnrollmentContainerReference(workerId, reference);
+            await _remote.StartAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        }
+
+        var started = await _remote.InspectContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        if (!started.Exists || !started.State.Contains("running", StringComparison.OrdinalIgnoreCase) || !HasOwnedLabels(started, targetIdentity))
+            throw new RemoteWorkerUnavailableException("The rebuilt worker container did not reach the exact target running state.", transport: false);
+    }
+
+    /// <summary>Inspects the rebuild name against both exact old and target identities.</summary>
+    public async Task<RebuildContainerInspection> InspectRebuildContainerAsync(string workerId, ContainerTarget target, CancellationToken token)
+    {
+        RequireEnabled();
+        var store = Store();
+        var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker enrollment not found.");
+        ValidateTarget(store, enrollment, target);
+        var resource = store.ListWorkerResources(workerId).SingleOrDefault(x => x.ResourceKind == "container")
+            ?? throw new OrganizationConcurrencyException("The worker has no owned container resource to inspect.");
+        var host = _targets.Resolve(enrollment.HostId);
+        var inspection = await _remote.InspectContainerAsync(host, enrollment.ContainerName, token).ConfigureAwait(false);
+        if (!inspection.Exists) return new(false, false, false, false);
+        var targetOwned = HasOwnedLabels(inspection, Identity(enrollment, resource.OperationId, target.ProfileRevisionId));
+        var originalOwned = HasOwnedLabels(inspection, Identity(enrollment, resource.OperationId, target.SourceProfileRevisionId ?? CurrentProfileRevisionFor(store, enrollment)));
+        if (!targetOwned && !originalOwned) throw new ForeignResourceException("The resource is not exactly owned by the original or rebuild target operation.");
+        return new(true, targetOwned, originalOwned, inspection.State.Contains("running", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task ResetVolumeIfRequestedAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, ExecutionTarget host, string volumeName, bool reset, CancellationToken token)
+    {
+        if (!reset) return;
+        var resource = store.ListWorkerResources(enrollment.WorkerId).Single(x => x.ResourceKind == "volume" && x.ResourceName == volumeName);
+        var inspection = await _remote.InspectVolumeAsync(host, volumeName, token).ConfigureAwait(false);
+        if (inspection.Exists)
+        {
+            RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, Identity(enrollment, resource.OperationId));
+            await _remote.RemoveVolumeAsync(host, volumeName, token).ConfigureAwait(false);
+        }
+        var reference = await _remote.CreateVolumeAsync(host, new(volumeName, Identity(enrollment, resource.OperationId)), token).ConfigureAwait(false);
+        store.TransitionResource(resource.Id, resource.Revision, resource.State, "present", reference);
+        store.SetEnrollmentResourceReference(enrollment.WorkerId, VolumeKind(enrollment, volumeName), reference);
+    }
+
+    private static bool HasOwnedLabels(RemoteResourceInspection inspection, WorkerResourceIdentity identity)
+    {
+        try
+        {
+            RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, identity);
+            return true;
+        }
+        catch (ForeignResourceException)
+        {
+            return false;
+        }
+    }
+
+    private void ValidateTarget(OrganizationStore store, WorkerEnrollmentRecord enrollment, ContainerTarget target)
+    {
+        if (target.Platform != enrollment.ExpectedPlatform) throw new WorkerControlConfigurationException("The rebuild target platform differs from the enrolled worker platform.");
+        var build = store.GetVerifiedProfileBuild(target.ProfileRevisionId, enrollment.HostId);
+        if (build?.ImageDigest != target.ImageDigest || build.Platform != target.Platform)
+            throw new WorkerControlConfigurationException("The rebuild target is not the verified profile build for this host and platform.");
+    }
+
+    /// <summary>
     /// Builds the exact container create spec for an enrollment. It is shared by
     /// first provisioning and replacement so a replacement reproduces the same
     /// name, image, platform, four volumes, frozen limits, approved digest set,
@@ -594,10 +777,23 @@ public sealed class RemoteWorkerProvisioningCoordinator
     /// </summary>
     private ContainerCreateSpec ContainerSpecFor(OrganizationStore store, WorkerEnrollmentRecord enrollment, ExecutionTarget host, WorkerResourceIdentity identity)
     {
+        var applied = LatestAppliedRebuild(store, enrollment.WorkerId);
+        var revisionId = applied?.ToProfileRevisionId ?? (enrollment.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(enrollment));
+        var imageDigest = applied?.ToImageDigest ?? enrollment.ExpectedImageDigest;
+        var platform = applied?.ToPlatform ?? enrollment.ExpectedPlatform;
+        var currentIdentity = Identity(enrollment, identity.OperationId, revisionId);
+        return ContainerSpecFor(store, enrollment, host, currentIdentity, imageDigest, platform, revisionId);
+    }
+
+    private ContainerCreateSpec ContainerSpecFor(OrganizationStore store, WorkerEnrollmentRecord enrollment, ExecutionTarget host, WorkerResourceIdentity identity, ContainerTarget target) =>
+        ContainerSpecFor(store, enrollment, host, identity, target.ImageDigest, target.Platform, target.ProfileRevisionId);
+
+    private ContainerCreateSpec ContainerSpecFor(OrganizationStore store, WorkerEnrollmentRecord enrollment, ExecutionTarget host, WorkerResourceIdentity identity, string imageDigest, string platform, string? profileRevisionId)
+    {
         var mounts = new[] { new NamedVolumeMount(enrollment.ControlVolumeName, "/control"), new(enrollment.HomeVolumeName, "/home/worker"), new(enrollment.WorkspaceVolumeName, "/workspace"), new(enrollment.SessionVolumeName, "/session") };
         var approved = store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest);
         var limits = ContainerLimitsFor(store, enrollment);
-        return new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, limits.MemoryBytes, limits.CpuLimit, limits.PidsLimit, approved, ProfileEnvironmentFor(enrollment));
+        return new(enrollment.ContainerName, imageDigest, platform, identity, mounts, limits.MemoryBytes, limits.CpuLimit, limits.PidsLimit, approved, ProfileEnvironmentFor(profileRevisionId));
     }
 
     private async Task ReconcileUncertain(OrganizationStore store, WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation, ExecutionTarget host, CancellationToken token)
@@ -673,12 +869,42 @@ public sealed class RemoteWorkerProvisioningCoordinator
     // A profile enrollment's digest is exactly one verified build on its host, so
     // the revision id is recovered from the frozen digest rather than stored twice.
     private WorkerResourceIdentity Identity(WorkerEnrollmentRecord e, string operation) =>
-        new(e.OrganizationId, e.ControllerId, e.HostId, e.WorkerId, e.RuntimeBindingId, operation,
-            e.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(e));
+        Identity(e, operation, e.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(e));
+
+    private static WorkerResourceIdentity Identity(WorkerEnrollmentRecord e, string operation, string? profileRevisionId) =>
+        new(e.OrganizationId, e.ControllerId, e.HostId, e.WorkerId, e.RuntimeBindingId, operation, profileRevisionId);
+
+    /// <summary>
+    /// True when the inspection labels match the exact operation identity under
+    /// either the current (post-rebuild) or the original (pre-rebuild) revision
+    /// label. Both are the controller's own container; a label set matching neither
+    /// is foreign. Revision is the only field a rebuild changes, so a false here
+    /// still means the resource is not ours under any known identity.
+    /// </summary>
+    private static bool IsOwnedUnderEitherRevision(IReadOnlyDictionary<string, string> labels, WorkerEnrollmentRecord e, string operation, string? currentRevision, string? originalRevision)
+    {
+        foreach (var revision in new[] { currentRevision, originalRevision }.Distinct(StringComparer.Ordinal))
+        {
+            try { RemoteWorkerCommandBuilder.RequireOwnedLabels(labels, Identity(e, operation, revision)); return true; }
+            catch (ForeignResourceException) { }
+        }
+        return false;
+    }
 
     private string ProfileRevisionFor(WorkerEnrollmentRecord e) =>
         Store().ListProfileBuilds(hostId: e.HostId).SingleOrDefault(b => b.State == ProfileBuildStates.Built && b.Verified && b.ImageDigest == e.ExpectedImageDigest)?.ProfileRevisionId
         ?? throw new WorkerControlConfigurationException("The enrollment's image digest is not a verified profile build on its host.");
+
+    private string? CurrentProfileRevisionFor(OrganizationStore store, WorkerEnrollmentRecord enrollment) =>
+        LatestAppliedRebuild(store, enrollment.WorkerId)?.ToProfileRevisionId
+        ?? (enrollment.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(enrollment));
+
+    private static EmployeeRebuildRecord? LatestAppliedRebuild(OrganizationStore store, string workerId) =>
+        store.ListEmployeeRebuilds(workerId)
+            .Where(x => x.State == EmployeeRebuildStates.Applied)
+            .OrderByDescending(x => x.UpdatedAt)
+            .ThenByDescending(x => x.Id, StringComparer.Ordinal)
+            .FirstOrDefault();
 
     // A managed enrollment consumes the owner-frozen limits recorded at approval
     // time (MiB to bytes, integer CPU to the decimal Docker expects); every other
@@ -691,14 +917,16 @@ public sealed class RemoteWorkerProvisioningCoordinator
         return ((long)managed.MemoryLimitMiB * 1024 * 1024, managed.CpuLimit, managed.PidsLimit);
     }
 
-    private IReadOnlyDictionary<string, string>? ProfileEnvironmentFor(WorkerEnrollmentRecord enrollment)
+    private IReadOnlyDictionary<string, string>? ProfileEnvironmentFor(WorkerEnrollmentRecord enrollment) =>
+        ProfileEnvironmentFor(enrollment.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(enrollment));
+
+    private IReadOnlyDictionary<string, string>? ProfileEnvironmentFor(string? revisionId)
     {
-        if (enrollment.ExpectedImageDigest == _options.ApprovedImageDigest) return null;
-        var revisionId = ProfileRevisionFor(enrollment);
+        if (revisionId is null) return null;
         var revision = Store().ListContainerProfiles()
             .SelectMany(profile => Store().ListContainerProfileRevisions(profile.Id) ?? [])
             .SingleOrDefault(item => item.Id == revisionId)
-            ?? throw new OrganizationStoreCorruptException("The enrollment's verified profile revision is missing.");
+            ?? throw new OrganizationStoreCorruptException("The verified profile revision is missing.");
         using var document = System.Text.Json.JsonDocument.Parse(revision.Definition);
         if (!document.RootElement.TryGetProperty("containerEnv", out var environment)) return null;
         return environment.EnumerateObject().ToDictionary(item => item.Name, item => item.Value.GetString() ?? string.Empty, StringComparer.Ordinal);

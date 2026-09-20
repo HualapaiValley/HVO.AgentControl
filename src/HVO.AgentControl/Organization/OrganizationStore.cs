@@ -92,10 +92,17 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 11 permits managed hiring against the controller-local Docker daemon:
-    /// it rebuilds <c>execution_hosts</c> with a constrained <c>transport_kind</c>
+    /// Schema 12 adds the durable employee-rebuild operation record
+    /// (<c>employee_rebuilds</c>, additive only). It records the exact source
+    /// revision/digest a worker is running, the verified target revision/build/
+    /// digest and host, the destructive-reset authorization, and one fixed state
+    /// machine from <c>Intent</c> to <c>Applied</c>/<c>Failed</c>. One active
+    /// rebuild per worker is enforced by a partial unique index and no
+    /// image/container work moves through this slice. Schema 11 permitted managed
+    /// hiring against the controller-local Docker daemon: it rebuilt
+    /// <c>execution_hosts</c> with a constrained <c>transport_kind</c>
     /// (<c>local-docker</c> or <c>ssh-docker</c>), a CHECK that an SSH host carries
-    /// all four endpoint columns and a local host none of them, and seeds the
+    /// all four endpoint columns and a local host none of them, and seeded the
     /// reserved <c>local-docker</c> row. Schema 10 added atomic owner approval and
     /// managed-employee creation (<c>hire_request_approvals</c>,
     /// <c>managed_enrollment_resources</c>) and rebuilt <c>hire_requests</c> with a
@@ -106,7 +113,7 @@ public sealed partial class OrganizationStore : IDisposable
     /// and creates verified, immutable source evidence before changing the
     /// authoritative store.
     /// </summary>
-    public const int CurrentSchemaVersion = 11;
+    public const int CurrentSchemaVersion = 12;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -132,6 +139,10 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV9BackupHashFileName = "control.schema-v9.sha256";
     public const string SchemaV10BackupFileName = "control.schema-v10.db";
     public const string SchemaV10BackupHashFileName = "control.schema-v10.sha256";
+    public const string SchemaV11BackupFileName = "control.schema-v11.db";
+    public const string SchemaV11BackupHashFileName = "control.schema-v11.sha256";
+    public const string SchemaV12BackupFileName = "control.schema-v12.db";
+    public const string SchemaV12BackupHashFileName = "control.schema-v12.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -541,6 +552,12 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV11Statements =
         [.. SchemaV3Statements, .. RemoteWorkerSchemaV11Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements];
 
+    // v12 = v11 + the additive durable employee-rebuild operation record (table,
+    // partial active index and immutability/no-delete/no-replace triggers). The
+    // frozen v11 statements above stay intact for exact-signature migration.
+    private static readonly string[] SchemaV12Statements =
+        [.. SchemaV11Statements, .. RebuildSchemaV12Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -565,8 +582,11 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV10 =
         BuildExpectedSchema(SchemaV10Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV11 =
         BuildExpectedSchema(SchemaV11Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV12Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1595,6 +1615,17 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV10ToV11(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV11);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 11)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV11);
+            EnsureSchemaV11Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV11ToV12(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -2119,6 +2150,28 @@ public sealed partial class OrganizationStore : IDisposable
     private void EnsureSchemaV10Backup(SqliteConnection source) =>
         EnsureSchemaBackup(source, 10, SchemaV10BackupFileName, SchemaV10BackupHashFileName, ExpectedSchemaV10);
 
+    private void EnsureSchemaV11Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 11, SchemaV11BackupFileName, SchemaV11BackupHashFileName, ExpectedSchemaV11);
+
+    /// <summary>
+    /// Adds the durable employee-rebuild operation record. The migration is
+    /// additive: no existing table is rebuilt, so every profile build, approval,
+    /// enrollment and host row survives byte-for-byte. The table, its partial
+    /// active-worker index and its immutability triggers are created in one
+    /// transaction with the version bump.
+    /// </summary>
+    private void MigrateV11ToV12(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        foreach (var statement in RebuildSchemaV12Statements)
+        {
+            Execute(connection, transaction, statement);
+        }
+        Execute(connection, transaction, "UPDATE schema_version SET version = 12 WHERE version = 11");
+        BeforeMigrationCommit?.Invoke();
+        transaction.Commit();
+    }
+
     /// <summary>The v11 execution_hosts definition created under a staging name during migration.</summary>
     private static string ExecutionHostsV11StagingStatement =>
         ExecutionHostsSchemaV11Statement.Replace("CREATE TABLE execution_hosts (", "CREATE TABLE execution_hosts_v11 (", StringComparison.Ordinal);
@@ -2211,7 +2264,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v10 file is pre-migration evidence only and restoring it would lose owner approvals recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v11 file is pre-migration evidence only and restoring it would lose employee-rebuild operations recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2353,7 +2406,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV11Statements)
+        foreach (var statement in SchemaV12Statements)
         {
             Execute(connection, transaction, statement);
         }
@@ -2748,7 +2801,7 @@ public sealed partial class OrganizationStore : IDisposable
                 SELECT e.id, e.slug, e.display_name, e.purpose, e.instructions, e.rules, e.restrictions, e.organization_id,
                         d.id, d.slug, d.display_name,
                        r.id, r.slug, r.display_name,
-                       b.id, b.placement, s.id, s.native_session_id, s.title
+                       b.id, b.placement, s.id, s.native_session_id, s.title, e.revision
                 FROM employees e
                 JOIN departments d ON d.id = e.department_id
                 JOIN roles r ON r.id = e.role_id
@@ -2780,7 +2833,8 @@ public sealed partial class OrganizationStore : IDisposable
                     reader.GetString(15),
                     reader.IsDBNull(16) ? null : reader.GetString(16),
                     reader.IsDBNull(17) ? null : reader.GetString(17),
-                    reader.IsDBNull(18) ? null : reader.GetString(18)));
+                    reader.IsDBNull(18) ? null : reader.GetString(18),
+                    reader.GetInt32(19)));
             }
         }
 

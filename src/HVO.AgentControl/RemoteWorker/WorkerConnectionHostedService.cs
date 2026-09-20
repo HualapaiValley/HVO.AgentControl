@@ -13,6 +13,7 @@ namespace HVO.AgentControl.RemoteWorker;
 internal sealed class WorkerConnectionHostedService(
     WorkerConnectionManager manager,
     ProfileBuildCoordinator builds,
+    EmployeeRebuildCoordinator rebuilds,
     HVO.AgentControl.Runtime.AcpControlHost control,
     IOptions<WorkerControlOptions> configured,
     ILogger<WorkerConnectionHostedService> logger) : BackgroundService
@@ -48,6 +49,12 @@ internal sealed class WorkerConnectionHostedService(
             // mark it uncertain so the next build request reconciles it by tag.
             var buildInterrupted = builds.ReconcileInterruptedOnStartup();
             if (buildInterrupted.Count > 0) logger.LogWarning("Marked {Count} interrupted profile build(s) uncertain for reconciliation: {Ids}", buildInterrupted.Count, string.Join(", ", buildInterrupted));
+
+            // Rebuild reconciliation must run before the manager reconnects: it
+            // establishes/retains the manual dispatch hold and verifies any target
+            // container with a fresh owner lease before normal dispatch can resume.
+            var rebuildReconciled = await rebuilds.ReconcileInterruptedOnStartup(stoppingToken).ConfigureAwait(false);
+            if (rebuildReconciled.Count > 0) logger.LogWarning("Reconciled {Count} interrupted employee rebuild(s): {Ids}", rebuildReconciled.Count, string.Join(", ", rebuildReconciled));
             await manager.ReconcileStartupAsync(stoppingToken).ConfigureAwait(false);
         }
         catch (OrganizationStoreException)

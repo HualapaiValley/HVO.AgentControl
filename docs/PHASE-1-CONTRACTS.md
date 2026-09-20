@@ -1084,6 +1084,44 @@ hiring.
   completion. The Overview shows company summary, employee counts by department
   and state, pending approvals, and linked failures needing owner attention.
 
+### 10.4 Data-preserving employee rebuild (#261)
+
+A profile revision is never auto-adopted. The owner must explicitly select a
+newer revision of the employee's existing profile that already has a verified
+build on the employee's frozen host. `POST /api/employees/{id}/rebuild` is
+owner-authenticated, same-origin and bound to the employee's current optimistic
+revision. The request names only the target revision and optional reset scope;
+the server resolves and freezes the verified build, digest, platform, binding,
+worker, host and pre-rebuild ownership epoch.
+
+The default preserves all four named volumes, including workspace and home.
+Resetting workspace requires the exact phrase `reset-workspace`; resetting home
+requires `reset-home`; resetting both requires `reset-workspace-and-home`. A
+non-reset rebuild carries no confirmation. These phrases are stored with the
+durable intent so destructive scope remains auditable.
+
+The schema-v12 row moves through `Intent → Holding → Replacing → Verifying →
+Applied`, with `Uncertain` and `Failed` recovery outcomes. Only one active rebuild
+per worker is permitted. Dispatch is manually held before replacement, the
+container replacement reuses employee identity, binding, native ACP session and
+preserved volume names, and application requires a running exact target plus a
+fresh ownership epoch. A restart marks interrupted stages uncertain and
+reconciles by exact original/target labels; an uncertain effect is never blindly
+repeated. Terminal failed resources and unused failed/rejected images are handled
+only through the existing ownership-checked scoped cleanup paths.
+
+The API drives this bounded, idempotent coordinator synchronously after durable
+intent creation. A hosted queue was deliberately not added because it would
+create a second resume path without improving intent durability. The response
+returns the durable rebuild record and updated profile status; history is listed
+by `GET /api/employees/{id}/rebuilds`. The employee page reports newer revisions
+without action and displays Applied/Uncertain/Failed history with only the stored
+sanitized failure summary. Controller secrets are never projected.
+
+This is code capability with hermetic validation. No live employee rebuild has
+run on a deployment host. `home-docker` remains on `802eb6f` / schema v9, and
+`WorkerControl` remains disabled by default.
+
 ## 13. Fresh disposable teardown/rebuild test
 
 Scope: one disposable organization/employee on the phase topology, not the

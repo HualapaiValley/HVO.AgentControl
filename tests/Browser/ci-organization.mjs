@@ -163,10 +163,24 @@ try {
   await page.press('[data-employee-search]', 'Enter');
   record('pressing Enter in employee filters preserves URL, state, and results', page.url() === directoryUrl && await page.inputValue('[data-employee-search]') === 'no matching employee' && (await page.locator('[data-employee-directory]').innerText()).includes('No employees match'), { directoryUrl, currentUrl: page.url() });
   await page.fill('[data-employee-search]', ''); const employeeDetailPath = await page.locator('[data-employee-directory] a').first().getAttribute('href');
+  const routedEmployeeId = employeeDetailPath.split('/').pop(); let rebuildBody = null;
+  await page.route(`**/api/employees/${routedEmployeeId}`, async (route) => {
+    const response = await route.fetch(); const body = await response.json();
+    await route.fulfill({ response, json: { ...body, revision: 1, profileStatus: { currentProfileId: 'prof-browser', currentProfileDisplayName: 'Browser profile', currentProfileRevisionId: 'prev-browser-1', currentRevisionNumber: 1, currentImageDigest: `sha256:${'1'.repeat(64)}`, currentPlatform: 'linux/amd64', workerId: 'wrk-browser', hostId: 'local-docker', newerRevisionAvailable: true, newerRevisionId: 'prev-browser-2', newerRevisionNumber: 2, activeRebuildState: null, activeRebuildId: null } } });
+  });
+  await page.route(`**/api/employees/${routedEmployeeId}/rebuilds`, (route) => route.fulfill({ json: [{ id: 'reb-browser-applied', state: 'Applied', toProfileRevisionId: 'prev-browser-2', resetWorkspace: false, resetHome: false, failureSummary: null, updatedAt: '2026-09-19T00:00:00Z' }] }));
+  await page.route(`**/api/employees/${routedEmployeeId}/rebuild`, async (route) => { rebuildBody = route.request().postDataJSON(); await route.fulfill({ json: { rebuild: { id: 'reb-browser-new', state: 'Applied' }, profileStatus: {} } }); });
   await page.goto(`${base}${employeeDetailPath}`); await page.waitForSelector('[data-employee-content]:not([hidden])');
   const employeeId = await page.locator('[data-employee-detail]').getAttribute('data-employee-id');
   record('detail loads exact URL employee and terminal module', await page.locator('[data-selected-employee-name]').first().innerText() !== '—' && await page.locator('[data-terminal]').count() === 1, { employeeId });
   record('detail selection event targets exact employee', await page.locator('[data-portal]').getAttribute('data-selected-employee-id') === employeeId);
+  record('employee detail reports a newer revision without acting', (await page.locator('[data-profile-update-note]').innerText()).includes('will not be adopted automatically') && rebuildBody === null);
+  record('employee detail renders Applied rebuild history', (await page.locator('[data-rebuild-history]').innerText()).includes('Applied'));
+  await page.check('[data-reset-home]');
+  record('employee rebuild reset stays disabled without exact confirmation', await page.locator('[data-rebuild-submit]').isDisabled() && (await page.locator('[data-reset-confirmation-phrase]').innerText()) === 'reset-home');
+  await page.fill('[data-reset-confirmation]', 'reset-home'); await page.click('[data-rebuild-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-rebuild-receipt]').dataset.status === 'ok');
+  record('employee rebuild sends expected employee revision and target revision', rebuildBody?.expectedRevision === 1 && rebuildBody?.targetProfileRevisionId === 'prev-browser-2' && rebuildBody?.resetConfirmation === 'reset-home', rebuildBody || {});
 
 
   // Enabled-fixture terminal surface: exact route assets, restored mount class,

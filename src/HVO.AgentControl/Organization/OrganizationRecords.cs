@@ -30,6 +30,7 @@ public static class OrganizationIds
     public const string ContainerProfilePrefix = "prof-";
     public const string ContainerProfileRevisionPrefix = "prev-";
     public const string ProfileBuildPrefix = "pbld-";
+    public const string RebuildPrefix = "rbld-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -52,6 +53,7 @@ public static class OrganizationIds
     public static string NewContainerProfileId() => NewId(ContainerProfilePrefix);
     public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
     public static string NewProfileBuildId() => NewId(ProfileBuildPrefix);
+    public static string NewEmployeeRebuildId() => NewId(RebuildPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -459,6 +461,136 @@ public sealed record ProfileBuildRecord(
 
 public sealed record ProfileBuildRequest(string HostId);
 
+/// <summary>Fixed state machine of one durable employee-rebuild operation.</summary>
+public static class EmployeeRebuildStates
+{
+    public const string Intent = "Intent";
+    public const string Holding = "Holding";
+    public const string Replacing = "Replacing";
+    public const string Verifying = "Verifying";
+    public const string Applied = "Applied";
+    public const string Uncertain = "Uncertain";
+    public const string Failed = "Failed";
+
+    public static bool IsDefined(string state) =>
+        state is Intent or Holding or Replacing or Verifying or Applied or Uncertain or Failed;
+
+    /// <summary>States that hold the single active-rebuild slot for a worker.</summary>
+    public static bool IsActive(string state) => state is Intent or Holding or Replacing or Verifying or Uncertain;
+
+    public static bool CanTransition(string from, string to) => (from, to) switch
+    {
+        (Intent, Holding) => true,
+        (Intent, Failed) => true,
+        (Holding, Replacing) => true,
+        (Holding, Failed) => true,
+        (Holding, Uncertain) => true,
+        (Replacing, Verifying) => true,
+        (Replacing, Failed) => true,
+        (Replacing, Uncertain) => true,
+        (Verifying, Applied) => true,
+        (Verifying, Failed) => true,
+        (Verifying, Uncertain) => true,
+        // Reconciliation after a lost result. Uncertain -> Applied is allowed only
+        // when the controller proves the target digest is the one now running; the
+        // caller owns that evidence, and the Applied transition requires it.
+        (Uncertain, Replacing) => true,
+        (Uncertain, Applied) => true,
+        (Uncertain, Failed) => true,
+        _ => false,
+    };
+}
+
+/// <summary>
+/// The frozen intent to rebuild one managed worker. <c>dispatch_hold_reason</c>
+/// is fixed to the existing manual hold and <c>requested_by</c> to the owner, so
+/// neither is caller-supplied.
+/// </summary>
+public sealed record EmployeeRebuildCreate(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string HostId,
+    string FromProfileRevisionId,
+    string FromImageDigest,
+    int FromRevisionNumber,
+    string ToProfileRevisionId,
+    string ToProfileBuildId,
+    string ToImageDigest,
+    string ToPlatform,
+    bool ResetWorkspace,
+    bool ResetHome,
+    string? ResetConfirmation,
+    long OwnershipEpochBefore,
+    bool HoldPreexisting = false);
+
+/// <summary>
+/// Owner-facing profile status for one managed employee: the profile revision the
+/// enrollment is currently frozen to, its image digest, whether the profile has a
+/// newer revision with a verified build ready on the employee's host, and the
+/// active rebuild operation when one exists. It is a read-only projection over
+/// the immutable approval, profile and worker records; it mutates nothing. A
+/// non-managed (or base) employee has no managed enrollment resources and yields
+/// null from the store helper.
+/// </summary>
+public sealed record EmployeeRebuildRequest(
+    int ExpectedRevision,
+    string? TargetProfileRevisionId,
+    bool ResetWorkspace = false,
+    bool ResetHome = false,
+    string? ResetConfirmation = null);
+
+public sealed record EmployeeRebuildResponse(
+    EmployeeRebuildRecord Rebuild,
+    EmployeeProfileStatusDetail ProfileStatus);
+
+public sealed record EmployeeProfileStatus(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string? WorkerId,
+    string HostId,
+    string CurrentProfileRevisionId,
+    int CurrentRevisionNumber,
+    string CurrentProfileId,
+    string CurrentProfileDisplayName,
+    string CurrentImageDigest,
+    string CurrentPlatform,
+    bool NewerRevisionAvailable,
+    string? NewerRevisionId,
+    int? NewerRevisionNumber,
+    string? NewerVerifiedBuildId,
+    string? NewerVerifiedImageDigest,
+    EmployeeRebuildRecord? ActiveRebuild);
+
+public sealed record EmployeeRebuildRecord(
+    string Id,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string HostId,
+    string FromProfileRevisionId,
+    string FromImageDigest,
+    int FromRevisionNumber,
+    string ToProfileRevisionId,
+    string ToProfileBuildId,
+    string ToImageDigest,
+    string ToPlatform,
+    bool ResetWorkspace,
+    bool ResetHome,
+    string? ResetConfirmation,
+    bool HoldPreexisting,
+    string State,
+    long OwnershipEpochBefore,
+    long? OwnershipEpochAfter,
+    string DispatchHoldReason,
+    string RequestedBy,
+    string? EvidenceHash,
+    string? FailureSummary,
+    int Revision,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+
 public sealed record ContainerProfileCreate(
     string? IdempotencyKey,
     string? Slug,
@@ -553,10 +685,17 @@ public sealed record EmployeeSummary(
     string? SessionRecordId,
     string? NativeSessionId,
     string? SessionTitle,
+    int Revision,
     OrientationStatus? Orientation = null)
 {
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionRecordId, string? nativeSessionId, string? sessionTitle, OrientationStatus? orientation)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionRecordId, nativeSessionId, sessionTitle, 1, orientation) { }
+
     public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, OrientationStatus? orientation = null)
-        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, orientation) { }
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, 1, orientation) { }
+
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, int revision, OrientationStatus? orientation = null)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, revision, orientation) { }
 
     // Backward-compatible API alias. SessionId has always meant the ACP-native
     // identity on the wire; database relationships must use SessionRecordId.
