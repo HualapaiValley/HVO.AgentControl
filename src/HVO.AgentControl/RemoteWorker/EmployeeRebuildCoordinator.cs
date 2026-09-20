@@ -19,7 +19,6 @@ public sealed record EmployeeRebuildResult(EmployeeRebuildRecord Rebuild, Worker
 public sealed class EmployeeRebuildCoordinator(
     AcpControlHost control,
     RemoteWorkerProvisioningCoordinator provisioning,
-    IWorkerBridgeSessionFactory sessions,
     IOptions<WorkerControlOptions> configured,
     ILogger<EmployeeRebuildCoordinator> logger)
 {
@@ -130,6 +129,28 @@ public sealed class EmployeeRebuildCoordinator(
     }
 
     /// <summary>
+    /// Owner-explicit recovery of a Failed rebuild whose destructive replacement
+    /// already completed. Exact target inspection must prove the new revision
+    /// container exists and is running; only then is the row reopened at Verifying.
+    /// The container replacement stage is never re-entered.
+    /// </summary>
+    public async Task<EmployeeRebuildResult> ResumeFailedAsync(string rebuildId, int expectedRevision, CancellationToken cancellationToken)
+    {
+        RequireEnabled();
+        var store = Store();
+        var rebuild = store.GetEmployeeRebuild(rebuildId)
+            ?? throw new OrganizationNotFoundException($"Employee rebuild '{rebuildId}' does not exist.");
+        if (rebuild.State != EmployeeRebuildStates.Failed || rebuild.Revision != expectedRevision)
+            throw new OrganizationConcurrencyException("The employee rebuild changed or is not Failed.");
+        var inspection = await provisioning.InspectRebuildContainerAsync(rebuild.WorkerId, Target(rebuild), cancellationToken).ConfigureAwait(false);
+        if (!inspection.IsTarget || !inspection.Running)
+            throw new WorkerRecoveryRequiredException("The failed rebuild target container is not proven running.", "rebuild-target-not-running");
+        store.SetManualDispatchHold(rebuild.EmployeeId, true, "rebuild " + rebuild.Id);
+        var verifying = store.ResumeFailedEmployeeRebuild(rebuild.Id, rebuild.Revision);
+        return await ResumeAsync(verifying.Id, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Marks interrupted rows uncertain, then reconciles each by exact old/target
     /// labels. Cancellation is deliberately Uncertain: once stop/remove/create may
     /// have started, safety is more important than distinguishing a clean interrupt.
@@ -209,8 +230,9 @@ public sealed class EmployeeRebuildCoordinator(
     {
         var current = store.GetEmployeeRebuild(rebuild.Id)!;
         var enrollment = RequireEnrollment(store, current);
-        await using var session = await sessions.ConnectAsync(enrollment, cancellationToken).ConfigureAwait(false);
-        var status = await RemoteOrientationCoordinator.ReadStatusAsync(session, cancellationToken).ConfigureAwait(false);
+        var ready = await provisioning.ConnectProvisionedWorkerAsync(enrollment, cancellationToken).ConfigureAwait(false);
+        await using var session = ready.Session;
+        var status = ready.Status;
         status = await WorkerConnectionManager.ReconcileRecordedSessionAsync(store, enrollment, session, status, cancellationToken).ConfigureAwait(false);
         var binding = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
         if (binding.NativeSessionId is not { } nativeSessionId)

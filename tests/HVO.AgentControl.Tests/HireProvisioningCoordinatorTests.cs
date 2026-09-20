@@ -551,6 +551,47 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task FailedRebuildResumeVerifiesRunningTargetWithoutReplacingAgain()
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "failed-resume");
+        var rebuild = fixture.BeginRebuild(target.Id, RebuildDigest);
+        fixture.Store.SetManualDispatchHold(fixture.EmployeeId, true, "rebuild " + rebuild.Id);
+        var holding = fixture.Store.TransitionEmployeeRebuild(rebuild.Id, rebuild.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
+        var replacing = fixture.Store.TransitionEmployeeRebuild(rebuild.Id, holding.Revision, EmployeeRebuildStates.Holding, EmployeeRebuildStates.Replacing);
+        await fixture.Provisioning.ReplaceContainerAsync(enrollment.WorkerId, new(RebuildDigest, "linux/amd64", target.Id, SourceProfileRevisionId: rebuild.FromProfileRevisionId), CancellationToken.None);
+        var verifying = fixture.Store.TransitionEmployeeRebuild(rebuild.Id, replacing.Revision, EmployeeRebuildStates.Replacing, EmployeeRebuildStates.Verifying);
+        var failed = fixture.Store.TransitionEmployeeRebuild(rebuild.Id, verifying.Revision, EmployeeRebuildStates.Verifying, EmployeeRebuildStates.Failed, failureSummary: "bridge-startup-race");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var resumed = await fixture.RebuildCoordinator.ResumeFailedAsync(rebuild.Id, failed.Revision, CancellationToken.None);
+
+        Assert.Equal(EmployeeRebuildStates.Applied, resumed.Rebuild.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count); // verification only; no second replacement
+        Assert.False(fixture.ManualHoldActive());
+        Assert.Equal(RebuildDigest, fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!.CurrentImageDigest);
+    }
+
+    [Fact]
+    public async Task FailedRebuildResumeRefusesWhenTargetContainerIsNotRunning()
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "failed-absent");
+        var rebuild = fixture.BeginRebuild(target.Id, RebuildDigest);
+        var failed = fixture.Store.TransitionEmployeeRebuild(rebuild.Id, rebuild.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Failed, failureSummary: "before replacement");
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.RebuildCoordinator.ResumeFailedAsync(rebuild.Id, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("rebuild-target-not-running", recovery.Kind);
+        Assert.Equal(EmployeeRebuildStates.Failed, fixture.Store.GetEmployeeRebuild(rebuild.Id)!.State);
+        Assert.Equal(BuiltDigest, fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!.CurrentImageDigest);
+    }
+
+    [Fact]
     public async Task EmployeeRebuildResumesAStrandedIntentAndABandonRestoresRemediation()
     {
         using var fixture = new Fixture();
@@ -652,7 +693,7 @@ public sealed class HireProvisioningCoordinatorTests
         public RemoteWorkerProvisioningCoordinator Provisioning { get; }
         public RemoteOrientationCoordinator Orientation { get; }
         public HireProvisioningCoordinator Coordinator => new(_control, Provisioning, Orientation, Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<HireProvisioningCoordinator>.Instance);
-        public EmployeeRebuildCoordinator RebuildCoordinator => new(_control, Provisioning, new FixedFactory(VerificationSession), Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<EmployeeRebuildCoordinator>.Instance);
+        public EmployeeRebuildCoordinator RebuildCoordinator => new(_control, Provisioning, Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<EmployeeRebuildCoordinator>.Instance);
         public string NativeSessionId { get; } = "native-managed";
         public string HireId { get; private set; } = string.Empty;
         public string EmployeeId { get; private set; } = string.Empty;
