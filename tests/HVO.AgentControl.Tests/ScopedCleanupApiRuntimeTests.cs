@@ -227,15 +227,18 @@ public sealed class ScopedCleanupApiRuntimeTests : IClassFixture<ScopedCleanupRu
             return (profile.Id, revision.Id, store.GetProfileBuild(queued.Id)!);
         }
 
-        var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
-        var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
         if (state == "uncertain")
         {
-            var uncertain = store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Uncertain, failureSummary: "lost");
+            var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+            var uncertain = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Uncertain, failureSummary: "lost");
             return (profile.Id, revision.Id, uncertain);
         }
 
-        var failed = store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Failed, imageDigest: digest ?? NewDigest(), failureSummary: "failed");
+        // The remove endpoint needs a terminal failed row, not a simulated build
+        // pipeline. Use the shortest valid transition so the optional startup
+        // reconciliation service cannot observe and reclassify a transient
+        // Building/Verifying row while this shared runtime fixture is seeding it.
+        var failed = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Failed, imageDigest: digest ?? NewDigest(), failureSummary: "failed");
         return (profile.Id, revision.Id, failed);
     }
 
