@@ -186,11 +186,12 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, sys, xml.etree.ElementTree as ET
-          # 4 image/lifecycle cases plus the fixed container-command contract test
-          # (RealContainerCommandAppliesTheFixedIsolationBootstrapAndLabels), which
-          # runs the controller's own bootstrap and container-create construction
-          # against a real local daemon using only disposable local resources.
-          EXPECTED = 5
+          # The class currently discovers eight real/structural cases: image and
+          # lifecycle contracts, the fixed controller container-command path, the
+          # deterministic profile build/verifier matrix, and isolated-Python startup.
+          # Keep this exact so a renamed, skipped, added or removed case is an
+          # explicit CI change rather than a false green.
+          EXPECTED = 8
           files = glob.glob("artifacts/worker-image-results/*.trx")
           if len(files) != 1:
               sys.exit(f"expected exactly one worker-image TRX, found {len(files)}")
