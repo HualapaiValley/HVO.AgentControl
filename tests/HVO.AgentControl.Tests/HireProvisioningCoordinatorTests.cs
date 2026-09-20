@@ -296,6 +296,45 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesMalformedResourceTopology()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.Execute("UPDATE resource_records SET resource_kind='container' WHERE id=(SELECT id FROM resource_records WHERE resource_kind='volume' LIMIT 1)");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-resource-shape-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumePostTransitionUncertainFailureIsDurablyContained()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.OrientationSession.FailInstallAsWriteUncertain = true;
+
+        await Assert.ThrowsAsync<WorkerWriteUncertainException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal(HireRequestStates.Uncertain, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+    }
+
+    [Fact]
     public async Task EmployeeRebuildUsesNewVerifiedDigestPreservesVolumesAndSessionAndClearsHold()
     {
         using var fixture = new Fixture();
@@ -715,6 +754,15 @@ public sealed class HireProvisioningCoordinatorTests
             using var command = connection.CreateCommand();
             command.CommandText = sql;
             return Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        public void Execute(string sql)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _databasePath, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
         }
 
         private void PrepareHost()

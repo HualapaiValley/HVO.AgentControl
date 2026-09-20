@@ -430,10 +430,16 @@ public sealed class RemoteWorkerProvisioningCoordinator
             throw new WorkerRecoveryRequiredException("The failed hire's five provisioning resources are not durably present.", "hire-resources-not-present");
         var resourceNames = resources.Select(x => x.ResourceName).ToHashSet(StringComparer.Ordinal);
         var expectedNames = new HashSet<string>([enrollment.ContainerName, enrollment.ControlVolumeName, enrollment.HomeVolumeName, enrollment.WorkspaceVolumeName, enrollment.SessionVolumeName], StringComparer.Ordinal);
+        var volumeOperationIds = operations.Where(x => x.Kind == "volume-create").Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
+        var resourceVolumeOperationIds = resources.Where(x => x.ResourceKind == "volume").Select(x => x.OperationId).ToHashSet(StringComparer.Ordinal);
+        var containerOperationId = operations.Single(x => x.Kind == "container-create").Id;
+        var containerResources = resources.Where(x => x.ResourceKind == "container").ToArray();
         if (!resourceNames.SetEquals(expectedNames)
-            || resources.Count(x => x.ResourceKind == "container") != 1
+            || containerResources.Length != 1
             || resources.Count(x => x.ResourceKind == "volume") != 4
-            || resources.Any(x => !operations.Any(operation => operation.Id == x.OperationId && operation.Kind == (x.ResourceKind == "container" ? "container-create" : "volume-create"))))
+            || resourceVolumeOperationIds.Count != 4
+            || !resourceVolumeOperationIds.SetEquals(volumeOperationIds)
+            || !string.Equals(containerResources.SingleOrDefault()?.OperationId, containerOperationId, StringComparison.Ordinal))
             throw new WorkerRecoveryRequiredException("The failed hire's resource topology does not match the fixed container and four volumes.", "hire-resource-shape-invalid");
 
         var host = _targets.Resolve(enrollment.HostId);
