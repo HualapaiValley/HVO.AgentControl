@@ -152,7 +152,13 @@ public sealed class DockerHelperServer(DockerHelperOptions options, IPeerCredent
                 string[] argv = Build(request);
                 if (request.Operation is DockerOperation.Connector or DockerOperation.Viewer) { await StreamAsync(stream, request, argv, token).ConfigureAwait(false); return; }
                 if (!await _concurrency.WaitAsync(0, token).ConfigureAwait(false)) { await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperError("error", id, "capacity-exhausted"), token); return; }
-                try { var result = await _runner.RunAsync(id, request.Operation, argv, input, TimeSpan.FromSeconds(request.TimeoutSeconds), token).ConfigureAwait(false); await WriteAsync(stream, result, token).ConfigureAwait(false); }
+                try
+                {
+                    var result = request.Operation == DockerOperation.WorkspaceVerify
+                        ? await RunWorkspaceVerifyAsync(request, token).ConfigureAwait(false)
+                        : await _runner.RunAsync(id, request.Operation, argv, input, TimeSpan.FromSeconds(request.TimeoutSeconds), token).ConfigureAwait(false);
+                    await WriteAsync(stream, result, token).ConfigureAwait(false);
+                }
                 finally { _concurrency.Release(); }
             }
             catch (DockerGrammarException) { await SafeErrorAsync(stream, id, "request-rejected", token).ConfigureAwait(false); }
@@ -164,7 +170,34 @@ public sealed class DockerHelperServer(DockerHelperOptions options, IPeerCredent
         }
     }
 
-    private string[] Build(DockerHelperRequest request) => request.Operation switch { DockerOperation.VolumeCreate when request.VolumeCreate is not null => DockerArgv.BuildVolumeCreate(request.VolumeCreate), DockerOperation.ContainerCreate when request.ContainerCreate is not null => DockerArgv.BuildContainerCreate(request.ContainerCreate, options.Policy), DockerOperation.Bootstrap when request.Bootstrap is not null => DockerArgv.BuildBootstrap(request.Bootstrap, options.Policy), DockerOperation.ImageBuild when request.ImageBuild is not null => DockerArgv.BuildImageBuild(request.ImageBuild), _ => DockerArgv.Build(request.Operation, request.Tokens ?? [], options.Policy) };
+    private string[] Build(DockerHelperRequest request) => request.Operation switch { DockerOperation.VolumeCreate when request.VolumeCreate is not null => DockerArgv.BuildVolumeCreate(request.VolumeCreate), DockerOperation.ContainerCreate when request.ContainerCreate is not null => DockerArgv.BuildContainerCreate(request.ContainerCreate, options.Policy), DockerOperation.Bootstrap when request.Bootstrap is not null => DockerArgv.BuildBootstrap(request.Bootstrap, options.Policy), DockerOperation.ImageBuild when request.ImageBuild is not null => DockerArgv.BuildImageBuild(request.ImageBuild), DockerOperation.WorkspaceVerify when request.WorkspaceVerify is not null => DockerArgv.BuildWorkspaceVerify(request.WorkspaceVerify, options.Policy), _ => DockerArgv.Build(request.Operation, request.Tokens ?? [], options.Policy) };
+
+    private async Task<DockerHelperResult> RunWorkspaceVerifyAsync(DockerHelperRequest request, CancellationToken token)
+    {
+        var spec = request.WorkspaceVerify ?? throw new DockerGrammarException("Workspace verification specification is required.");
+        var volume = await _runner.RunAsync(request.Id, DockerOperation.VolumeInspect, DockerArgv.Build(DockerOperation.VolumeInspect, [spec.WorkspaceVolumeName], options.Policy), null, TimeSpan.FromSeconds(Math.Min(request.TimeoutSeconds, 60)), token).ConfigureAwait(false);
+        if (volume.ExitCode != 0) throw new DockerGrammarException("Workspace volume could not be inspected.");
+        using (var document = JsonDocument.Parse(volume.Stdout))
+        {
+            var labels = document.RootElement.GetProperty("Labels").EnumerateObject().ToDictionary(property => property.Name, property => property.Value.GetString() ?? string.Empty, StringComparer.Ordinal);
+            DockerArgv.RequireOwnedLabels(labels, spec.Identity);
+        }
+        var image = await _runner.RunAsync(request.Id, DockerOperation.ImageInspect, DockerArgv.Build(DockerOperation.ImageInspect, [spec.TargetImageDigest], options.Policy), null, TimeSpan.FromSeconds(Math.Min(request.TimeoutSeconds, 60)), token).ConfigureAwait(false);
+        if (image.ExitCode != 0) throw new DockerGrammarException("Workspace verification image could not be inspected.");
+        using (var document = JsonDocument.Parse(image.Stdout))
+        {
+            var inspected = document.RootElement;
+            var id = inspected.GetProperty("Id").GetString();
+            if (!string.Equals(id, spec.TargetImageDigest, StringComparison.Ordinal)) throw new DockerGrammarException("Workspace verification image digest does not match.");
+            var labels = inspected.GetProperty("Config").GetProperty("Labels");
+            if (!string.Equals(spec.TargetImageDigest, options.Policy.ApprovedBaseDigest, StringComparison.Ordinal)
+                && (!labels.TryGetProperty("agentcontrol.profile", out var profile) || string.IsNullOrWhiteSpace(profile.GetString())
+                    || !labels.TryGetProperty("agentcontrol.base-digest", out var baseDigest) || baseDigest.GetString() != options.Policy.ApprovedBaseDigest))
+                throw new DockerGrammarException("Workspace verification image provenance is invalid.");
+        }
+        return await _runner.RunAsync(request.Id, request.Operation, DockerArgv.BuildWorkspaceVerify(spec, options.Policy), null, TimeSpan.FromSeconds(request.TimeoutSeconds), token).ConfigureAwait(false);
+    }
+
     private static void ValidateEnvelope(DockerHelperRequest request) { if (request.Type != "request" || request.Id is not { Length: >= 1 and <= 128 } || request.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_' and not '.' and not ':') || request.TimeoutSeconds is < 1 or > DockerHelperProtocol.MaxTimeoutSeconds || request.BinaryLength is < 0 or > DockerHelperProtocol.MaxBinaryBytes) throw new InvalidDataException(); var needsBinary = request.Operation is DockerOperation.Bootstrap or DockerOperation.ImageBuild; if (needsBinary != (request.BinaryLength > 0)) throw new InvalidDataException(); if (request.Operation is DockerOperation.Connector or DockerOperation.Viewer && request.BinaryLength != 0) throw new InvalidDataException(); }
     private async Task StreamAsync(Stream stream, DockerHelperRequest request, string[] argv, CancellationToken token) { if (!await _concurrency.WaitAsync(0, token).ConfigureAwait(false)) { await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperError("error", request.Id, "capacity-exhausted"), token); return; } Process? process = null; try { process = await _runner.StartStreamAsync(argv, token).ConfigureAwait(false); await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperStreamOpen("stream-open", request.Id), token).ConfigureAwait(false); using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token); var input = stream.CopyToAsync(process.StandardInput.BaseStream, lifetime.Token); var output = process.StandardOutput.BaseStream.CopyToAsync(stream, lifetime.Token); var completed = await Task.WhenAny(input, output, process.WaitForExitAsync(lifetime.Token)).ConfigureAwait(false); lifetime.Cancel(); try { await completed.ConfigureAwait(false); } catch { } } finally { try { if (process is not null && !process.HasExited) process.Kill(true); } catch { } process?.Dispose(); _concurrency.Release(); } }
     /// <summary>

@@ -31,6 +31,9 @@ public sealed record EmployeeTaskCancel(int ExpectedTaskRevision);
 /// <summary>The revision-bound request to synchronize one exact task without resubmitting it.</summary>
 public sealed record EmployeeTaskSync(int ExpectedTaskRevision);
 
+/// <summary>The revision-bound request to independently verify a completed task.</summary>
+public sealed record EmployeeTaskVerify(int ExpectedTaskRevision);
+
 /// <summary>The owner-controlled manual dispatch hold for any managed employee.</summary>
 public sealed record EmployeeDispatchHoldUpdate(int ExpectedEmployeeRevision, bool Held, string? Detail);
 

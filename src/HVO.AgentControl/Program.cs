@@ -603,6 +603,17 @@ app.MapPost("/api/tasks/{taskId}/sync", async (HttpContext context, AcpControlHo
 })
     .WithName("SynchronizeWorkerTask").WithTags("Employee tasks");
 
+app.MapPost("/api/tasks/{taskId}/verify", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskVerify request) =>
+{
+    if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid worker task verification.", detail: "A bounded stable task id and current task revision are required.");
+    if (Program.RejectCrossOrigin(context, "Worker task verification") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.VerifyAsync(taskId, request.ExpectedTaskRevision, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("VerifyWorkerTask").WithTags("Employee tasks");
+
 app.MapPost("/api/tasks/{taskId}/cancel", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskCancel request) =>
 {
     if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)

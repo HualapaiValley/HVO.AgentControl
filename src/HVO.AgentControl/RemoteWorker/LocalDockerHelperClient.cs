@@ -1,6 +1,7 @@
 using System.Net.Sockets;
 using System.Text.Json;
 using HVO.AgentControl.DockerHelper.Protocol;
+using HVO.AgentControl.Organization;
 using HVO.AgentControl.Worker;
 using Microsoft.Extensions.Options;
 
@@ -15,6 +16,27 @@ public sealed class LocalDockerHelperClient(IOptions<WorkerControlOptions> confi
     public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token) => RequestAsync(target, new("request", Id(), DockerOperation.ContainerCreate, ContainerCreate: spec, TimeoutSeconds: Timeout(DockerOperation.ContainerCreate)), null, token);
     public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec spec, byte[] key, CancellationToken token) => RequestAsync(target, new("request", Id(), DockerOperation.Bootstrap, Bootstrap: spec, BinaryLength: key.Length, TimeoutSeconds: Timeout(DockerOperation.Bootstrap)), key, token);
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec spec, byte[] contextTar, CancellationToken token) => RequestAsync(target, new("request", Id(), DockerOperation.ImageBuild, ImageBuild: spec, BinaryLength: contextTar.Length, TimeoutSeconds: Timeout(DockerOperation.ImageBuild)), contextTar, token);
+    public async Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec spec, CancellationToken token)
+    {
+        var result = await RequestAsync(target, new("request", Id(), DockerOperation.WorkspaceVerify, WorkspaceVerify: spec, TimeoutSeconds: spec.MaximumSeconds), null, token).ConfigureAwait(false);
+        if (result.ExitCode != 0) return new(result.ErrorCategory == "timeout" ? WorkerTaskVerificationStates.Uncertain : WorkerTaskVerificationStates.Failed, null, null, null, result.ErrorCategory == "timeout" ? "verification-timeout-uncertain" : "verification-command-failed");
+        try
+        {
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            var root = document.RootElement;
+            var passed = root.GetProperty("state").GetString() == "passed";
+            return new(
+                passed ? WorkerTaskVerificationStates.Passed : WorkerTaskVerificationStates.Failed,
+                passed ? root.GetProperty("manifest").GetRawText() : null,
+                passed ? root.GetProperty("testSummary").GetRawText() : null,
+                null,
+                passed ? null : root.TryGetProperty("failureDetail", out var detail) ? detail.GetString() ?? "verification-failed" : "verification-failed");
+        }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            return new(WorkerTaskVerificationStates.Uncertain, null, null, null, "verification-output-invalid");
+        }
+    }
     public Task<Stream> ConnectAsync(ExecutionTarget target, string container, CancellationToken token) => OpenStreamAsync(target, DockerOperation.Connector, container, token);
     public Task<Stream> ConnectViewerAsync(ExecutionTarget target, string container, CancellationToken token) => OpenStreamAsync(target, DockerOperation.Viewer, container, token);
 

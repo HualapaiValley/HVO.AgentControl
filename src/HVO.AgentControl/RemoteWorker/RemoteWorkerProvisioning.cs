@@ -62,6 +62,7 @@ public interface IRemoteWorkerProvisioner
     /// destructive step.
     /// </summary>
     Task<string?> InspectImageAsync(ExecutionTarget target, string imageReference, CancellationToken token);
+    Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec spec, CancellationToken token) => throw new WorkerControlConfigurationException("Workspace verification is not implemented by this provisioner.");
 }
 
 public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations operations) : IRemoteWorkerProvisioner
@@ -71,6 +72,7 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
     public async Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeInspect, [name], null, token));
     public async Task<string> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token) => Require(await operations.CreateContainerAsync(target, spec, token));
     public async Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerInspect, [name], null, token));
+    public Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec spec, CancellationToken token) => operations.WorkspaceVerifyAsync(target, spec, token);
 
     /// <summary>
     /// Runs the ephemeral bootstrap container with the controller-encoded key on

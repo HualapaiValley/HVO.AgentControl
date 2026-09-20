@@ -279,6 +279,15 @@ public sealed class EmployeeTaskApiRuntimeTests : IClassFixture<EmployeeTaskRunt
         using var syncRejected = await client.SendAsync(syncCrossOrigin);
         Assert.Equal(HttpStatusCode.Forbidden, syncRejected.StatusCode);
 
+        using var verifyCrossOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/tasks/tsk-does-not-exist/verify")
+        {
+            Content = new StringContent("""{"expectedTaskRevision":1}""", Encoding.UTF8, "application/json"),
+        };
+        verifyCrossOrigin.Headers.Add("Origin", "https://other.example");
+        verifyCrossOrigin.Headers.Authorization = RemoteWorkerApi.Basic("owner", EnabledRuntimeFactory.OwnerPassword);
+        using var verifyRejected = await client.SendAsync(verifyCrossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, verifyRejected.StatusCode);
+
         using var holdCrossOrigin = new HttpRequestMessage(HttpMethod.Put, $"/api/employees/{seed.EmployeeId}/dispatch-hold")
         {
             Content = new StringContent("""{"expectedEmployeeRevision":1,"held":true}""", Encoding.UTF8, "application/json"),

@@ -23,6 +23,7 @@ public sealed record DockerHelperRequest(
     HVO.AgentControl.RemoteWorker.ContainerCreateSpec? ContainerCreate = null,
     HVO.AgentControl.RemoteWorker.BootstrapSpec? Bootstrap = null,
     HVO.AgentControl.RemoteWorker.ImageBuildSpec? ImageBuild = null,
+    HVO.AgentControl.RemoteWorker.WorkspaceVerifySpec? WorkspaceVerify = null,
     int BinaryLength = 0,
     int TimeoutSeconds = 60);
 
