@@ -415,26 +415,41 @@ public sealed class RemoteWorkerProvisioningCoordinator
         while (elapsed.Elapsed < limit)
         {
             token.ThrowIfCancellationRequested();
+            var remaining = limit - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero) break;
+            using var attemptDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            attemptDeadline.CancelAfter(remaining);
             IWorkerBridgeSession? session = null;
+            var retained = false;
             try
             {
-                session = await _verification.ConnectAsync(enrollment, token).ConfigureAwait(false);
-                var statusResult = await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
+                session = await _verification.ConnectAsync(enrollment, attemptDeadline.Token).ConfigureAwait(false);
+                var statusResult = await session.InvokeAsync("status", new { operation = "status" }, false, attemptDeadline.Token).ConfigureAwait(false);
                 var status = JsonSerializer.Deserialize<BridgeWorkerStatus>(statusResult.Result.GetRawText(), HVO.AgentControl.Worker.WorkerProtocol.JsonOptions)
                     ?? throw new HVO.AgentControl.Worker.WorkerProtocolException("Worker status is invalid.");
-                if (status.ProcessState == "running" && status.AcpInitialized) return (session, status);
+                if (status.ProcessState == "running" && status.AcpInitialized)
+                {
+                    retained = true;
+                    return (session, status);
+                }
                 last = new OrganizationConcurrencyException("The newly-started worker process is not initialized yet.");
             }
             catch (Exception exception) when (exception is HVO.AgentControl.Worker.WorkerProtocolException
-                or WorkerReadUncertainException
                 or RemoteWorkerUnavailableException
                 or IOException)
             {
                 last = exception;
             }
+            catch (OperationCanceledException exception) when (!token.IsCancellationRequested)
+            {
+                last = new TimeoutException("The worker bridge readiness attempt exceeded the remaining startup window.", exception);
+            }
+            finally
+            {
+                if (session is not null && !retained) await session.DisposeAsync().ConfigureAwait(false);
+            }
 
-            if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
-            var remaining = limit - elapsed.Elapsed;
+            remaining = limit - elapsed.Elapsed;
             if (remaining <= TimeSpan.Zero) break;
             await Task.Delay(remaining < TimeSpan.FromMilliseconds(200) ? remaining : TimeSpan.FromMilliseconds(200), token).ConfigureAwait(false);
         }

@@ -1592,7 +1592,9 @@ public sealed class RemoteWorkerControlTests
         using var fixture = new RemoteStoreFixture(makeDeveloper: true, seedSession: false);
         var remote = new RecordingProvisioner();
         var healthy = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { SessionId = null }) { NewSessionId = "native-after-ready" };
-        var delayed = new DelayedReadySessionFactory(healthy, failures: 2);
+        var unready = new ReadinessProbeSession(fixture.BridgeStatus() with { AcpInitialized = false, SessionId = null });
+        var readFailed = new ReadinessProbeSession(fixture.BridgeStatus() with { SessionId = null }, failRead: true);
+        var delayed = new SequenceSessionFactory(unready, readFailed, healthy);
         var coordinator = fixture.CreateCoordinator(remote, delayed, options => options.ConnectTimeoutSeconds = 2);
         var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
 
@@ -1601,9 +1603,30 @@ public sealed class RemoteWorkerControlTests
         Assert.Equal("enrolled", enrolled.LifecycleStatus);
         Assert.Equal(3, delayed.Attempts);
         Assert.Equal("native-after-ready", fixture.Store.GetRemoteBindingSession(fixture.BindingId).NativeSessionId);
-        // The failed attempts closed before any operation. Only the ready session
-        // receives the new-session mutation, exactly once.
+        Assert.Equal(["status"], unready.Invocations);
+        Assert.Equal(["status"], readFailed.Invocations);
+        Assert.True(unready.Disposed);
+        Assert.True(readFailed.Disposed);
+        // Only the ready session receives the session mutation, exactly once.
         Assert.Single(healthy.Invocations, x => x.Operation == "new-session");
+    }
+
+    [Fact]
+    public async Task ProvisioningBridgeReadinessTimeoutIsBoundedAndUncertain()
+    {
+        using var fixture = new RemoteStoreFixture(makeDeveloper: true, seedSession: false);
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote, new HangingSessionFactory(), options => options.ConnectTimeoutSeconds = 1);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        var failure = await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.True(failure.Transport);
+        Assert.InRange(started.Elapsed, TimeSpan.FromMilliseconds(700), TimeSpan.FromSeconds(4));
+        // All provisioning effects were committed before readiness verification;
+        // none are replayed by this timeout path.
+        Assert.All(fixture.Store.ListProvisioningOperations(enrollment.WorkerId), operation => Assert.Equal("Applied", operation.State));
     }
 
     /// <summary>
@@ -3245,17 +3268,44 @@ public sealed class RemoteWorkerControlTests
         Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Id == obligation.Id);
     }
 
-    private sealed class DelayedReadySessionFactory(FakeBridgeSession session, int failures) : IWorkerBridgeSessionFactory
+    private sealed class SequenceSessionFactory(params IWorkerBridgeSession[] sessions) : IWorkerBridgeSessionFactory
     {
         private int _attempts;
         public int Attempts => _attempts;
 
         public Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var attempt = Interlocked.Increment(ref _attempts);
-            if (attempt <= failures) throw new HVO.AgentControl.Worker.WorkerProtocolException("Bridge closed during authentication.");
-            return Task.FromResult<IWorkerBridgeSession>(session);
+            return Task.FromResult(sessions[Math.Min(attempt - 1, sessions.Length - 1)]);
         }
+    }
+
+    private sealed class HangingSessionFactory : IWorkerBridgeSessionFactory
+    {
+        public async Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
+    private sealed class ReadinessProbeSession(BridgeWorkerStatus status, bool failRead = false) : IWorkerBridgeSession
+    {
+        public WorkerBridgeLease Lease { get; } = new(1, "controller-a", Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
+        public List<string> Invocations { get; } = [];
+        public bool Disposed { get; private set; }
+        public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => throw new InvalidOperationException("Readiness probes must not create mutations.");
+        public Task<WorkerSessionResult> InvokeAsync(string operation, object request, bool mutation, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Invocations.Add(operation);
+            Assert.False(mutation);
+            Assert.Equal("status", operation);
+            if (failRead) throw new WorkerReadUncertainException("injected readiness status failure");
+            return Task.FromResult(new WorkerSessionResult(operation, JsonSerializer.SerializeToElement(status, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions), false));
+        }
+        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
 
     private sealed class FakeBridgeSessionFactory(FakeBridgeSession session, Action? beforeConnect = null) : IWorkerBridgeSessionFactory
