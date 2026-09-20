@@ -378,12 +378,17 @@ public sealed class HireProvisioningCoordinatorTests
         // Swap two volume resource links while keeping the exact same resource and
         // operation sets. Set equality alone still passes; remote ownership labels
         // must expose the mismatched operation identity and fail closed.
-        fixture.Execute("""
-            CREATE TEMP TABLE swap_ops AS SELECT id,operation_id,row_number() OVER (ORDER BY id) n FROM resource_records WHERE resource_kind='volume' LIMIT 2;
-            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE n=2) WHERE id=(SELECT id FROM swap_ops WHERE n=1);
-            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE n=1) WHERE id=(SELECT id FROM swap_ops WHERE n=2);
+        fixture.Execute($"""
+            CREATE TEMP TABLE swap_ops AS
+              SELECT resource_name,operation_id FROM resource_records
+              WHERE resource_name IN ('{enrollment.ControlVolumeName}','{enrollment.HomeVolumeName}');
+            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE resource_name='{enrollment.HomeVolumeName}') WHERE resource_name='{enrollment.ControlVolumeName}';
+            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE resource_name='{enrollment.ControlVolumeName}') WHERE resource_name='{enrollment.HomeVolumeName}';
             DROP TABLE swap_ops;
             """);
+        // Make the remote labels agree with the corrupted database links. The
+        // name-derived intent proof must still refuse before trusting inspection.
+        fixture.Provisioner.SwapLabels(enrollment.ControlVolumeName, enrollment.HomeVolumeName);
         var before = fixture.Provisioner.Effects.Count;
 
         var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
@@ -1049,6 +1054,7 @@ public sealed class HireProvisioningCoordinatorTests
         public string? OwnerOverride { get; set; }
 
         public void SetState(string name, string state) => _states[name] = state;
+        public void SwapLabels(string first, string second) => (_labels[first], _labels[second]) = (_labels[second], _labels[first]);
 
         /// <summary>Removes the tracked container without recording a remote effect, modelling a crash after removal.</summary>
         public void SimulateAbsentContainer(string name) { _labels.Remove(name); _states.Remove(name); }
