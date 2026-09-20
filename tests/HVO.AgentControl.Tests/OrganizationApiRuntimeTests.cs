@@ -744,7 +744,10 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(HttpStatusCode.Forbidden, crossOriginAbandonResponse.StatusCode);
 
         // With valid origin and identifiers, the disabled gate answers 409 for both.
-        using var disabledResume = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/resume");
+        using var disabledResume = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/resume")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1 }),
+        };
         disabledResume.Headers.Add("Origin", origin);
         using var disabledResumeResponse = await disabledClient.SendAsync(disabledResume);
         Assert.Equal(HttpStatusCode.Conflict, disabledResumeResponse.StatusCode);
