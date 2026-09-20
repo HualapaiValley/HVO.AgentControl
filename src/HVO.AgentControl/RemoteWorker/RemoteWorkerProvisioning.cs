@@ -783,9 +783,10 @@ public sealed class RemoteWorkerProvisioningCoordinator
         // session through the verification bridge so the replacement continues the
         // employee's history rather than starting a new one, then require the
         // session to be ready for work before returning.
-        await using var session = await _verification.ConnectAsync(store.GetWorkerEnrollment(workerId)!, token).ConfigureAwait(false);
-        var status = await ReadStatusAsync(session, token).ConfigureAwait(false);
-        status = await EnsureProvisionedSessionAsync(store, store.GetWorkerEnrollment(workerId)!, session, status, token).ConfigureAwait(false);
+        var replacementEnrollment = store.GetWorkerEnrollment(workerId)!;
+        var ready = await ConnectProvisionedWorkerAsync(replacementEnrollment, token).ConfigureAwait(false);
+        await using var session = ready.Session;
+        var status = await EnsureProvisionedSessionAsync(store, replacementEnrollment, session, ready.Status, token).ConfigureAwait(false);
         var authoritative = store.GetRemoteBindingSession(enrollment.RuntimeBindingId);
         if (authoritative.NativeSessionId is not { } nativeSessionId) throw new OrganizationConcurrencyException("Replacement did not establish an authoritative worker session.");
         WorkerConnectionManager.EnsureSessionReadyForWork(store, workerId, nativeSessionId, status);
