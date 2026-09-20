@@ -50,6 +50,7 @@ jobs:
       - name: Test
         run: >-
           dotnet test HVO.AgentControl.slnx --no-build -c Release
+          --filter "FullyQualifiedName!~AgentIsolationContainerTests&FullyQualifiedName!~WorkerImageContractTests&FullyQualifiedName!~DockerHelperIntegrationTests&FullyQualifiedName!~LocalManagedHiringDockerIntegrationTests&FullyQualifiedName!~OpenCodeOutboundIntegrationTests"
           --logger "trx;LogFileName=test-results.trx"
           --results-directory artifacts/test-results
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

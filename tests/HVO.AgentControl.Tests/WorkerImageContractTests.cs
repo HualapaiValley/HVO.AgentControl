@@ -418,10 +418,11 @@ public sealed class WorkerImageContractTests
                 ("opencode-policy", "RUN mkdir -p /etc/opencode && printf '{}' > /etc/opencode/opencode.json", "OpenCode configuration"),
                 // Profiles have no approved custom-CA feature, so trust stays base-identical.
                 ("ca-bundle", "RUN printf 'evil' >> /etc/ssl/certs/ca-certificates.crt", "/etc/ssl differs"),
-                // Metadata includes all xattrs, not only file capabilities.
-                // OCI layer export commonly strips user.* xattrs; prove this does not create
-                // a false rejection. Pure verifier tests cover an observed xattr mismatch.
-                ("user-xattr", "RUN python3 -c 'import os;os.setxattr(\"/usr/bin/env\",\"user.agentcontrol-test\",b\"x\")'", "none"),
+                // User xattrs are storage-driver dependent: some OCI layer paths
+                // preserve them and correctly reject the pinned artifact, while
+                // others strip them before verification. The pure verifier tests
+                // deterministically cover an observed xattr mismatch; do not make
+                // this real-Docker matrix depend on the host storage driver.
             };
             foreach (var (name, fragment, expect) in hostile)
             {
