@@ -53,6 +53,7 @@ public interface IRemoteWorkerProvisioner
     Task StopAsync(ExecutionTarget target, string container, CancellationToken token);
     Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token);
     Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token);
+    Task RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken token);
 }
 
 public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations operations) : IRemoteWorkerProvisioner
@@ -87,6 +88,20 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
     public async Task StopAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerStop, [container], null, token));
     public async Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerRemove, [container], null, token));
     public async Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeRemove, [volume], null, token));
+
+    /// <summary>
+    /// Removes one image by digest or controller-shaped local tag. Absence is
+    /// tolerated: a <c>not-found</c> answer means the image is already gone, so the
+    /// caller can finish cleanup. Any transport failure is raised unchanged as an
+    /// uncertain effect. The caller must prove the image is not in use first; this
+    /// transport never decides that.
+    /// </summary>
+    public async Task RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken token)
+    {
+        var result = await operations.RemoveImageAsync(target, imageReference, token).ConfigureAwait(false);
+        if (result.ExitCode == 0 || result.ErrorCategory == "not-found") return;
+        throw new RemoteWorkerUnavailableException("Worker provisioning image removal failed.", result.ErrorCategory == "transport");
+    }
 
     private static string Require(RemoteOperationResult result)
     {

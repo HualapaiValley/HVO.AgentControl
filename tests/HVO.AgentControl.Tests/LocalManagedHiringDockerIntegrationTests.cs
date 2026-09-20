@@ -210,6 +210,88 @@ public sealed class LocalManagedHiringDockerIntegrationTests(ITestOutputHelper o
         }
     }
 
+    /// <summary>
+    /// Real-daemon coverage for scoped failed-build cleanup: a failed build row's
+    /// local result tag is removed through the local helper and the tag is proven
+    /// gone. The build carries no image digest, so cleanup removes only the tag and
+    /// never the shared base image.
+    /// </summary>
+    [Fact(Timeout = 300_000)]
+    public async Task ScopedCleanupRemovesAFailedBuildsLocalTagThroughTheLocalHelper()
+    {
+        if (!Available.Value) throw Xunit.Sdk.SkipException.ForSkip("Real Docker scoped-cleanup integration requires Linux, a reachable Docker daemon, and the hvo-agentcontrol:worker-tests image (or permission to build it).");
+
+        var baseDigest = ImageDigest();
+        var platform = Run(["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"]).Output.Trim();
+        var directory = Path.Combine(Path.GetTempPath(), "agentcontrol-cleanup-" + Guid.NewGuid().ToString("N")[..12]);
+        Directory.CreateDirectory(directory);
+        var target = new ExecutionTarget(ExecutionHosts.LocalDockerId, "local-docker", null);
+        var resultTag = "agentcontrol-profile:prev-cleanup-" + Guid.NewGuid().ToString("N")[..12];
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        await using var helper = await HelperHarness.StartAsync(baseDigest, platform);
+        OrganizationStore? store = null;
+        AcpControlHost? control = null;
+        try
+        {
+            var options = Options.Create(new WorkerControlOptions
+            {
+                Enabled = true,
+                ControllerId = "controller-cleanup-integration",
+                ApprovedImageDigest = baseDigest,
+                ApprovedImagePlatform = platform,
+                LocalDockerHelperSocketPath = helper.SocketPath,
+                ExpectedControllerUid = CurrentUid(),
+                OperationTimeoutSeconds = 150,
+                AuthenticationTimeoutSeconds = 20,
+                MemoryBytes = 2L * 1024 * 1024 * 1024,
+                CpuLimit = 2,
+                PidsLimit = 256,
+            });
+            var local = new LocalDockerExecutionOperations(new LocalDockerHelperClient(options));
+            var routed = new RoutingExecutionOperations(new RejectingSshOperations(), local);
+
+            store = new OrganizationStore(Path.Combine(directory, "control.db"), lockTimeout: TimeSpan.FromSeconds(10));
+            store.OpenAndAdopt("AgentControl Cleanup Integration", "owner-approved:test", null, "seed://fresh");
+            control = ControlHost(directory, store);
+            var host = store.GetExecutionHost(ExecutionHosts.LocalDockerId)!;
+            store.RecordLocalExecutionHostProbe(ExecutionHosts.LocalDockerId, host.Revision, new LocalExecutionHostProbe(
+                "29.0", "1.51", "x86_64", "overlay2", "ext4", false, 64L << 30, 16L << 30, 8, true, platform, "valid"));
+
+            // Point a controller-profile tag at the shared base image, then seed a
+            // failed build that names it and carries no digest.
+            var tag = await routed.ExecuteAsync(target, RemoteDockerOperation.ImageTag, [baseDigest, resultTag], null, timeout.Token);
+            Assert.Equal(0, tag.ExitCode);
+            Assert.Equal(0, Run(["image", "inspect", resultTag]).ExitCode);
+
+            var profile = store.CreateContainerProfile(new ContainerProfileCreate(
+                Guid.NewGuid().ToString("N"), "cleanup-live-" + Guid.NewGuid().ToString("N")[..8], "Cleanup Live",
+                "Scoped cleanup real-docker fixture.",
+                """{"image":"agentcontrol-worker-base","name":"Cleanup Live"}""", null), null);
+            var revision = store.GetContainerProfile(profile.Id)!.Revisions.Single();
+            var contextHash = "sha256:" + new string('9', 64);
+            var queued = store.QueueProfileBuild(revision.Id, ExecutionHosts.LocalDockerId, baseDigest, platform, contextHash, resultTag);
+            var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+            var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+            _ = store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Failed, failureSummary: "the build failed (remote-command-failed)");
+
+            var adapter = new RemoteWorkerProvisionerAdapter(routed);
+            var provisioning = new RemoteWorkerProvisioningCoordinator(control, adapter, options, new ThrowingSessionFactory());
+            var cleanup = new CleanupCoordinator(control, adapter, provisioning, options, NullLogger<CleanupCoordinator>.Instance);
+            var removed = await cleanup.CleanupProfileBuildAsync(queued.Id, "owner", timeout.Token);
+
+            Assert.Equal(ProfileBuildStates.Removed, removed.State);
+            Assert.NotEqual(0, Run(["image", "inspect", resultTag]).ExitCode);
+            Assert.Equal(0, Run(["image", "inspect", baseDigest]).ExitCode);
+        }
+        finally
+        {
+            _ = Run(["image", "rm", "--no-prune", resultTag]);
+            control?.Dispose();
+            store?.Dispose();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+        }
+    }
+
     private static async Task RemoveImageAsync(IRemoteWorkerOperations operations, ExecutionTarget target, string image, CancellationToken token)
     {
         try { _ = await operations.ExecuteAsync(target, RemoteDockerOperation.ImageRemove, [image], null, token); }
@@ -277,6 +359,11 @@ public sealed class LocalManagedHiringDockerIntegrationTests(ITestOutputHelper o
         }
     }
 
+    private sealed class ThrowingSessionFactory : IWorkerBridgeSessionFactory
+    {
+        public Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken) => throw new Xunit.Sdk.XunitException("scoped build cleanup must not open a worker bridge session");
+    }
+
     private sealed class RejectingSshOperations : ISshExecutionOperations
     {
         public List<string> Calls { get; } = [];
@@ -286,6 +373,7 @@ public sealed class LocalManagedHiringDockerIntegrationTests(ITestOutputHelper o
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => Reject<RemoteOperationResult>();
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => Reject<RemoteOperationResult>();
         public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => Reject<RemoteOperationResult>();
+        public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => Reject<RemoteOperationResult>();
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => Reject<HostProbePayload>();
     }
 

@@ -355,11 +355,11 @@ app.MapPost("/api/workers/{workerId}/enroll/apply", async (HttpContext context, 
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("ApplyRemoteWorkerEnrollment").WithTags("Remote workers");
 
-app.MapPost("/api/workers/{workerId}/cleanup", async (HttpContext context, AcpControlHost control, RemoteWorkerProvisioningCoordinator coordinator, string workerId) =>
+app.MapPost("/api/workers/{workerId}/cleanup", async (HttpContext context, AcpControlHost control, HVO.AgentControl.RemoteWorker.CleanupCoordinator cleanup, string workerId) =>
 {
     if (Program.RejectCrossOrigin(context, "Worker cleanup") is { } rejection) return rejection;
     if (control.Organization is null) return Program.WorkerStoreUnavailable();
-    try { await coordinator.CleanupAsync(workerId, context.RequestAborted); return Results.Ok(); }
+    try { await cleanup.CleanupFailedProvisioningAsync(workerId, context.RequestAborted); return Results.Ok(); }
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 }).WithName("CleanupRemoteWorker").WithTags("Remote workers");
 
@@ -993,6 +993,37 @@ app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds", async (HttpConte
 })
     .WithName("BuildProfileRevision").WithTags("Profiles")
     .WithSummary("Builds and verifies the revision's image on one approved, ready execution host and records the result; called again for an uncertain or interrupted build it reconciles by tag instead of rebuilding. A verified digest joins that host's approved set; nothing is provisioned.")
+    .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/profiles/{id}/revisions/{revisionId}/builds/{buildId}/remove", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.CleanupCoordinator cleanup, string id, string revisionId, string buildId, CancellationToken cancellationToken) =>
+{
+    if (!Program.IsValidContainerProfileId(id) || !Program.IsValidContainerProfileRevisionId(revisionId) || !Program.IsValidProfileBuildId(buildId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid container profile, revision or build id.");
+    if (Program.RejectCrossOrigin(context, "Profile build removal") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var revisions = store.ListContainerProfileRevisions(id);
+        if (revisions is null || revisions.All(r => r.Id != revisionId)) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Container profile revision not found.");
+        var build = store.GetProfileBuild(buildId);
+        if (build is null || !string.Equals(build.ProfileRevisionId, revisionId, StringComparison.Ordinal))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Profile build not found.");
+        return Results.Ok(await cleanup.CleanupProfileBuildAsync(buildId, "owner", cancellationToken));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception) { return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Profile build removal is invalid.", detail: exception.Message); }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException) { return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Profile build not found."); }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception) { return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Profile build removal conflicted.", detail: exception.Message); }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("RemoveProfileBuild").WithTags("Profiles")
+    .WithSummary("Removes the result tag and image of one failed or rejected profile build. Refuses an image an enrollment, frozen approval or active/applied rebuild still uses, and refuses a live, built or uncertain build; an uncertain transport leaves the build unremoved for a safe retry.")
     .Produces<HVO.AgentControl.Organization.ProfileBuildRecord>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
@@ -2112,6 +2143,10 @@ public partial class Program
 
     public static bool IsValidContainerProfileRevisionId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ContainerProfileRevisionPrefix, MaximumContainerProfileIdLength);
+
+    /// <summary>Validates the bounded stable ID used by profile build routes.</summary>
+    public static bool IsValidProfileBuildId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ProfileBuildPrefix, MaximumContainerProfileIdLength);
 
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {

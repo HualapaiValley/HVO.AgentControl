@@ -869,6 +869,12 @@ public sealed class HireProvisioningCoordinatorTests
             return Task.CompletedTask;
         }
 
+        public Task RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken token)
+        {
+            Effects.Add("remove-image:" + imageReference);
+            return Task.CompletedTask;
+        }
+
         public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, "present");
         public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, _states.TryGetValue(name, out var state) ? state : "running");
 

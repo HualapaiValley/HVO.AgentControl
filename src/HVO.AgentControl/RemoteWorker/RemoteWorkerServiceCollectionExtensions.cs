@@ -31,6 +31,7 @@ public static class RemoteWorkerServiceCollectionExtensions
         services.AddSingleton<IRemoteWorkerStatusProvider, RemoteWorkerStatusProvider>();
         services.AddSingleton<ExecutionHostRegistry>();
         services.AddSingleton<ProfileBuildCoordinator>();
+        services.AddSingleton<CleanupCoordinator>();
         return services;
     }
 }

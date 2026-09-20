@@ -2190,6 +2190,7 @@ public sealed class RemoteWorkerControlTests
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ContainerCreate, [specification.Name], null, cancellationToken);
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.Bootstrap, [specification.ControlVolumeName], standardInput, cancellationToken);
         public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageBuild, [specification.ResultTag], contextTar, cancellationToken);
+        public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageRemove, [imageReference], null, cancellationToken);
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) { Calls.Add($"{name}:{target.Id}:Probe"); return Task.FromResult(new HostProbePayload("{}", "{}", "/var/lib/docker", 0)); }
     }
 
@@ -2209,6 +2210,7 @@ public sealed class RemoteWorkerControlTests
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget host, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget host, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
@@ -2431,6 +2433,7 @@ public sealed class RemoteWorkerControlTests
         public Task StopAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("stop:" + container); if (_labels.ContainsKey(container)) _containerStates[container] = "stopped"; return Task.CompletedTask; }
         public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
         public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token) { Targets.Add(host); Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
+        public Task RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken token) { Targets.Add(host); Effects.Add("remove-image:" + imageReference); return Task.CompletedTask; }
 
         public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, "present"); }
         public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running"); }

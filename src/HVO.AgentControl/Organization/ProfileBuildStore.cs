@@ -211,6 +211,106 @@ public sealed partial class OrganizationStore
     }
 
     /// <summary>
+    /// Explicit scoped cleanup of one non-verified build. Only a <c>failed</c> or
+    /// <c>rejected</c> build can be removed: a <c>queued</c>/<c>building</c>/
+    /// <c>verifying</c> build is still live, a <c>built</c>/verified image is
+    /// provisionable, and an <c>uncertain</c> row must be reconciled first so an
+    /// image that was actually produced is never orphaned. The transition is
+    /// revision-bound and records the acting owner; the requested evidence hash is
+    /// preserved. Identity columns and the no-delete guard are unchanged: removal
+    /// is a state, never a row deletion.
+    /// </summary>
+    public ProfileBuildRecord TransitionProfileBuildToRemoved(string id, int expectedRevision, string requestedBy, string? evidenceHash = null)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ProfileBuildPrefix) || expectedRevision < 1) throw new OrganizationValidationException("A stable profile build id and current revision are required.");
+        if (!string.Equals(requestedBy, "owner", StringComparison.Ordinal)) throw new OrganizationValidationException("Only the owner may remove a failed profile build.");
+        if (evidenceHash is not null && !IsHash(evidenceHash)) throw new OrganizationValidationException("Evidence hash must be an exact sha256 value.");
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadBuilds(connection, transaction, null, null, id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Profile build '{id}' does not exist.");
+                if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
+                if (!ProfileBuildStates.CanTransition(current.State, ProfileBuildStates.Removed))
+                    throw new OrganizationConcurrencyException($"A profile build cannot move from {current.State} to {ProfileBuildStates.Removed}; only failed or rejected builds may be removed.");
+                var now = Timestamp();
+                var affected = Execute(connection, transaction,
+                    """
+                    UPDATE profile_builds
+                    SET state = $state, evidence_hash = COALESCE($evidence, evidence_hash),
+                        finished_at = COALESCE(finished_at, $now),
+                        revision = revision + 1, updated_at = $now
+                    WHERE id = $id AND revision = $revision
+                    """,
+                    ("$state", ProfileBuildStates.Removed), ("$evidence", evidenceHash), ("$now", now), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1) throw new OrganizationConcurrencyException("The profile build changed before the transition.");
+                FoldRevisionBuildStatus(connection, transaction, current.ProfileRevisionId);
+                transaction.Commit();
+                return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Builds whose image may be explicitly removed: <c>failed</c> or
+    /// <c>rejected</c> rows that have not already been <c>removed</c>. A live,
+    /// verified or uncertain build is never listed, so cleanup cannot select an
+    /// image that is still in use or whose result is unknown.
+    /// </summary>
+    public IReadOnlyList<ProfileBuildRecord> ListRemovableProfileBuilds(string? profileRevisionId = null, string? hostId = null)
+    {
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                return ReadBuilds(connection, null, profileRevisionId, hostId, null)
+                    .Where(b => b.State is ProfileBuildStates.Failed or ProfileBuildStates.Rejected).ToArray();
+            }
+        });
+    }
+
+    /// <summary>
+    /// The reason categories for which an image digest is still in use, or empty
+    /// when it is safe to remove. A digest is in use when an enrollment expects it,
+    /// a frozen managed approval pins it, or an active or applied employee rebuild
+    /// names it as either the source or the target. Only category names are
+    /// returned; no digest, worker, employee or secret is included, so a caller can
+    /// refuse cleanup without leaking which record holds it.
+    /// </summary>
+    public IReadOnlyList<string> ImageDigestUsage(string imageDigest)
+    {
+        if (!IsHash(imageDigest)) throw new OrganizationValidationException("Image digest must be an exact sha256 value.");
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                var reasons = new List<string>();
+                if (Exists(connection, "SELECT EXISTS(SELECT 1 FROM worker_enrollments WHERE expected_image_digest = $digest)", imageDigest)) reasons.Add("enrollment");
+                if (Exists(connection, "SELECT EXISTS(SELECT 1 FROM managed_enrollment_resources WHERE approved_image_digest = $digest)", imageDigest)) reasons.Add("managed-enrollment");
+                if (Exists(connection, "SELECT EXISTS(SELECT 1 FROM employee_rebuilds WHERE (state IN ('Intent', 'Holding', 'Replacing', 'Verifying', 'Uncertain') OR state = 'Applied') AND (from_image_digest = $digest OR to_image_digest = $digest))", imageDigest)) reasons.Add("employee-rebuild");
+                return (IReadOnlyList<string>)reasons;
+            }
+        });
+    }
+
+    private static bool Exists(SqliteConnection connection, string sql, string digest)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$digest", digest);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+    }
+
+    /// <summary>
     /// A controller that stops while a build is <c>building</c> or <c>verifying</c>
     /// cannot know whether the host finished the work. On startup those rows are
     /// moved to <c>uncertain</c> so the next run reconciles them by tag instead of
