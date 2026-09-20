@@ -88,7 +88,15 @@ public sealed record PortalEmployeeDetail(
     TerminalDescriptor Terminal,
     WorkerPermissionsProjection PendingWorkerPermissions,
     UnsupportedFeature RecentLogs,
-    EmployeeProfileStatusDetail ProfileStatus);
+    EmployeeProfileStatusDetail ProfileStatus)
+{
+    /// <summary>
+    /// Additive owner-facing recent tasks for this employee, newest first. It is
+    /// empty for a non-managed employee (including the internal seed), which has
+    /// no durable worker tasks.
+    /// </summary>
+    public IReadOnlyList<EmployeeTaskDetail> RecentTasks { get; init; } = [];
+}
 
 public sealed record OwnerAttentionItem(
     string EmployeeId,
@@ -407,8 +415,20 @@ public static class PortalOrganizationReadModel
             new UnsupportedFeature(
                 Supported: false,
                 Reason: "Recent runtime logs are not exposed because a safe employee-scoped log contract is not implemented."),
-            BuildProfileStatus(store, employee.Id));
+            BuildProfileStatus(store, employee.Id))
+        {
+            RecentTasks = BuildRecentTasks(store, employee.Id),
+        };
     }
+
+    /// <summary>
+    /// The employee-scoped recent tasks for one employee, or an empty list when
+    /// the store is unavailable, the employee is not a managed employee, or no
+    /// task has been recorded. Never throws for an unknown employee and never
+    /// mutates anything.
+    /// </summary>
+    private static IReadOnlyList<EmployeeTaskDetail> BuildRecentTasks(OrganizationStore? store, string employeeId) =>
+        store is null ? [] : store.ListEmployeeTaskDetails(employeeId, 10);
 
     /// <summary>
     /// The profile revision status for one employee, or an all-null projection

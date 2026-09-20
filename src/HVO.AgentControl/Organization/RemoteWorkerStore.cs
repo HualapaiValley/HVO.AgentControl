@@ -44,15 +44,15 @@ public sealed record WorkerTaskRecord(
     string DescriptionHash,
     string State,
     int Revision,
-    string TaskSpecJson = "",
-    string TaskSpecHash = "",
-    string? ModelReportJson = null,
-    string? ModelReportHash = null,
-    DateTimeOffset? ModelReportedAt = null,
-    string? FailureDetail = null,
-    DateTimeOffset CreatedAt = default,
-    DateTimeOffset UpdatedAt = default);
-public sealed record WorkerRequestRecord(string Id, string TaskId, string SessionRecordId, string NativeSessionId, string EmployeeId, string RuntimeBindingId, string WorkerId, string PayloadHash, string State, long OwnershipEpoch, long ProcessGeneration, string TurnId, string? OutcomeHash, string? OutcomeCategory, int? OutcomeBytes, string IdempotencyKey, int Revision, DateTimeOffset CreatedAt = default, DateTimeOffset? ForwardedAt = null, DateTimeOffset? CompletedAt = null, DateTimeOffset UpdatedAt = default)
+    string TaskSpecJson,
+    string TaskSpecHash,
+    string? ModelReportJson,
+    string? ModelReportHash,
+    DateTimeOffset? ModelReportedAt,
+    string? FailureDetail,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+public sealed record WorkerRequestRecord(string Id, string TaskId, string SessionRecordId, string NativeSessionId, string EmployeeId, string RuntimeBindingId, string WorkerId, string PayloadHash, string State, long OwnershipEpoch, long ProcessGeneration, string TurnId, string? OutcomeHash, string? OutcomeCategory, int? OutcomeBytes, string IdempotencyKey, int Revision, DateTimeOffset CreatedAt, DateTimeOffset? ForwardedAt, DateTimeOffset? CompletedAt, DateTimeOffset UpdatedAt)
 {
     public string SessionId => NativeSessionId;
 }

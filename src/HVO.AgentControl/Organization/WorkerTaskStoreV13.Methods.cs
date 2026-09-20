@@ -434,7 +434,7 @@ public sealed partial class OrganizationStore
             lock (_gate)
             {
                 using var connection = OpenConnection();
-                return ReadWorkerTasks(connection, null, employeeId, workerId);
+                return ReadWorkerTasks(connection, null, id: null, employeeId: employeeId, workerId: workerId);
             }
         });
     }
