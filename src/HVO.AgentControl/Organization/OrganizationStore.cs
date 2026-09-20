@@ -2801,7 +2801,7 @@ public sealed partial class OrganizationStore : IDisposable
                 SELECT e.id, e.slug, e.display_name, e.purpose, e.instructions, e.rules, e.restrictions, e.organization_id,
                         d.id, d.slug, d.display_name,
                        r.id, r.slug, r.display_name,
-                       b.id, b.placement, s.id, s.native_session_id, s.title
+                       b.id, b.placement, s.id, s.native_session_id, s.title, e.revision
                 FROM employees e
                 JOIN departments d ON d.id = e.department_id
                 JOIN roles r ON r.id = e.role_id
@@ -2833,7 +2833,8 @@ public sealed partial class OrganizationStore : IDisposable
                     reader.GetString(15),
                     reader.IsDBNull(16) ? null : reader.GetString(16),
                     reader.IsDBNull(17) ? null : reader.GetString(17),
-                    reader.IsDBNull(18) ? null : reader.GetString(18)));
+                    reader.IsDBNull(18) ? null : reader.GetString(18),
+                    reader.GetInt32(19)));
             }
         }
 

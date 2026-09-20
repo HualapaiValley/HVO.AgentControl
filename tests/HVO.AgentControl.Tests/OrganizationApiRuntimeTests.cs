@@ -669,6 +669,56 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
     }
 
     [Fact]
+    public async Task EmployeeRebuildApiEnforcesAuthenticationOriginIdentityAndWorkerControlGate()
+    {
+        using var client = await ReadyClientAsync(_valid);
+        var origin = _valid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority);
+        var body = new { expectedRevision = 1, targetProfileRevisionId = "prev-0000000000000000" };
+
+        using var unauthenticated = _valid.CreateClient();
+        using var unauthenticatedResponse = await unauthenticated.PostAsJsonAsync("/api/employees/emp-0000000000000000/rebuild", body);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResponse.StatusCode);
+
+        using var malformed = new HttpRequestMessage(HttpMethod.Post, "/api/employees/not-an-employee/rebuild") { Content = JsonContent.Create(body) };
+        malformed.Headers.Add("Origin", origin);
+        using var malformedResponse = await client.SendAsync(malformed);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, malformedResponse.StatusCode);
+
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/employees/emp-0000000000000000/rebuild") { Content = JsonContent.Create(body) };
+        crossOrigin.Headers.Add("Origin", "https://other.example");
+        using var crossOriginResponse = await client.SendAsync(crossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        using var unknown = new HttpRequestMessage(HttpMethod.Post, "/api/employees/emp-0000000000000000/rebuild") { Content = JsonContent.Create(body) };
+        unknown.Headers.Add("Origin", origin);
+        using var unknownResponse = await client.SendAsync(unknown);
+        Assert.Equal(HttpStatusCode.NotFound, unknownResponse.StatusCode);
+
+        using var disabled = new EnabledRuntimeFactory();
+        using var disabledClient = await ReadyClientAsync(disabled);
+        using var disabledOverviewResponse = await disabledClient.GetAsync("/api/organization");
+        using var disabledOverview = JsonDocument.Parse(await disabledOverviewResponse.Content.ReadAsStringAsync());
+        var seedEmployee = disabledOverview.RootElement.GetProperty("employees").EnumerateArray().Single();
+        using var disabledRequest = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedEmployee.GetProperty("id").GetString()}/rebuild")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1, targetProfileRevisionId = "prev-0000000000000000" }),
+        };
+        disabledRequest.Headers.Add("Origin", disabled.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+        using var disabledResponse = await disabledClient.SendAsync(disabledRequest);
+        Assert.Equal(HttpStatusCode.Conflict, disabledResponse.StatusCode);
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(disabledResponse)).GetProperty("title").GetString());
+
+        var seedId = seedEmployee.GetProperty("id").GetString();
+        using var invalidTarget = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuild")
+        {
+            Content = JsonContent.Create(new { expectedRevision = 1, targetProfileRevisionId = "invalid-target" }),
+        };
+        invalidTarget.Headers.Add("Origin", origin);
+        using var invalidTargetResponse = await client.SendAsync(invalidTarget);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidTargetResponse.StatusCode);
+    }
+
+    [Fact]
     public async Task ApproveIs409WhenWorkerControlIsDisabled()
     {
         using var disabled = new EnabledRuntimeFactory();

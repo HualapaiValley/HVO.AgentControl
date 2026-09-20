@@ -119,7 +119,7 @@ public sealed class ScopedCleanupTests : IAsyncLifetime
         var failed = FailedBuild(OrphanDigest);
         var rejected = RejectedBuild("agentcontrol-profile:prev-rejected-list-00000000000");
         _ = BuiltBuild(_cleanupRevision.Id, "agentcontrol-profile:prev-built-list-0000000000000");
-        Assert.Equal([failed.Id, rejected.Id], _store.ListRemovableProfileBuilds(_cleanupRevision.Id).Select(x => x.Id).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        Assert.Equal(new[] { failed.Id, rejected.Id }.OrderBy(x => x, StringComparer.Ordinal), _store.ListRemovableProfileBuilds(_cleanupRevision.Id).Select(x => x.Id).OrderBy(x => x, StringComparer.Ordinal));
         _store.TransitionProfileBuildToRemoved(failed.Id, failed.Revision, "owner");
         Assert.Equal([rejected.Id], _store.ListRemovableProfileBuilds(_cleanupRevision.Id).Select(x => x.Id).ToArray());
     }

@@ -52,10 +52,16 @@ public sealed record WorkerPermissionsProjection(bool Supported, IReadOnlyList<W
 /// employee, which has no managed enrollment resources.
 /// </summary>
 public sealed record EmployeeProfileStatusDetail(
+    string? CurrentProfileId,
+    string? CurrentProfileDisplayName,
     string? CurrentProfileRevisionId,
     int? CurrentRevisionNumber,
     string? CurrentImageDigest,
+    string? CurrentPlatform,
+    string? WorkerId,
+    string? HostId,
     bool NewerRevisionAvailable,
+    string? NewerRevisionId,
     int? NewerRevisionNumber,
     string? ActiveRebuildState,
     string? ActiveRebuildId);
@@ -75,6 +81,7 @@ public sealed record PortalEmployeeDetail(
     string Instructions,
     string Rules,
     string Restrictions,
+    int Revision,
     string Availability,
     EmployeeRuntimeDetail Runtime,
     OrientationStatus? Orientation,
@@ -372,6 +379,7 @@ public static class PortalOrganizationReadModel
             employee.Instructions,
             employee.Rules,
             employee.Restrictions,
+            employee.Revision,
             availability,
             new EmployeeRuntimeDetail(
                 employee.RuntimeBindingId,
@@ -414,21 +422,35 @@ public static class PortalOrganizationReadModel
         var status = store.GetEmployeeProfileStatus(employeeId);
         return status is null
             ? EmptyProfileStatus()
-            : new EmployeeProfileStatusDetail(
-                status.CurrentProfileRevisionId,
-                status.CurrentRevisionNumber,
-                status.CurrentImageDigest,
-                status.NewerRevisionAvailable,
-                status.NewerRevisionNumber,
-                status.ActiveRebuild?.State,
-                status.ActiveRebuild?.Id);
+            : ToProfileStatusDetail(status);
     }
+
+    public static EmployeeProfileStatusDetail ToProfileStatusDetail(EmployeeProfileStatus status) => new(
+        status.CurrentProfileId,
+        status.CurrentProfileDisplayName,
+        status.CurrentProfileRevisionId,
+        status.CurrentRevisionNumber,
+        status.CurrentImageDigest,
+        status.CurrentPlatform,
+        status.WorkerId,
+        status.HostId,
+        status.NewerRevisionAvailable,
+        status.NewerRevisionId,
+        status.NewerRevisionNumber,
+        status.ActiveRebuild?.State,
+        status.ActiveRebuild?.Id);
 
     private static EmployeeProfileStatusDetail EmptyProfileStatus() => new(
         null,
         null,
         null,
+        null,
+        null,
+        null,
+        null,
+        null,
         NewerRevisionAvailable: false,
+        null,
         null,
         null,
         null);

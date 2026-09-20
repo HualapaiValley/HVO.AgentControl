@@ -554,6 +554,95 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
     .ProducesProblem(StatusCodes.Status404NotFound)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+// Rebuilds run synchronously after BeginEmployeeRebuild commits the durable
+// intent. The coordinator is bounded, idempotent and resumable; a second hosted
+// queue would add another recovery path without making the intent more durable.
+app.MapPost("/api/employees/{id}/rebuild", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, HVO.AgentControl.Organization.EmployeeRebuildRequest request) =>
+{
+    if (!Program.IsValidEmployeeId(id))
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: "A bounded stable employee id is required.");
+    if (request.ExpectedRevision < 1 || !Program.IsValidContainerProfileRevisionId(request.TargetProfileRevisionId))
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: "The current employee revision and a bounded target profile revision id are required.");
+    if (Program.RejectCrossOrigin(context, "Employee rebuild") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so no employee rebuild was recorded.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no employee rebuild was recorded.");
+
+    try
+    {
+        var employee = store.GetOverview().Employees.SingleOrDefault(item => string.Equals(item.Id, id, StringComparison.Ordinal));
+        if (employee is null) return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee not found.");
+        if (employee.Revision != request.ExpectedRevision)
+            return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: "The employee changed; reload and retry with its current revision.");
+        var profile = store.GetEmployeeProfileStatus(id);
+        if (profile is null)
+            return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: "Only a managed employee with enrollment resources can be rebuilt.");
+
+        var rebuild = await coordinator.RebuildAsync(id, request.TargetProfileRevisionId!, request.ResetWorkspace, request.ResetHome, request.ResetConfirmation, context.RequestAborted);
+        var updated = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The rebuilt employee profile status is missing.");
+        return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(rebuild, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(updated)));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild target.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: $"Reconcile the open '{exception.Kind}' recovery obligation before retrying.");
+    }
+    catch (Exception exception) when (Program.IsEmployeeRebuildEffectUncertain(exception))
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: "The durable rebuild intent has an uncertain remote effect. Reconcile or resume it before starting another rebuild.");
+    }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
+})
+    .WithName("RebuildEmployee").WithTags("Organization")
+    .WithSummary("Synchronously drives one revision-bound owner rebuild after durably recording its intent. Workspace and home are preserved unless the exact reset confirmation is supplied; uncertain effects require recovery.")
+    .Produces<HVO.AgentControl.Organization.EmployeeRebuildResponse>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/employees/{id}/rebuilds", (AcpControlHost host, string id) =>
+{
+    if (!Program.IsValidEmployeeId(id))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee id.", detail: "A bounded stable employee id is required.");
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        if (!store.GetOverview().Employees.Any(item => string.Equals(item.Id, id, StringComparison.Ordinal)))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee not found.");
+        var status = store.GetEmployeeProfileStatus(id);
+        return Results.Ok(status?.WorkerId is { } workerId ? store.ListEmployeeRebuilds(workerId) : []);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Employee rebuild history unavailable.");
+    }
+})
+    .WithName("ListEmployeeRebuilds").WithTags("Organization")
+    .WithSummary("Lists the durable rebuild history for one employee, newest first.")
+    .Produces<IReadOnlyList<HVO.AgentControl.Organization.EmployeeRebuildRecord>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapGet("/api/departments/{id}", (AcpControlHost host, IRemoteWorkerStatusProvider remoteWorkers, string id) =>
 {
     if (!Program.IsValidDepartmentId(id))
@@ -1963,6 +2052,15 @@ public partial class Program
     /// translate into the single RFC 9457 error contract. Used as an exception
     /// filter so unexpected failures still reach the sanitized 500 handler.
     /// </summary>
+    internal static bool IsEmployeeRebuildEffectUncertain(Exception exception) => exception is
+        HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException
+        or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException
+        or HVO.AgentControl.Worker.WorkerOperationUncertainException
+        or IOException
+        or ObjectDisposedException
+        or HVO.AgentControl.RemoteWorker.WorkerRemoteException { Code: "worker-operation-uncertain" }
+        or HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException { Transport: true };
+
     public static bool IsRemoteWorkerFailure(Exception exception) =>
         exception is HVO.AgentControl.Organization.OrganizationStoreException
             or HVO.AgentControl.RemoteWorker.RemoteWorkerException

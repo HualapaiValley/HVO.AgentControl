@@ -532,6 +532,17 @@ public sealed record EmployeeRebuildCreate(
 /// non-managed (or base) employee has no managed enrollment resources and yields
 /// null from the store helper.
 /// </summary>
+public sealed record EmployeeRebuildRequest(
+    int ExpectedRevision,
+    string? TargetProfileRevisionId,
+    bool ResetWorkspace = false,
+    bool ResetHome = false,
+    string? ResetConfirmation = null);
+
+public sealed record EmployeeRebuildResponse(
+    EmployeeRebuildRecord Rebuild,
+    EmployeeProfileStatusDetail ProfileStatus);
+
 public sealed record EmployeeProfileStatus(
     string EmployeeId,
     string RuntimeBindingId,
@@ -672,10 +683,17 @@ public sealed record EmployeeSummary(
     string? SessionRecordId,
     string? NativeSessionId,
     string? SessionTitle,
+    int Revision,
     OrientationStatus? Orientation = null)
 {
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionRecordId, string? nativeSessionId, string? sessionTitle, OrientationStatus? orientation)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionRecordId, nativeSessionId, sessionTitle, 1, orientation) { }
+
     public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, OrientationStatus? orientation = null)
-        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, orientation) { }
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, 1, orientation) { }
+
+    public EmployeeSummary(string id, string slug, string displayName, string purpose, string instructions, string rules, string restrictions, string organizationId, string departmentId, string departmentSlug, string departmentDisplayName, string roleId, string roleSlug, string roleDisplayName, string runtimeBindingId, string placement, string? sessionId, string? sessionTitle, int revision, OrientationStatus? orientation = null)
+        : this(id, slug, displayName, purpose, instructions, rules, restrictions, organizationId, departmentId, departmentSlug, departmentDisplayName, roleId, roleSlug, roleDisplayName, runtimeBindingId, placement, sessionId, sessionId, sessionTitle, revision, orientation) { }
 
     // Backward-compatible API alias. SessionId has always meant the ACP-native
     // identity on the wire; database relationships must use SessionRecordId.

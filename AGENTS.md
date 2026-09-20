@@ -11,7 +11,7 @@ Build a Docker-native controller for self-contained OpenCode workers using ACP.
 No Fleet dependency, Claude-specific adapter, shared worker checkout, or
 implicit reuse of existing infrastructure. The active baseline implements a
 single control-host portal plus a disabled-by-default hermetic remote-worker
-controller slice: schema-v11 records, approved-host validation, fixed SSH/Docker
+controller slice: schema-v12 records, approved-host validation, fixed SSH/Docker
 command construction and shared bridge protocol code. Durable hire request and
 revision-bound rejection are shipped, as are immutable container profiles with
 a constrained devcontainer subset (#258) and per-host verified builds (#259).
@@ -33,9 +33,13 @@ owner-approved hire has been executed on any host, the
 `home-docker` execution-host enrollment is still held by the owner, and
 `WorkerControl` remains disabled by default. Approval is an explicit owner act
 on a verified selection; nothing provisions without it. No request may
-auto-create an employee and profile updates
-never auto-rebuild employees; #261 (data-preserving rebuild) is out of scope and
-there is no termination or scheduling policy. Keep the three worker classes
+auto-create an employee and profile updates never auto-rebuild employees. #261
+adds an explicit owner-only, same-origin, employee-revision-bound rebuild against
+a newer verified build on the same profile and host. It preserves workspace and
+home by default; an exact typed phrase authorizes either reset scope. The durable
+single-flight state machine holds dispatch, fences on a fresh ownership epoch and
+is synchronously driven by the API after recording intent; uncertain effects
+require recovery. There is no termination or scheduling policy. Keep the three worker classes
 distinct: (1) automatic controller-local managed employees provisioned through
 the helper; (2) manually operated remote Docker workers reached by
 controller-initiated pinned SSH + `docker exec`, never created by hiring; and

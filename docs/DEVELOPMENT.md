@@ -167,10 +167,11 @@ owner authorization and the disposable resources were removed; the flags in
 report that first path, with `workerControlValidatedScope` carrying the exact
 `first-managed-disposable-two-host` bound, while `WorkerControlEnabled` remains
 the deployment/configuration gate and is false by default. The #260
-approval/provisioning/orientation slice is code capability with hermetic coverage
-only: no live owner-approved hire has been executed on any host, the
-`home-docker` execution-host enrollment remains held by the owner, and #261 and
-any termination/scheduling policy are out of scope.
+approval/provisioning/orientation slice and the #261 explicit data-preserving
+rebuild are code capabilities with hermetic coverage only: no live
+owner-approved hire or rebuild has been executed on a deployment host, the
+`home-docker` execution-host enrollment remains held by the owner, and any
+termination/scheduling policy is out of scope.
 
 The approved-host capability probe is parsed from the real captured output of
 `docker system info`, `docker version` and one `df -B1 --output=avail` of the
@@ -472,6 +473,7 @@ unconfirmed upstream change, `503` not ready or cancellation not accepted.
 | `/api/info` | Implemented | Adds `workerControlValidatedScope` to bound the accepted capability claim |
 | `/api/organization` | Not implemented | Owner-protected overview plus same-origin revision-guarded rename and basic-instruction update backed by the authoritative SQLite store; employee rows include orientation readiness/holds |
 | Hire approval (`POST /api/hire-requests/{id}/approve`) | Not implemented | Owner-only, same-origin, revision-bound approval that freezes one hire against one verified profile build on the **controller-local Docker target** (`local-docker`; no SSH host input) and atomically creates the managed employee identity and DeveloperContainer binding, then durably queues provisioning and orientation to Ready. Docker operations run through the privileged `docker-helper` over its Unix socket; the control image has neither the daemon socket nor a Docker CLI. Code capability with hermetic coverage only — no live owner-approved hire has run and `WorkerControl` is off by default |
+| Employee rebuild (`POST /api/employees/{id}/rebuild`, `GET /api/employees/{id}/rebuilds`) | Not implemented | Owner-only, same-origin, employee-revision-bound synchronous rebuild against a newer verified same-profile build. Durable intent precedes effects; workspace/home are preserved unless the exact typed reset phrase is supplied; single-flight, dispatch hold, fresh-epoch fencing and uncertain-effect recovery are enforced. The employee page shows profile status and history and never auto-adopts. Hermetic code capability only — no live rebuild has run on a deployment host; `home-docker` remains on `802eb6f` / schema v9 |
 | `/api/orientation*`, `/api/roles/{id}/instructions`, `/api/permissions/grants*` | Not implemented | Owner-authenticated stale-readable orientation status, host-verified assignment delivery with persisted restart-required generation, authoritative revisioned role-fragment instruction update, assignment-bound owner/live comprehension, manual hold and staged grant/revoke operations; host-started malformed/empty/oversized/non-terminal/ACP-error turns persist live-model failure, timeout/caller cancellation request bounded remote cancellation and fence retries, grants are not ACP-executable in Phase 1, permission callbacks persist synchronous rejection plus every matched restriction ID, and all mutations require same origin and ProblemDetails |
 
 The new endpoints and ProblemDetails behavior have local regression coverage;

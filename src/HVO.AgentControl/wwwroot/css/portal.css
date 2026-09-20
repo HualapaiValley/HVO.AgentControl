@@ -882,6 +882,14 @@ body {
     }
 }
 
+.employee-rebuild { margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.employee-rebuild .panel-form { margin: 12px 0; }
+.employee-rebuild fieldset { display: flex; flex-wrap: wrap; gap: 12px; border: 1px solid var(--line); border-radius: 7px; padding: 12px; }
+.employee-rebuild fieldset label { display: flex; align-items: center; gap: 7px; }
+.employee-rebuild fieldset input { width: auto; }
+.profile-update-note { color: var(--amber); }
+.rebuild-failure { color: var(--red); overflow-wrap: anywhere; }
+
 .orientation-actions {
     display: flex;
     flex-wrap: wrap;
