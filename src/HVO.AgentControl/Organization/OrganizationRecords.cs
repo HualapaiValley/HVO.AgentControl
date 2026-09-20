@@ -541,6 +541,8 @@ public sealed record EmployeeRebuildRequest(
     bool ResetHome = false,
     string? ResetConfirmation = null);
 
+public sealed record EmployeeRebuildResume(int ExpectedRevision);
+
 public sealed record EmployeeRebuildResponse(
     EmployeeRebuildRecord Rebuild,
     EmployeeProfileStatusDetail ProfileStatus);

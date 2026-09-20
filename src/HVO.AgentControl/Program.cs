@@ -646,7 +646,7 @@ app.MapGet("/api/employees/{id}/rebuilds", (AcpControlHost host, string id) =>
 // Resumes one durable rebuild from wherever it lies, including an Intent or
 // Uncertain row a previous process left behind. This is the recovery trigger the
 // employee page offers when a rebuild did not reach a terminal state.
-app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/resume", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, string rebuildId) =>
+app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/resume", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, string rebuildId, HVO.AgentControl.Organization.EmployeeRebuildResume request) =>
 {
     if (!Program.IsValidEmployeeId(id) || !Program.IsValidEmployeeRebuildId(rebuildId))
         return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee rebuild.", detail: "A bounded stable employee and rebuild id are required.");
@@ -662,7 +662,9 @@ app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/resume", async (HttpContex
         var rebuild = store.GetEmployeeRebuild(rebuildId);
         if (rebuild is null || !string.Equals(rebuild.EmployeeId, id, StringComparison.Ordinal))
             return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
-        var result = await coordinator.ResumeAsync(rebuildId, context.RequestAborted);
+        var result = rebuild.State == HVO.AgentControl.Organization.EmployeeRebuildStates.Failed
+            ? await coordinator.ResumeFailedAsync(rebuildId, request.ExpectedRevision, context.RequestAborted)
+            : await coordinator.ResumeAsync(rebuildId, context.RequestAborted);
         var resumedStatus = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The resumed employee profile status is missing.");
         return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(result.Rebuild, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(resumedStatus)));
     }

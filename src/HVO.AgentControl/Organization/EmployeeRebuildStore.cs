@@ -390,6 +390,37 @@ public sealed partial class OrganizationStore
         });
     }
 
+    /// <summary>
+    /// Specialized recovery edge used only after the coordinator proves the
+    /// target revision container already exists and is running. Failed is not a
+    /// general resumable state: this revision-bound edge reopens verification only
+    /// and never permits another stop/remove/create cycle.
+    /// </summary>
+    internal EmployeeRebuildRecord ResumeFailedEmployeeRebuild(string id, int expectedRevision)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.RebuildPrefix) || expectedRevision < 1)
+            throw new OrganizationValidationException("A stable employee rebuild id and current revision are required.");
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadRebuilds(connection, transaction, id: id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Employee rebuild '{id}' does not exist.");
+                if (current.State != EmployeeRebuildStates.Failed || current.Revision != expectedRevision)
+                    throw new OrganizationConcurrencyException("The employee rebuild changed or is not Failed.");
+                var affected = Execute(connection, transaction,
+                    "UPDATE employee_rebuilds SET state='Verifying', failure_summary=NULL, revision=revision+1, updated_at=$now WHERE id=$id AND revision=$revision AND state='Failed'",
+                    ("$now", Timestamp()), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1) throw new OrganizationConcurrencyException("The employee rebuild changed before recovery.");
+                transaction.Commit();
+                return ReadRebuilds(connection, null, id: id).Single();
+            }
+        });
+    }
+
     public EmployeeRebuildRecord? GetActiveEmployeeRebuild(string workerId)
     {
         if (!IsBoundedIdentifier(workerId, "wrk-")) return null;
