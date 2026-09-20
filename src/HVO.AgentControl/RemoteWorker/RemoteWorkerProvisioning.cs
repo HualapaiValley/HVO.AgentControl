@@ -457,6 +457,12 @@ public sealed class RemoteWorkerProvisioningCoordinator
             || !resourceVolumeOperationIds.SetEquals(volumeOperationIds)
             || !string.Equals(containerResources.SingleOrDefault()?.OperationId, containerOperationId, StringComparison.Ordinal))
             throw new WorkerRecoveryRequiredException("The failed hire's resource topology does not match the fixed container and four volumes.", "hire-resource-shape-invalid");
+        foreach (var volume in resources.Where(x => x.ResourceKind == "volume"))
+        {
+            var operation = operations.Single(x => x.Id == volume.OperationId);
+            if (operation.Kind != "volume-create" || !string.Equals(operation.IntentHash, Hash(volume.ResourceName), StringComparison.Ordinal))
+                throw new WorkerRecoveryRequiredException("A failed hire volume is not linked to its exact name-derived provisioning intent.", "hire-resource-operation-invalid");
+        }
 
         var host = _targets.Resolve(enrollment.HostId);
         foreach (var resource in resources)
