@@ -20,7 +20,23 @@ const results = [];
 const record = (name, passed, detail = {}) => { results.push({ name, passed: !!passed, detail }); console.log(`${passed ? 'PASS' : 'FAIL'}  ${name}${Object.keys(detail).length ? ' :: ' + JSON.stringify(detail) : ''}`); };
 const freePort = () => new Promise((resolve, reject) => { const server = createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
 async function waitFor(base, timeout = 90000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { if ((await fetch(`${base}/health/live`)).ok) return true; } catch {} await sleep(200); } return false; }
-async function waitForOrganization(base, timeout = 90000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { const response = await fetch(`${base}/api/organization/portal`, { headers: { Authorization: BASIC_AUTH, Accept: 'application/json' } }); if (response.ok) return true; } catch {} await sleep(200); } return false; }
+async function waitForOrganization(base, timeout = 90000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    try {
+      // Bound each fetch too: an accepted connection that never returns headers
+      // must not outlive the readiness deadline.
+      const response = await fetch(`${base}/api/organization/portal`, {
+        headers: { Authorization: BASIC_AUTH, Accept: 'application/json' },
+        signal: AbortSignal.timeout(Math.max(1, Math.min(5000, remaining))),
+      });
+      if (response.ok) return true;
+    } catch {}
+    await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
+  }
+  return false;
+}
 const departmentIdFromHref = (href, base) => new URL(href, base).searchParams.get('departmentId');
 
 mkdirSync(OUT, { recursive: true });
