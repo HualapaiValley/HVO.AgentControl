@@ -92,28 +92,21 @@ public sealed class OrganizationNotFoundException : OrganizationStoreException
 public sealed partial class OrganizationStore : IDisposable
 {
     /// <summary>
-    /// Schema 12 adds the durable employee-rebuild operation record
-    /// (<c>employee_rebuilds</c>, additive only). It records the exact source
-    /// revision/digest a worker is running, the verified target revision/build/
-    /// digest and host, the destructive-reset authorization, and one fixed state
-    /// machine from <c>Intent</c> to <c>Applied</c>/<c>Failed</c>. One active
-    /// rebuild per worker is enforced by a partial unique index and no
-    /// image/container work moves through this slice. Schema 11 permitted managed
-    /// hiring against the controller-local Docker daemon: it rebuilt
-    /// <c>execution_hosts</c> with a constrained <c>transport_kind</c>
-    /// (<c>local-docker</c> or <c>ssh-docker</c>), a CHECK that an SSH host carries
-    /// all four endpoint columns and a local host none of them, and seeded the
-    /// reserved <c>local-docker</c> row. Schema 10 added atomic owner approval and
-    /// managed-employee creation (<c>hire_request_approvals</c>,
-    /// <c>managed_enrollment_resources</c>) and rebuilt <c>hire_requests</c> with a
-    /// bounded nullable <c>status_detail</c>. Schema 9 added per-host profile image
-    /// builds (additive only). Schema 8 added immutable container profiles and
-    /// their revision chain and seeded the <c>generic-employee</c> profile. Each
-    /// migration accepts only the exact released signature of the previous version
-    /// and creates verified, immutable source evidence before changing the
-    /// authoritative store.
+    /// Schema 13 adds the durable task specification, model report and host
+    /// verification domain (#220 slice A). <c>worker_tasks</c> is rebuilt with the
+    /// bounded specification, the optional model-report triplet and a bounded
+    /// failure detail, preserving every row and its timestamps/revision; the
+    /// additive <c>worker_task_verifications</c> table records the host-only path
+    /// from a completed task to <c>Verified</c>. Schema 12 added the durable
+    /// employee-rebuild operation record (additive only): it records the exact
+    /// source revision/digest a worker is running, the verified target
+    /// revision/build/digest and host, the destructive-reset authorization, and
+    /// one fixed state machine from <c>Intent</c> to <c>Applied</c>/<c>Failed</c>.
+    /// Schema 11 permitted managed hiring against the controller-local Docker
+    /// daemon; it rebuilt <c>execution_hosts</c> with a constrained
+    /// <c>transport_kind</c>.
     /// </summary>
-    public const int CurrentSchemaVersion = 12;
+    public const int CurrentSchemaVersion = 13;
 
     public const string DatabaseFileName = "control.db";
     public const string LockFileName = "control.db.lock";
@@ -143,6 +136,8 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV11BackupHashFileName = "control.schema-v11.sha256";
     public const string SchemaV12BackupFileName = "control.schema-v12.db";
     public const string SchemaV12BackupHashFileName = "control.schema-v12.sha256";
+    public const string SchemaV13BackupFileName = "control.schema-v13.db";
+    public const string SchemaV13BackupHashFileName = "control.schema-v13.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -558,6 +553,21 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV12Statements =
         [.. SchemaV11Statements, .. RebuildSchemaV12Statements];
 
+    // v13 rebuilds worker_tasks in place with the bounded task specification and
+    // model report, and adds the host verification table. The frozen v12
+    // statements stay intact for exact-signature migration; the v13 remote-worker
+    // list replaces only the worker_tasks statement.
+    private static readonly string[] RemoteWorkerSchemaV13Statements =
+        [
+            ExecutionHostsSchemaV11Statement,
+            .. RemoteWorkerSchemaV6Statements[1..5],
+            WorkerTasksSchemaV13Statement,
+            .. RemoteWorkerSchemaV6Statements[6..],
+        ];
+
+    private static readonly string[] SchemaV13Statements =
+        [.. SchemaV3Statements, .. RemoteWorkerSchemaV13Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements, .. RebuildSchemaV12Statements, .. WorkerTaskVerificationSchemaV13Statements];
+
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
 
@@ -585,8 +595,12 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV11 =
         BuildExpectedSchema(SchemaV11Statements);
 
-    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+    /// <summary>The exact frozen v12 signature, retained as the accepted pre-v13 shape.</summary>
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV12 =
         BuildExpectedSchema(SchemaV12Statements);
+
+    private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchema =
+        BuildExpectedSchema(SchemaV13Statements);
 
     private static IReadOnlyDictionary<(string Type, string Name), string> BuildExpectedSchema(
         IEnumerable<string> statements)
@@ -1626,6 +1640,17 @@ public sealed partial class OrganizationStore : IDisposable
             AfterMigrationBackup?.Invoke();
             MigrateV11ToV12(connection);
             ValidateIntegrity(connection);
+            ValidateSchemaSignature(connection, ExpectedSchemaV12);
+            version = ReadSchemaVersion(connection);
+        }
+
+        if (version == 12)
+        {
+            ValidateSchemaSignature(connection, ExpectedSchemaV12);
+            EnsureSchemaV12Backup(connection);
+            AfterMigrationBackup?.Invoke();
+            MigrateV12ToV13(connection);
+            ValidateIntegrity(connection);
             ValidateSchemaSignature(connection, ExpectedSchema);
             version = ReadSchemaVersion(connection);
         }
@@ -2153,6 +2178,9 @@ public sealed partial class OrganizationStore : IDisposable
     private void EnsureSchemaV11Backup(SqliteConnection source) =>
         EnsureSchemaBackup(source, 11, SchemaV11BackupFileName, SchemaV11BackupHashFileName, ExpectedSchemaV11);
 
+    private void EnsureSchemaV12Backup(SqliteConnection source) =>
+        EnsureSchemaBackup(source, 12, SchemaV12BackupFileName, SchemaV12BackupHashFileName, ExpectedSchemaV12);
+
     /// <summary>
     /// Adds the durable employee-rebuild operation record. The migration is
     /// additive: no existing table is rebuilt, so every profile build, approval,
@@ -2170,6 +2198,76 @@ public sealed partial class OrganizationStore : IDisposable
         Execute(connection, transaction, "UPDATE schema_version SET version = 12 WHERE version = 11");
         BeforeMigrationCommit?.Invoke();
         transaction.Commit();
+    }
+
+    /// <summary>
+    /// Rebuilds <c>worker_tasks</c> with the bounded v13 specification and model
+    /// report and adds the host verification table. <c>worker_requests</c>
+    /// references <c>worker_tasks(id)</c>, so the replacement is built under a
+    /// staging name, the existing rows are copied with a deterministic legacy
+    /// specification derived from each row's description hash, the old table is
+    /// dropped and the staging table is renamed into place while foreign keys are
+    /// briefly disabled. Every child reference keeps naming <c>worker_tasks</c>
+    /// and resolves to the rebuilt table; <c>PRAGMA foreign_key_check</c> proves
+    /// it before the migration is accepted.
+    /// </summary>
+    private void MigrateV12ToV13(SqliteConnection connection)
+    {
+        ExecutePragma(connection, "foreign_keys = OFF");
+        using var transaction = connection.BeginTransaction();
+        try
+        {
+            var staging = WorkerTasksSchemaV13Statement.Replace(
+                "CREATE TABLE worker_tasks (",
+                "CREATE TABLE worker_tasks_v13 (",
+                StringComparison.Ordinal);
+            Execute(connection, transaction, staging);
+
+            // Copy every existing task with a deterministic, bounded legacy
+            // specification. The spec is derived from the description hash so the
+            // migration is reproducible; no migrated row is left with an empty or
+            // invented free-form prompt. The old table has no spec/report columns,
+            // so each row is read and re-inserted explicitly.
+            using (var read = connection.CreateCommand())
+            {
+                read.Transaction = transaction;
+                read.CommandText =
+                    "SELECT id, employee_id, runtime_binding_id, worker_id, description_hash, state, created_at, updated_at, revision FROM worker_tasks";
+                using var reader = read.ExecuteReader();
+                while (reader.Read())
+                {
+                    var (json, hash) = LegacyTaskSpecForMigration(reader.GetString(4));
+                    Execute(connection, transaction,
+                        """
+                        INSERT INTO worker_tasks_v13 (
+                            id, employee_id, runtime_binding_id, worker_id, description_hash,
+                            task_spec_json, task_spec_hash, model_report_json, model_report_hash,
+                            model_reported_at, failure_detail, state, created_at, updated_at, revision)
+                        VALUES ($id, $employee, $binding, $worker, $description, $json, $hash,
+                            NULL, NULL, NULL, NULL, $state, $created, $updated, $revision)
+                        """,
+                        ("$id", reader.GetString(0)), ("$employee", reader.GetString(1)),
+                        ("$binding", reader.GetString(2)), ("$worker", reader.GetString(3)),
+                        ("$description", reader.GetString(4)), ("$json", json), ("$hash", hash),
+                        ("$state", reader.GetString(5)), ("$created", reader.GetString(6)),
+                        ("$updated", reader.GetString(7)), ("$revision", reader.GetInt32(8)));
+                }
+            }
+
+            Execute(connection, transaction, "DROP TABLE worker_tasks");
+            Execute(connection, transaction, "ALTER TABLE worker_tasks_v13 RENAME TO worker_tasks");
+            foreach (var statement in WorkerTaskVerificationSchemaV13Statements)
+            {
+                Execute(connection, transaction, statement);
+            }
+            Execute(connection, transaction, "UPDATE schema_version SET version = 13 WHERE version = 12");
+            BeforeMigrationCommit?.Invoke();
+            transaction.Commit();
+        }
+        finally
+        {
+            ExecutePragma(connection, "foreign_keys = ON");
+        }
     }
 
     /// <summary>The v11 execution_hosts definition created under a staging name during migration.</summary>
@@ -2264,7 +2362,7 @@ public sealed partial class OrganizationStore : IDisposable
         catch (OrganizationStoreCorruptException exception) when (version == CurrentSchemaVersion)
         {
             throw new OrganizationStoreCorruptException(
-                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v11 file is pre-migration evidence only and restoring it would lose employee-rebuild operations recorded after migration. {exception.Message}",
+                $"Unsupported schema {CurrentSchemaVersion} signature. Restore a current authoritative schema-v{CurrentSchemaVersion} backup or source. No schema-v{CurrentSchemaVersion} backup is created automatically; the retained schema-v12 file is pre-migration evidence only and restoring it would lose task specifications, model reports and host verifications recorded after migration. {exception.Message}",
                 exception);
         }
         if (version != CurrentSchemaVersion)
@@ -2406,7 +2504,7 @@ public sealed partial class OrganizationStore : IDisposable
 
         using var transaction = connection.BeginTransaction();
 
-        foreach (var statement in SchemaV12Statements)
+        foreach (var statement in SchemaV13Statements)
         {
             Execute(connection, transaction, statement);
         }

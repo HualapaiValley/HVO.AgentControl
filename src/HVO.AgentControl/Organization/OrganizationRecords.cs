@@ -31,6 +31,7 @@ public static class OrganizationIds
     public const string ContainerProfileRevisionPrefix = "prev-";
     public const string ProfileBuildPrefix = "pbld-";
     public const string RebuildPrefix = "rbld-";
+    public const string TaskVerificationPrefix = "tvr-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -54,6 +55,7 @@ public static class OrganizationIds
     public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
     public static string NewProfileBuildId() => NewId(ProfileBuildPrefix);
     public static string NewEmployeeRebuildId() => NewId(RebuildPrefix);
+    public static string NewTaskVerificationId() => NewId(TaskVerificationPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
