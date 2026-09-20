@@ -267,10 +267,14 @@ public sealed class HireProvisioningCoordinatorTests
 
         Assert.Equal(HireRequestStates.Ready, result.Hire.State);
         var recoveryEffects = fixture.Provisioner.Effects.Skip(before.Length).ToArray();
-        // Orientation requires one deliberate container replacement, but the
-        // original provisioning volumes/bootstrap are never replayed.
-        Assert.DoesNotContain(recoveryEffects, effect => effect.StartsWith("volume:", StringComparison.Ordinal));
-        Assert.DoesNotContain(recoveryEffects, effect => effect.StartsWith("bootstrap:", StringComparison.Ordinal));
+        // Recovery performs exactly the deliberate orientation container
+        // replacement. None of the original eight provisioning effects replay.
+        Assert.Equal([
+            "stop:" + enrollment.ContainerName,
+            "remove-container:" + enrollment.ContainerName,
+            "container:" + enrollment.ContainerName,
+            "start:" + enrollment.ContainerName,
+        ], recoveryEffects);
         Assert.Single(fixture.Store.ListWorkerEnrollments());
         Assert.All(fixture.Store.ListProvisioningOperations(enrollment.WorkerId), operation => Assert.Equal("Applied", operation.State));
     }
@@ -382,8 +386,9 @@ public sealed class HireProvisioningCoordinatorTests
             """);
         var before = fixture.Provisioner.Effects.Count;
 
-        await Assert.ThrowsAsync<ForeignResourceException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
 
+        Assert.Equal("hire-resource-operation-invalid", recovery.Kind);
         Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
         Assert.Equal(before, fixture.Provisioner.Effects.Count);
     }
