@@ -831,12 +831,14 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(employeeId, approval.EmployeeId);
 
         // The employee identity and frozen resources exist and the durable state is
-        // queued before the HTTP response. The remote work remains asynchronous: no
-        // enrollment or host effect is required for approval to return.
+        // queued before the HTTP response. Provisioning is asynchronous: its hosted
+        // reader may create the one exact enrollment before or after this assertion,
+        // but approval never waits for a host effect and can never create a duplicate.
         Assert.Equal(HireRequestStates.Provisioning, store.GetHireRequest(id)!.State);
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM employees WHERE id = @id", employeeId!));
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM managed_enrollment_resources WHERE runtime_binding_id = @id", bindingId!));
-        Assert.Equal(0, CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments", null));
+        Assert.InRange(CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments WHERE runtime_binding_id = @id", bindingId!), 0, 1);
+        Assert.InRange(CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments", null), 0, 1);
     }
 
     [Fact]
