@@ -201,9 +201,9 @@ public sealed class DockerHelperTests
         Assert.Equal(new[] { "docker", "system", "info", "--format", "{{json .}}" }, DockerArgv.Build(DockerOperation.Probe, [], Policy));
         Assert.Equal("df", DockerArgv.Build(DockerOperation.StorageFree, ["/var/lib/docker"], Policy)[0]);
         Assert.Equal(new[] {
-            "docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+            "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--pids-limit", "16", "--platform", "linux/amd64",
-            "--mount", "type=volume,dst=/probe", "--entrypoint", "/usr/bin/df", Digest,
+            "--mount", "type=volume,dst=/probe,readonly,volume-nocopy", "--entrypoint", "/usr/bin/df", Digest,
             "-B1", "--output=avail", "/probe"
         }, DockerArgv.Build(DockerOperation.LocalStorageFree, [], Policy));
         Assert.Equal("docker", DockerArgv.Build(DockerOperation.ImageInspect, [Digest], Policy)[0]);

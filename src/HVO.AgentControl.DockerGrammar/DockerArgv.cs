@@ -49,7 +49,7 @@ public static class DockerArgv
         // daemon's own volume backing filesystem, so a fixed, isolated run of the
         // approved base can measure that filesystem without any host bind mount.
         // --rm also removes the anonymous probe volume after the command exits.
-        DockerOperation.LocalStorageFree when tokens.Count == 0 => ["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "16", "--platform", ValidPlatform(policy.ApprovedPlatform), "--mount", "type=volume,dst=/probe", "--entrypoint", "/usr/bin/df", ValidDigest(policy.ApprovedBaseDigest), "-B1", "--output=avail", "/probe"],
+        DockerOperation.LocalStorageFree when tokens.Count == 0 => ["docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "16", "--platform", ValidPlatform(policy.ApprovedPlatform), "--mount", "type=volume,dst=/probe,readonly,volume-nocopy", "--entrypoint", "/usr/bin/df", ValidDigest(policy.ApprovedBaseDigest), "-B1", "--output=avail", "/probe"],
         DockerOperation.ImageInspect when tokens.Count == 1 => ["docker", "image", "inspect", "--format", "{{json .}}", ValidImageReference(tokens[0])],
         DockerOperation.ImageTag when tokens.Count == 2 => ["docker", "image", "tag", ValidDigest(tokens[0]), ValidLocalImageReference(tokens[1])],
         DockerOperation.ImageRemove when tokens.Count == 1 => ["docker", "image", "rm", "--no-prune", ValidImageReference(tokens[0])],
