@@ -57,6 +57,8 @@ public sealed class RemoteWorkerControlTests
         var identity = new WorkerResourceIdentity("org-a", "controller-a", "host-a", "worker-a", "binding-a", "operation-a");
         var actual = identity.Labels.ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
         actual["org.opencontainers.image.revision"] = "inherited-image-label";
+        actual[ProfileBuildContext.ContextHashLabel] = "sha256:" + new string('a', 64);
+        actual[ProfileBuildContext.BaseDigestLabel] = "sha256:" + new string('b', 64);
         RemoteWorkerCommandBuilder.RequireOwnedLabels(actual, identity);
 
         var changed = new Dictionary<string, string>(actual, StringComparer.Ordinal) { ["agentcontrol.worker"] = "other" };

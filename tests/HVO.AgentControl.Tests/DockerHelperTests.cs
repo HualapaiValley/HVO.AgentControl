@@ -72,8 +72,14 @@ public sealed class DockerHelperTests
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(new("agentcontrol-worker-x", Digest, "linux/amd64", identity, [new("agentcontrol-control-x", "/evil"), .. volumes.Skip(1)], 1, 1, 32, [Digest]), Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(new("agentcontrol-worker-x", "latest", "linux/amd64", identity, volumes, 1, 1, 32, [Digest]), Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(new("agentcontrol-worker-x", Digest, "linux/amd64", identity, volumes, Policy.MaxMemoryBytes + 1, 1, 32, [Digest]), Policy));
-        var changed = identity.Labels.ToDictionary(x => x.Key, x => x.Value); changed["agentcontrol.worker"] = "other";
+        var inherited = identity.Labels.ToDictionary(x => x.Key, x => x.Value);
+        inherited[ProfileBuildContext.ContextHashLabel] = "sha256:" + new string('a', 64);
+        inherited[ProfileBuildContext.BaseDigestLabel] = Digest;
+        DockerArgv.RequireOwnedLabels(inherited, identity);
+        var changed = new Dictionary<string, string>(inherited) { ["agentcontrol.worker"] = "other" };
         Assert.Throws<DockerGrammarException>(() => DockerArgv.RequireOwnedLabels(changed, identity));
+        var unexpected = new Dictionary<string, string>(inherited) { ["agentcontrol.unexpected"] = "present" };
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.RequireOwnedLabels(unexpected, identity));
     }
 
     [Fact]

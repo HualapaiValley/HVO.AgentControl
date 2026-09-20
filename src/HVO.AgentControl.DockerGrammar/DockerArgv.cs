@@ -108,8 +108,15 @@ public static class DockerArgv
 
     public static void RequireOwnedLabels(IReadOnlyDictionary<string, string> actual, WorkerResourceIdentity identity)
     {
-        var owned = actual.Where(label => label.Key.StartsWith("agentcontrol.", StringComparison.Ordinal)).ToArray();
-        if (owned.Length != identity.Labels.Count) throw new DockerGrammarException("The resource carries unexpected AgentControl labels.");
+        // Containers inherit the verified profile image's context/base provenance
+        // labels. They do not assert resource ownership; all ownership labels still
+        // have to match exactly, and every other AgentControl label is rejected.
+        var allowed = identity.Labels.Keys
+            .Append("agentcontrol.context-hash")
+            .Append("agentcontrol.base-digest")
+            .ToHashSet(StringComparer.Ordinal);
+        if (actual.Keys.Any(label => label.StartsWith("agentcontrol.", StringComparison.Ordinal) && !allowed.Contains(label)))
+            throw new DockerGrammarException("The resource carries unexpected AgentControl labels.");
         foreach (var expected in identity.Labels) if (!actual.TryGetValue(expected.Key, out var value) || !string.Equals(value, expected.Value, StringComparison.Ordinal)) throw new DockerGrammarException("The resource is not exactly owned by this operation.");
     }
 

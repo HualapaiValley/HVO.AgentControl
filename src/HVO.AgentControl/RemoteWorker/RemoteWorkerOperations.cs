@@ -201,8 +201,17 @@ public static class RemoteWorkerCommandBuilder
 
     public static void RequireOwnedLabels(IReadOnlyDictionary<string, string> actual, WorkerResourceIdentity identity)
     {
-        var owned = actual.Where(label => label.Key.StartsWith("agentcontrol.", StringComparison.Ordinal)).ToArray();
-        if (owned.Length != identity.Labels.Count) throw new ForeignResourceException("The resource carries unexpected AgentControl labels.");
+        // Docker copies image labels into container Config.Labels. Verified profile
+        // images therefore contribute the immutable build-provenance labels below;
+        // they are not resource ownership claims and must not make the container
+        // foreign. Every ownership label remains exact, and any other AgentControl
+        // label still fails closed.
+        var allowed = identity.Labels.Keys
+            .Append(ProfileBuildContext.ContextHashLabel)
+            .Append(ProfileBuildContext.BaseDigestLabel)
+            .ToHashSet(StringComparer.Ordinal);
+        if (actual.Keys.Any(label => label.StartsWith("agentcontrol.", StringComparison.Ordinal) && !allowed.Contains(label)))
+            throw new ForeignResourceException("The resource carries unexpected AgentControl labels.");
         foreach (var expected in identity.Labels) if (!actual.TryGetValue(expected.Key, out var value) || !string.Equals(value, expected.Value, StringComparison.Ordinal)) throw new ForeignResourceException("The resource is not exactly owned by this operation.");
     }
 }
