@@ -248,6 +248,175 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnerResumeOfFailedHireProvesAppliedResourcesAndDoesNotReplayProvisioningEffects()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        enrollment = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        var before = fixture.Provisioner.Effects.ToArray();
+        // Failed recovery is not exposed through the general state machine; only
+        // the coordinator's post-reconciliation specialized edge may reopen it.
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.TransitionHireRequestState(failed.Id, failed.Revision, HireRequestStates.Failed, HireRequestStates.Provisioning));
+
+        var result = await fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None);
+
+        Assert.Equal(HireRequestStates.Ready, result.Hire.State);
+        var recoveryEffects = fixture.Provisioner.Effects.Skip(before.Length).ToArray();
+        // Recovery performs exactly the deliberate orientation container
+        // replacement. None of the original eight provisioning effects replay.
+        Assert.Equal([
+            "stop:" + enrollment.ContainerName,
+            "remove-container:" + enrollment.ContainerName,
+            "container:" + enrollment.ContainerName,
+            "start:" + enrollment.ContainerName,
+        ], recoveryEffects);
+        Assert.Single(fixture.Store.ListWorkerEnrollments());
+        Assert.All(fixture.Store.ListProvisioningOperations(enrollment.WorkerId), operation => Assert.Equal("Applied", operation.State));
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesForeignResourceAndLeavesStateFailed()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.Provisioner.OwnerOverride = "another-owner";
+        var before = fixture.Provisioner.Effects.Count;
+
+        await Assert.ThrowsAsync<ForeignResourceException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesMalformedResourceTopology()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.Execute("UPDATE resource_records SET resource_kind='container' WHERE id=(SELECT id FROM resource_records WHERE resource_kind='volume' LIMIT 1)");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-resource-shape-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesCountCorrectButWrongOperationIdentity()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.Execute("UPDATE provisioning_operations SET intent_hash='sha256:" + new string('f', 64) + "' WHERE kind='start'");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-plan-identity-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesCountCorrectWrongOperationKinds()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        // Keep eight Applied operations but replace the required enroll-key kind
+        // with a cleanup kind. Count alone must never pass this topology.
+        fixture.Execute("UPDATE provisioning_operations SET kind='cleanup' WHERE kind='enroll-key'");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-plan-shape-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesSwappedResourceOperationLinks()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        // Swap two volume resource links while keeping the exact same resource and
+        // operation sets. Set equality alone still passes; remote ownership labels
+        // must expose the mismatched operation identity and fail closed.
+        fixture.Execute($"""
+            CREATE TEMP TABLE swap_ops AS
+              SELECT resource_name,operation_id FROM resource_records
+              WHERE resource_name IN ('{enrollment.ControlVolumeName}','{enrollment.HomeVolumeName}');
+            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE resource_name='{enrollment.HomeVolumeName}') WHERE resource_name='{enrollment.ControlVolumeName}';
+            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE resource_name='{enrollment.ControlVolumeName}') WHERE resource_name='{enrollment.HomeVolumeName}';
+            DROP TABLE swap_ops;
+            """);
+        // Make the remote labels agree with the corrupted database links. The
+        // name-derived intent proof must still refuse before trusting inspection.
+        fixture.Provisioner.SwapLabels(enrollment.ControlVolumeName, enrollment.HomeVolumeName);
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-resource-operation-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumePostTransitionUncertainFailureIsDurablyContained()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.OrientationSession.FailInstallAsWriteUncertain = true;
+
+        await Assert.ThrowsAsync<WorkerWriteUncertainException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal(HireRequestStates.Uncertain, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+    }
+
+    [Fact]
     public async Task EmployeeRebuildUsesNewVerifiedDigestPreservesVolumesAndSessionAndClearsHold()
     {
         using var fixture = new Fixture();
@@ -669,6 +838,15 @@ public sealed class HireProvisioningCoordinatorTests
             return Convert.ToString(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
         }
 
+        public void Execute(string sql)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _databasePath, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+
         private void PrepareHost()
         {
             // The SSH host stays registered for the manual-path tests, but managed
@@ -876,6 +1054,7 @@ public sealed class HireProvisioningCoordinatorTests
         public string? OwnerOverride { get; set; }
 
         public void SetState(string name, string state) => _states[name] = state;
+        public void SwapLabels(string first, string second) => (_labels[first], _labels[second]) = (_labels[second], _labels[first]);
 
         /// <summary>Removes the tracked container without recording a remote effect, modelling a crash after removal.</summary>
         public void SimulateAbsentContainer(string name) { _labels.Remove(name); _states.Remove(name); }

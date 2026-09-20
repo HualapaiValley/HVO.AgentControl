@@ -399,6 +399,88 @@ public sealed class RemoteWorkerProvisioningCoordinator
     }
 
     /// <summary>
+    /// Proves an already-applied provisioning plan before an owner resumes a
+    /// failed hire. Every one of the fixed eight operations must be Applied; the
+    /// five expected resources must be durably present and currently inspect as
+    /// the exact operation-owned labels; and the single container must be running.
+    /// This method is read-only: it never retries, creates, starts or removes an
+    /// effect. A failed proof leaves the hire Failed.
+    /// </summary>
+    public async Task<WorkerEnrollmentRecord> VerifyAppliedPlanAsync(string workerId, CancellationToken token)
+    {
+        RequireEnabled();
+        var store = Store();
+        var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new OrganizationNotFoundException("Worker enrollment not found.");
+        var operations = store.ListProvisioningOperations(workerId);
+        if (operations.Count != PlanStepCount || operations.Any(x => x.State != "Applied" || x.WorkerId != workerId || x.HostId != enrollment.HostId || x.RuntimeBindingId != enrollment.RuntimeBindingId))
+            throw new WorkerRecoveryRequiredException("The failed hire's provisioning plan is not exactly and completely Applied.", "hire-plan-not-applied");
+        var kindCounts = operations.GroupBy(x => x.Kind, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Count(), StringComparer.Ordinal);
+        var expectedKinds = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["enroll-key"] = 1,
+            ["volume-create"] = 4,
+            ["bootstrap"] = 1,
+            ["container-create"] = 1,
+            ["start"] = 1,
+        };
+        if (kindCounts.Count != expectedKinds.Count || expectedKinds.Any(x => !kindCounts.TryGetValue(x.Key, out var count) || count != x.Value))
+            throw new WorkerRecoveryRequiredException("The failed hire's provisioning operation topology is not the fixed eight-step plan.", "hire-plan-shape-invalid");
+        var expectedOperationDescriptors = new[]
+        {
+            (Kind: "enroll-key", IntentHash: Hash(enrollment.KeyId)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.ControlVolumeName)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.HomeVolumeName)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.WorkspaceVolumeName)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.SessionVolumeName)),
+            (Kind: "bootstrap", IntentHash: Hash(enrollment.KeyId + enrollment.ControlVolumeName)),
+            (Kind: "container-create", IntentHash: Hash(enrollment.ContainerName)),
+            (Kind: "start", IntentHash: Hash(enrollment.ContainerName)),
+        }.OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.IntentHash, StringComparer.Ordinal).ToArray();
+        var actualOperationDescriptors = operations
+            .Select(x => (x.Kind, x.IntentHash))
+            .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.IntentHash, StringComparer.Ordinal).ToArray();
+        if (!actualOperationDescriptors.SequenceEqual(expectedOperationDescriptors))
+            throw new WorkerRecoveryRequiredException("The failed hire's provisioning operation identities do not match the frozen fixed plan.", "hire-plan-identity-invalid");
+        var resources = store.ListWorkerResources(workerId);
+        if (resources.Count != 5 || resources.Any(x => x.State != "present" || x.WorkerId != workerId || x.HostId != enrollment.HostId))
+            throw new WorkerRecoveryRequiredException("The failed hire's five provisioning resources are not durably present.", "hire-resources-not-present");
+        var resourceNames = resources.Select(x => x.ResourceName).ToHashSet(StringComparer.Ordinal);
+        var expectedNames = new HashSet<string>([enrollment.ContainerName, enrollment.ControlVolumeName, enrollment.HomeVolumeName, enrollment.WorkspaceVolumeName, enrollment.SessionVolumeName], StringComparer.Ordinal);
+        var volumeOperationIds = operations.Where(x => x.Kind == "volume-create").Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
+        var resourceVolumeOperationIds = resources.Where(x => x.ResourceKind == "volume").Select(x => x.OperationId).ToHashSet(StringComparer.Ordinal);
+        var containerOperationId = operations.Single(x => x.Kind == "container-create").Id;
+        var containerResources = resources.Where(x => x.ResourceKind == "container").ToArray();
+        if (!resourceNames.SetEquals(expectedNames)
+            || containerResources.Length != 1
+            || resources.Count(x => x.ResourceKind == "volume") != 4
+            || resourceVolumeOperationIds.Count != 4
+            || !resourceVolumeOperationIds.SetEquals(volumeOperationIds)
+            || !string.Equals(containerResources.SingleOrDefault()?.OperationId, containerOperationId, StringComparison.Ordinal))
+            throw new WorkerRecoveryRequiredException("The failed hire's resource topology does not match the fixed container and four volumes.", "hire-resource-shape-invalid");
+        foreach (var volume in resources.Where(x => x.ResourceKind == "volume"))
+        {
+            var operation = operations.Single(x => x.Id == volume.OperationId);
+            if (operation.Kind != "volume-create" || !string.Equals(operation.IntentHash, Hash(volume.ResourceName), StringComparison.Ordinal))
+                throw new WorkerRecoveryRequiredException("A failed hire volume is not linked to its exact name-derived provisioning intent.", "hire-resource-operation-invalid");
+        }
+
+        var host = _targets.Resolve(enrollment.HostId);
+        foreach (var resource in resources)
+        {
+            var inspection = resource.ResourceKind == "container"
+                ? await _remote.InspectContainerAsync(host, resource.ResourceName, token).ConfigureAwait(false)
+                : await _remote.InspectVolumeAsync(host, resource.ResourceName, token).ConfigureAwait(false);
+            if (!inspection.Exists)
+                throw new WorkerRecoveryRequiredException("A failed hire resource is absent and requires reconciliation.", "hire-resource-absent");
+            var revision = CurrentProfileRevisionFor(store, enrollment);
+            RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, Identity(enrollment, resource.OperationId, revision));
+            if (resource.ResourceKind == "container" && !string.Equals(inspection.State, "running", StringComparison.Ordinal))
+                throw new WorkerRecoveryRequiredException("The failed hire's owned container is not running.", "hire-container-not-running");
+        }
+        return enrollment;
+    }
+
+    /// <summary>
     /// Waits for the newly-started container's bridge and ACP process before the
     /// first session mutation. Docker reporting <c>running</c> only proves PID1 is
     /// alive; the bridge socket and ACP initialize asynchronously. Authentication
