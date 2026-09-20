@@ -1586,6 +1586,26 @@ public sealed class RemoteWorkerControlTests
         Assert.DoesNotContain(verification.Invocations, x => x.Operation == "load-session");
     }
 
+    [Fact]
+    public async Task ProvisioningWaitsForBridgeReadinessBeforeCreatingTheSession()
+    {
+        using var fixture = new RemoteStoreFixture(makeDeveloper: true, seedSession: false);
+        var remote = new RecordingProvisioner();
+        var healthy = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { SessionId = null }) { NewSessionId = "native-after-ready" };
+        var delayed = new DelayedReadySessionFactory(healthy, failures: 2);
+        var coordinator = fixture.CreateCoordinator(remote, delayed, options => options.ConnectTimeoutSeconds = 2);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+
+        var enrolled = await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal("enrolled", enrolled.LifecycleStatus);
+        Assert.Equal(3, delayed.Attempts);
+        Assert.Equal("native-after-ready", fixture.Store.GetRemoteBindingSession(fixture.BindingId).NativeSessionId);
+        // The failed attempts closed before any operation. Only the ready session
+        // receives the new-session mutation, exactly once.
+        Assert.Single(healthy.Invocations, x => x.Operation == "new-session");
+    }
+
     /// <summary>
     /// A verified profile build on the host is a provisionable digest: the plan
     /// freezes it, the bootstrap still runs the configured base (it only writes the
@@ -3223,6 +3243,19 @@ public sealed class RemoteWorkerControlTests
 
         await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => manager.RecoverAsync(request.WorkerId, obligation.Id, obligation.Revision, CancellationToken.None));
         Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Id == obligation.Id);
+    }
+
+    private sealed class DelayedReadySessionFactory(FakeBridgeSession session, int failures) : IWorkerBridgeSessionFactory
+    {
+        private int _attempts;
+        public int Attempts => _attempts;
+
+        public Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken)
+        {
+            var attempt = Interlocked.Increment(ref _attempts);
+            if (attempt <= failures) throw new HVO.AgentControl.Worker.WorkerProtocolException("Bridge closed during authentication.");
+            return Task.FromResult<IWorkerBridgeSession>(session);
+        }
     }
 
     private sealed class FakeBridgeSessionFactory(FakeBridgeSession session, Action? beforeConnect = null) : IWorkerBridgeSessionFactory

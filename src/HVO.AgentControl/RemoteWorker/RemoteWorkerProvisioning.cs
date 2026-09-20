@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -385,9 +386,9 @@ public sealed class RemoteWorkerProvisioningCoordinator
             if (blocked is not null) throw new WorkerRecoveryRequiredException($"Provisioning is {blocked.State.ToLowerInvariant()} at {blocked.Kind}.", blocked.ErrorCategory ?? "reconciliation-required");
         }
         var enrollment = Store().GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker not found.");
-        await using var session = await _verification.ConnectAsync(enrollment, token).ConfigureAwait(false);
-        var statusResult = await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
-        var status = JsonSerializer.Deserialize<BridgeWorkerStatus>(statusResult.Result.GetRawText(), HVO.AgentControl.Worker.WorkerProtocol.JsonOptions) ?? throw new HVO.AgentControl.Worker.WorkerProtocolException("Worker status is invalid.");
+        var ready = await ConnectProvisionedWorkerAsync(enrollment, token).ConfigureAwait(false);
+        await using var session = ready.Session;
+        var status = ready.Status;
         status = await EnsureProvisionedSessionAsync(Store(), enrollment, session, status, token).ConfigureAwait(false);
         var authoritative = Store().GetRemoteBindingSession(enrollment.RuntimeBindingId);
         if (authoritative.NativeSessionId is not { } nativeSessionId) throw new OrganizationConcurrencyException("Provisioning did not establish an authoritative worker session.");
@@ -395,6 +396,50 @@ public sealed class RemoteWorkerProvisioningCoordinator
         if (enrollment.LifecycleStatus == "provisioning") enrollment = Store().UpdateEnrollmentLifecycle(workerId, enrollment.Revision, "provisioning", "enrolled");
         Store().SetExecutionHostEnrolled(enrollment.HostId, true);
         return enrollment;
+    }
+
+    /// <summary>
+    /// Waits for the newly-started container's bridge and ACP process before the
+    /// first session mutation. Docker reporting <c>running</c> only proves PID1 is
+    /// alive; the bridge socket and ACP initialize asynchronously. Authentication
+    /// closure, read-only status loss, and a not-yet-initialized status are safe to
+    /// retry because no mutation has been sent. Once this method returns, session
+    /// creation/loading keeps its existing uncertain-write semantics and is never
+    /// retried here.
+    /// </summary>
+    private async Task<(IWorkerBridgeSession Session, BridgeWorkerStatus Status)> ConnectProvisionedWorkerAsync(WorkerEnrollmentRecord enrollment, CancellationToken token)
+    {
+        var limit = TimeSpan.FromSeconds(_options.ConnectTimeoutSeconds);
+        var elapsed = Stopwatch.StartNew();
+        Exception? last = null;
+        while (elapsed.Elapsed < limit)
+        {
+            token.ThrowIfCancellationRequested();
+            IWorkerBridgeSession? session = null;
+            try
+            {
+                session = await _verification.ConnectAsync(enrollment, token).ConfigureAwait(false);
+                var statusResult = await session.InvokeAsync("status", new { operation = "status" }, false, token).ConfigureAwait(false);
+                var status = JsonSerializer.Deserialize<BridgeWorkerStatus>(statusResult.Result.GetRawText(), HVO.AgentControl.Worker.WorkerProtocol.JsonOptions)
+                    ?? throw new HVO.AgentControl.Worker.WorkerProtocolException("Worker status is invalid.");
+                if (status.ProcessState == "running" && status.AcpInitialized) return (session, status);
+                last = new OrganizationConcurrencyException("The newly-started worker process is not initialized yet.");
+            }
+            catch (Exception exception) when (exception is HVO.AgentControl.Worker.WorkerProtocolException
+                or WorkerReadUncertainException
+                or RemoteWorkerUnavailableException
+                or IOException)
+            {
+                last = exception;
+            }
+
+            if (session is not null) await session.DisposeAsync().ConfigureAwait(false);
+            var remaining = limit - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero) break;
+            await Task.Delay(remaining < TimeSpan.FromMilliseconds(200) ? remaining : TimeSpan.FromMilliseconds(200), token).ConfigureAwait(false);
+        }
+
+        throw new RemoteWorkerUnavailableException("The newly-started worker bridge did not become ready inside the bounded startup window.", transport: true, last);
     }
 
     private static async Task<BridgeWorkerStatus> EnsureProvisionedSessionAsync(OrganizationStore store, WorkerEnrollmentRecord enrollment, IWorkerBridgeSession session, BridgeWorkerStatus status, CancellationToken token)
