@@ -248,6 +248,51 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnerResumeOfFailedHireProvesAppliedResourcesAndDoesNotReplayProvisioningEffects()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        enrollment = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        var before = fixture.Provisioner.Effects.ToArray();
+
+        var result = await fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None);
+
+        Assert.Equal(HireRequestStates.Ready, result.Hire.State);
+        var recoveryEffects = fixture.Provisioner.Effects.Skip(before.Length).ToArray();
+        // Orientation requires one deliberate container replacement, but the
+        // original provisioning volumes/bootstrap are never replayed.
+        Assert.DoesNotContain(recoveryEffects, effect => effect.StartsWith("volume:", StringComparison.Ordinal));
+        Assert.DoesNotContain(recoveryEffects, effect => effect.StartsWith("bootstrap:", StringComparison.Ordinal));
+        Assert.Single(fixture.Store.ListWorkerEnrollments());
+        Assert.All(fixture.Store.ListProvisioningOperations(enrollment.WorkerId), operation => Assert.Equal("Applied", operation.State));
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesForeignResourceAndLeavesStateFailed()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.Provisioner.OwnerOverride = "another-owner";
+        var before = fixture.Provisioner.Effects.Count;
+
+        await Assert.ThrowsAsync<ForeignResourceException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
     public async Task EmployeeRebuildUsesNewVerifiedDigestPreservesVolumesAndSessionAndClearsHold()
     {
         using var fixture = new Fixture();

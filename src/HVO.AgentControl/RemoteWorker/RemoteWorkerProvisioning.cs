@@ -399,6 +399,42 @@ public sealed class RemoteWorkerProvisioningCoordinator
     }
 
     /// <summary>
+    /// Proves an already-applied provisioning plan before an owner resumes a
+    /// failed hire. Every one of the fixed eight operations must be Applied; the
+    /// five expected resources must be durably present and currently inspect as
+    /// the exact operation-owned labels; and the single container must be running.
+    /// This method is read-only: it never retries, creates, starts or removes an
+    /// effect. A failed proof leaves the hire Failed.
+    /// </summary>
+    public async Task<WorkerEnrollmentRecord> VerifyAppliedPlanAsync(string workerId, CancellationToken token)
+    {
+        RequireEnabled();
+        var store = Store();
+        var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new OrganizationNotFoundException("Worker enrollment not found.");
+        var operations = store.ListProvisioningOperations(workerId);
+        if (operations.Count != PlanStepCount || operations.Any(x => x.State != "Applied"))
+            throw new WorkerRecoveryRequiredException("The failed hire's provisioning plan is not exactly and completely Applied.", "hire-plan-not-applied");
+        var resources = store.ListWorkerResources(workerId);
+        if (resources.Count != 5 || resources.Any(x => x.State != "present"))
+            throw new WorkerRecoveryRequiredException("The failed hire's five provisioning resources are not durably present.", "hire-resources-not-present");
+
+        var host = _targets.Resolve(enrollment.HostId);
+        foreach (var resource in resources)
+        {
+            var inspection = resource.ResourceKind == "container"
+                ? await _remote.InspectContainerAsync(host, resource.ResourceName, token).ConfigureAwait(false)
+                : await _remote.InspectVolumeAsync(host, resource.ResourceName, token).ConfigureAwait(false);
+            if (!inspection.Exists)
+                throw new WorkerRecoveryRequiredException("A failed hire resource is absent and requires reconciliation.", "hire-resource-absent");
+            var revision = CurrentProfileRevisionFor(store, enrollment);
+            RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, Identity(enrollment, resource.OperationId, revision));
+            if (resource.ResourceKind == "container" && !inspection.State.Contains("running", StringComparison.OrdinalIgnoreCase))
+                throw new WorkerRecoveryRequiredException("The failed hire's owned container is not running.", "hire-container-not-running");
+        }
+        return enrollment;
+    }
+
+    /// <summary>
     /// Waits for the newly-started container's bridge and ACP process before the
     /// first session mutation. Docker reporting <c>running</c> only proves PID1 is
     /// alive; the bridge socket and ACP initialize asynchronously. Authentication

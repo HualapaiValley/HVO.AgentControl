@@ -505,6 +505,10 @@ public sealed partial class OrganizationStore
         (HireRequestStates.Provisioning, HireRequestStates.Uncertain) => true,
         (HireRequestStates.Uncertain, HireRequestStates.Provisioning) => true,
         (HireRequestStates.Interrupted, HireRequestStates.Provisioning) => true,
+        // Failed is terminal for automatic processing. It can return to
+        // Provisioning only through the owner-explicit recovery coordinator after
+        // exact applied-plan/resource reconciliation.
+        (HireRequestStates.Failed, HireRequestStates.Provisioning) => true,
         (HireRequestStates.Orienting, HireRequestStates.Ready) => true,
         (HireRequestStates.Orienting, HireRequestStates.Failed) => true,
         (HireRequestStates.Orienting, HireRequestStates.Interrupted) => true,

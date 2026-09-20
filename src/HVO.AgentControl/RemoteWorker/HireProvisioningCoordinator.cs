@@ -52,6 +52,29 @@ public sealed class HireProvisioningCoordinator(
     public Task<HireProvisioningResult> ResumeAsync(string hireId, CancellationToken cancellationToken) =>
         ProvisionToOrientingAsync(hireId, cancellationToken);
 
+    /// <summary>
+    /// Owner-explicit recovery of a Failed hire. Automatic startup never retries a
+    /// Failed row. First prove the complete plan and all exact-label resources are
+    /// already present with one running container; only then move Failed back to
+    /// Provisioning and continue with bridge/session/orientation readiness. No
+    /// provisioning effect is repeated by this path.
+    /// </summary>
+    public async Task<HireProvisioningResult> ResumeFailedAsync(string hireId, int expectedRevision, CancellationToken cancellationToken)
+    {
+        if (!_options.Enabled) throw new WorkerControlDisabledException();
+        var store = Store();
+        var hire = store.GetHireRequest(hireId) ?? throw new OrganizationNotFoundException($"Hire request '{hireId}' does not exist.");
+        if (hire.State != HireRequestStates.Failed || hire.Revision != expectedRevision)
+            throw new OrganizationConcurrencyException("The hire changed or is not a Failed hire eligible for explicit recovery.");
+        var approval = store.GetHireRequestApproval(hireId)
+            ?? throw new OrganizationConcurrencyException("The failed hire has no frozen approval.");
+        if (approval.WorkerId is null)
+            throw new OrganizationConcurrencyException("The failed hire has no linked worker to reconcile.");
+        _ = await provisioning.VerifyAppliedPlanAsync(approval.WorkerId, cancellationToken).ConfigureAwait(false);
+        store.TransitionHireRequestState(hireId, hire.Revision, HireRequestStates.Failed, HireRequestStates.Provisioning, "Owner resumed after exact applied-plan reconciliation.");
+        return await ProvisionToOrientingAsync(hireId, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<HireProvisioningResult> ProvisionToOrientingAsync(string hireId, CancellationToken cancellationToken)
     {
         if (!_options.Enabled) throw new WorkerControlDisabledException();
