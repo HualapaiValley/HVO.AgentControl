@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace HVO.AgentControl.RemoteWorker;
 
-public enum DockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector, Viewer }
+public enum DockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector, Viewer, LocalStorageFree }
 
 public sealed record WorkerResourceIdentity(string OrganizationId, string ControllerId, string HostId, string WorkerId, string BindingId, string OperationId, string? ProfileRevisionId = null)
 {
@@ -44,6 +44,12 @@ public static class DockerArgv
         DockerOperation.Probe when tokens.Count == 0 => ["docker", "system", "info", "--format", "{{json .}}"],
         DockerOperation.VersionProbe when tokens.Count == 0 => ["docker", "version", "--format", "{{json .Server}}"],
         DockerOperation.StorageFree when tokens.Count == 1 => ["df", "-B1", "--output=avail", "--", ValidAbsolutePath(tokens[0])],
+        // The daemon's DockerRootDir is a host path and is intentionally not
+        // mounted into the privileged helper. An anonymous local volume uses the
+        // daemon's own volume backing filesystem, so a fixed, isolated run of the
+        // approved base can measure that filesystem without any host bind mount.
+        // --rm also removes the anonymous probe volume after the command exits.
+        DockerOperation.LocalStorageFree when tokens.Count == 0 => ["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "16", "--platform", ValidPlatform(policy.ApprovedPlatform), "--mount", "type=volume,dst=/probe", "--entrypoint", "/usr/bin/df", ValidDigest(policy.ApprovedBaseDigest), "-B1", "--output=avail", "/probe"],
         DockerOperation.ImageInspect when tokens.Count == 1 => ["docker", "image", "inspect", "--format", "{{json .}}", ValidImageReference(tokens[0])],
         DockerOperation.ImageTag when tokens.Count == 2 => ["docker", "image", "tag", ValidDigest(tokens[0]), ValidLocalImageReference(tokens[1])],
         DockerOperation.ImageRemove when tokens.Count == 1 => ["docker", "image", "rm", "--no-prune", ValidImageReference(tokens[0])],

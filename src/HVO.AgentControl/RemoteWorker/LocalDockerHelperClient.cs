@@ -22,8 +22,11 @@ public sealed class LocalDockerHelperClient(IOptions<WorkerControlOptions> confi
     {
         var info = Require(await ExecuteAsync(target, DockerOperation.Probe, [], token).ConfigureAwait(false));
         var version = Require(await ExecuteAsync(target, DockerOperation.VersionProbe, [], token).ConfigureAwait(false));
-        var root = HostProbeParser.ReadDockerRootDirectory(info);
-        var free = Require(await ExecuteAsync(target, DockerOperation.StorageFree, [root], token).ConfigureAwait(false));
+        // The local helper cannot and must not see the daemon's host root path.
+        // Measure the local-volume backing filesystem through a fixed anonymous
+        // volume instead; SSH targets continue using host-side df of DockerRootDir.
+        var root = HostProbeParser.ReadDockerRootDirectory(info); // retain it as daemon evidence; never mount/use it locally
+        var free = Require(await ExecuteAsync(target, DockerOperation.LocalStorageFree, [], token).ConfigureAwait(false));
         return new(info, version, root, HostProbeParser.ParseAvailableBytes(free));
     }
 
