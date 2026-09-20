@@ -1608,7 +1608,7 @@ public sealed class RemoteWorkerControlTests
         Assert.True(unready.Disposed);
         Assert.True(readFailed.Disposed);
         // Only the ready session receives the session mutation, exactly once.
-        Assert.Single(healthy.Invocations, x => x.Operation == "new-session");
+        Assert.Equal(["new-session"], healthy.MutationInvocations);
     }
 
     [Fact]
@@ -3342,6 +3342,7 @@ public sealed class RemoteWorkerControlTests
         public Func<long, long, BridgeReplayPage>? ReplayPageFactory { get; set; }
         public List<(long Generation, long Sequence)> Acknowledgments { get; } = [];
         public List<(string Operation, string Payload)> Invocations { get; } = [];
+        public List<string> MutationInvocations { get; } = [];
         public bool FailAcknowledgment { get; set; }
         public (long Generation, long Sequence)? FailAcknowledgmentAt { get; set; }
         public bool FailSubmitAsWriteUncertain { get; set; }
@@ -3411,6 +3412,7 @@ public sealed class RemoteWorkerControlTests
             if (operation == "load-session" && FailLoadSessionAsCallerCanceled) throw new WorkerCallerCanceledException("injected caller cancellation");
             var payload = JsonSerializer.Serialize(request, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions);
             Invocations.Add((operation, payload));
+            if (mutation) MutationInvocations.Add(operation);
             using var requestDocument = JsonDocument.Parse(payload);
             var root = requestDocument.RootElement;
 
