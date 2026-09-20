@@ -77,6 +77,11 @@ services:
     build:
       context: .
       target: docker-helper
+    # The helper keeps its dedicated uid but uses the controller's gid as its
+    # primary group, so the private Unix socket it creates is naturally
+    # controller-accessible (1002:1001, mode 0660) without root startup or
+    # CAP_CHOWN. The host Docker-socket gid is supplementary via group_add below.
+    user: "1002:1001"
     # Two inputs are required for deployment and are supplied by the operator,
     # normally through a `.env` file beside this one (see README "Container"):
     #
@@ -98,7 +103,9 @@ services:
     environment:
       AGENTCONTROL_DOCKER_HELPER_SOCKET: /run/agentcontrol-docker-helper/helper.sock
       AGENTCONTROL_DOCKER_HELPER_CLIENT_UID: "1001"
-      AGENTCONTROL_DOCKER_HELPER_GID: "1001"
+      # No chown is needed: the helper's primary gid is already the controller
+      # group. -1 prevents an ineffective chown attempt under cap_drop: ALL.
+      AGENTCONTROL_DOCKER_HELPER_GID: "-1"
       AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST: ${AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST:-}
       AGENTCONTROL_DOCKER_HELPER_APPROVED_PLATFORM: ${AGENTCONTROL_DOCKER_HELPER_APPROVED_PLATFORM:-linux/amd64}
       AGENTCONTROL_DOCKER_HELPER_MAX_MEMORY_BYTES: "2147483648"
