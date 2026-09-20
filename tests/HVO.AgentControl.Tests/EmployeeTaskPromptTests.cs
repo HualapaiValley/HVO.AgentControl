@@ -48,6 +48,10 @@ public sealed class EmployeeTaskPromptTests
         Assert.Contains("do not push", prompt, StringComparison.Ordinal);
         Assert.Contains("GitHub", prompt, StringComparison.Ordinal);
         Assert.Contains("credentials", prompt, StringComparison.Ordinal);
+        Assert.Contains("changedPaths", prompt, StringComparison.Ordinal);
+        Assert.Contains("deniedAction", prompt, StringComparison.Ordinal);
+        Assert.Contains("noSideEffect", prompt, StringComparison.Ordinal);
+        Assert.Contains("Do not include markdown fences", prompt, StringComparison.Ordinal);
     }
 
     [Fact]

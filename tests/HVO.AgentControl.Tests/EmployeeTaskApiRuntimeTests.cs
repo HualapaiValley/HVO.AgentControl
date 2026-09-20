@@ -200,6 +200,47 @@ public sealed class EmployeeTaskApiRuntimeTests : IClassFixture<EmployeeTaskRunt
     }
 
     [Fact]
+    public async Task SyncIsRevisionBoundNeverResubmitsAndGetShowsReport()
+    {
+        var (client, seed) = await ReadyAsync();
+        using var created = await PostAsync(client, $"/api/employees/{seed.EmployeeId}/tasks", Spec("http-sync"));
+        using var createdDocument = JsonDocument.Parse(await created.Content.ReadAsStringAsync());
+        var task = createdDocument.RootElement.GetProperty("task");
+        var taskId = task.GetProperty("id").GetString()!;
+        var revision = task.GetProperty("revision").GetInt32();
+        var requestId = createdDocument.RootElement.GetProperty("request").GetProperty("id").GetString()!;
+        var submits = _factory.Fake.SubmitCount;
+        _factory.Fake.Complete(requestId);
+
+        using var synchronized = await PostAsync(client, $"/api/tasks/{taskId}/sync", $$"""{"expectedTaskRevision":{{revision}}}""");
+        Assert.Equal(HttpStatusCode.OK, synchronized.StatusCode);
+        using var synchronizedDocument = JsonDocument.Parse(await synchronized.Content.ReadAsStringAsync());
+        Assert.Equal("remote-completed", synchronizedDocument.RootElement.GetProperty("detail").GetString());
+        Assert.Equal(WorkerTaskStates.Completed, synchronizedDocument.RootElement.GetProperty("task").GetProperty("task").GetProperty("state").GetString());
+        Assert.Equal(submits, _factory.Fake.SubmitCount);
+
+        using var get = await client.GetAsync($"/api/tasks/{taskId}");
+        using var getDocument = JsonDocument.Parse(await get.Content.ReadAsStringAsync());
+        Assert.Equal(JsonValueKind.String, getDocument.RootElement.GetProperty("task").GetProperty("modelReportJson").ValueKind);
+        using var stale = await PostAsync(client, $"/api/tasks/{taskId}/sync", $$"""{"expectedTaskRevision":{{revision}}}""");
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+    }
+
+    [Fact]
+    public async Task EmployeeDispatchHoldIsRevisionAndOriginBound()
+    {
+        var (client, seed) = await ReadyAsync();
+        using var held = await PutAsync(client, $"/api/employees/{seed.EmployeeId}/dispatch-hold", """{"expectedEmployeeRevision":1,"held":true,"detail":"maintenance"}""");
+        Assert.Equal(HttpStatusCode.OK, held.StatusCode);
+        using var blocked = await PostAsync(client, $"/api/employees/{seed.EmployeeId}/tasks", Spec("http-held"));
+        Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+        using var cleared = await PutAsync(client, $"/api/employees/{seed.EmployeeId}/dispatch-hold", """{"expectedEmployeeRevision":1,"held":false,"detail":null}""");
+        Assert.Equal(HttpStatusCode.OK, cleared.StatusCode);
+        using var staleRevision = await PutAsync(client, $"/api/employees/{seed.EmployeeId}/dispatch-hold", """{"expectedEmployeeRevision":99,"held":true}""");
+        Assert.Equal(HttpStatusCode.Conflict, staleRevision.StatusCode);
+    }
+
+    [Fact]
     public async Task ReadsAndMutationsRequireOwnerAuthAndSameOrigin()
     {
         await ReadyAsync();
@@ -228,6 +269,24 @@ public sealed class EmployeeTaskApiRuntimeTests : IClassFixture<EmployeeTaskRunt
         cancelCrossOrigin.Headers.Authorization = RemoteWorkerApi.Basic("owner", EnabledRuntimeFactory.OwnerPassword);
         using var cancelRejected = await client.SendAsync(cancelCrossOrigin);
         Assert.Equal(HttpStatusCode.Forbidden, cancelRejected.StatusCode);
+
+        using var syncCrossOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/tasks/tsk-does-not-exist/sync")
+        {
+            Content = new StringContent("""{"expectedTaskRevision":1}""", Encoding.UTF8, "application/json"),
+        };
+        syncCrossOrigin.Headers.Add("Origin", "https://other.example");
+        syncCrossOrigin.Headers.Authorization = RemoteWorkerApi.Basic("owner", EnabledRuntimeFactory.OwnerPassword);
+        using var syncRejected = await client.SendAsync(syncCrossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, syncRejected.StatusCode);
+
+        using var holdCrossOrigin = new HttpRequestMessage(HttpMethod.Put, $"/api/employees/{seed.EmployeeId}/dispatch-hold")
+        {
+            Content = new StringContent("""{"expectedEmployeeRevision":1,"held":true}""", Encoding.UTF8, "application/json"),
+        };
+        holdCrossOrigin.Headers.Add("Origin", "https://other.example");
+        holdCrossOrigin.Headers.Authorization = RemoteWorkerApi.Basic("owner", EnabledRuntimeFactory.OwnerPassword);
+        using var holdRejected = await client.SendAsync(holdCrossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, holdRejected.StatusCode);
     }
 
     [Fact]
@@ -282,9 +341,12 @@ public sealed class EmployeeTaskApiRuntimeTests : IClassFixture<EmployeeTaskRunt
         }
     }
 
-    private static async Task<HttpResponseMessage> PostAsync(HttpClient client, string path, string body)
+    private static Task<HttpResponseMessage> PostAsync(HttpClient client, string path, string body) => SendAsync(client, HttpMethod.Post, path, body);
+    private static Task<HttpResponseMessage> PutAsync(HttpClient client, string path, string body) => SendAsync(client, HttpMethod.Put, path, body);
+
+    private static async Task<HttpResponseMessage> SendAsync(HttpClient client, HttpMethod method, string path, string body)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, path)
+        var request = new HttpRequestMessage(method, path)
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
         };
@@ -476,7 +538,7 @@ internal sealed class FakeTaskBridgeSessionFactory(FakeTaskBridgeSession session
 /// </summary>
 public sealed class FakeTaskBridgeSession : IWorkerBridgeSession
 {
-    private readonly Dictionary<string, (string TurnId, long Epoch, long Process)> _requests = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string TurnId, long Epoch, long Process, string State, string? Outcome)> _requests = new(StringComparer.Ordinal);
 
     public FakeTaskBridgeSession() =>
         Lease = new WorkerBridgeLease(1, "controller-task", Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
@@ -486,6 +548,9 @@ public sealed class FakeTaskBridgeSession : IWorkerBridgeSession
     public string SessionId { get; set; } = string.Empty;
 
     public int SubmitCount { get; private set; }
+
+    public void Complete(string requestId) =>
+        _requests[requestId] = (_requests[requestId].TurnId, 1, 1, "completed", "{\"summary\":\"done\",\"changedPaths\":[\"src/a.cs\"],\"tests\":[{\"recipeId\":\"dotnet-test-release\",\"status\":\"passed\",\"summary\":\"passed\"}],\"deniedAction\":null,\"limitations\":[]}");
 
     public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) =>
         new Dictionary<string, object?>(fields) { ["operation"] = operation };
@@ -512,23 +577,23 @@ public sealed class FakeTaskBridgeSession : IWorkerBridgeSession
         var requestId = root.GetProperty("requestId").GetString()!;
         var turnId = root.GetProperty("turnId").GetString()!;
         SubmitCount++;
-        _requests[requestId] = (turnId, 1, 1);
-        return Stored(requestId, turnId, "forwarded");
+        _requests[requestId] = (turnId, 1, 1, "forwarded", null);
+        return Stored(requestId, turnId, "forwarded", null);
     }
 
     private object Reconcile(JsonElement root)
     {
         var requestId = root.GetProperty("requestId").GetString()!;
         if (!_requests.TryGetValue(requestId, out var recorded)) throw new WorkerRemoteException("worker-request-rejected");
-        return Stored(requestId, recorded.TurnId, "forwarded");
+        return Stored(requestId, recorded.TurnId, recorded.State, recorded.Outcome);
     }
 
-    private object Stored(string requestId, string turnId, string state) => new
+    private object Stored(string requestId, string turnId, string state, string? outcome) => new
     {
         requestId,
         payloadHash = "sha256:" + new string('0', 64),
         state,
-        outcomeJson = (string?)null,
+        outcomeJson = outcome,
         processGeneration = 1,
         ownershipEpoch = 1,
         turnId,

@@ -145,10 +145,10 @@ public sealed class WorkerTaskV13Tests
     {
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
         var task = CompleteTask(fixture);
-        var report = new ModelTaskReport("Implemented the change", ["src/a.cs", "src/a.cs", "src/b.cs"], ["dotnet test"], "denied network write", "none");
+        var report = new ModelTaskReport("Implemented the change", ["src/a.cs", "src/a.cs", "src/b.cs"], [new ModelTaskTestReport(WorkerTaskTestRecipes.DotnetTestRelease, "passed", "dotnet test passed")], new ModelTaskDeniedAction("network write", "network egress", "denied", true), ["none"]);
 
-        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport(new string('s', 2049), [], [], null, null)));
-        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("ok", ["../escape"], [], null, null)));
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport(new string('s', 2049), [], [], null, [])));
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("ok", ["../escape"], [], null, [])));
 
         var recorded = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, report);
         Assert.NotNull(recorded.ModelReportHash);
@@ -168,7 +168,7 @@ public sealed class WorkerTaskV13Tests
         var request = fixture.CreateEligibleRequest();
         var task = fixture.Store.GetWorkerTask(request.TaskId)!;
         Assert.Equal("Requested", task.State);
-        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("ok", [], [], null, null)));
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("ok", [], [], null, [])));
     }
 
     // --------------------------------------------------------- verification ----
@@ -181,7 +181,7 @@ public sealed class WorkerTaskV13Tests
 
         Assert.Throws<OrganizationValidationException>(() => fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1"));
 
-        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", ["src/a.cs"], ["dotnet test"], null, null));
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", ["src/a.cs"], [new ModelTaskTestReport(WorkerTaskTestRecipes.DotnetTestRelease, "passed", "dotnet test passed")], null, []));
         var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
         Assert.Equal("Pending", verification.State);
         Assert.Equal(task.Id, verification.TaskId);
@@ -203,7 +203,7 @@ public sealed class WorkerTaskV13Tests
     {
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
         var task = CompleteTask(fixture);
-        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, null));
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
         var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
 
         Assert.Throws<OrganizationValidationException>(() => fixture.Store.CompleteWorkerTaskVerification(verification.Id, verification.Revision, new HostTaskVerification(WorkerTaskVerificationStates.Passed, null, null, null, null)));
@@ -221,7 +221,7 @@ public sealed class WorkerTaskV13Tests
     {
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
         var task = CompleteTask(fixture);
-        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, null));
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
         var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
         var replay = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
         Assert.Equal(verification.Id, replay.Id);
@@ -297,7 +297,7 @@ public sealed class WorkerTaskV13Tests
 
             // A new task can be verified on the rebuilt table.
             var fresh = migrated.GetWorkerTask(task.Id)!;
-            fresh = migrated.RecordWorkerTaskModelReport(fresh.Id, fresh.Revision, new ModelTaskReport("migrated", [], [], null, null));
+            fresh = migrated.RecordWorkerTaskModelReport(fresh.Id, fresh.Revision, new ModelTaskReport("migrated", [], [], null, []));
             var verification = migrated.BeginWorkerTaskVerification(fresh.Id, fresh.Revision, "host/1");
             migrated.CompleteWorkerTaskVerification(verification.Id, verification.Revision, new HostTaskVerification(
                 WorkerTaskVerificationStates.Passed, """{"ok":true}""", """{"passed":1}""", null, null));

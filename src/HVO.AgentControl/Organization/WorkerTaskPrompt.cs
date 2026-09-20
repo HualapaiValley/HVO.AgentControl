@@ -44,7 +44,10 @@ public static class WorkerTaskPrompt
         builder.AppendLine("- Do not commit, do not push, do not create or modify any GitHub resource, and do not access credentials or secrets.");
         builder.AppendLine("- If a request would violate these rules, refuse it and report the denial instead of proceeding.");
         builder.AppendLine();
-        builder.AppendLine("When the turn ends, return a short structured report of what you changed, the tests you ran, and any denied request or limitation. The host verifies the result independently; your report is evidence only and never proves success.");
+        builder.AppendLine("When the turn ends, return ONLY one unfenced JSON object with exactly these fields:");
+        builder.AppendLine("summary (string), changedPaths (array of safe relative paths), tests (array of {recipeId,status,summary}), deniedAction (null or {requested,action,result,noSideEffect}), limitations (array of strings).");
+        builder.AppendLine("Each test status must be passed, failed, or not-run. recipeId must be the declared recipe id or null. A deniedAction must set noSideEffect to true.");
+        builder.AppendLine("Do not include markdown fences or any other text. The host verifies the result independently; your report is evidence only and never proves success.");
 
         var prompt = builder.ToString();
         if (Encoding.UTF8.GetByteCount(prompt) > MaxPromptBytes)

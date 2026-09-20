@@ -592,6 +592,17 @@ app.MapGet("/api/tasks/{taskId}", (AcpControlHost host, HVO.AgentControl.RemoteW
 })
     .WithName("GetWorkerTaskDetail").WithTags("Employee tasks");
 
+app.MapPost("/api/tasks/{taskId}/sync", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskSync request) =>
+{
+    if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid worker task synchronization.", detail: "A bounded stable task id and current task revision are required.");
+    if (Program.RejectCrossOrigin(context, "Worker task synchronization") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.SyncAsync(taskId, request, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("SynchronizeWorkerTask").WithTags("Employee tasks");
+
 app.MapPost("/api/tasks/{taskId}/cancel", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskCancel request) =>
 {
     if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)
@@ -602,6 +613,17 @@ app.MapPost("/api/tasks/{taskId}/cancel", async (HttpContext context, AcpControl
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
     .WithName("CancelWorkerTask").WithTags("Employee tasks");
+
+app.MapPut("/api/employees/{id}/dispatch-hold", (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, HVO.AgentControl.RemoteWorker.EmployeeDispatchHoldUpdate request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedEmployeeRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee dispatch hold.", detail: "A bounded stable employee id and current employee revision are required.");
+    if (Program.RejectCrossOrigin(context, "Employee dispatch hold") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(coordinator.SetDispatchHold(id, request)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("SetEmployeeDispatchHold").WithTags("Employee tasks");
 
 // Rebuilds run synchronously after BeginEmployeeRebuild commits the durable
 // intent. The coordinator is bounded, idempotent and resumable; a second hosted

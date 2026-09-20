@@ -193,7 +193,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             request = store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
             try
             {
-                var mutation = lease.Session.Mutation("submit", new Dictionary<string, object?> { ["requestId"] = request.Id, ["envelope"] = envelope, ["turnId"] = request.TurnId });
+                var mutation = lease.Session.Mutation("submit", new Dictionary<string, object?> { ["requestId"] = request.Id, ["envelope"] = envelope, ["turnId"] = request.TurnId, ["captureTaskReport"] = command.TaskSpec is not null });
                 var result = await lease.Session.InvokeAsync("submit", mutation, true, cancellationToken).ConfigureAwait(false);
                 Touch(lease);
                 var remote = DeserializeRequired<BridgeStoredRequest>(result.Result, "Worker submit result");
@@ -924,7 +924,41 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         if (remote.RequestId != local.Id || remote.OwnershipEpoch != local.OwnershipEpoch || remote.ProcessGeneration != local.ProcessGeneration || remote.TurnId != local.TurnId || remote.SessionId != local.NativeSessionId) throw new WorkerReconciliationInvalidException("Worker request correlation does not match the durable controller intent.");
         var to = remote.State switch { "forwarding" or "forwarded" => "Forwarded", "completed" => "Completed", "failed" => "Failed", "uncertain" => "Uncertain", _ => throw new WorkerReconciliationInvalidException("Worker request state is invalid.") };
         if (local.State == to) return local;
+        if (to is "Completed" or "Failed")
+        {
+            var task = store.GetWorkerTask(local.TaskId) ?? throw new WorkerReconciliationInvalidException("Worker request task is missing.");
+            var spec = OrganizationStore.DeserializeWorkerTaskSpec(task.TaskSpecJson);
+            var legacy = spec.WorkspaceRoot == "/workspace/legacy-request";
+            ModelTaskReport? report = null;
+            var category = to == "Failed" ? ReadOutcomeCategory(remote.OutcomeJson) ?? "failed" : "completed";
+            if (to == "Completed" && !legacy)
+            {
+                try
+                {
+                    report = remote.OutcomeJson is null ? null : OrganizationStore.DeserializeModelTaskReport(remote.OutcomeJson);
+                }
+                catch (OrganizationValidationException exception)
+                {
+                    throw new WorkerReconciliationInvalidException("Worker model report is invalid.", exception);
+                }
+                if (report is null) throw new WorkerReconciliationInvalidException("Worker model report is absent.");
+                if (report.Tests.Any(test => test.RecipeId is not null && !string.Equals(test.RecipeId, spec.TestRecipeId, StringComparison.Ordinal)))
+                    throw new WorkerReconciliationInvalidException("Worker model report test recipe does not match the task specification.");
+            }
+            return store.ReconcileWorkerTaskTerminalRequest(local.Id, local.Revision, local.State, to, category, remote.OutcomeJson, report);
+        }
         return store.TransitionWorkerRequest(local.Id, local.Revision, local.State, to, to.ToLowerInvariant(), remote.OutcomeJson);
+    }
+
+    private static string? ReadOutcomeCategory(string? outcomeJson)
+    {
+        if (outcomeJson is null) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(outcomeJson, new JsonDocumentOptions { MaxDepth = 8 });
+            return document.RootElement.TryGetProperty("category", out var category) && category.ValueKind == JsonValueKind.String ? category.GetString() : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     private static async Task<BridgeWorkerStatus> StatusAsync(IWorkerBridgeSession session, CancellationToken token)

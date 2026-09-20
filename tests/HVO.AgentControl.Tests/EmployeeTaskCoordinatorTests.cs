@@ -194,7 +194,7 @@ public sealed class EmployeeTaskCoordinatorTests
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarded", "Completed");
         var task = fixture.Store.GetWorkerTask(request.TaskId)!;
-        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", ["src/a.cs"], ["dotnet test"], null, null));
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", ["src/a.cs"], [new ModelTaskTestReport(WorkerTaskTestRecipes.DotnetTestRelease, "passed", "dotnet test passed")], null, []));
         var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
 
         var detail = Assert.Single(fixture.Store.ListEmployeeTaskDetails(fixture.EmployeeId, 10));
@@ -207,6 +207,116 @@ public sealed class EmployeeTaskCoordinatorTests
         Assert.Equal(WorkerTaskVerificationStates.Pending, detail.Verification.State);
         Assert.Null(detail.Verification.VerifiedAt);
         Assert.NotNull(detail.Request);
+    }
+
+    [Fact]
+    public async Task SyncCompletesWithReportExactlyOnceAndNeverResubmits()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        await using var manager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var coordinator = Coordinator(fixture, manager);
+        var running = await coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-sync", SpecInput()), CancellationToken.None);
+        session.Complete(running.Request!.Id);
+
+        var synchronized = await coordinator.SyncAsync(running.Task.Id, new EmployeeTaskSync(running.Task.Revision), CancellationToken.None);
+
+        Assert.Equal(WorkerTaskStates.Completed, synchronized.Task.Task.State);
+        Assert.Equal("Completed", synchronized.Task.Request!.State);
+        Assert.NotNull(synchronized.Task.Task.ModelReportJson);
+        Assert.Equal(1, session.SubmitCount);
+        var reread = coordinator.Get(running.Task.Id);
+        Assert.Equal(synchronized.Task.Task.ModelReportHash, reread.Task.ModelReportHash);
+    }
+
+    [Fact]
+    public async Task RestartPreservesForwardedAndSyncCompletesWithoutDuplicateSubmit()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        EmployeeTaskDetail running;
+        await using (var firstManager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session)))
+        {
+            running = await Coordinator(fixture, firstManager).CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-restart-sync", SpecInput()), CancellationToken.None);
+        }
+        session.Complete(running.Request!.Id);
+
+        await using var restarted = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var synchronized = await Coordinator(fixture, restarted).SyncAsync(running.Task.Id, new EmployeeTaskSync(running.Task.Revision), CancellationToken.None);
+
+        Assert.Equal(WorkerTaskStates.Completed, synchronized.Task.Task.State);
+        Assert.NotNull(synchronized.Task.Task.ModelReportHash);
+        Assert.Equal(1, session.SubmitCount);
+    }
+
+    [Fact]
+    public async Task CancellationIsObservedOnlyAfterTerminalReconciliation()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        await using var manager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var coordinator = Coordinator(fixture, manager);
+        var running = await coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-cancel-observe", SpecInput()), CancellationToken.None);
+        var cancellation = await coordinator.CancelAsync(running.Task.Id, new EmployeeTaskCancel(running.Task.Revision), CancellationToken.None);
+        Assert.Equal(WorkerTaskStates.Running, cancellation.Task.Task.State);
+        session.Fail(running.Request!.Id);
+
+        var synchronized = await coordinator.SyncAsync(running.Task.Id, new EmployeeTaskSync(running.Task.Revision), CancellationToken.None);
+
+        Assert.Equal(WorkerTaskStates.Cancelled, synchronized.Task.Task.State);
+        Assert.Equal("Observed", fixture.Store.ListWorkerCancellations().Single().State);
+    }
+
+    [Fact]
+    public async Task NormalCompletionAfterCancellationIsPreservedWithDiagnostic()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        await using var manager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var coordinator = Coordinator(fixture, manager);
+        var running = await coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-cancel-complete", SpecInput()), CancellationToken.None);
+        await coordinator.CancelAsync(running.Task.Id, new EmployeeTaskCancel(running.Task.Revision), CancellationToken.None);
+        session.Complete(running.Request!.Id);
+
+        var synchronized = await coordinator.SyncAsync(running.Task.Id, new EmployeeTaskSync(running.Task.Revision), CancellationToken.None);
+
+        Assert.Equal(WorkerTaskStates.Completed, synchronized.Task.Task.State);
+        Assert.Equal("cancellation-requested-but-completed", synchronized.Task.Task.FailureDetail);
+        Assert.Equal("Observed", fixture.Store.ListWorkerCancellations().Single().State);
+    }
+
+    [Fact]
+    public async Task ManualHoldBlocksDispatchAndClearingOnlyManualStillHonorsStaleOrientation()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        await using var manager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var coordinator = Coordinator(fixture, manager);
+
+        var held = coordinator.SetDispatchHold(fixture.EmployeeId, new EmployeeDispatchHoldUpdate(1, true, "maintenance"));
+        Assert.False(held.Status.Ready);
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-held-manual", SpecInput()), CancellationToken.None));
+        coordinator.SetDispatchHold(fixture.EmployeeId, new EmployeeDispatchHoldUpdate(1, false, null));
+        var dispatched = await coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-held-cleared", SpecInput()), CancellationToken.None);
+        Assert.Equal(WorkerTaskStates.Running, dispatched.Task.State);
+
+        using var connection = new SqliteConnection($"Data Source={fixture.DatabasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"UPDATE orientation_assignments SET state='Stale' WHERE runtime_binding_id='{fixture.BindingId}'";
+        command.ExecuteNonQuery();
+        coordinator.SetDispatchHold(fixture.EmployeeId, new EmployeeDispatchHoldUpdate(1, false, null));
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-still-stale", SpecInput()), CancellationToken.None));
     }
 
     [Fact]
@@ -244,7 +354,7 @@ public sealed class EmployeeTaskCoordinatorTests
     /// </summary>
     private sealed class TaskFakeBridgeSession : IWorkerBridgeSession
     {
-        private readonly Dictionary<string, (string TurnId, long Epoch, long Process)> _requests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (string TurnId, long Epoch, long Process, string State, string? Outcome)> _requests = new(StringComparer.Ordinal);
 
         public TaskFakeBridgeSession(string controllerId) =>
             Lease = new WorkerBridgeLease(1, controllerId, Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
@@ -252,6 +362,12 @@ public sealed class EmployeeTaskCoordinatorTests
         public WorkerBridgeLease Lease { get; }
 
         public int SubmitCount { get; private set; }
+
+        public void Complete(string requestId, string? outcome = null) =>
+            _requests[requestId] = (_requests[requestId].TurnId, 1, 1, "completed", outcome ?? "{\"summary\":\"done\",\"changedPaths\":[\"src/a.cs\"],\"tests\":[{\"recipeId\":\"dotnet-test-release\",\"status\":\"passed\",\"summary\":\"passed\"}],\"deniedAction\":null,\"limitations\":[]}");
+
+        public void Fail(string requestId, string category = "cancelled") =>
+            _requests[requestId] = (_requests[requestId].TurnId, 1, 1, "failed", $"{{\"category\":\"{category}\"}}");
 
         public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => new Dictionary<string, object?>(fields) { ["operation"] = operation };
 
@@ -277,23 +393,23 @@ public sealed class EmployeeTaskCoordinatorTests
             var requestId = root.GetProperty("requestId").GetString()!;
             var turnId = root.GetProperty("turnId").GetString()!;
             SubmitCount++;
-            _requests[requestId] = (turnId, 1, 1);
-            return Stored(requestId, turnId, "forwarded");
+            _requests[requestId] = (turnId, 1, 1, "forwarded", null);
+            return Stored(requestId, turnId, "forwarded", null);
         }
 
         private object Reconcile(JsonElement root)
         {
             var requestId = root.GetProperty("requestId").GetString()!;
             if (!_requests.TryGetValue(requestId, out var recorded)) throw new WorkerRemoteException("worker-request-rejected");
-            return Stored(requestId, recorded.TurnId, "forwarded");
+            return Stored(requestId, recorded.TurnId, recorded.State, recorded.Outcome);
         }
 
-        private static object Stored(string requestId, string turnId, string state) => new
+        private static object Stored(string requestId, string turnId, string state, string? outcome) => new
         {
             requestId,
             payloadHash = "sha256:" + new string('0', 64),
             state,
-            outcomeJson = (string?)null,
+            outcomeJson = outcome,
             processGeneration = 1,
             ownershipEpoch = 1,
             turnId,

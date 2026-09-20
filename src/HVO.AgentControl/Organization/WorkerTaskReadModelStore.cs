@@ -151,7 +151,8 @@ public sealed partial class OrganizationStore
                 spec,
                 request,
                 verification,
-                HVO.AgentControl.RemoteWorker.EmployeeTaskDisplayStates.ForTaskState(task.State)));
+                string.Empty));
+            result[^1] = result[^1] with { DisplayState = HVO.AgentControl.RemoteWorker.EmployeeTaskDisplayStates.For(result[^1]) };
         }
 
         return result;

@@ -29,7 +29,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
     private readonly object _submitGate = new();
     private readonly object _cancellationGate = new();
     private ActivePromptContext? _activePrompt;
-    private OrientationTurnCapture? _activeComprehensionCapture;
+    private TurnTextCapture? _activeComprehensionCapture;
+    private TurnTextCapture? _activeTaskReportCapture;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly CancellationTokenSource _transportFault = new();
     private readonly NdjsonFrameReader _acpReader;
@@ -205,7 +206,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (read.Content.AsSpan().IndexOf((byte)0) >= 0) throw new WorkerProtocolException("The installed orientation content is invalid.");
 
         var prompt = BuildComprehensionPrompt(assignmentId, employeeId, sessionId, orientationVersion, status.OrientationInstalledPath!, artifactContent);
-        var capture = new OrientationTurnCapture(sessionId, WorkerProtocol.MaxOrientationComprehensionBytes);
+        var capture = new TurnTextCapture(sessionId, WorkerProtocol.MaxOrientationComprehensionBytes);
         JsonElement result;
         try
         {
@@ -356,7 +357,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     /// bounded and overflows closed. It seals on the response frame whose id
     /// matches the bound request, so late chunks cannot corrupt a completed turn.
     /// </summary>
-    private sealed class OrientationTurnCapture(string sessionId, int maximumBytes)
+    private sealed class TurnTextCapture(string sessionId, int maximumBytes)
     {
         private readonly object _gate = new();
         private readonly StringBuilder _buffer = new();
@@ -485,7 +486,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         finally { _responses.TryRemove(id, out _); }
     }
 
-    public Task<StoredRequest> BeginSubmit(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken)
+    public Task<StoredRequest> BeginSubmit(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken, bool captureTaskReport = false)
     {
         ValidatePromptEnvelope(envelope);
         const bool prompt = true;
@@ -513,7 +514,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 var forwarded = new TaskCompletionSource<StoredRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
                 handle = new OperationHandle(forwarded);
                 if (!_operations.TryAdd(requestId, handle)) throw new WorkerProtocolException("Request ownership is ambiguous.");
-                handle.Completion = RunRequestAsync(registered, envelope.Clone(), promptOwned, forwarded);
+                handle.Completion = RunRequestAsync(registered, envelope.Clone(), promptOwned, forwarded, captureTaskReport);
                 _ = handle.Completion.ContinueWith(static task => _ = task.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
             catch
@@ -526,16 +527,17 @@ public sealed class WorkerRuntime : IAsyncDisposable
         return handle.Forwarded.Task.WaitAsync(connectionToken);
     }
 
-    public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken) =>
-        BeginSubmit(epoch, connectionNonce, requestId, envelope, turnId, connectionToken);
+    public Task<StoredRequest> SubmitAsync(long epoch, string connectionNonce, string requestId, JsonElement envelope, string? turnId, CancellationToken connectionToken, bool captureTaskReport = false) =>
+        BeginSubmit(epoch, connectionNonce, requestId, envelope, turnId, connectionToken, captureTaskReport);
 
-    private async Task<StoredRequest> RunRequestAsync(StoredRequest registered, JsonElement envelope, bool promptOwned, TaskCompletionSource<StoredRequest> forwarded)
+    private async Task<StoredRequest> RunRequestAsync(StoredRequest registered, JsonElement envelope, bool promptOwned, TaskCompletionSource<StoredRequest> forwarded, bool captureTaskReport)
     {
         await Task.Yield();
         var requestId = registered.RequestId;
         var prompt = IsPrompt(envelope);
         long? correlationId = null;
         ActivePromptContext? promptContext = null;
+        TurnTextCapture? reportCapture = null;
         try
         {
             if (prompt) _store.SetActiveRequest(requestId);
@@ -543,10 +545,13 @@ public sealed class WorkerRuntime : IAsyncDisposable
             if (prompt)
             {
                 promptContext = new ActivePromptContext(requestId, registered.TurnId, registered.ProcessGeneration, registered.OwnershipEpoch, correlationId.Value, registered.SessionId);
+                reportCapture = captureTaskReport ? new TurnTextCapture(registered.SessionId, WorkerProtocol.MaxModelTaskReportBytes) : null;
+                reportCapture?.BindRequest(correlationId.Value);
                 lock (_activePromptGate)
                 {
-                    if (_activePrompt is not null) throw new WorkerProtocolException("Active prompt ownership is ambiguous.");
+                    if (_activePrompt is not null || _activeTaskReportCapture is not null) throw new WorkerProtocolException("Active prompt ownership is ambiguous.");
                     _activePrompt = promptContext;
+                    _activeTaskReportCapture = reportCapture;
                 }
             }
             using var normalized = NormalizeEnvelope(envelope, correlationId.Value);
@@ -557,7 +562,37 @@ public sealed class WorkerRuntime : IAsyncDisposable
             forwarded.TrySetResult(_store.GetRequest(requestId)!);
             var result = await completion.Task.ConfigureAwait(false);
             var state = result.TryGetProperty("error", out _) ? "failed" : "completed";
-            _store.CompleteRequest(requestId, state, SanitizeOutcome(result, state));
+            string outcome;
+            if (captureTaskReport && state == "completed")
+            {
+                var stopReason = result.TryGetProperty("result", out var resultBody) && resultBody.ValueKind == JsonValueKind.Object && resultBody.TryGetProperty("stopReason", out var stop) ? stop.GetString() : null;
+                var captured = reportCapture!.Complete();
+                if (!string.Equals(stopReason, "end_turn", StringComparison.Ordinal) || captured.Overflowed || string.IsNullOrWhiteSpace(captured.Text))
+                {
+                    state = "failed";
+                    outcome = TaskReportFailureOutcome();
+                }
+                else
+                {
+                    try
+                    {
+                        using var document = JsonDocument.Parse(captured.Text, new JsonDocumentOptions { MaxDepth = 32 });
+                        if (!ModelTaskReportShape.TryCanonicalize(document.RootElement, out var canonical, out _))
+                        {
+                            state = "failed";
+                            outcome = TaskReportFailureOutcome();
+                        }
+                        else outcome = canonical!;
+                    }
+                    catch (JsonException)
+                    {
+                        state = "failed";
+                        outcome = TaskReportFailureOutcome();
+                    }
+                }
+            }
+            else outcome = SanitizeOutcome(result, state);
+            _store.CompleteRequest(requestId, state, outcome);
             TryAppendObservation("acp-response", SanitizeObservation(result, requestId, correlationId));
             return _store.GetRequest(requestId)!;
         }
@@ -582,6 +617,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 lock (_activePromptGate)
                 {
                     if (ReferenceEquals(_activePrompt, promptContext)) _activePrompt = null;
+                    if (ReferenceEquals(_activeTaskReportCapture, reportCapture)) _activeTaskReportCapture = null;
                 }
             }
             if (prompt) _store.SetActiveRequest(null);
@@ -672,7 +708,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 using (document)
                 {
                     var root = document.RootElement;
-                    ObserveComprehension(root);
+                    ObserveTurnCaptures(root);
                     if (root.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number && !root.TryGetProperty("method", out _) && _responses.TryRemove(id.GetInt64(), out var response)) { response.TrySetResult(root.Clone()); continue; }
                     if (root.TryGetProperty("method", out var method) && method.ValueKind == JsonValueKind.String && method.GetString() == "session/request_permission" && root.TryGetProperty("id", out _))
                         await HandlePermissionRequestAsync(root).ConfigureAwait(false);
@@ -695,13 +731,19 @@ public sealed class WorkerRuntime : IAsyncDisposable
     /// general observation path. Only correlated text chunks are retained in
     /// memory, and the capture seals on the matching response id.
     /// </summary>
-    private void ObserveComprehension(JsonElement frame)
+    private void ObserveTurnCaptures(JsonElement frame)
     {
-        OrientationTurnCapture? capture;
-        lock (_activePromptGate) capture = _activeComprehensionCapture;
-        if (capture is null) return;
-        capture.TryAppend(frame);
-        capture.TrySeal(frame);
+        TurnTextCapture? comprehension;
+        TurnTextCapture? report;
+        lock (_activePromptGate)
+        {
+            comprehension = _activeComprehensionCapture;
+            report = _activeTaskReportCapture;
+        }
+        comprehension?.TryAppend(frame);
+        comprehension?.TrySeal(frame);
+        report?.TryAppend(frame);
+        report?.TrySeal(frame);
     }
 
     private void FailPendingResponses()
@@ -786,6 +828,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (envelope.TryGetProperty("params", out var parameters)) value["params"] = parameters.Clone();
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(value, WorkerProtocol.JsonOptions));
     }
+    private static string TaskReportFailureOutcome() => JsonSerializer.Serialize(new { category = "model-report-invalid" }, WorkerProtocol.JsonOptions);
+
     private static string SanitizeOutcome(JsonElement result, string state)
     {
         var raw = result.GetRawText();
@@ -1116,7 +1160,7 @@ public sealed class WorkerBridge : IAsyncDisposable
             "stop-process" => await RunAsync(StopProcessAsync).ConfigureAwait(false),
             "new-session" => await _runtime.NewSessionAsync(socketLease.Epoch, socketLease.ConnectionNonce, connectionToken).ConfigureAwait(false),
             "load-session" => await _runtime.LoadSessionAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "sessionId"), connectionToken).ConfigureAwait(false),
-            "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken).ConfigureAwait(false),
+            "submit" => await _runtime.SubmitAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "requestId"), RequiredElement(message, "envelope", JsonValueKind.Object), OptionalString(message, "turnId", WorkerProtocol.MaxIdentifierLength), connectionToken, OptionalBoolean(message, "captureTaskReport")).ConfigureAwait(false),
             "cancel" => await _runtime.CancelAsync(socketLease.Epoch, socketLease.ConnectionNonce, RequiredBounded(message, "cancellationId"), RequiredBounded(message, "targetRequestId"), RequiredElement(message, "envelope", JsonValueKind.Object), connectionToken).ConfigureAwait(false),
             "permission" => await _runtime.DecidePermissionAsync(socketLease.Epoch, RequiredBounded(message, "decisionId"), RequiredInt64(message, "processGeneration", 0), RequiredBounded(message, "requestId"), RequiredBounded(message, "turnId"), RequiredBounded(message, "decision"), connectionToken).ConfigureAwait(false),
             "install-orientation" => await InstallOrientationAsync(socketLease, message, connectionToken).ConfigureAwait(false),
@@ -1221,6 +1265,7 @@ public sealed class WorkerBridge : IAsyncDisposable
     private static void RequireExactControlFields(JsonElement element, params string[] fields) { if (element.ValueKind != JsonValueKind.Object || !element.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(fields.Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw new WorkerProtocolException("Control message fields are invalid."); }
     private static long RequiredInt64(JsonElement element, string name, long minimum) { if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Number || !property.TryGetInt64(out var value) || value < minimum) throw new WorkerProtocolException($"Invalid {name}."); return value; }
     private static bool RequiredBoolean(JsonElement element, string name) => element.TryGetProperty(name, out var property) && property.ValueKind is JsonValueKind.True or JsonValueKind.False ? property.GetBoolean() : throw new WorkerProtocolException($"Invalid {name}.");
+    private static bool OptionalBoolean(JsonElement element, string name) => !element.TryGetProperty(name, out var property) ? false : property.ValueKind is JsonValueKind.True or JsonValueKind.False ? property.GetBoolean() : throw new WorkerProtocolException($"Invalid {name}.");
     private static string? OptionalString(JsonElement element, string name, int maximum) { if (!element.TryGetProperty(name, out var property) || property.ValueKind == JsonValueKind.Null) return null; if (property.ValueKind != JsonValueKind.String || property.GetString() is not { } value || value.Length > maximum) throw new WorkerProtocolException($"Invalid {name}."); return value; }
     private static JsonElement RequiredElement(JsonElement element, string name, JsonValueKind kind) => element.TryGetProperty(name, out var property) && property.ValueKind == kind ? property : throw new WorkerProtocolException($"Invalid {name}.");
     private static void RequireExactFields(JsonElement element, params string[] fields) { if (element.ValueKind != JsonValueKind.Object || element.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(fields.Order(StringComparer.Ordinal), StringComparer.Ordinal) is false) throw new WorkerProtocolException("Authentication message fields are invalid."); }

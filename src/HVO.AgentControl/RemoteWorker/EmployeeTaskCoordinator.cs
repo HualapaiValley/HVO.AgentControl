@@ -68,6 +68,50 @@ public sealed class EmployeeTaskCoordinator(AcpControlHost control, WorkerConnec
             ?? throw new OrganizationNotFoundException($"Worker task '{taskId}' does not exist.");
     }
 
+    /// <summary>Synchronizes one exact durable request and never resubmits it.</summary>
+    public async Task<EmployeeTaskSyncDetail> SyncAsync(string taskId, EmployeeTaskSync request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!IsBoundedTaskId(taskId) || request.ExpectedTaskRevision < 1)
+            throw new OrganizationValidationException("A bounded stable task id and current revision are required.");
+        var store = Store();
+        var detail = store.GetEmployeeTaskDetail(taskId)
+            ?? throw new OrganizationNotFoundException($"Worker task '{taskId}' does not exist.");
+        if (detail.Task.Revision != request.ExpectedTaskRevision)
+            throw new OrganizationConcurrencyException("The worker task changed; reload and retry with its current revision.");
+        if (detail.Request is null)
+            throw new OrganizationConcurrencyException("The task has no exact request to synchronize.");
+        await manager.SynchronizeOnceAsync(detail.Task.WorkerId, cancellationToken).ConfigureAwait(false);
+        var updated = store.GetEmployeeTaskDetail(taskId)
+            ?? throw new OrganizationStoreCorruptException("The synchronized worker task could not be re-read.");
+        var message = updated.Request?.State switch
+        {
+            "Completed" => "remote-completed",
+            "Failed" => updated.Task.State == WorkerTaskStates.Cancelled ? "cancellation-observed" : "remote-failed",
+            "Uncertain" or "Interrupted" => "remote-outcome-uncertain",
+            _ => "remote-still-in-flight",
+        };
+        return new EmployeeTaskSyncDetail(updated, DateTimeOffset.UtcNow, message);
+    }
+
+    /// <summary>Sets or clears only the employee's manual hold, revision-bound.</summary>
+    public EmployeeDispatchHoldDetail SetDispatchHold(string employeeId, EmployeeDispatchHoldUpdate request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.ExpectedEmployeeRevision < 1)
+            throw new OrganizationValidationException("The current employee revision is required.");
+        var store = Store();
+        var employee = store.GetOverview().Employees.SingleOrDefault(item => item.Id == employeeId)
+            ?? throw new OrganizationNotFoundException($"Employee '{employeeId}' does not exist.");
+        if (employee.Revision != request.ExpectedEmployeeRevision)
+            throw new OrganizationConcurrencyException("The employee changed; reload and retry with its current revision.");
+        if (employee.Placement != "DeveloperContainer")
+            throw new OrganizationConcurrencyException("The employee is not a managed DeveloperContainer employee.");
+        var status = store.SetManualDispatchHold(employeeId, request.Held, request.Detail);
+        var updated = store.GetOverview().Employees.Single(item => item.Id == employeeId);
+        return new EmployeeDispatchHoldDetail(updated, status);
+    }
+
     /// <summary>
     /// Resolves the task's current request and forwards an exact cancellation for
     /// it. The task is deliberately not moved to <c>Cancelled</c> here: a

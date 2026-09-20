@@ -28,6 +28,18 @@ public sealed record EmployeeTaskCreate(
 /// <summary>The bounded body of the owner-only task cancellation route.</summary>
 public sealed record EmployeeTaskCancel(int ExpectedTaskRevision);
 
+/// <summary>The revision-bound request to synchronize one exact task without resubmitting it.</summary>
+public sealed record EmployeeTaskSync(int ExpectedTaskRevision);
+
+/// <summary>The owner-controlled manual dispatch hold for any managed employee.</summary>
+public sealed record EmployeeDispatchHoldUpdate(int ExpectedEmployeeRevision, bool Held, string? Detail);
+
+/// <summary>The result of one exact synchronization pass and authoritative re-read.</summary>
+public sealed record EmployeeTaskSyncDetail(EmployeeTaskDetail Task, DateTimeOffset SynchronizedAt, string Detail);
+
+/// <summary>The employee and orientation/hold state after a manual hold mutation.</summary>
+public sealed record EmployeeDispatchHoldDetail(HVO.AgentControl.Organization.EmployeeSummary Employee, HVO.AgentControl.Organization.OrientationStatus Status);
+
 /// <summary>
 /// A read-only summary of one host verification. Only the bounded hashes and
 /// the sanitized failure detail are surfaced; the raw manifest, test summary and
@@ -70,12 +82,23 @@ public sealed record EmployeeTaskCancellationDetail(
 public static class EmployeeTaskDisplayStates
 {
     public const string Requested = "requested";
+    public const string Accepted = "accepted";
     public const string Running = "running";
     public const string Completed = "completed";
     public const string Verified = "verified";
     public const string Failed = "failed";
     public const string Cancelled = "cancelled";
     public const string Uncertain = "uncertain";
+
+    public static string For(EmployeeTaskDetail detail) => detail.Request?.State switch
+    {
+        "Forwarding" => Accepted,
+        "Forwarded" => Running,
+        "Uncertain" or "Interrupted" => Uncertain,
+        "Completed" => detail.Task.State == HVO.AgentControl.Organization.WorkerTaskStates.Verified ? Verified : Completed,
+        "Failed" => detail.Task.State == HVO.AgentControl.Organization.WorkerTaskStates.Cancelled ? Cancelled : Failed,
+        _ => ForTaskState(detail.Task.State),
+    };
 
     public static string ForTaskState(string taskState) => taskState switch
     {

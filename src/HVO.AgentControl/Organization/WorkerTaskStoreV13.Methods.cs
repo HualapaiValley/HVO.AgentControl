@@ -13,6 +13,7 @@ public sealed partial class OrganizationStore
     private const int MaxModelReportTestCount = 64;
     private const int MaxModelReportTestLength = 256;
     private const int MaxModelReportDeniedLength = 512;
+    private const int MaxModelReportLimitationCount = 32;
     private const int MaxModelReportLimitationsLength = 1024;
     private const int MaxVerifierVersionLength = 64;
 
@@ -199,6 +200,96 @@ public sealed partial class OrganizationStore
                 return ReadWorkerTaskIn(connection, null, taskId)!;
             }
         });
+    }
+
+    /// <summary>
+    /// Atomically records an exact terminal worker request, its model report when
+    /// required, and any observed cancellation. A malformed report is rejected
+    /// before mutation. Cancellation is observation, not rollback: a normally
+    /// completed request remains Completed with a diagnostic detail, while a failed
+    /// request with a forwarded/uncertain cancellation becomes Cancelled.
+    /// </summary>
+    public WorkerRequestRecord ReconcileWorkerTaskTerminalRequest(
+        string requestId,
+        int expectedRequestRevision,
+        string expectedRequestState,
+        string remoteState,
+        string? outcomeCategory,
+        string? outcomeJson,
+        ModelTaskReport? report)
+    {
+        if (remoteState is not ("Completed" or "Failed"))
+            throw new OrganizationValidationException("A terminal worker request state is required.");
+        (string Json, string Hash)? normalizedReport = report is null ? null : NormalizeModelTaskReport(report);
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var request = GetWorkerRequestIn(connection, transaction, requestId);
+                if (request.Revision != expectedRequestRevision || request.State != expectedRequestState)
+                    throw new OrganizationConcurrencyException("The worker request changed before terminal reconciliation.");
+                var task = ReadWorkerTaskIn(connection, transaction, request.TaskId)
+                    ?? throw new OrganizationStoreCorruptException("The worker request task is missing.");
+                var activeCancellation = ReadActiveCancellation(connection, transaction, requestId);
+                var cancellationObserved = remoteState == "Completed" || outcomeCategory is "cancelled" or "cancellation-observed";
+                var cancellation = cancellationObserved ? activeCancellation : null;
+                var now = Timestamp();
+                var outcomeBytes = outcomeJson is null ? (int?)null : Encoding.UTF8.GetByteCount(outcomeJson);
+                if (outcomeBytes > 64 * 1024) throw new OrganizationValidationException("Outcome metadata is too large.");
+                Execute(connection, transaction,
+                    "UPDATE worker_requests SET state=$state,outcome_hash=$hash,outcome_category=$category,outcome_bytes=$bytes,completed_at=$now,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND state=$from",
+                    ("$state", remoteState), ("$hash", outcomeJson is null ? null : HashText(outcomeJson)),
+                    ("$category", SanitizeRemote(outcomeCategory, 64)), ("$bytes", outcomeBytes), ("$now", now),
+                    ("$id", requestId), ("$revision", expectedRequestRevision), ("$from", expectedRequestState));
+
+                var completedAfterCancellation = remoteState == "Completed" && cancellation is not null;
+                var cancelled = remoteState == "Failed" && cancellation is not null;
+                var taskState = cancelled ? WorkerTaskStates.Cancelled : remoteState == "Completed" ? WorkerTaskStates.Completed : WorkerTaskStates.Failed;
+                var failure = completedAfterCancellation ? "cancellation-requested-but-completed" : cancelled ? "cancellation-observed" : outcomeCategory;
+                var reportJson = normalizedReport?.Json;
+                var reportHash = normalizedReport?.Hash;
+                var taskRows = Execute(connection, transaction,
+                    """
+                    UPDATE worker_tasks
+                    SET state=$state,
+                        model_report_json=COALESCE(model_report_json,$report),
+                        model_report_hash=COALESCE(model_report_hash,$reportHash),
+                        model_reported_at=CASE WHEN model_report_json IS NULL AND $report IS NOT NULL THEN $now ELSE model_reported_at END,
+                        failure_detail=COALESCE($failure,failure_detail),
+                        updated_at=$now,
+                        revision=revision+1
+                    WHERE id=$task AND state IN ('Running','Uncertain')
+                      AND (($reportHash IS NULL AND model_report_hash IS NULL) OR model_report_hash IS NULL OR model_report_hash=$reportHash)
+                    """,
+                    ("$state", taskState), ("$report", reportJson), ("$reportHash", reportHash),
+                    ("$failure", StripBounded(failure, MaxFailureDetailLength)), ("$now", now), ("$task", task.Id));
+                if (taskRows != 1) throw new OrganizationConcurrencyException("The worker task changed or carries a conflicting model report.");
+                if (cancellation is not null)
+                {
+                    var cancellationRows = Execute(connection, transaction,
+                        "UPDATE worker_cancellations SET state='Observed',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND state IN ('Forwarded','Uncertain')",
+                        ("$now", now), ("$id", cancellation.Id), ("$revision", cancellation.Revision));
+                    if (cancellationRows != 1) throw new OrganizationConcurrencyException("The worker cancellation changed before observation.");
+                }
+                ClearRecovery(connection, transaction, request.WorkerId, "request-uncertain", HashText(request.Id));
+                transaction.Commit();
+                return GetWorkerRequest(requestId)!;
+            }
+        });
+    }
+
+    private static WorkerCancellationRecord? ReadActiveCancellation(SqliteConnection connection, SqliteTransaction transaction, string requestId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT id,request_id,payload_hash,state,ownership_epoch,process_generation,revision FROM worker_cancellations WHERE request_id=$request AND state IN ('Forwarded','Uncertain') ORDER BY created_at DESC,id DESC LIMIT 1";
+        command.Parameters.AddWithValue("$request", requestId);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? new WorkerCancellationRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt32(6)) : null;
     }
 
     /// <summary>
@@ -540,38 +631,88 @@ public sealed partial class OrganizationStore
             reader.GetInt32(14));
     }
 
-    private static (string Json, string Hash) NormalizeModelTaskReport(ModelTaskReport report)
+    internal static (string Json, string Hash) NormalizeModelTaskReport(ModelTaskReport report)
     {
         var summary = SanitizeBounded(report.Summary, MaxModelReportSummaryLength);
         if (string.IsNullOrEmpty(summary))
             throw new OrganizationValidationException("A model report requires a bounded summary.");
 
-        var changedPaths = NormalizeReportList(report.ClaimedChangedPaths, MaxModelReportChangedPathCount, "claimed changed path", allowRelativePath: true);
-        var claimedTests = NormalizeReportList(report.ClaimedTests, MaxModelReportTestCount, "claimed test", allowRelativePath: false);
-        var denied = NormalizeReportOptional(report.DeniedRequestResult, MaxModelReportDeniedLength, "denied request result");
-        var limitations = NormalizeReportOptional(report.Limitations, MaxModelReportLimitationsLength, "limitations");
+        var changedPaths = NormalizeReportList(report.ChangedPaths, MaxModelReportChangedPathCount, "changed path", allowRelativePath: true);
+        var tests = NormalizeModelTaskTests(report.Tests);
+        var denied = NormalizeDeniedAction(report.DeniedAction);
+        var limitations = NormalizeReportList(report.Limitations, MaxModelReportLimitationCount, "limitation", allowRelativePath: false, MaxModelReportLimitationsLength);
 
-        var envelope = new CanonicalModelReport(1, summary, changedPaths, claimedTests, denied, limitations);
-        var json = JsonSerializer.Serialize(envelope);
+        var envelope = new CanonicalModelReport(summary, changedPaths, tests, denied, limitations);
+        var json = JsonSerializer.Serialize(envelope, CanonicalJsonOptions);
         if (Encoding.UTF8.GetByteCount(json) > MaxModelReportJsonLength)
             throw new OrganizationValidationException("The model report is too large.");
         return (json, HashText(json));
     }
 
-    private sealed record CanonicalModelReport(
-        int Version,
-        string Summary,
-        IReadOnlyList<string> ClaimedChangedPaths,
-        IReadOnlyList<string> ClaimedTests,
-        string? DeniedRequestResult,
-        string? Limitations);
+    internal static ModelTaskReport DeserializeModelTaskReport(string json)
+    {
+        if (Encoding.UTF8.GetByteCount(json) > MaxModelReportJsonLength)
+            throw new OrganizationValidationException("The model report is too large.");
+        try
+        {
+            var report = JsonSerializer.Deserialize<ModelTaskReport>(json, CanonicalJsonOptions)
+                ?? throw new OrganizationValidationException("The model report is empty.");
+            _ = NormalizeModelTaskReport(report);
+            return report;
+        }
+        catch (JsonException exception)
+        {
+            throw new OrganizationValidationException("The model report is malformed.", exception);
+        }
+    }
 
-    private static string[] NormalizeReportList(IReadOnlyList<string>? values, int maximum, string kind, bool allowRelativePath)
+    private sealed record CanonicalModelReport(
+        string Summary,
+        IReadOnlyList<string> ChangedPaths,
+        IReadOnlyList<ModelTaskTestReport> Tests,
+        ModelTaskDeniedAction? DeniedAction,
+        IReadOnlyList<string> Limitations);
+
+    private static ModelTaskTestReport[] NormalizeModelTaskTests(IReadOnlyList<ModelTaskTestReport>? tests)
+    {
+        if (tests is null) return [];
+        if (tests.Count > MaxModelReportTestCount)
+            throw new OrganizationValidationException($"A model report may carry at most {MaxModelReportTestCount} tests.");
+        return tests.Select(test =>
+        {
+            if (test is null) throw new OrganizationValidationException("A model report test is invalid.");
+            var recipe = test.RecipeId is null ? null : SanitizeBounded(test.RecipeId, MaxModelReportTestLength);
+            if (recipe is not null && !WorkerTaskTestRecipes.IsDefined(recipe))
+                throw new OrganizationValidationException("A model report test recipe is not recognized.");
+            var status = SanitizeBounded(test.Status, 32);
+            if (status is not ("passed" or "failed" or "not-run"))
+                throw new OrganizationValidationException("A model report test status is invalid.");
+            var summary = SanitizeBounded(test.Summary, MaxModelReportTestLength)
+                ?? throw new OrganizationValidationException("A model report test summary is required.");
+            return new ModelTaskTestReport(recipe, status, summary);
+        }).OrderBy(test => test.RecipeId, StringComparer.Ordinal).ThenBy(test => test.Status, StringComparer.Ordinal).ThenBy(test => test.Summary, StringComparer.Ordinal).ToArray();
+    }
+
+    private static ModelTaskDeniedAction? NormalizeDeniedAction(ModelTaskDeniedAction? denied)
+    {
+        if (denied is null) return null;
+        var requested = SanitizeBounded(denied.Requested, MaxModelReportDeniedLength)
+            ?? throw new OrganizationValidationException("A denied action request is required.");
+        var action = SanitizeBounded(denied.Action, MaxModelReportDeniedLength)
+            ?? throw new OrganizationValidationException("A denied action is required.");
+        var result = SanitizeBounded(denied.Result, MaxModelReportDeniedLength)
+            ?? throw new OrganizationValidationException("A denied action result is required.");
+        if (!denied.NoSideEffect)
+            throw new OrganizationValidationException("A denied action must state that no side effect occurred.");
+        return new ModelTaskDeniedAction(requested, action, result, true);
+    }
+
+    private static string[] NormalizeReportList(IReadOnlyList<string>? values, int maximum, string kind, bool allowRelativePath, int itemMaximum = MaxModelReportTestLength)
     {
         if (values is null) return [];
         if (values.Count > maximum) throw new OrganizationValidationException($"A model report may carry at most {maximum} {kind}s.");
         var normalized = values
-            .Select(value => SanitizeBounded(value, MaxModelReportTestLength))
+            .Select(value => SanitizeBounded(value, itemMaximum))
             .Select(value => string.IsNullOrEmpty(value)
                 ? throw new OrganizationValidationException($"A model report {kind} must not be empty.")
                 : value)

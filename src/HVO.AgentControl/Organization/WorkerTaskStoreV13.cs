@@ -45,11 +45,24 @@ public sealed record WorkerTaskSpec(
 /// <c>Verified</c>. Every field is bounded and normalized before persistence.
 /// </summary>
 public sealed record ModelTaskReport(
-    string Summary,
-    IReadOnlyList<string> ClaimedChangedPaths,
-    IReadOnlyList<string> ClaimedTests,
-    string? DeniedRequestResult,
-    string? Limitations);
+    [property: System.Text.Json.Serialization.JsonPropertyName("summary")] string Summary,
+    [property: System.Text.Json.Serialization.JsonPropertyName("changedPaths")] IReadOnlyList<string> ChangedPaths,
+    [property: System.Text.Json.Serialization.JsonPropertyName("tests")] IReadOnlyList<ModelTaskTestReport> Tests,
+    [property: System.Text.Json.Serialization.JsonPropertyName("deniedAction")] ModelTaskDeniedAction? DeniedAction,
+    [property: System.Text.Json.Serialization.JsonPropertyName("limitations")] IReadOnlyList<string> Limitations);
+
+/// <summary>One model-claimed execution of the host-selected test recipe.</summary>
+public sealed record ModelTaskTestReport(
+    [property: System.Text.Json.Serialization.JsonPropertyName("recipeId")] string? RecipeId,
+    [property: System.Text.Json.Serialization.JsonPropertyName("status")] string Status,
+    [property: System.Text.Json.Serialization.JsonPropertyName("summary")] string Summary);
+
+/// <summary>A model claim that a prohibited action was refused without side effects.</summary>
+public sealed record ModelTaskDeniedAction(
+    [property: System.Text.Json.Serialization.JsonPropertyName("requested")] string Requested,
+    [property: System.Text.Json.Serialization.JsonPropertyName("action")] string Action,
+    [property: System.Text.Json.Serialization.JsonPropertyName("result")] string Result,
+    [property: System.Text.Json.Serialization.JsonPropertyName("noSideEffect")] bool NoSideEffect);
 
 /// <summary>
 /// A host verification outcome for one task. Only <c>Passed</c> carries the
@@ -163,7 +176,7 @@ public static class WorkerTaskTestRecipes
 public sealed partial class OrganizationStore
 {
     public const int MaxTaskSpecJsonLength = 32768;
-    public const int MaxModelReportJsonLength = 32768;
+    public const int MaxModelReportJsonLength = 16 * 1024;
     public const int MaxManifestJsonLength = 65536;
     public const int MaxTestSummaryJsonLength = 32768;
     public const int MaxDeniedActionJsonLength = 8192;
