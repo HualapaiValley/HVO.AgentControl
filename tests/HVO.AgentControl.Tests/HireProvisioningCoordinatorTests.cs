@@ -259,6 +259,9 @@ public sealed class HireProvisioningCoordinatorTests
         var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
         var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
         var before = fixture.Provisioner.Effects.ToArray();
+        // Failed recovery is not exposed through the general state machine; only
+        // the coordinator's post-reconciliation specialized edge may reopen it.
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.TransitionHireRequestState(failed.Id, failed.Revision, HireRequestStates.Failed, HireRequestStates.Provisioning));
 
         var result = await fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None);
 

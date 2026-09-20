@@ -71,7 +71,7 @@ public sealed class HireProvisioningCoordinator(
         if (approval.WorkerId is null)
             throw new OrganizationConcurrencyException("The failed hire has no linked worker to reconcile.");
         _ = await provisioning.VerifyAppliedPlanAsync(approval.WorkerId, cancellationToken).ConfigureAwait(false);
-        store.TransitionHireRequestState(hireId, hire.Revision, HireRequestStates.Failed, HireRequestStates.Provisioning, "Owner resumed after exact applied-plan reconciliation.");
+        store.ResumeFailedHireRequest(hireId, hire.Revision);
         return await ProvisionToOrientingAsync(hireId, cancellationToken).ConfigureAwait(false);
     }
 

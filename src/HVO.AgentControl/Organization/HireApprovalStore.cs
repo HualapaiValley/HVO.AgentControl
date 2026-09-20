@@ -505,16 +505,47 @@ public sealed partial class OrganizationStore
         (HireRequestStates.Provisioning, HireRequestStates.Uncertain) => true,
         (HireRequestStates.Uncertain, HireRequestStates.Provisioning) => true,
         (HireRequestStates.Interrupted, HireRequestStates.Provisioning) => true,
-        // Failed is terminal for automatic processing. It can return to
-        // Provisioning only through the owner-explicit recovery coordinator after
-        // exact applied-plan/resource reconciliation.
-        (HireRequestStates.Failed, HireRequestStates.Provisioning) => true,
         (HireRequestStates.Orienting, HireRequestStates.Ready) => true,
         (HireRequestStates.Orienting, HireRequestStates.Failed) => true,
         (HireRequestStates.Orienting, HireRequestStates.Interrupted) => true,
         (HireRequestStates.Orienting, HireRequestStates.Uncertain) => true,
         _ => false,
     };
+
+    /// <summary>
+    /// Specialized recovery edge used only after the coordinator has independently
+    /// proved the exact applied plan and current operation-owned resources. Keeping
+    /// this outside the general state machine prevents an arbitrary caller from
+    /// moving a Failed hire back to Provisioning without that proof.
+    /// </summary>
+    public HireRequestSummary ResumeFailedHireRequest(string id, int expectedRevision)
+    {
+        if (!IsBoundedIdentifier(id, OrganizationIds.HireRequestPrefix) || expectedRevision < 1)
+            throw new OrganizationValidationException("A stable hire request id and current revision are required.");
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadHireRequest(connection, transaction, id)
+                    ?? throw new OrganizationNotFoundException($"Hire request '{id}' does not exist.");
+                if (current.State != HireRequestStates.Failed || current.Revision != expectedRevision)
+                    throw new OrganizationConcurrencyException("The hire changed or is not Failed.");
+                var now = Timestamp();
+                var affected = Execute(connection, transaction,
+                    "UPDATE hire_requests SET state='Provisioning', status_detail=$detail, revision=revision+1, updated_at=$now WHERE id=$id AND revision=$revision AND state='Failed'",
+                    ("$detail", "Owner resumed after exact applied-plan reconciliation."), ("$now", now), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1) throw new OrganizationConcurrencyException("The hire changed before recovery.");
+                var revision = expectedRevision + 1;
+                AppendHireRequestEvent(connection, transaction, id, HireRequestStates.Provisioning, revision,
+                    HashHireValue($"resume-failed\n{id}\n{revision}"), now);
+                transaction.Commit();
+                return ReadHireRequests(connection, id).Single();
+            }
+        });
+    }
 
     private static string ValidateApprovalIdentity(string? value)
     {

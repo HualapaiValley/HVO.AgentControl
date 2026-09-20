@@ -412,11 +412,29 @@ public sealed class RemoteWorkerProvisioningCoordinator
         var store = Store();
         var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new OrganizationNotFoundException("Worker enrollment not found.");
         var operations = store.ListProvisioningOperations(workerId);
-        if (operations.Count != PlanStepCount || operations.Any(x => x.State != "Applied"))
+        if (operations.Count != PlanStepCount || operations.Any(x => x.State != "Applied" || x.WorkerId != workerId || x.HostId != enrollment.HostId || x.RuntimeBindingId != enrollment.RuntimeBindingId))
             throw new WorkerRecoveryRequiredException("The failed hire's provisioning plan is not exactly and completely Applied.", "hire-plan-not-applied");
+        var kindCounts = operations.GroupBy(x => x.Kind, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Count(), StringComparer.Ordinal);
+        var expectedKinds = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["enroll-key"] = 1,
+            ["volume-create"] = 4,
+            ["bootstrap"] = 1,
+            ["container-create"] = 1,
+            ["start"] = 1,
+        };
+        if (kindCounts.Count != expectedKinds.Count || expectedKinds.Any(x => !kindCounts.TryGetValue(x.Key, out var count) || count != x.Value))
+            throw new WorkerRecoveryRequiredException("The failed hire's provisioning operation topology is not the fixed eight-step plan.", "hire-plan-shape-invalid");
         var resources = store.ListWorkerResources(workerId);
-        if (resources.Count != 5 || resources.Any(x => x.State != "present"))
+        if (resources.Count != 5 || resources.Any(x => x.State != "present" || x.WorkerId != workerId || x.HostId != enrollment.HostId))
             throw new WorkerRecoveryRequiredException("The failed hire's five provisioning resources are not durably present.", "hire-resources-not-present");
+        var resourceNames = resources.Select(x => x.ResourceName).ToHashSet(StringComparer.Ordinal);
+        var expectedNames = new HashSet<string>([enrollment.ContainerName, enrollment.ControlVolumeName, enrollment.HomeVolumeName, enrollment.WorkspaceVolumeName, enrollment.SessionVolumeName], StringComparer.Ordinal);
+        if (!resourceNames.SetEquals(expectedNames)
+            || resources.Count(x => x.ResourceKind == "container") != 1
+            || resources.Count(x => x.ResourceKind == "volume") != 4
+            || resources.Any(x => !operations.Any(operation => operation.Id == x.OperationId && operation.Kind == (x.ResourceKind == "container" ? "container-create" : "volume-create"))))
+            throw new WorkerRecoveryRequiredException("The failed hire's resource topology does not match the fixed container and four volumes.", "hire-resource-shape-invalid");
 
         var host = _targets.Resolve(enrollment.HostId);
         foreach (var resource in resources)
@@ -428,7 +446,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
                 throw new WorkerRecoveryRequiredException("A failed hire resource is absent and requires reconciliation.", "hire-resource-absent");
             var revision = CurrentProfileRevisionFor(store, enrollment);
             RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, Identity(enrollment, resource.OperationId, revision));
-            if (resource.ResourceKind == "container" && !inspection.State.Contains("running", StringComparison.OrdinalIgnoreCase))
+            if (resource.ResourceKind == "container" && !string.Equals(inspection.State, "running", StringComparison.Ordinal))
                 throw new WorkerRecoveryRequiredException("The failed hire's owned container is not running.", "hire-container-not-running");
         }
         return enrollment;
