@@ -489,7 +489,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
     /// creation/loading keeps its existing uncertain-write semantics and is never
     /// retried here.
     /// </summary>
-    private async Task<(IWorkerBridgeSession Session, BridgeWorkerStatus Status)> ConnectProvisionedWorkerAsync(WorkerEnrollmentRecord enrollment, CancellationToken token)
+    internal async Task<(IWorkerBridgeSession Session, BridgeWorkerStatus Status)> ConnectProvisionedWorkerAsync(WorkerEnrollmentRecord enrollment, CancellationToken token)
     {
         var limit = TimeSpan.FromSeconds(_options.ConnectTimeoutSeconds);
         var elapsed = Stopwatch.StartNew();
