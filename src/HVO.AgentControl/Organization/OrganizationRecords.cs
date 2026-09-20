@@ -30,6 +30,7 @@ public static class OrganizationIds
     public const string ContainerProfilePrefix = "prof-";
     public const string ContainerProfileRevisionPrefix = "prev-";
     public const string ProfileBuildPrefix = "pbld-";
+    public const string RebuildPrefix = "rbld-";
 
     public static string NewOrganizationId() => NewId(OrganizationPrefix);
     public static string NewDepartmentId() => NewId(DepartmentPrefix);
@@ -52,6 +53,7 @@ public static class OrganizationIds
     public static string NewContainerProfileId() => NewId(ContainerProfilePrefix);
     public static string NewContainerProfileRevisionId() => NewId(ContainerProfileRevisionPrefix);
     public static string NewProfileBuildId() => NewId(ProfileBuildPrefix);
+    public static string NewEmployeeRebuildId() => NewId(RebuildPrefix);
 
     /// <summary>Generates a stable random identifier with the supplied prefix.</summary>
     public static string NewId(string prefix)
@@ -458,6 +460,96 @@ public sealed record ProfileBuildRecord(
     DateTimeOffset UpdatedAt);
 
 public sealed record ProfileBuildRequest(string HostId);
+
+/// <summary>Fixed state machine of one durable employee-rebuild operation.</summary>
+public static class EmployeeRebuildStates
+{
+    public const string Intent = "Intent";
+    public const string Holding = "Holding";
+    public const string Replacing = "Replacing";
+    public const string Verifying = "Verifying";
+    public const string Applied = "Applied";
+    public const string Uncertain = "Uncertain";
+    public const string Failed = "Failed";
+
+    public static bool IsDefined(string state) =>
+        state is Intent or Holding or Replacing or Verifying or Applied or Uncertain or Failed;
+
+    /// <summary>States that hold the single active-rebuild slot for a worker.</summary>
+    public static bool IsActive(string state) => state is Intent or Holding or Replacing or Verifying or Uncertain;
+
+    public static bool CanTransition(string from, string to) => (from, to) switch
+    {
+        (Intent, Holding) => true,
+        (Intent, Failed) => true,
+        (Holding, Replacing) => true,
+        (Holding, Failed) => true,
+        (Holding, Uncertain) => true,
+        (Replacing, Verifying) => true,
+        (Replacing, Failed) => true,
+        (Replacing, Uncertain) => true,
+        (Verifying, Applied) => true,
+        (Verifying, Failed) => true,
+        (Verifying, Uncertain) => true,
+        // Reconciliation after a lost result. Uncertain -> Applied is allowed only
+        // when the controller proves the target digest is the one now running; the
+        // caller owns that evidence, and the Applied transition requires it.
+        (Uncertain, Replacing) => true,
+        (Uncertain, Applied) => true,
+        (Uncertain, Failed) => true,
+        _ => false,
+    };
+}
+
+/// <summary>
+/// The frozen intent to rebuild one managed worker. <c>dispatch_hold_reason</c>
+/// is fixed to the existing manual hold and <c>requested_by</c> to the owner, so
+/// neither is caller-supplied.
+/// </summary>
+public sealed record EmployeeRebuildCreate(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string HostId,
+    string FromProfileRevisionId,
+    string FromImageDigest,
+    int FromRevisionNumber,
+    string ToProfileRevisionId,
+    string ToProfileBuildId,
+    string ToImageDigest,
+    string ToPlatform,
+    bool ResetWorkspace,
+    bool ResetHome,
+    string? ResetConfirmation,
+    long OwnershipEpochBefore);
+
+public sealed record EmployeeRebuildRecord(
+    string Id,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string HostId,
+    string FromProfileRevisionId,
+    string FromImageDigest,
+    int FromRevisionNumber,
+    string ToProfileRevisionId,
+    string ToProfileBuildId,
+    string ToImageDigest,
+    string ToPlatform,
+    bool ResetWorkspace,
+    bool ResetHome,
+    string? ResetConfirmation,
+    string State,
+    long OwnershipEpochBefore,
+    long? OwnershipEpochAfter,
+    string DispatchHoldReason,
+    string RequestedBy,
+    string? EvidenceHash,
+    string? FailureSummary,
+    int Revision,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
 
 public sealed record ContainerProfileCreate(
     string? IdempotencyKey,
