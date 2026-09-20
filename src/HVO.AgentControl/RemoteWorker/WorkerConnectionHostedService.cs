@@ -41,7 +41,8 @@ internal sealed class WorkerConnectionHostedService(
             // A provisioning step left applying by a previous process has an unknown
             // remote effect. Mark it uncertain before the manager reconciles so the
             // next apply inspects the effect instead of repeating it blind.
-            var store = control.Organization ?? throw new OrganizationStoreException("Organization store unavailable.");
+            var store = await OrganizationStoreStartup.WaitAsync(() => control.Organization, stoppingToken).ConfigureAwait(false)
+                ?? throw new OrganizationStoreException("Organization store unavailable after the bounded startup wait.");
             var interrupted = store.MarkInterruptedProvisioningOperationsUncertain();
             if (interrupted > 0) logger.LogWarning("Marked {Count} interrupted provisioning operation(s) uncertain for reconciliation.", interrupted);
 
@@ -59,9 +60,9 @@ internal sealed class WorkerConnectionHostedService(
         }
         catch (OrganizationStoreException)
         {
-            // The authoritative control store is unavailable: either the control
-            // runtime is disabled or it has not finished opening. The host stays
-            // up and the first accepted request reconciles startup instead.
+            // The authoritative control store did not open inside the bounded
+            // startup window. The host stays up and request paths continue to
+            // report sanitized 503s rather than faulting the portal.
             logger.LogWarning(
                 "Remote worker startup reconciliation is held because the authoritative control store is unavailable.");
             return;
