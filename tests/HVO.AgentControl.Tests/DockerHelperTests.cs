@@ -310,6 +310,38 @@ public sealed class DockerHelperTests
         await Assert.ThrowsAsync<IOException>(() => runner.RunAsync("x", DockerOperation.Probe, ["/usr/bin/python3", "-c", "print('x'*1100000)"], null, TimeSpan.FromSeconds(10), CancellationToken.None));
     }
 
+    /// <summary>
+    /// An authorized peer that never sends its envelope must not hold the
+    /// accepted connection open: the helper closes it with a protocol error once
+    /// the bounded envelope window elapses.
+    /// </summary>
+    [Fact]
+    public async Task IdleAuthorizedConnectionIsClosedAfterTheEnvelopeDeadline()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "agentcontrol-helper-idle-" + Guid.NewGuid().ToString("N")[..8] + ".sock");
+        using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        listener.Bind(new UnixDomainSocketEndPoint(path)); listener.Listen(1);
+        using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        await client.ConnectAsync(new UnixDomainSocketEndPoint(path));
+        var accepted = await listener.AcceptAsync();
+        await using var server = new DockerHelperServer(new(path + ".unused", 1001, -1, Policy, EnvelopeTimeoutSeconds: 1), new FakeCredentials(1001), new FakeRunner());
+        using var stream = new NetworkStream(client, ownsSocket: false);
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var handling = server.HandleAsync(accepted, CancellationToken.None);
+        using var response = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
+        await handling.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.NotNull(response);
+        Assert.Equal("error", response.RootElement.GetProperty("type").GetString());
+        Assert.Equal("protocol-error", response.RootElement.GetProperty("error").GetString());
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(8), "the idle connection was not closed within the bounded window");
+        // The socket is closed by the helper afterwards: a further read yields EOF.
+        var trailing = new byte[1];
+        Assert.Equal(0, await stream.ReadAsync(trailing, CancellationToken.None));
+        try { File.Delete(path); } catch (IOException) { }
+    }
+
     private static async Task<JsonElement> ExchangeAsync(DockerHelperRequest request, IPeerCredentialProvider credentials, int expectedUid)
     {
         var path = Path.Combine(Path.GetTempPath(), "agentcontrol-helper-test-" + Guid.NewGuid().ToString("N")[..8] + ".sock");

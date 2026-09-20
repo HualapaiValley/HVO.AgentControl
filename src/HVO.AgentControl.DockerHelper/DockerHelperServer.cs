@@ -10,7 +10,7 @@ using HVO.AgentControl.Worker;
 
 namespace HVO.AgentControl.DockerHelper;
 
-public sealed record DockerHelperOptions(string SocketPath, int ClientUid, int SocketGid, DockerPolicy Policy, int MaxConcurrency = 4)
+public sealed record DockerHelperOptions(string SocketPath, int ClientUid, int SocketGid, DockerPolicy Policy, int MaxConcurrency = 4, int EnvelopeTimeoutSeconds = DockerHelperProtocol.EnvelopeTimeoutSeconds)
 {
     public static DockerHelperOptions FromEnvironment()
     {
@@ -51,7 +51,11 @@ public sealed class LinuxPeerCredentialProvider : IPeerCredentialProvider
         try
         {
             handle.DangerousAddRef(ref added);
-            if (getsockopt(handle.DangerousGetHandle().ToInt32(), SolSocket, SoPeerCred, bytes, ref length) != 0 || length != bytes.Length)
+            // A Linux descriptor is a small non-negative int; refuse anything else
+            // rather than silently truncating a 64-bit handle value.
+            var raw = handle.DangerousGetHandle().ToInt64();
+            if (raw is < 0 or > int.MaxValue) throw new IOException("The helper connection descriptor is not a valid Linux file descriptor.");
+            if (getsockopt((int)raw, SolSocket, SoPeerCred, bytes, ref length) != 0 || length != bytes.Length)
                 throw new IOException("The peer credentials of the helper connection could not be read.");
         }
         finally { if (added) handle.DangerousRelease(); }
@@ -130,7 +134,18 @@ public sealed class DockerHelperServer(DockerHelperOptions options, IPeerCredent
             try
             {
                 if (_credentials.GetUid(socket) != options.ClientUid) { await WorkerProtocol.WriteFrameAsync(stream, new DockerHelperError("error", id, "peer-unauthorized"), token); return; }
-                using var document = await ReadRequestFrameAsync(stream, token).ConfigureAwait(false);
+                // The envelope must arrive within a bounded window so a stalled client
+                // cannot hold an accepted connection open indefinitely. Only the
+                // envelope is deadlined here; the operation itself carries its own
+                // bounded timeout.
+                JsonDocument document;
+                using (var envelopeDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    envelopeDeadline.CancelAfter(TimeSpan.FromSeconds(options.EnvelopeTimeoutSeconds));
+                    try { document = await ReadRequestFrameAsync(stream, envelopeDeadline.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (!token.IsCancellationRequested) { await SafeErrorAsync(stream, id, "protocol-error", token).ConfigureAwait(false); return; }
+                }
+                using var _ = document;
                 var request = JsonSerializer.Deserialize<DockerHelperRequest>(document.RootElement.GetRawText(), DockerHelperProtocol.JsonOptions) ?? throw new InvalidDataException(); id = request.Id;
                 ValidateEnvelope(request);
                 var input = request.BinaryLength == 0 ? null : await ReadExactAsync(stream, request.BinaryLength, token).ConfigureAwait(false);

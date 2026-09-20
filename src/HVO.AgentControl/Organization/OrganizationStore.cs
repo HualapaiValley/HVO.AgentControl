@@ -2126,13 +2126,13 @@ public sealed partial class OrganizationStore : IDisposable
     /// <summary>
     /// Rebuilds <c>execution_hosts</c> to admit the controller-local Docker
     /// transport and seeds its reserved row. Seven tables reference
-    /// <c>execution_hosts(id)</c>, so the rename must not rewrite those references
-    /// to a temporary name: <c>PRAGMA legacy_alter_table = ON</c> keeps every
-    /// referencing foreign key pointed at <c>execution_hosts</c> while the old
-    /// table is renamed, the new table is created, the rows are copied and the old
-    /// table is dropped. The pragma is scoped to this migration and restored before
-    /// commit; <c>PRAGMA foreign_key_check</c> afterwards proves every reference
-    /// resolves against the new table.
+    /// <c>execution_hosts(id)</c>, and renaming the old table would make SQLite
+    /// rewrite those references to the temporary name. The replacement is
+    /// therefore built under a staging name, the rows are copied, the old table is
+    /// dropped, and the staging table is renamed into <c>execution_hosts</c>, so
+    /// every child foreign key keeps naming <c>execution_hosts</c> and resolves to
+    /// the new table. Foreign keys are switched off only for that swap and
+    /// restored before <c>PRAGMA foreign_key_check</c> proves every reference.
     /// </summary>
     private void MigrateV10ToV11(SqliteConnection connection)
     {

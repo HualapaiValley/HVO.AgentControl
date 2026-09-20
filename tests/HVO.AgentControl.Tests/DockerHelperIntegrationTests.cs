@@ -77,14 +77,19 @@ public sealed class DockerHelperIntegrationTests
             var build = Run(["build", "--target", "docker-helper", "--tag", tag, RepositoryRoot()], 900_000);
             Assert.True(build.ExitCode == 0, build.Output);
 
-            // The fixed CLI and the helper entrypoint are both in the image.
-            var cli = Run(["run", "--rm", "--entrypoint", "/usr/bin/docker", tag, "version", "--format", "{{.Client.Version}}"]);
+            // The fixed CLI is in the image. Ask for its client version path
+            // without contacting a daemon: `docker version` would fail here
+            // because the container has no mounted daemon socket by design.
+            var cli = Run(["run", "--rm", "--entrypoint", "/usr/bin/docker", tag, "--version"]);
             Assert.True(cli.ExitCode == 0, cli.Output);
+            Assert.StartsWith("Docker version", cli.Output.Trim(), StringComparison.Ordinal);
             var helper = Run(["run", "--rm", "--entrypoint", "/usr/bin/stat", tag, "-c", "%a", "/app/HVO.AgentControl.DockerHelper.dll"]);
             Assert.Equal("644", helper.Output.Trim());
 
-            // No file may keep a setuid or setgid bit on the runtime rootfs.
-            var setuid = Run(["run", "--rm", "--entrypoint", "/usr/bin/find", tag, "/", "-xdev", "-perm", "/6000", "-type", "f", "-print"]);
+            // No file may keep a setuid or setgid bit on the runtime rootfs. This
+            // runs as root so the scan actually descends every directory; as the
+            // helper's uid 1002 it would silently skip root-owned trees.
+            var setuid = Run(["run", "--rm", "--user", "0:0", "--entrypoint", "/usr/bin/find", tag, "/", "-xdev", "-perm", "/6000", "-type", "f", "-print"]);
             Assert.True(setuid.ExitCode == 0, setuid.Output);
             Assert.Equal(string.Empty, setuid.Output.Trim());
 
