@@ -272,11 +272,15 @@ public sealed class EmployeeRebuildCoordinator(
     }
 
     /// <summary>
-    /// Owner-explicit abandonment of a rebuild that cannot be completed: an Intent
-    /// that never took the hold, or an Uncertain row whose container state the
-    /// operator has reconciled externally. It records a sanitized Failed outcome and
-    /// releases the rebuild hold (restoring any pre-existing owner hold) so the
-    /// employee is not stranded behind a hold nobody can clear. It never touches a
+    /// Owner-explicit abandonment of a rebuild that cannot be completed. Only a
+    /// rebuild that has not begun a destructive replacement may be abandoned: an
+    /// <c>Intent</c> that never took the hold, or an <c>Uncertain</c> row whose
+    /// container state the operator has reconciled externally. <c>Holding</c>,
+    /// <c>Replacing</c> and <c>Verifying</c> are refused because the coordinator may
+    /// be mid-swap, and releasing the hold there could leave a target container
+    /// running while the durable status still claims the original image. It records
+    /// a sanitized Failed outcome and releases the rebuild hold (restoring any
+    /// pre-existing owner hold) so the employee is not stranded. It never touches a
     /// container or volume.
     /// </summary>
     public EmployeeRebuildRecord AbandonAsync(string rebuildId, string sanitizedReason)
@@ -287,8 +291,8 @@ public sealed class EmployeeRebuildCoordinator(
             ?? throw new OrganizationNotFoundException($"Employee rebuild '{rebuildId}' does not exist.");
         if (current.State is EmployeeRebuildStates.Applied or EmployeeRebuildStates.Failed)
             return current;
-        if (current.State is not (EmployeeRebuildStates.Intent or EmployeeRebuildStates.Holding or EmployeeRebuildStates.Replacing or EmployeeRebuildStates.Verifying or EmployeeRebuildStates.Uncertain))
-            throw new OrganizationConcurrencyException($"An employee rebuild in state {current.State} cannot be abandoned.");
+        if (current.State is not (EmployeeRebuildStates.Intent or EmployeeRebuildStates.Uncertain))
+            throw new OrganizationConcurrencyException($"An employee rebuild in state {current.State} cannot be abandoned; a rebuild that may be mid-replacement must be resumed to a durable outcome first.");
         var failed = store.TransitionEmployeeRebuild(current.Id, current.Revision, current.State, EmployeeRebuildStates.Failed, failureSummary: sanitizedReason);
         ReleaseRebuildHold(store, failed);
         logger.LogWarning("Employee rebuild {RebuildId} was abandoned by the owner.", rebuildId);

@@ -251,6 +251,43 @@ public sealed class ScopedCleanupTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CleanupClaimsDurablyAndBlocksATagReuseUntilFinalized()
+    {
+        var failed = FailedBuild(OrphanDigest, OrphanTag);
+
+        // The claim reserves the (host, tag) pair: a second claim for the same tag
+        // is refused, so two cleanups cannot race the same image.
+        var claim = _store.ClaimProfileBuildRemoval(failed.Id, failed.Revision, "owner");
+        Assert.Equal(ProfileBuildStates.Failed, claim.State);
+
+        // A new build that tries to reuse the claimed tag is refused.
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            Task.Run(() => _store.QueueProfileBuild(NewCleanupRevision().Id, ExecutionHosts.LocalDockerId, BaseDigest, "linux/amd64", ContextHash, OrphanTag)));
+
+        // Finalizing the removal releases the claim and marks the build removed.
+        var finalized = _store.FinalizeProfileBuildRemoval(failed.Id, claim.Revision, "owner", ContextHash);
+        Assert.Equal(ProfileBuildStates.Removed, finalized.State);
+        Assert.False(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+    }
+
+    [Fact]
+    public async Task CleanupReleasedClaimAllowsARetryAfterARefusedGuard()
+    {
+        // The build's recorded digest is in use, so the coordinator's post-claim
+        // guard refuses after the claim exists; the claim must be released so the
+        // state stays retryable and the build is not marked removed.
+        var build = FailedBuild(FromDigest, "agentcontrol-profile:prev-guard-0000000000000");
+        var remote = new RecordingProvisioner();
+        var cleanup = Cleanup(remote);
+
+        await Assert.ThrowsAsync<OrganizationValidationException>(() => cleanup.CleanupProfileBuildAsync(build.Id, "owner", CancellationToken.None));
+
+        Assert.Equal(ProfileBuildStates.Failed, _store.GetProfileBuild(build.Id)!.State);
+        Assert.False(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, build.ResultTag));
+        Assert.Empty(remote.RemovedImages);
+    }
+
+    [Fact]
     public async Task CleanupRefusesUnknownBuildAndNonOwner()
     {
         await Assert.ThrowsAsync<OrganizationNotFoundException>(() => Cleanup(new RecordingProvisioner()).CleanupProfileBuildAsync("pbld-0000000000000000", "owner", CancellationToken.None));

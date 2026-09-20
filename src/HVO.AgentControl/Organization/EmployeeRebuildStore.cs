@@ -120,6 +120,23 @@ public sealed partial class OrganizationStore
             SELECT RAISE(ABORT, 'employee rebuilds are never replaced');
         END
         """,
+        // A durable claim that serializes a profile-build image removal against a
+        // later build of the same result tag. The tag is derived from the revision
+        // and context, so without a claim a cleanup preflight could pass and a
+        // concurrent build could then point the tag at a live image before the
+        // removal runs. The unique key is (host, tag); a claim is inserted before
+        // the remote effect and deleted when the removal finalizes or fails.
+        """
+        CREATE TABLE profile_build_removals (
+            profile_build_id TEXT PRIMARY KEY REFERENCES profile_builds(id) ON DELETE RESTRICT,
+            host_id TEXT NOT NULL REFERENCES execution_hosts(id) ON DELETE RESTRICT,
+            result_tag TEXT NOT NULL CHECK (length(result_tag) BETWEEN 1 AND 200),
+            requested_by TEXT NOT NULL CHECK (requested_by IN ('owner')),
+            created_at TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            UNIQUE (host_id, result_tag)
+        ) WITHOUT ROWID
+        """,
     ];
 
     /// <summary>

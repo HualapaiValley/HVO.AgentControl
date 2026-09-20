@@ -48,40 +48,27 @@ public sealed class CleanupCoordinator(
         if (build.State is not (ProfileBuildStates.Failed or ProfileBuildStates.Rejected))
             throw new OrganizationConcurrencyException($"Profile build '{profileBuildId}' is {build.State}; only a failed or rejected build can be removed.");
 
-        // The result tag is derived from the revision and context, so a failed
-        // build can share it with a later verified build of the same revision and
-        // context. Removing that shared tag would detach the verified row's image.
-        // Refuse rather than risk the live image; the tag is not unique per build.
-        if (store.IsResultTagShared(build.Id, build.HostId, build.ResultTag))
-            throw new OrganizationValidationException("Another non-removed build on this host shares the build's result tag; removing it could detach an image still in use.");
-
-        // A build that recorded an in-use digest is refused before any transport
-        // call: its digest is pinned by an enrollment, frozen approval or rebuild,
-        // so nothing about this build's cleanup may touch the host.
-        if (build.ImageDigest is { } recordedDigest) EnsureImageNotInUse(recordedDigest);
-
         var host = _targets.Resolve(build.HostId);
 
-        var removed = new List<string> { build.ResultTag };
+        // Claim the removal durably before any remote effect. The claim revalidates
+        // the shared-tag and in-use checks in one transaction and reserves the
+        // (host, tag) pair, so a concurrent build cannot reuse the tag between the
+        // preflight and the removal. The claim is released on finalize or failure.
+        var claimed = store.ClaimProfileBuildRemoval(build.Id, build.Revision, requestedBy);
+        var removed = new List<string> { claimed.ResultTag };
+
         try
         {
-            // Resolve what the tag currently points at. Removing the tag can delete
-            // the image when nothing else references it, so a tag that resolves to an
-            // approved base, an in-use digest or another build's reference is
-            // refused before any transport removal. Resolution is inside the
-            // uncertain boundary because a transport failure here leaves the effect
-            // unknown exactly as removal does.
-            var tagDigest = await remote.InspectImageAsync(host, build.ResultTag, cancellationToken).ConfigureAwait(false);
+            // Resolution and the digest guards run inside the claim so any refusal
+            // releases it and leaves the state retryable, while a transport failure
+            // keeps the claim for reconciliation.
+            var tagDigest = await remote.InspectImageAsync(host, claimed.ResultTag, cancellationToken).ConfigureAwait(false);
             if (tagDigest is not null) EnsureTagTargetRemovable(tagDigest);
-            await remote.RemoveImageAsync(host, build.ResultTag, cancellationToken).ConfigureAwait(false);
+            if (claimed.ImageDigest is { } recordedDigest) EnsureImageNotInUse(recordedDigest);
 
-            // Remove the resolved digest too when it is a distinct reference and not
-            // in use, so a dangling image left by the failed build is reclaimed. Only
-            // do this when the tag did not already delete the image, and never
-            // without the same guard. Prefer the resolved digest over the recorded
-            // one.
-            var digestReference = tagDigest ?? build.ImageDigest;
-            if (digestReference is { } imageDigest && !string.Equals(imageDigest, build.ResultTag, StringComparison.Ordinal))
+            await remote.RemoveImageAsync(host, claimed.ResultTag, cancellationToken).ConfigureAwait(false);
+            var digestReference = tagDigest ?? claimed.ImageDigest;
+            if (digestReference is { } imageDigest && !string.Equals(imageDigest, claimed.ResultTag, StringComparison.Ordinal))
             {
                 EnsureImageNotInUse(imageDigest);
                 removed.Add(imageDigest);
@@ -90,14 +77,23 @@ public sealed class CleanupCoordinator(
         }
         catch (RemoteWorkerUnavailableException exception) when (exception.Transport)
         {
-            // The effect is unknown: the tag may or may not be gone. Do not mark the
-            // row removed; the retry is idempotent and tolerates not-found.
-            throw new WorkerRecoveryRequiredException("Image removal transport failed; the build remains unremoved until cleanup is retried.", "profile-build-remove-uncertain");
+            // The effect is unknown: the tag may or may not be gone. Keep the claim
+            // and do not mark the row removed; a retry is idempotent and tolerates
+            // not-found.
+            throw new WorkerRecoveryRequiredException("Image removal transport failed; the build remains claimed and unremoved until cleanup is retried.", "profile-build-remove-uncertain");
+        }
+        catch (OrganizationValidationException)
+        {
+            // A guard refused the removal, so nothing destructive happened (or only
+            // an untag did). Release the claim so the state stays retryable and the
+            // build is not marked removed.
+            store.FailProfileBuildRemoval(claimed.Id, claimed.Revision, "image removal was refused by the in-use guard after the claim");
+            throw;
         }
 
-        var evidence = "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', build.Id, "remove-profile-build", string.Join('\n', removed))))).ToLowerInvariant();
-        var result = store.TransitionProfileBuildToRemoved(build.Id, build.Revision, requestedBy, evidence);
-        logger.LogInformation("Removed failed profile build {BuildId}; references {References}.", build.Id, string.Join(", ", removed));
+        var evidence = "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', claimed.Id, "remove-profile-build", string.Join('\n', removed))))).ToLowerInvariant();
+        var result = store.FinalizeProfileBuildRemoval(claimed.Id, claimed.Revision, requestedBy, evidence);
+        logger.LogInformation("Removed failed profile build {BuildId}; references {References}.", claimed.Id, string.Join(", ", removed));
         return result;
     }
 

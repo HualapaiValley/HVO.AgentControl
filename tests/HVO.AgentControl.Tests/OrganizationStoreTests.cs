@@ -1588,6 +1588,8 @@ public sealed class OrganizationStoreTests
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'one_active_employee_rebuild_per_worker';"));
         Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'employee_rebuilds%';"));
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM employee_rebuilds;"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_build_removals';"));
+        Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM profile_build_removals;"));
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_check;"));
 
         var retained = File.ReadAllBytes(backup);
@@ -1623,6 +1625,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'employee_rebuilds';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'one_active_employee_rebuild_per_worker';"));
         Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'employee_rebuilds%';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_build_removals';"));
     }
 
     [Fact]
@@ -1937,6 +1940,7 @@ public sealed class OrganizationStoreTests
             path,
             """
             PRAGMA foreign_keys = OFF;
+            DROP TABLE profile_build_removals;
             DROP TRIGGER employee_rebuilds_identity_immutable;
             DROP TRIGGER employee_rebuilds_no_delete;
             DROP TRIGGER employee_rebuilds_no_replace;

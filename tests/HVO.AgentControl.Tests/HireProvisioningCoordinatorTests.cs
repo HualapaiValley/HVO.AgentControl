@@ -427,6 +427,29 @@ public sealed class HireProvisioningCoordinatorTests
         Assert.False(clean.ManualHoldActive());
     }
 
+    [Fact]
+    public async Task EmployeeRebuildAbandonIsRefusedWhileAReplacementMayBeInFlight()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "abandon-mid");
+
+        // Move the durable row into Replacing without driving the remote swap, so
+        // the state is exactly the mid-replacement window an abandon must not touch.
+        var intent = fixture.BeginRebuild(target.Id, RebuildDigest);
+        fixture.Store.SetManualDispatchHold(fixture.EmployeeId, true, "rebuild " + intent.Id);
+        var holding = fixture.Store.TransitionEmployeeRebuild(intent.Id, intent.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
+        var replacing = fixture.Store.TransitionEmployeeRebuild(intent.Id, holding.Revision, EmployeeRebuildStates.Holding, EmployeeRebuildStates.Replacing);
+
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() => Task.Run(() => fixture.RebuildCoordinator.AbandonAsync(replacing.Id, "owner-abandoned-rebuild")));
+
+        // The row and its hold are untouched: the rebuild must be resumed to a
+        // durable outcome instead of abandoned mid-swap.
+        Assert.Equal(EmployeeRebuildStates.Replacing, fixture.Store.GetEmployeeRebuild(replacing.Id)!.State);
+        Assert.True(fixture.ManualHoldActive());
+    }
+
     // ---------------------------------------------------------------- fixture
 
     private sealed class Fixture : IDisposable
