@@ -1586,6 +1586,49 @@ public sealed class RemoteWorkerControlTests
         Assert.DoesNotContain(verification.Invocations, x => x.Operation == "load-session");
     }
 
+    [Fact]
+    public async Task ProvisioningWaitsForBridgeReadinessBeforeCreatingTheSession()
+    {
+        using var fixture = new RemoteStoreFixture(makeDeveloper: true, seedSession: false);
+        var remote = new RecordingProvisioner();
+        var healthy = new FakeBridgeSession("controller-a", fixture.BridgeStatus() with { SessionId = null }) { NewSessionId = "native-after-ready" };
+        var unready = new ReadinessProbeSession(fixture.BridgeStatus() with { AcpInitialized = false, SessionId = null });
+        var readFailed = new ReadinessProbeSession(fixture.BridgeStatus() with { SessionId = null }, failRead: true);
+        var delayed = new SequenceSessionFactory(unready, readFailed, healthy);
+        var coordinator = fixture.CreateCoordinator(remote, delayed, options => options.ConnectTimeoutSeconds = 2);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+
+        var enrolled = await coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+
+        Assert.Equal("enrolled", enrolled.LifecycleStatus);
+        Assert.Equal(3, delayed.Attempts);
+        Assert.Equal("native-after-ready", fixture.Store.GetRemoteBindingSession(fixture.BindingId).NativeSessionId);
+        Assert.Equal(["status"], unready.Invocations);
+        Assert.Equal(["status"], readFailed.Invocations);
+        Assert.True(unready.Disposed);
+        Assert.True(readFailed.Disposed);
+        // Only the ready session receives the session mutation, exactly once.
+        Assert.Equal(["new-session"], healthy.MutationInvocations);
+    }
+
+    [Fact]
+    public async Task ProvisioningBridgeReadinessTimeoutIsBoundedAndUncertain()
+    {
+        using var fixture = new RemoteStoreFixture(makeDeveloper: true, seedSession: false);
+        var remote = new RecordingProvisioner();
+        var coordinator = fixture.CreateCoordinator(remote, new HangingSessionFactory(), options => options.ConnectTimeoutSeconds = 1);
+        var enrollment = await coordinator.PlanAsync(fixture.BindingId, "host-a", CancellationToken.None);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        var failure = await Assert.ThrowsAsync<RemoteWorkerUnavailableException>(() => coordinator.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None));
+
+        Assert.True(failure.Transport);
+        Assert.InRange(started.Elapsed, TimeSpan.FromMilliseconds(700), TimeSpan.FromSeconds(4));
+        // All provisioning effects were committed before readiness verification;
+        // none are replayed by this timeout path.
+        Assert.All(fixture.Store.ListProvisioningOperations(enrollment.WorkerId), operation => Assert.Equal("Applied", operation.State));
+    }
+
     /// <summary>
     /// A verified profile build on the host is a provisionable digest: the plan
     /// freezes it, the bootstrap still runs the configured base (it only writes the
@@ -3225,6 +3268,46 @@ public sealed class RemoteWorkerControlTests
         Assert.Contains(fixture.Store.ListWorkerRecoveryObligations(request.WorkerId, true), x => x.Id == obligation.Id);
     }
 
+    private sealed class SequenceSessionFactory(params IWorkerBridgeSession[] sessions) : IWorkerBridgeSessionFactory
+    {
+        private int _attempts;
+        public int Attempts => _attempts;
+
+        public Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var attempt = Interlocked.Increment(ref _attempts);
+            return Task.FromResult(sessions[Math.Min(attempt - 1, sessions.Length - 1)]);
+        }
+    }
+
+    private sealed class HangingSessionFactory : IWorkerBridgeSessionFactory
+    {
+        public async Task<IWorkerBridgeSession> ConnectAsync(WorkerEnrollmentRecord enrollment, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
+    private sealed class ReadinessProbeSession(BridgeWorkerStatus status, bool failRead = false) : IWorkerBridgeSession
+    {
+        public WorkerBridgeLease Lease { get; } = new(1, "controller-a", Convert.ToBase64String(new byte[32]), DateTimeOffset.UtcNow);
+        public List<string> Invocations { get; } = [];
+        public bool Disposed { get; private set; }
+        public object Mutation(string operation, IReadOnlyDictionary<string, object?> fields) => throw new InvalidOperationException("Readiness probes must not create mutations.");
+        public Task<WorkerSessionResult> InvokeAsync(string operation, object request, bool mutation, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Invocations.Add(operation);
+            Assert.False(mutation);
+            Assert.Equal("status", operation);
+            if (failRead) throw new WorkerReadUncertainException("injected readiness status failure");
+            return Task.FromResult(new WorkerSessionResult(operation, JsonSerializer.SerializeToElement(status, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions), false));
+        }
+        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+    }
+
     private sealed class FakeBridgeSessionFactory(FakeBridgeSession session, Action? beforeConnect = null) : IWorkerBridgeSessionFactory
     {
         private int _connectCount;
@@ -3259,6 +3342,7 @@ public sealed class RemoteWorkerControlTests
         public Func<long, long, BridgeReplayPage>? ReplayPageFactory { get; set; }
         public List<(long Generation, long Sequence)> Acknowledgments { get; } = [];
         public List<(string Operation, string Payload)> Invocations { get; } = [];
+        public List<string> MutationInvocations { get; } = [];
         public bool FailAcknowledgment { get; set; }
         public (long Generation, long Sequence)? FailAcknowledgmentAt { get; set; }
         public bool FailSubmitAsWriteUncertain { get; set; }
@@ -3328,6 +3412,7 @@ public sealed class RemoteWorkerControlTests
             if (operation == "load-session" && FailLoadSessionAsCallerCanceled) throw new WorkerCallerCanceledException("injected caller cancellation");
             var payload = JsonSerializer.Serialize(request, HVO.AgentControl.Worker.WorkerProtocol.JsonOptions);
             Invocations.Add((operation, payload));
+            if (mutation) MutationInvocations.Add(operation);
             using var requestDocument = JsonDocument.Parse(payload);
             var root = requestDocument.RootElement;
 
