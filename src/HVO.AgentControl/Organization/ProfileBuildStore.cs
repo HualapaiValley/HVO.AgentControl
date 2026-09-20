@@ -323,6 +323,26 @@ public sealed partial class OrganizationStore
                         throw new OrganizationValidationException("Another non-removed build on this host shares the result tag; removing it could detach an image still in use.");
                 }
 
+                // A claim held by a different build for the same (host, tag) means a
+                // removal is genuinely in flight elsewhere; refuse. A claim held by
+                // THIS build is an idempotent re-claim: a previous attempt failed on
+                // transport and kept its claim, so a retry must be able to reuse it
+                // rather than deadlock forever.
+                using (var existingClaim = connection.CreateCommand())
+                {
+                    existingClaim.Transaction = transaction;
+                    existingClaim.CommandText = "SELECT profile_build_id FROM profile_build_removals WHERE host_id = $host AND result_tag = $tag";
+                    existingClaim.Parameters.AddWithValue("$host", current.HostId);
+                    existingClaim.Parameters.AddWithValue("$tag", current.ResultTag);
+                    if (existingClaim.ExecuteScalar() is string owner)
+                    {
+                        if (!string.Equals(owner, id, StringComparison.Ordinal))
+                            throw new OrganizationConcurrencyException("A removal is already claimed for this build's result tag by another build; reconcile it before retrying.");
+                        transaction.Commit();
+                        return current;
+                    }
+                }
+
                 var now = Timestamp();
                 using (var claim = connection.CreateCommand())
                 {
@@ -345,13 +365,47 @@ public sealed partial class OrganizationStore
         });
     }
 
-    /// <summary>Finalizes a claimed removal after the transport confirmed the effect.</summary>
+    /// <summary>
+    /// Finalizes a claimed removal after the transport confirmed the effect. The
+    /// state change to <c>removed</c> and the claim release happen in one
+    /// transaction, so a crash cannot leave a build marked removed while its claim
+    /// still blocks the tag, or a released claim while the build stays failed.
+    /// </summary>
     public ProfileBuildRecord FinalizeProfileBuildRemoval(string id, int expectedRevision, string requestedBy, string? evidenceHash = null)
     {
+        if (!IsBoundedIdentifier(id, OrganizationIds.ProfileBuildPrefix) || expectedRevision < 1) throw new OrganizationValidationException("A stable profile build id and current revision are required.");
+        if (!string.Equals(requestedBy, "owner", StringComparison.Ordinal)) throw new OrganizationValidationException("Only the owner may remove a failed profile build.");
         if (evidenceHash is not null && !IsHash(evidenceHash)) throw new OrganizationValidationException("Evidence hash must be an exact sha256 value.");
-        var removed = TransitionProfileBuildToRemoved(id, expectedRevision, requestedBy, evidenceHash);
-        DeleteRemovalClaim(id);
-        return removed;
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadBuilds(connection, transaction, null, null, id).SingleOrDefault()
+                    ?? throw new OrganizationNotFoundException($"Profile build '{id}' does not exist.");
+                if (current.Revision != expectedRevision) throw new OrganizationConcurrencyException("The profile build changed; reload and retry with its current revision.");
+                if (!ProfileBuildStates.CanTransition(current.State, ProfileBuildStates.Removed))
+                    throw new OrganizationConcurrencyException($"A profile build cannot move from {current.State} to {ProfileBuildStates.Removed}; only failed or rejected builds may be removed.");
+                var now = Timestamp();
+                var affected = Execute(connection, transaction,
+                    """
+                    UPDATE profile_builds
+                    SET state = $state, evidence_hash = COALESCE($evidence, evidence_hash),
+                        finished_at = COALESCE(finished_at, $now),
+                        revision = revision + 1, updated_at = $now
+                    WHERE id = $id AND revision = $revision
+                    """,
+                    ("$state", ProfileBuildStates.Removed), ("$evidence", evidenceHash), ("$now", now), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1) throw new OrganizationConcurrencyException("The profile build changed before the transition.");
+                Execute(connection, transaction, "DELETE FROM profile_build_removals WHERE profile_build_id = $id", ("$id", id));
+                FoldRevisionBuildStatus(connection, transaction, current.ProfileRevisionId);
+                transaction.Commit();
+                return ReadBuilds(connection, null, null, null, id).Single();
+            }
+        });
     }
 
     /// <summary>
@@ -400,26 +454,6 @@ public sealed partial class OrganizationStore
                 command.Parameters.AddWithValue("$host", hostId);
                 command.Parameters.AddWithValue("$tag", resultTag);
                 return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
-            }
-        });
-    }
-
-    private void DeleteRemovalClaim(string id)
-    {
-        TranslateStoreFaults(() =>
-        {
-            ThrowIfDisposed();
-            lock (_gate)
-            {
-                using var connection = OpenConnection();
-                using var transaction = connection.BeginTransaction();
-                using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                command.CommandText = "DELETE FROM profile_build_removals WHERE profile_build_id = $id";
-                command.Parameters.AddWithValue("$id", id);
-                command.ExecuteNonQuery();
-                transaction.Commit();
-                return true;
             }
         });
     }

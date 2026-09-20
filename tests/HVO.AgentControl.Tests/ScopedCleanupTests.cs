@@ -235,6 +235,61 @@ public sealed class ScopedCleanupTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CleanupRetriesSuccessfullyAfterATransportFailureKeptTheClaim()
+    {
+        var build = FailedBuild(OrphanDigest, OrphanTag);
+        var remote = new RecordingProvisioner { RemovalTransportLoss = true };
+        var cleanup = Cleanup(remote);
+
+        // The first attempt fails on transport and keeps the claim: the build stays
+        // failed and the tag stays reserved.
+        await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => cleanup.CleanupProfileBuildAsync(build.Id, "owner", CancellationToken.None));
+        Assert.True(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+        Assert.Equal(ProfileBuildStates.Failed, _store.GetProfileBuild(build.Id)!.State);
+
+        // A retry of the SAME build must not deadlock on its own kept claim: the
+        // claim is re-used idempotently and the removal completes and releases it.
+        remote.RemovalTransportLoss = false;
+        var removed = await cleanup.CleanupProfileBuildAsync(build.Id, "owner", CancellationToken.None);
+        Assert.Equal(ProfileBuildStates.Removed, removed.State);
+        Assert.False(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+        Assert.Contains(OrphanTag, remote.RemovedImages);
+    }
+
+    [Fact]
+    public void ClaimIsIdempotentForTheSameBuildButConflictsForAnother()
+    {
+        var failed = FailedBuild(OrphanDigest, OrphanTag);
+        var first = _store.ClaimProfileBuildRemoval(failed.Id, failed.Revision, "owner");
+        Assert.True(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+
+        // The same build may re-claim its own tag (a retry after a kept claim)
+        // without creating a second claim or changing state.
+        var again = _store.ClaimProfileBuildRemoval(failed.Id, first.Revision, "owner");
+        Assert.Equal(failed.Id, again.Id);
+        Assert.Equal(ProfileBuildStates.Failed, again.State);
+
+        // A different failed build that shares the tag on the same host is refused
+        // by the shared-tag guard before it ever reaches the claim: the first build
+        // is a non-removed row on that tag, so removing it could detach the image.
+        // The row is inserted directly because the build queue serializes one live
+        // slot per revision/host and this test is about the claim, not queueing.
+        var now = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        ExecuteRaw(
+            _temp.Path,
+            $"""
+            INSERT INTO profile_builds (
+                id, profile_revision_id, host_id, base_image_digest, platform, context_hash, result_tag, state,
+                image_digest, verified, failure_summary, evidence_hash, requested_by, revision, started_at, finished_at, created_at, updated_at)
+            VALUES ('pbld-claim-other-000000000000', '{failed.ProfileRevisionId}', '{ExecutionHosts.LocalDockerId}', '{BaseDigest}', 'linux/amd64', '{ContextHash}', '{OrphanTag}', 'failed',
+                NULL, 0, 'other failed', NULL, 'owner', 1, NULL, NULL, '{now}', '{now}')
+            """);
+        Assert.Throws<OrganizationValidationException>(() => _store.ClaimProfileBuildRemoval("pbld-claim-other-000000000000", 1, "owner"));
+        // The first build's claim is untouched.
+        Assert.True(_store.IsResultTagClaimedForRemoval(ExecutionHosts.LocalDockerId, OrphanTag));
+    }
+
+    [Fact]
     public async Task CleanupRefusesUncertainLiveAndBuiltBuilds()
     {
         var remote = new RecordingProvisioner();
