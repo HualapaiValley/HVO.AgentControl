@@ -338,6 +338,57 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesCountCorrectWrongOperationKinds()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        // Keep eight Applied operations but replace the required enroll-key kind
+        // with a cleanup kind. Count alone must never pass this topology.
+        fixture.Execute("UPDATE provisioning_operations SET kind='cleanup' WHERE kind='enroll-key'");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-plan-shape-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesSwappedResourceOperationLinks()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        // Swap two volume resource links while keeping the exact same resource and
+        // operation sets. Set equality alone still passes; remote ownership labels
+        // must expose the mismatched operation identity and fail closed.
+        fixture.Execute("""
+            CREATE TEMP TABLE swap_ops AS SELECT id,operation_id,row_number() OVER (ORDER BY id) n FROM resource_records WHERE resource_kind='volume' LIMIT 2;
+            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE n=2) WHERE id=(SELECT id FROM swap_ops WHERE n=1);
+            UPDATE resource_records SET operation_id=(SELECT operation_id FROM swap_ops WHERE n=1) WHERE id=(SELECT id FROM swap_ops WHERE n=2);
+            DROP TABLE swap_ops;
+            """);
+        var before = fixture.Provisioner.Effects.Count;
+
+        await Assert.ThrowsAsync<ForeignResourceException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
     public async Task OwnerResumePostTransitionUncertainFailureIsDurablyContained()
     {
         using var fixture = new Fixture();
