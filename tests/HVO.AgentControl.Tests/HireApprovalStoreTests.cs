@@ -327,6 +327,11 @@ public sealed class HireApprovalStoreTests
         Assert.Contains("<!-- fragment:role", artifact.Content, StringComparison.Ordinal);
         Assert.Contains("<!-- fragment:employee", artifact.Content, StringComparison.Ordinal);
         Assert.Contains($"Identity: {creation.DisplayName} ({creation.EmployeeId})", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("# Standing Facts", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"identity\":\"" + creation.DisplayName + "\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"reporting\":\"owner\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"operate only inside the approved managed runtime and its own persisted workspace\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"no controller secrets or authoritative-store edits\"", artifact.Content, StringComparison.Ordinal);
         Assert.Throws<OrganizationNotFoundException>(() => store.GetOrientationStatus(creation.EmployeeId));
     }
 
