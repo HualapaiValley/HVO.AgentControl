@@ -997,6 +997,61 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
     .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+// Failed hires are never retried automatically. This owner-explicit recovery
+// first proves the exact applied plan and operation-owned resources, then resumes
+// only readiness/session/orientation work; no provisioning effect is replayed.
+app.MapPost("/api/hire-requests/{id}/resume", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.HireProvisioningCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, HVO.AgentControl.Organization.HireRequestResume request) =>
+{
+    if (!Program.IsValidHireRequestId(id) || request.ExpectedRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid hire request recovery.", detail: "A bounded stable hire request id and current revision are required.");
+    if (Program.RejectCrossOrigin(context, "Hire request recovery") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    if (!options.Value.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.");
+    if (options.Value.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.");
+    try
+    {
+        var result = await coordinator.ResumeFailedAsync(id, request.ExpectedRevision, context.RequestAborted);
+        return Results.Ok(result.Hire);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Hire request not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid hire request recovery.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request recovery conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request recovery is required.", detail: $"Reconcile the open '{exception.Kind}' condition before retrying.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.ForeignResourceException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Hire request recovery found a foreign resource.");
+    }
+    catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception))
+    {
+        return Program.RemoteWorkerProblem(exception);
+    }
+})
+    .WithName("ResumeFailedHireRequest").WithTags("Hiring")
+    .WithSummary("Owner-explicit recovery of a Failed managed hire after exact proof that all provisioning operations are Applied and all five operation-owned resources are present with one running container. No provisioning effect is replayed.")
+    .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapGet("/api/profiles", (AcpControlHost host) =>
 {
     if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();

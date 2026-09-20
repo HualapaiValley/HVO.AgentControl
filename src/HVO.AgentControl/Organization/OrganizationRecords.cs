@@ -250,6 +250,7 @@ public sealed record HireRequestCreate(
     int PidsLimit);
 
 public sealed record HireRequestReject(int ExpectedRevision);
+public sealed record HireRequestResume(int ExpectedRevision);
 
 /// <summary>
 /// An exact owner approval selection for one hire request. The server resolves
