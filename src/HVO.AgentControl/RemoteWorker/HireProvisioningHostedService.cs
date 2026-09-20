@@ -46,13 +46,10 @@ internal sealed class HireProvisioningHostedService(
         if (!_options.Enabled) return;
         if (_options.Validate().Count > 0) return;
 
-        OrganizationStore store;
-        try
+        var store = await OrganizationStoreStartup.WaitAsync(() => control.Organization, stoppingToken).ConfigureAwait(false);
+        if (store is null)
         {
-            store = control.Organization ?? throw new OrganizationStoreException("Organization store unavailable.");
-        }
-        catch (OrganizationStoreException)
-        {
+            logger.LogWarning("Hire provisioning resume is held because the authoritative control store did not open inside the bounded startup window.");
             return;
         }
 
