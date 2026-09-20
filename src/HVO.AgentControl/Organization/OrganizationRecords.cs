@@ -251,10 +251,10 @@ public sealed record HireRequestReject(int ExpectedRevision);
 
 /// <summary>
 /// An exact owner approval selection for one hire request. The server resolves
-/// the unique verified profile build for <see cref="ProfileRevisionId"/> and
-/// <see cref="HostId"/>; the caller never supplies a build id.
+/// the unique verified profile build for <see cref="ProfileRevisionId"/> on the
+/// controller-local Docker target; the caller never supplies a host or build id.
 /// </summary>
-public sealed record HireRequestApprove(int ExpectedRevision, string ProfileRevisionId, string HostId);
+public sealed record HireRequestApprove(int ExpectedRevision, string ProfileRevisionId);
 
 /// <summary>A frozen owner approval and its optional managed-employee links.</summary>
 public sealed record HireRequestApprovalRecord(

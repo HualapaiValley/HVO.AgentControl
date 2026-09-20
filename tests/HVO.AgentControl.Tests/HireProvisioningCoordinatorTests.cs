@@ -197,7 +197,7 @@ public sealed class HireProvisioningCoordinatorTests
         // partial remote effects, then resume with the same method the endpoint and
         // hosted service call.
         var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
-        var enrollment = await fixture.Provisioning.PlanAsync(creation.RuntimeBindingId, creation.ApprovedHostId, creation.ApprovedImageDigest, CancellationToken.None);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
         enrollment = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
         var artifact = fixture.Store.ComposeAndAssignCurrentOrientation(creation.EmployeeId);
         _ = await fixture.Orientation.DeliverAsync(enrollment, artifact, CancellationToken.None);
@@ -316,7 +316,7 @@ public sealed class HireProvisioningCoordinatorTests
         public async Task<WorkerEnrollmentRecord> EnrollAsync()
         {
             await ApproveManagedHireAsync();
-            var enrollment = await Provisioning.PlanAsync(BindingId, "host-a", CancellationToken.None);
+            var enrollment = await Provisioning.PlanManagedAsync(BindingId, CancellationToken.None);
             return await Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
         }
 
@@ -335,7 +335,7 @@ public sealed class HireProvisioningCoordinatorTests
                 Guid.NewGuid().ToString("N"), "Managed Dev", "Managed hire under test.", department.Id, role.Id,
                 RuntimePlacements.DeveloperContainer, 1, 1024, 128), null);
             HireId = hire.Id;
-            Store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId, "host-a"), "owner");
+            Store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner");
             EmployeeId = Store.CreateManagedEmployeeFromHire(hire.Id).EmployeeId;
             OrientationSession.Comprehension = BuildComprehension;
         }
@@ -402,18 +402,24 @@ public sealed class HireProvisioningCoordinatorTests
 
         private void PrepareHost()
         {
+            // The SSH host stays registered for the manual-path tests, but managed
+            // hires approve only against the controller-local Docker target.
             Store.RegisterExecutionHost("host-a", "host-a.example", 22, "roys", "/known", new ExecutionHostRegistration("host-a", "host-a", "Host A"));
             var host = Store.GetExecutionHost("host-a")!;
             Store.RecordExecutionHostProbe("host-a", host.Revision, new ExecutionHostProbe(
                 "ssh-ed25519", "SHA256:x", "sha256:" + new string('1', 64), "29.0", "1.51", "x86_64", "overlay2", "ext4",
                 false, 64L << 30, 16L << 30, 8, true, "linux/amd64", "valid"));
+
+            var local = Store.GetExecutionHost(ExecutionHosts.LocalDockerId)!;
+            Store.RecordLocalExecutionHostProbe(ExecutionHosts.LocalDockerId, local.Revision, new LocalExecutionHostProbe(
+                "29.0", "1.51", "x86_64", "overlay2", "ext4", false, 64L << 30, 16L << 30, 8, true, "linux/amd64", "valid"));
         }
 
         private void BuildProfile()
         {
             var profile = Store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
             var revisionId = Store.GetContainerProfile(profile.Id)!.Revisions.Single().Id;
-            var queued = Store.QueueProfileBuild(revisionId, "host-a", BaseDigest, "linux/amd64", ContextHash, "agentcontrol-profile:x");
+            var queued = Store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, BaseDigest, "linux/amd64", ContextHash, "agentcontrol-profile:x");
             var building = Store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
             var verifying = Store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
             Store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: BuiltDigest, verified: true, evidenceHash: ContextHash);
@@ -605,16 +611,16 @@ public sealed class HireProvisioningCoordinatorTests
         /// <summary>Removes the tracked container without recording a remote effect, modelling a crash after removal.</summary>
         public void SimulateAbsentContainer(string name) { _labels.Remove(name); _states.Remove(name); }
 
-        public Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token) => throw new NotSupportedException();
+        public Task<HostProbePayload> ProbeAsync(ExecutionTarget host, CancellationToken token) => throw new NotSupportedException();
 
-        public Task<string> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec spec, CancellationToken token)
+        public Task<string> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec spec, CancellationToken token)
         {
             Effects.Add("volume:" + spec.Name);
             _labels[spec.Name] = spec.Identity.Labels;
             return Task.FromResult("volume-ref-" + spec.Name);
         }
 
-        public Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token)
+        public Task<string> CreateContainerAsync(ExecutionTarget host, ContainerCreateSpec spec, CancellationToken token)
         {
             Effects.Add("container:" + spec.Name);
             if (FailCreateContainerOnce && Interlocked.Increment(ref _containerAttempts) == 1) throw new RemoteWorkerUnavailableException("injected create failure", transport: true);
@@ -627,28 +633,28 @@ public sealed class HireProvisioningCoordinatorTests
             return Task.FromResult("container-ref-" + spec.Name + "-" + Interlocked.Increment(ref _containerRefs));
         }
 
-        public Task BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec spec, byte[] key, CancellationToken token)
+        public Task BootstrapAsync(ExecutionTarget host, BootstrapSpec spec, byte[] key, CancellationToken token)
         {
             Effects.Add("bootstrap:" + spec.ControlVolumeName);
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
             return Task.CompletedTask;
         }
 
-        public Task StartAsync(ApprovedExecutionHost host, string container, CancellationToken token)
+        public Task StartAsync(ExecutionTarget host, string container, CancellationToken token)
         {
             Effects.Add("start:" + container);
             if (_labels.ContainsKey(container)) _states[container] = "running";
             return Task.CompletedTask;
         }
 
-        public Task StopAsync(ApprovedExecutionHost host, string container, CancellationToken token)
+        public Task StopAsync(ExecutionTarget host, string container, CancellationToken token)
         {
             Effects.Add("stop:" + container);
             if (_labels.ContainsKey(container)) _states[container] = "stopped";
             return Task.CompletedTask;
         }
 
-        public Task RemoveContainerAsync(ApprovedExecutionHost host, string container, CancellationToken token)
+        public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token)
         {
             Effects.Add("remove-container:" + container);
             _labels.Remove(container);
@@ -656,15 +662,15 @@ public sealed class HireProvisioningCoordinatorTests
             return Task.CompletedTask;
         }
 
-        public Task RemoveVolumeAsync(ApprovedExecutionHost host, string volume, CancellationToken token)
+        public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token)
         {
             Effects.Add("remove-volume:" + volume);
             _labels.Remove(volume);
             return Task.CompletedTask;
         }
 
-        public Task<RemoteResourceInspection> InspectVolumeAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(name, "present");
-        public Task<RemoteResourceInspection> InspectContainerAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(name, _states.TryGetValue(name, out var state) ? state : "running");
+        public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, "present");
+        public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, _states.TryGetValue(name, out var state) ? state : "running");
 
         private Task<RemoteResourceInspection> Inspect(string name, string state)
         {

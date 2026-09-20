@@ -162,7 +162,7 @@ public sealed class OrganizationStoreTests
             reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
 
         Assert.Contains("load-bearing schema", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(obligation.Id, audit.ObligationId);
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("session-reconciliation", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_obligations'"), StringComparison.Ordinal);
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var v4Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV4BackupFileName);
@@ -230,7 +230,7 @@ public sealed class OrganizationStoreTests
         using (var migrated = Open(root))
             migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Contains("request-uncertain", RawText(root.Path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='worker_recovery_audit'"), StringComparison.Ordinal);
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV5BackupHashFileName);
@@ -307,7 +307,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(before, SnapshotCoreData(root.Path));
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         var v1Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupFileName);
         var v1Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV1BackupHashFileName);
@@ -356,7 +356,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("Chained", identity.SessionTitle);
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(before, SnapshotCoreData(root.Path));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('runtime_bindings') WHERE name = 'credential_set_id';"));
         Assert.Equal(4, RawScalar(root.Path, "SELECT COUNT(*) FROM orientation_fragments WHERE active = 1;"));
@@ -492,7 +492,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(0, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'orientation_assignments';"));
         using var retry = Open(root);
         retry.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
     }
 
     [Fact]
@@ -809,11 +809,11 @@ public sealed class OrganizationStoreTests
         var exception = Assert.Throws<OrganizationStoreCorruptException>(
             () => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Contains("unexpected table shape", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("current authoritative schema-v10 backup or source", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("No schema-v10 backup is created automatically", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("schema-v9 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("current authoritative schema-v11 backup or source", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("No schema-v11 backup is created automatically", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("schema-v10 file is pre-migration evidence only", exception.Message, StringComparison.Ordinal);
         Assert.Contains("lose owner approvals recorded after migration", exception.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("Restore the verified schema-v9 backup", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restore the verified schema-v10 backup", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1370,7 +1370,7 @@ public sealed class OrganizationStoreTests
             Assert.Empty(migrated.ListHireRequests());
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         var backup = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupFileName);
         var hash = Path.Combine(root.Directory, OrganizationStore.SchemaV6BackupHashFileName);
         Assert.True(File.Exists(backup));
@@ -1414,7 +1414,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal("seed", Assert.Single(migrated.GetContainerProfile(profile.Id)!.Revisions).CreatedBy);
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM hire_request_events WHERE hire_request_id = '{hireId}';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'container_profile_revision_id';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_foreign_key_list('hire_requests') WHERE \"table\" = 'container_profile_revisions';"));
@@ -1456,7 +1456,7 @@ public sealed class OrganizationStoreTests
             Assert.Empty(migrated.ListProfileBuilds());
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_builds';"));
         Assert.Equal(3, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'profile_builds%';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hire_request_approvals';"));
@@ -1491,7 +1491,7 @@ public sealed class OrganizationStoreTests
     }
 
     [Fact]
-    public void ExactSchemaV9MigratesToV10WithVerifiedCreateOnceBackupAndPreservesProfilesBuildsAndHires()
+    public void ExactSchemaV9MigratesThroughV10ToV11WithVerifiedCreateOnceBackupsAndPreservesProfilesBuildsAndHires()
     {
         using var root = new TempStore();
         string hireId;
@@ -1532,7 +1532,7 @@ public sealed class OrganizationStoreTests
             Assert.Equal(profileId, migrated.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug).Id);
         }
 
-        Assert.Equal(10, RawScalar(root.Path, "SELECT version FROM schema_version;"));
+        Assert.Equal(11, RawScalar(root.Path, "SELECT version FROM schema_version;"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM pragma_table_info('hire_requests') WHERE name = 'status_detail';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hire_request_approvals';"));
         Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'managed_enrollment_resources';"));
@@ -1550,10 +1550,28 @@ public sealed class OrganizationStoreTests
         Assert.Equal(1, RawScalar(backup, $"SELECT COUNT(*) FROM profile_builds WHERE id = '{buildId}';"));
         Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(backup))).ToLowerInvariant(), File.ReadAllText(hash).Trim());
 
+        // The v10 backup is the exact pre-v11 evidence: it retains the ssh-only
+        // execution_hosts shape and no reserved local-docker row, and no
+        // status_detail was added by the v10 shape.
+        var v10Backup = Path.Combine(root.Directory, OrganizationStore.SchemaV10BackupFileName);
+        var v10Hash = Path.Combine(root.Directory, OrganizationStore.SchemaV10BackupHashFileName);
+        Assert.True(File.Exists(v10Backup));
+        AssertNoBackupSidecars(v10Backup);
+        Assert.Equal(10, RawScalar(v10Backup, "SELECT version FROM schema_version;"));
+        Assert.Equal(0, RawScalar(v10Backup, $"SELECT COUNT(*) FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}';"));
+        Assert.Equal(1, RawScalar(v10Backup, "SELECT COUNT(*) FROM execution_hosts WHERE id = 'host-a';"));
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v10Backup))).ToLowerInvariant(), File.ReadAllText(v10Hash).Trim());
+
+        // The migrated store carries the reserved local row and the preserved ssh host.
+        Assert.Equal(1, RawScalar(root.Path, $"SELECT COUNT(*) FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}' AND transport_kind = 'local-docker';"));
+        Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM execution_hosts WHERE id = 'host-a' AND transport_kind = 'ssh-docker';"));
+
         var retained = File.ReadAllBytes(backup);
+        var retainedV10 = File.ReadAllBytes(v10Backup);
         using var restarted = Open(root);
         restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(retained, File.ReadAllBytes(backup));
+        Assert.Equal(retainedV10, File.ReadAllBytes(v10Backup));
     }
 
     [Fact]
@@ -1772,8 +1790,34 @@ public sealed class OrganizationStoreTests
     /// <c>hire_requests</c> shape (no <c>status_detail</c>). Every older canonical
     /// downgrade runs this first so it never has to know about the v10 objects.
     /// </summary>
+    /// <summary>
+    /// Restores the exact v10 <c>execution_hosts</c> shape (an ssh-docker-only
+    /// CHECK with non-null endpoints) and removes the reserved controller-local
+    /// Docker row, so every older canonical downgrade starts from v10. The
+    /// replacement is built under a staging name and renamed into place so the
+    /// referencing foreign keys never point at a temporary name.
+    /// </summary>
+    private static void DowngradeToCanonicalV10(string path)
+    {
+        var createV10 = OrganizationStore.ExecutionHostsSchemaV10StatementForTest
+            .Replace("CREATE TABLE execution_hosts", "CREATE TABLE execution_hosts_v10", StringComparison.Ordinal);
+        ExecuteRaw(
+            path,
+            $"""
+            PRAGMA foreign_keys = OFF;
+            DELETE FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}';
+            {createV10};
+            INSERT INTO execution_hosts_v10 SELECT * FROM execution_hosts;
+            DROP TABLE execution_hosts;
+            ALTER TABLE execution_hosts_v10 RENAME TO execution_hosts;
+            PRAGMA foreign_keys = ON;
+            UPDATE schema_version SET version = 10;
+            """);
+    }
+
     private static void DowngradeToCanonicalV9(string path)
     {
+        DowngradeToCanonicalV10(path);
         ExecuteRaw(path,
             """
             PRAGMA foreign_keys = OFF;

@@ -21,40 +21,44 @@ public sealed record ContainerReplacementResult(
     long ProcessGeneration,
     string NativeSessionId);
 
+/// <summary>
+/// Provisioning operations addressed by an <see cref="ExecutionTarget"/> and
+/// routed to either the controller-local Docker helper or pinned SSH transport.
+/// </summary>
 public interface IRemoteWorkerProvisioner
 {
-    Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token);
-    Task<string> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec spec, CancellationToken token);
-    Task<RemoteResourceInspection> InspectVolumeAsync(ApprovedExecutionHost host, string name, CancellationToken token);
-    Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token);
-    Task<RemoteResourceInspection> InspectContainerAsync(ApprovedExecutionHost host, string name, CancellationToken token);
-    Task BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec spec, byte[] key, CancellationToken token);
-    Task StartAsync(ApprovedExecutionHost host, string container, CancellationToken token);
-    Task StopAsync(ApprovedExecutionHost host, string container, CancellationToken token);
-    Task RemoveContainerAsync(ApprovedExecutionHost host, string container, CancellationToken token);
-    Task RemoveVolumeAsync(ApprovedExecutionHost host, string volume, CancellationToken token);
+    Task<HostProbePayload> ProbeAsync(ExecutionTarget target, CancellationToken token);
+    Task<string> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec spec, CancellationToken token);
+    Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token);
+    Task<string> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token);
+    Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token);
+    Task BootstrapAsync(ExecutionTarget target, BootstrapSpec spec, byte[] key, CancellationToken token);
+    Task StartAsync(ExecutionTarget target, string container, CancellationToken token);
+    Task StopAsync(ExecutionTarget target, string container, CancellationToken token);
+    Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token);
+    Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token);
 }
 
 public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations operations) : IRemoteWorkerProvisioner
 {
-    public Task<HostProbePayload> ProbeAsync(ApprovedExecutionHost host, CancellationToken token) => operations.ProbeHostAsync(host, token);
-    public async Task<string> CreateVolumeAsync(ApprovedExecutionHost host, VolumeCreateSpec spec, CancellationToken token) => Require(await operations.CreateVolumeAsync(host, spec, token));
-    public async Task<RemoteResourceInspection> InspectVolumeAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(host, RemoteDockerOperation.VolumeInspect, [name], null, token));
-    public async Task<string> CreateContainerAsync(ApprovedExecutionHost host, ContainerCreateSpec spec, CancellationToken token) => Require(await operations.CreateContainerAsync(host, spec, token));
-    public async Task<RemoteResourceInspection> InspectContainerAsync(ApprovedExecutionHost host, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(host, RemoteDockerOperation.ContainerInspect, [name], null, token));
+    public Task<HostProbePayload> ProbeAsync(ExecutionTarget target, CancellationToken token) => operations.ProbeHostAsync(target, token);
+    public async Task<string> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec spec, CancellationToken token) => Require(await operations.CreateVolumeAsync(target, spec, token));
+    public async Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeInspect, [name], null, token));
+    public async Task<string> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec spec, CancellationToken token) => Require(await operations.CreateContainerAsync(target, spec, token));
+    public async Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token) => Inspect(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerInspect, [name], null, token));
 
     /// <summary>
     /// Runs the ephemeral bootstrap container with the controller-encoded key on
     /// standard input. The encoded buffer is zeroed on every path, and so is the
     /// caller's raw key.
     /// </summary>
-    public async Task BootstrapAsync(ApprovedExecutionHost host, BootstrapSpec spec, byte[] key, CancellationToken token)
+    public async Task BootstrapAsync(ExecutionTarget target, BootstrapSpec spec, byte[] key, CancellationToken token)
     {
         byte[]? encoded = null;
         try
         {
             encoded = WorkerBootstrapEncoding.Encode(key);
-            Require(await operations.BootstrapAsync(host, spec, encoded, token));
+            Require(await operations.BootstrapAsync(target, spec, encoded, token));
         }
         finally
         {
@@ -63,15 +67,15 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
         }
     }
 
-    public async Task StartAsync(ApprovedExecutionHost host, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(host, RemoteDockerOperation.ContainerStart, [container], null, token));
-    public async Task StopAsync(ApprovedExecutionHost host, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(host, RemoteDockerOperation.ContainerStop, [container], null, token));
-    public async Task RemoveContainerAsync(ApprovedExecutionHost host, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(host, RemoteDockerOperation.ContainerRemove, [container], null, token));
-    public async Task RemoveVolumeAsync(ApprovedExecutionHost host, string volume, CancellationToken token) => _ = Require(await operations.ExecuteAsync(host, RemoteDockerOperation.VolumeRemove, [volume], null, token));
+    public async Task StartAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerStart, [container], null, token));
+    public async Task StopAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerStop, [container], null, token));
+    public async Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.ContainerRemove, [container], null, token));
+    public async Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token) => _ = Require(await operations.ExecuteAsync(target, RemoteDockerOperation.VolumeRemove, [volume], null, token));
 
     private static string Require(RemoteOperationResult result)
     {
         if (result.ExitCode == 0) return result.StandardOutput.Trim();
-        throw new RemoteWorkerUnavailableException("Remote provisioning operation failed.", result.ErrorCategory == "transport");
+        throw new RemoteWorkerUnavailableException("Worker provisioning operation failed.", result.ErrorCategory == "transport");
     }
 
     private static RemoteResourceInspection Inspect(RemoteOperationResult result)
@@ -109,8 +113,8 @@ public sealed class RemoteWorkerProvisioningCoordinator
     /// <summary>The number of ordered steps in one fixed plan: key, four volumes, bootstrap, container, start.</summary>
     private const int PlanStepCount = 8;
 
-    private readonly AcpControlHost _control; private readonly IRemoteWorkerProvisioner _remote; private readonly WorkerControlOptions _options; private readonly IWorkerBridgeSessionFactory _verification;
-    public RemoteWorkerProvisioningCoordinator(AcpControlHost control, IRemoteWorkerProvisioner remote, IOptions<WorkerControlOptions> configured, IWorkerBridgeSessionFactory verification) { _control = control; _remote = remote; _options = configured.Value; _verification = verification; }
+    private readonly AcpControlHost _control; private readonly IRemoteWorkerProvisioner _remote; private readonly WorkerControlOptions _options; private readonly IWorkerBridgeSessionFactory _verification; private readonly ExecutionTargetResolver _targets;
+    public RemoteWorkerProvisioningCoordinator(AcpControlHost control, IRemoteWorkerProvisioner remote, IOptions<WorkerControlOptions> configured, IWorkerBridgeSessionFactory verification) { _control = control; _remote = remote; _options = configured.Value; _verification = verification; _targets = new ExecutionTargetResolver(control, configured); }
 
     /// <summary>
     /// Plans an enrollment. <paramref name="imageDigest"/> is the configured base
@@ -126,16 +130,15 @@ public sealed class RemoteWorkerProvisioningCoordinator
         RequireEnabled();
         var store = Store();
 
-        // A managed binding carries owner-frozen resources. The plan consumes them
-        // exactly: the host, image digest and platform cannot be re-chosen, and the
-        // frozen limits must still fit under the controller's global ceilings. This
-        // is what lets a fresh DeveloperContainer binding (container_ref NULL) plan
-        // without the circular "container must already exist" requirement.
+        // A managed binding carries owner-frozen resources. It may only be planned
+        // through the managed path, never by a caller naming a host or digest: a
+        // manual API must not be able to redirect an owner-approved hire.
         var managed = store.GetManagedEnrollmentResources(bindingId);
         if (managed is not null)
-            return Task.FromResult(PlanManaged(store, managed, bindingId, hostId, imageDigest));
+            throw new OrganizationValidationException("A managed enrollment is provisioned from its frozen owner approval and cannot be planned by host or digest.");
 
-        var host = Approved(hostId);
+        var host = _targets.Resolve(hostId);
+        if (host.IsLocalDocker) throw new OrganizationValidationException("The controller-local Docker target is reserved for managed enrollments.");
         var digest = imageDigest ?? _options.ApprovedImageDigest;
         if (!store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest).Contains(digest, StringComparer.Ordinal))
             throw new WorkerControlConfigurationException("The requested image is not the approved base or a verified profile build for this host.");
@@ -185,19 +188,28 @@ public sealed class RemoteWorkerProvisioningCoordinator
     }
 
     /// <summary>
-    /// Plans a managed binding from its frozen owner approval. The frozen host,
-    /// digest and platform are authoritative: a requested host or image that
-    /// disagrees is refused rather than silently re-planned, and the frozen limits
-    /// must fit under the current global ceilings. After the enrollment exists the
-    /// approval is linked to the exact worker identity under its own revision, and
-    /// an exact replay is idempotent.
+    /// Plans a managed binding from its frozen owner approval with no host or
+    /// digest argument: both are derived from the managed resources. Managed
+    /// hiring in this step provisions only on the controller-local Docker target,
+    /// so any other frozen host is refused. The frozen limits must fit under the
+    /// current global ceilings. After the enrollment exists the approval is linked
+    /// to the exact worker identity under its own revision, and an exact replay is
+    /// idempotent.
     /// </summary>
-    private WorkerEnrollmentRecord PlanManaged(OrganizationStore store, ManagedEnrollmentResourcesRecord managed, string bindingId, string hostId, string? imageDigest)
+    public Task<WorkerEnrollmentRecord> PlanManagedAsync(string bindingId, CancellationToken token = default)
     {
-        if (!string.Equals(managed.ApprovedHostId, hostId, StringComparison.Ordinal))
-            throw new OrganizationConcurrencyException("The managed binding is frozen to a different execution host.");
-        if (imageDigest is not null && !string.Equals(managed.ApprovedImageDigest, imageDigest, StringComparison.Ordinal))
-            throw new OrganizationConcurrencyException("The managed binding is frozen to a different image digest.");
+        RequireEnabled();
+        var store = Store();
+        var managed = store.GetManagedEnrollmentResources(bindingId)
+            ?? throw new OrganizationValidationException("The binding has no frozen managed resources.");
+        return Task.FromResult(PlanManaged(store, managed, bindingId));
+    }
+
+    private WorkerEnrollmentRecord PlanManaged(OrganizationStore store, ManagedEnrollmentResourcesRecord managed, string bindingId)
+    {
+        var hostId = managed.ApprovedHostId;
+        if (!string.Equals(hostId, ExecutionHosts.LocalDockerId, StringComparison.Ordinal))
+            throw new WorkerControlConfigurationException("Managed hires provision only on the controller-local Docker target.");
         if (managed.MemoryLimitMiB > _options.MemoryBytes / (1024 * 1024)
             || managed.CpuLimit > _options.CpuLimit
             || managed.PidsLimit > _options.PidsLimit)
@@ -205,10 +217,10 @@ public sealed class RemoteWorkerProvisioningCoordinator
         if (!string.Equals(managed.Platform, _options.ApprovedImagePlatform, StringComparison.Ordinal))
             throw new WorkerControlConfigurationException("The frozen managed platform differs from controller policy.");
 
-        // The frozen host must still be approved and remain ready; approval does not
-        // bypass the live host gate. CreateWorkerEnrollmentForPlan re-checks that the
-        // host is enabled and ready in the authoritative store.
-        _ = Approved(managed.ApprovedHostId);
+        // The frozen local target must still be present and usable; approval does
+        // not bypass the live host gate. CreateWorkerEnrollmentForPlan re-checks
+        // that the host is enabled and ready in the authoritative store.
+        _ = _targets.Resolve(managed.ApprovedHostId);
         var approval = store.GetHireRequestApprovalByBinding(bindingId)
             ?? throw new OrganizationStoreCorruptException("A managed binding has frozen resources but no owner approval.");
 
@@ -276,7 +288,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
         if (enrollment.LifecycleStatus == "planned") enrollment = store.UpdateEnrollmentLifecycle(workerId, enrollment.Revision, "planned", "provisioning");
         var operation = NextPending(store, enrollment);
         if (operation is null) return enrollment;
-        var host = Approved(enrollment.HostId);
+        var host = _targets.Resolve(enrollment.HostId);
 
         if (operation.State == "Uncertain")
         {
@@ -371,7 +383,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
         RequireEnabled();
         var store = Store();
         var enrollment = store.GetWorkerEnrollment(workerId) ?? throw new KeyNotFoundException("Worker not found.");
-        var host = Approved(enrollment.HostId);
+        var host = _targets.Resolve(enrollment.HostId);
         foreach (var resource in store.ListWorkerResources(workerId).OrderBy(x => x.ResourceKind == "container" ? 0 : 1).ThenByDescending(x => x.ResourceName, StringComparer.Ordinal))
         {
             if (!resource.Disposable) continue;
@@ -450,7 +462,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
         _ => 6,
     };
 
-    private async Task ApplyEffect(OrganizationStore store, WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation, ApprovedExecutionHost host, CancellationToken token)
+    private async Task ApplyEffect(OrganizationStore store, WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation, ExecutionTarget host, CancellationToken token)
     {
         var identity = Identity(enrollment, operation.Id);
         switch (operation.Kind)
@@ -513,7 +525,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
 
         var resource = store.ListWorkerResources(workerId).SingleOrDefault(x => x.ResourceKind == "container")
             ?? throw new OrganizationConcurrencyException("The worker has no owned container resource to replace.");
-        var host = Approved(enrollment.HostId);
+        var host = _targets.Resolve(enrollment.HostId);
         var identity = Identity(enrollment, resource.OperationId);
 
         // Inspect before touching anything. Absence is only concluded from the exact
@@ -580,7 +592,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
     /// name, image, platform, four volumes, frozen limits, approved digest set,
     /// profile environment and operation identity as the original.
     /// </summary>
-    private ContainerCreateSpec ContainerSpecFor(OrganizationStore store, WorkerEnrollmentRecord enrollment, ApprovedExecutionHost host, WorkerResourceIdentity identity)
+    private ContainerCreateSpec ContainerSpecFor(OrganizationStore store, WorkerEnrollmentRecord enrollment, ExecutionTarget host, WorkerResourceIdentity identity)
     {
         var mounts = new[] { new NamedVolumeMount(enrollment.ControlVolumeName, "/control"), new(enrollment.HomeVolumeName, "/home/worker"), new(enrollment.WorkspaceVolumeName, "/workspace"), new(enrollment.SessionVolumeName, "/session") };
         var approved = store.ListApprovedImageDigests(host.Id, _options.ApprovedImageDigest);
@@ -588,7 +600,7 @@ public sealed class RemoteWorkerProvisioningCoordinator
         return new(enrollment.ContainerName, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, identity, mounts, limits.MemoryBytes, limits.CpuLimit, limits.PidsLimit, approved, ProfileEnvironmentFor(enrollment));
     }
 
-    private async Task ReconcileUncertain(OrganizationStore store, WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation, ApprovedExecutionHost host, CancellationToken token)
+    private async Task ReconcileUncertain(OrganizationStore store, WorkerEnrollmentRecord enrollment, ProvisioningOperationRecord operation, ExecutionTarget host, CancellationToken token)
     {
         try
         {
@@ -693,7 +705,6 @@ public sealed class RemoteWorkerProvisioningCoordinator
     }
     private static string LabelsHash(WorkerResourceIdentity identity) => Hash(string.Join('\n', identity.Labels.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Key + "=" + x.Value)));
     private static string VolumeKind(WorkerEnrollmentRecord e, string name) => name == e.ControlVolumeName ? "control" : name == e.HomeVolumeName ? "home" : name == e.WorkspaceVolumeName ? "workspace" : "session";
-    private ApprovedExecutionHost Approved(string id) => _options.ApprovedHosts.SingleOrDefault(x => x.Id == id) ?? throw new KeyNotFoundException("Host is not approved.");
     private void RequireEnabled()
     {
         if (!_options.Enabled) throw new WorkerControlDisabledException();

@@ -104,7 +104,6 @@ const state = {
   profilePlans: [],
   profileCreatePlans: [],
   buildPlans: [],
-  hostPlans: [],
   mutationDelayMs: 0,
   createDelayMs: 0,
   profileCreateDelayMs: 0,
@@ -128,7 +127,7 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/__stub' && req.method === 'POST') {
     const patch = JSON.parse((await readBody(req)) || '{}');
-    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'approvePlans', 'profilePlans', 'profileCreatePlans', 'buildPlans', 'hostPlans'];
+    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'approvePlans', 'profilePlans', 'profileCreatePlans', 'buildPlans'];
     if (patch.resetPlans) for (const key of keys) state[key].length = 0;
     for (const key of keys) if (patch[key]) state[key].push(...patch[key]);
     if (typeof patch.mutationDelayMs === 'number') state.mutationDelayMs = patch.mutationDelayMs;
@@ -161,10 +160,6 @@ const server = createServer(async (req, res) => {
     if (state.approveDelayMs) await sleep(state.approveDelayMs);
     const plan = consume(state.approvePlans, null);
     return plan ? send(res, plan.status || 200, plan.body || {}) : send(res, 200, { state: 'Approved' });
-  }
-  if (url.pathname === '/api/execution-hosts' && req.method === 'GET') {
-    const plan = consume(state.hostPlans, null);
-    return plan ? send(res, plan.status || 200, plan.body || []) : send(res, 200, []);
   }
   if (url.pathname.startsWith('/api/profiles/') && url.pathname.endsWith('/builds') && req.method === 'GET') {
     const plan = consume(state.buildPlans, null);
@@ -290,16 +285,15 @@ try {
     cpuLimit: 2, memoryLimitMiB: 2048, pidsLimit: 256, purpose: 'Approve this developer container.',
   }];
   const activeProfiles = [{ id: 'prof-1', slug: 'generic-employee', displayName: 'Generic Employee', status: 'active', currentRevisionId: 'prev-1', currentRevisionNumber: 1 }];
-  const verifiedBuilds = [{ id: 'build-1', profileRevisionId: 'prev-1', hostId: 'host-a', state: 'built', verified: true, imageDigest: 'sha256:' + '9'.repeat(64) }];
-  const readyHosts = [{ id: 'host-a', slug: 'host-a', displayName: 'Host A', enabled: true, status: 'ready' }];
-  const approvedSummary = [{ ...approvable[0], state: 'Approved', revision: 5, containerProfileRevisionId: 'prev-1', profileBuildId: 'build-1', approvedImageDigest: 'sha256:' + '9'.repeat(64), approvedHostId: 'host-a', employeeId: 'emp-managed', runtimeBindingId: 'rtb-managed', workerId: null, statusDetail: null }];
+  const verifiedBuilds = [{ id: 'build-1', profileRevisionId: 'prev-1', hostId: 'local-docker', state: 'built', verified: true, imageDigest: 'sha256:' + '9'.repeat(64) }];
+  const approvedSummary = [{ ...approvable[0], state: 'Approved', revision: 5, containerProfileRevisionId: 'prev-1', profileBuildId: 'build-1', approvedImageDigest: 'sha256:' + '9'.repeat(64), approvedHostId: 'local-docker', employeeId: 'emp-managed', runtimeBindingId: 'rtb-managed', workerId: null, statusDetail: null }];
 
-  await stub({ resetPlans: true, hirePlans: [{ status: 200, body: approvable }], profilePlans: [{ status: 200, body: activeProfiles }], buildPlans: [{ status: 200, body: verifiedBuilds }], hostPlans: [{ status: 200, body: readyHosts }] });
+  await stub({ resetPlans: true, hirePlans: [{ status: 200, body: approvable }], profilePlans: [{ status: 200, body: activeProfiles }], buildPlans: [{ status: 200, body: verifiedBuilds }] });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.request-card[data-request-id="hire-approve"] [data-approve-profile]:not([disabled])');
-  record('a verified build on a ready host enables the approval selection',
-    await page.locator('[data-approve-host="hire-approve"] option').count() === 1 && await page.locator('[data-approve-host="hire-approve"] option').first().getAttribute('value') === 'host-a',
-    { hostOptions: await page.locator('[data-approve-host="hire-approve"] option').allTextContents() });
+  record('a verified build on the controller-local Docker target enables the approval selection',
+    await page.locator('[data-approve-host="hire-approve"]').count() === 0 && await page.locator('[data-approve-profile="hire-approve"] option').count() === 1,
+    { profileOptions: await page.locator('[data-approve-profile="hire-approve"] option').allTextContents() });
 
   await stub({ resetPlans: true, approveDelayMs: 400 });
   const approvalRequest = page.waitForRequest((request) => request.url().endsWith('/api/hire-requests/hire-approve/approve'));
@@ -308,7 +302,7 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-hire-receipt]').dataset.status === 'pending');
   record('an in-flight approval reports a pending receipt and sends the exact selection',
     (await statusAttr('[data-hire-receipt]')) === 'pending' && (await page.locator('[data-hire-receipt]').innerText()).includes('Approving hire-approve')
-      && approveBody.expectedRevision === 4 && approveBody.profileRevisionId === 'prev-1' && approveBody.hostId === 'host-a',
+      && approveBody.expectedRevision === 4 && approveBody.profileRevisionId === 'prev-1' && approveBody.hostId === undefined,
     { receipt: await page.locator('[data-hire-receipt]').innerText(), approveBody });
 
   await stub({ resetPlans: true, approveDelayMs: 0, approvePlans: [{ status: 409, body: { title: 'Hire request approval conflicted.', detail: 'The hire request changed; reload and retry.' } }] });
@@ -318,7 +312,7 @@ try {
     (await statusAttr('[data-hire-receipt]')) === 'error' && (await page.locator('[data-hire-receipt]').innerText()).includes('The hire request changed'),
     { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
 
-  await stub({ resetPlans: true, approveDelayMs: 0, approvePlans: [{ status: 200, body: approvedSummary[0] }], hirePlans: [{ status: 200, body: approvable }, { status: 200, body: approvedSummary }], profilePlans: [{ status: 200, body: activeProfiles }], buildPlans: [{ status: 200, body: verifiedBuilds }], hostPlans: [{ status: 200, body: readyHosts }] });
+  await stub({ resetPlans: true, approveDelayMs: 0, approvePlans: [{ status: 200, body: approvedSummary[0] }], hirePlans: [{ status: 200, body: approvable }, { status: 200, body: approvedSummary }], profilePlans: [{ status: 200, body: activeProfiles }], buildPlans: [{ status: 200, body: verifiedBuilds }] });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.request-card[data-request-id="hire-approve"] [data-approve-profile]:not([disabled])');
   await page.click('.request-card[data-request-id="hire-approve"] button:text("Approve")');
@@ -327,8 +321,8 @@ try {
     (await statusAttr('[data-hire-receipt]')) === 'ok' && (await page.locator('[data-hire-receipt]').innerText()).includes('provisioning is queued; it runs in the background'),
     { status: await statusAttr('[data-hire-receipt]'), receipt: await page.locator('[data-hire-receipt]').innerText() });
   const frozenText = await page.locator('.request-card[data-request-id="hire-approve"] [data-frozen-approval]').innerText();
-  record('the approved card renders the frozen build, digest, host, employee and binding',
-    frozenText.includes('prev-1') && frozenText.includes('build-1') && frozenText.includes('emp-managed') && frozenText.includes('rtb-managed') && frozenText.includes('host-a'),
+  record('the approved card renders the frozen build, digest, target, employee and binding',
+    frozenText.includes('prev-1') && frozenText.includes('build-1') && frozenText.includes('emp-managed') && frozenText.includes('rtb-managed') && frozenText.includes('Controller-local Docker'),
     { frozenText });
   record('the approved card states provisioning is durably queued and never exposes the owner identity',
     (await page.locator('.request-card[data-request-id="hire-approve"] [data-provisioning-note]').innerText()).includes('durably queued provisioning and orientation')

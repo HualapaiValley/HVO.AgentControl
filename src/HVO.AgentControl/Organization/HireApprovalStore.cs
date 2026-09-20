@@ -173,7 +173,10 @@ public sealed partial class OrganizationStore
         var identity = ValidateApprovalIdentity(approvalIdentity);
         if (!IsBoundedIdentifier(request.ProfileRevisionId, OrganizationIds.ContainerProfileRevisionPrefix))
             throw new OrganizationValidationException("A stable container profile revision id is required.");
-        ValidateIdentifier(request.HostId, "execution host id");
+
+        // Managed hiring in this step is controller-local Docker only: the host is
+        // the reserved local row, never a caller-supplied execution host.
+        const string hostId = ExecutionHosts.LocalDockerId;
 
         return TranslateStoreFaults(() =>
         {
@@ -193,7 +196,6 @@ public sealed partial class OrganizationStore
                     // post-approval lifecycle state; a different selection is a
                     // conflict, never a second approval.
                     if (string.Equals(existing.ProfileRevisionId, request.ProfileRevisionId, StringComparison.Ordinal)
-                        && string.Equals(existing.HostId, request.HostId, StringComparison.Ordinal)
                         && string.Equals(existing.RequestVersionHash, current.RequestVersionHash, StringComparison.Ordinal)
                         && existing.ApprovedRequestRevision == request.ExpectedRevision)
                     {
@@ -215,9 +217,9 @@ public sealed partial class OrganizationStore
                 // names a build id. The revision must belong to the active profile
                 // and be its current revision.
                 EnsureBuildableRevision(connection, transaction, request.ProfileRevisionId);
-                var build = ReadVerifiedBuild(connection, transaction, request.ProfileRevisionId, request.HostId)
-                    ?? throw new OrganizationConcurrencyException("No exact verified profile build exists for that revision and host.");
-                var host = ReadApprovalHost(connection, transaction, request.HostId);
+                var build = ReadVerifiedBuild(connection, transaction, request.ProfileRevisionId, hostId)
+                    ?? throw new OrganizationConcurrencyException("No exact verified build for that revision exists on the controller-local Docker target.");
+                var host = ReadApprovalHost(connection, transaction, hostId);
                 if (host.Enabled != 1 || !string.Equals(host.Status, "ready", StringComparison.Ordinal)
                     || !string.Equals(host.CapabilityStatus, "valid", StringComparison.Ordinal))
                     throw new OrganizationConcurrencyException("The execution host is not enabled, ready and valid.");
@@ -240,7 +242,7 @@ public sealed partial class OrganizationStore
                     request.ProfileRevisionId,
                     build.Id,
                     build.ImageDigest!,
-                    request.HostId,
+                    hostId,
                     build.Platform,
                     current.CpuLimit.ToString(CultureInfo.InvariantCulture),
                     current.MemoryLimitMiB.ToString(CultureInfo.InvariantCulture),
@@ -258,7 +260,7 @@ public sealed partial class OrganizationStore
                     """,
                     ("$id", id), ("$version", frozenVersion), ("$revision", current.Revision),
                     ("$requestHash", current.RequestVersionHash), ("$profile", request.ProfileRevisionId),
-                    ("$build", build.Id), ("$digest", build.ImageDigest), ("$host", request.HostId),
+                    ("$build", build.Id), ("$digest", build.ImageDigest), ("$host", hostId),
                     ("$platform", build.Platform), ("$cpu", current.CpuLimit), ("$memory", current.MemoryLimitMiB),
                     ("$pids", current.PidsLimit), ("$identity", identity), ("$now", now));
                 var affected = Execute(connection, transaction,

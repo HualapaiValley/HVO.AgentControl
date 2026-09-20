@@ -18,14 +18,25 @@ Status reflects the active code, not the standalone POC.
    constrained devcontainer subset and the seeded `generic-employee` profile
    (#258) and per-host verified profile image builds (#259) are shipped.
    Owner approval (#260) is implemented as a code capability: a revision-bound,
-   same-origin owner action freezes one verified profile-revision build on a ready
-   host and atomically creates the managed employee identity and
+   same-origin owner action freezes one verified profile-revision build and
+   atomically creates the managed employee identity and
    DeveloperContainer binding, and the resumable coordinator drives
    `Approved → Provisioning → Orienting → Ready`. Approval commits the request to
    `Provisioning` and durably queues that work, which runs in the background and
-   is rebuilt from persisted state after a restart. It has **not** run a live
-   owner-approved hire on any host and `WorkerControl` is off by default, so it is
-   not operationally validated. #261 (data-preserving rebuild) remains. The schema
+   is rebuilt from persisted state after a restart. #272 (schema v11) freezes the
+   managed hire to the controller-local Docker target (`local-docker`): approval
+   takes no host input and Docker operations run through the privileged
+   `docker-helper`, while the control image has neither the daemon socket nor a
+   Docker CLI. It has **not** run a live owner-approved hire on any host and
+   `WorkerControl` is off by default, so it is
+   not operationally validated; the local managed path did reach `Ready` once on
+   a development machine, which is not a deployment result. The three worker
+   classes stay distinct: automatic controller-local managed employees through the
+   helper; manually operated remote Docker workers reached by controller-initiated
+   pinned SSH + `docker exec`, never created by hiring; and future manually
+   enrolled standalone workers that connect outbound, which are **not
+   implemented** (no listener or enrollment protocol). #261 (data-preserving
+   rebuild) remains. The schema
    also has a sanitized deduplicated controller event inbox, conditional
    request/cancellation/provisioning transitions, exact recovery markers and
    restart reconciliation. The first managed disposable two-host path was

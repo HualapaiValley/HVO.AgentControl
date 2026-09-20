@@ -311,7 +311,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
             $"sessionId {sessionId}",
             $"orientationVersion {orientationVersion}",
             $"The orientation artifact is installed at {installedPath}.",
-            "Standing orientation facts:",
+            "Copy identity, department, reporting, duties, restrictions, and escalation verbatim from the artifact's fenced JSON Standing Facts block. Do not infer or paraphrase them from prose.",
+            "Standing orientation artifact:",
             content);
     }
 

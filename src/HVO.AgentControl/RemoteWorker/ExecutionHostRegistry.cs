@@ -11,6 +11,7 @@ public sealed record DisableExecutionHostRequest(int ExpectedRevision);
 public sealed class ExecutionHostRegistry(AcpControlHost control, IOptions<WorkerControlOptions> configured, IRemoteWorkerOperations operations)
 {
     private readonly WorkerControlOptions _options = configured.Value;
+    private readonly ExecutionTargetResolver _targets = new(control, configured);
 
     public IReadOnlyList<ExecutionHostRecord> List() => Store().ListExecutionHosts();
 
@@ -27,11 +28,14 @@ public sealed class ExecutionHostRegistry(AcpControlHost control, IOptions<Worke
     /// </summary>
     public async Task<ExecutionHostRecord> ProbeAsync(string id, int expectedRevision, CancellationToken cancellationToken)
     {
-        if (!_options.Enabled) throw new WorkerControlDisabledException("Worker control is disabled; no host process is executed.");
-        var host = Approved(id);
-        var payload = await operations.ProbeHostAsync(host, cancellationToken).ConfigureAwait(false);
-        var probe = HostProbeParser.Parse(payload, host, _options.ApprovedImagePlatform, _options.ExpectedControllerUid);
-        return Store().RecordExecutionHostProbe(id, expectedRevision, probe);
+        if (!_options.Enabled) throw new WorkerControlDisabledException("Worker control is disabled; no execution target is probed.");
+        if (_options.Validate(inspectFiles: false).Count != 0) throw new WorkerControlConfigurationException("Worker control configuration is invalid.");
+        var target = _targets.Resolve(id);
+        var payload = await operations.ProbeHostAsync(target, cancellationToken).ConfigureAwait(false);
+        if (target.IsLocalDocker)
+            return Store().RecordLocalExecutionHostProbe(id, expectedRevision, HostProbeParser.ParseLocal(payload, _options.ApprovedImagePlatform));
+        var host = target.Ssh ?? throw new WorkerControlConfigurationException("The SSH execution target has no approved host configuration.");
+        return Store().RecordExecutionHostProbe(id, expectedRevision, HostProbeParser.Parse(payload, host, _options.ApprovedImagePlatform, _options.ExpectedControllerUid));
     }
 
     public ExecutionHostRecord Disable(string id, int expectedRevision) => Store().DisableExecutionHost(id, expectedRevision);

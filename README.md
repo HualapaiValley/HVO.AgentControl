@@ -44,19 +44,41 @@ contract-verified inside the image before its digest joins that host's
 approved set. Control schema v10 adds owner approval and managed-employee
 creation: an owner-only, same-origin, revision-bound `POST
 /api/hire-requests/{id}/approve` freezes one hire revision against one verified
-profile build on one ready host, creates exactly one managed employee identity
+profile build, creates exactly one managed employee identity
 and DeveloperContainer binding with fixed safe defaults, and records the frozen
-per-binding resources a later provisioning run consumes. Recording a profile,
+per-binding resources a later provisioning run consumes. Control schema v11
+gives an execution host a constrained transport kind (`local-docker` or
+`ssh-docker`) and seeds one reserved `local-docker` host. The #272 work freezes a
+managed hire to the **controller-local** Docker target: approval takes no SSH
+host input, and every Docker operation is executed by a privileged
+`docker-helper` process over a Unix socket. The control image contains neither
+the Docker daemon socket nor a Docker CLI; the helper is the only service that
+mounts the daemon socket, publishes no ports, runs read-only with
+`cap_drop: ALL`, `no-new-privileges` and `init`, runs as uid 1002, and is the
+only writer of the helper-socket volume shared with control. Recorded in
+compose, `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST` and
+`AGENTCONTROL_DOCKER_GID` must be supplied for deployment; the helper fails
+closed while the approved digest is empty. Recording a profile,
 building it, or approving a hire does **not** provision or orient a worker:
 approval leaves the request `Approved` and provisioning is a separate, resumable
 trigger that drives `Approved → Provisioning → Orienting → Ready`. The owner
 accepted the profile-based employee-creation design (epic #257); the explicit
 data-preserving rebuild (#261) is the remaining #219 slice. The #217 hermetic
-controller records are retained in the current schema-v10 store, including
+controller records are retained in the current schema-v11 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
 minimal same-origin owner control routes.
+
+Keep the three worker classes distinct. (1) An **automatic controller-local
+managed employee** is provisioned through the `docker-helper` by an approved
+hire. (2) A **manually operated remote Docker worker** is reached by
+controller-initiated pinned SSH and `docker exec`; it is never created by
+hiring. (3) **Future manually enrolled standalone workers** that connect outbound
+are **not implemented** — no listener or enrollment protocol exists. Only class
+(1) is the subject of the local managed path described here; class (2) is the
+first managed disposable two-host acceptance below, and class (3) is direction,
+not capability.
 
 **#217 operational acceptance (2026-09-18).** The first managed disposable
 two-host path was accepted on source `main` at `c4a7966` with worker OpenCode
@@ -76,8 +98,9 @@ permission handling covered `[once, always, reject]` and safe-reject
 `[reject]`, with a same-lease reject moving pending→decided and the prompt
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
-control portal on `home-docker` was deployed with separate schema-v7 UI (schema v8 not yet deployed) and is
-irrelevant to worker flags except portal inspection.
+control portal on `home-docker` currently runs `802eb6f` (schema v9; this branch's
+schema v10/v11 and the helper are not deployed there) and is irrelevant to worker
+flags except portal inspection.
 
 This path remains disabled by default. `/api/info` now reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
@@ -99,7 +122,8 @@ interactive execution, not a sandbox boundary. Do not expose this portal to
 untrusted networks or the Internet.
 
 The authorization to run the first managed disposable two-host path does not
-extend to a live owner-approved hire: the #260 approval, managed-provisioning
+extend to a production live owner-approved hire: the #260 approval,
+managed-provisioning
 and orientation slice is implemented and hermetically tested, but **no live
 owner-approved hire has been executed on any host**, the `home-docker`
 execution-host enrollment remains held by the owner, and `WorkerControl` remains
@@ -107,7 +131,15 @@ disabled by default. Approval commits the request to `Provisioning` and queues
 the remote workflow durably; the work itself runs asynchronously and is resumed
 from persisted state after a restart, so a queued hire is never lost and never
 repeated. #261 (the data-preserving rebuild) and any termination/scheduling
-policy are out of scope. The accepted path
+policy are out of scope.
+
+The local managed path has additionally been exercised end to end on one
+development machine: a generic-employee profile build, a real container
+provision through the `docker-helper`, real OpenCode ACP orientation delivery and
+comprehension, and a hire reaching `Ready` in about 1m50s. That is a **local
+development-machine** result only. It is **not** a `home-docker` deployment
+(this work is not deployed there), `WorkerControl` is still off by default
+there, and it does not lift any exclusion below. The accepted path
 does not validate key rotation or compromise re-enrollment
 and does not authorize production managed hiring/provisioning.
 
@@ -180,6 +212,43 @@ docker --context home-docker compose build
 python3 scripts/init-secrets.py --context home-docker
 docker --context home-docker compose up -d
 ```
+
+#### Local managed-hiring deployment inputs
+
+Controller-local managed hiring runs Docker operations through the privileged
+`docker-helper` service, never through the control container. Before
+`compose up` an operator supplies two inputs, normally in a `.env` file beside
+`compose.yaml` (Compose reads it automatically; both are interpolated with an
+empty/default fallback in `compose.yaml`, so an unconfigured deployment starts
+but cannot provision):
+
+```bash
+# The host daemon socket's group id, so the helper's uid 1002 can reach it.
+echo "AGENTCONTROL_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)" >> .env
+# The approved worker base image digest. Build the worker image first, then pin
+# its exact id; the helper refuses every container-create while this is empty.
+docker --context home-docker build --target worker --tag hvo-agentcontrol:worker .
+echo "AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST=$(docker --context home-docker image inspect --format '{{.Id}}' hvo-agentcontrol:worker)" >> .env
+```
+
+Then, with the controller running:
+
+1. Build both images (`docker compose build`); `docker-helper` is the only
+   service that mounts `/var/run/docker.sock`.
+2. Set `AGENTCONTROL_DOCKER_GID` and
+   `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST` in `.env`.
+3. `docker compose up -d`.
+4. Probe the local Docker target from the UI/API
+   (`POST /api/hosts/{id}/probe` for `local-docker`) and confirm it reports
+   `ready`/`valid`.
+5. Build the `generic-employee` profile on the `local-docker` host and confirm
+   the build verifies.
+6. Approve a hire against the verified profile-revision build; provisioning
+   runs through the helper to `Ready`.
+
+The `docker-helper` service fails closed: with no approved base digest it
+rejects every container-create rather than approving an unpinned image, and the
+control service has neither the daemon socket nor a Docker CLI.
 
 Open `http://home-docker.home.lan:5054` on the trusted LAN. The username is
 `owner`; retrieve the password locally with:

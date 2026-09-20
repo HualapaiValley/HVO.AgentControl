@@ -909,6 +909,87 @@ default; #261 (data-preserving rebuild) and any termination/scheduling policy ar
 out of scope. Approval is a host record of a verified selection, not a
 provisioned employee.
 
+### 10.3 Local-only managed hiring through the privileged Docker helper (#272; code capability plus a local dev-machine run)
+
+#272 freezes a managed hire to the **controller-local Docker target** and moves
+every Docker operation for it out of the controller into a privileged helper.
+This is the only managed-hiring target in this phase. It is code capability with
+hermetic coverage, plus one end-to-end run on a development machine; it is **not**
+operationally validated and no live owner-approved hire has run on a deployment
+host.
+
+**Execution target kinds (schema v11).** An execution host row carries a
+constrained `transport_kind`, exactly `local-docker` or `ssh-docker`. The
+constraint is in the table definition and rebuilt during migration, and a
+`CHECK` requires an `ssh-docker` row to carry its four endpoint columns
+(host/port/user/known-hosts path) and a `local-docker` row to carry none. A fresh
+store seeds exactly one reserved `local-docker` host and never registers it from
+configuration. Managed-hire approval resolves that reserved row directly and
+takes **no host input from the caller**: the approval request supplies only
+`ExpectedRevision` and `ProfileRevisionId`. The approval still requires the
+chosen build to be verified, the platform to match, and the local host to be
+enabled, `ready`, `valid`, limit-supporting and within capacity, but there is no
+SSH target to name.
+
+**Helper isolation contract.** The control service is never given Docker
+access. It has no daemon-socket mount and its final image stage installs no
+Docker CLI. The `docker-helper` service is the only service that mounts
+`/var/run/docker.sock`; it publishes no ports, runs with `read_only: true`,
+`cap_drop: ALL`, `no-new-privileges: true` and `init: true`, runs as uid 1002,
+and is the only writer of the helper-socket volume that is shared with the
+control service. The helper binary is a fixed .NET service, not a shell.
+
+**Helper protocol grammar and limits.** The controller connects only to the
+helper's Unix socket. Authorization is the kernel-attributed `SO_PEERCRED` uid
+of the connected peer, which must equal the configured controller uid (1001);
+the uid cannot be asserted or spoofed by the peer. The socket directory is
+`0750` and the socket is group-accessible only to the controller gid. Each
+request is a bounded JSON envelope plus, for typed operations, a bounded binary
+payload; unknown, missing or oversized fields fail closed. The helper builds
+the Docker argv itself from the shared `DockerArgv` grammar and never invokes a
+shell; the operation kinds are the fixed enum (`Probe`, `VersionProbe`,
+`StorageFree`, `ImageInspect`, `ImageTag`, `ImageBuild`, `ImageVerify`,
+`ImageRemove`, `VolumeCreate`, `VolumeInspect`, `VolumeRemove`, `ContainerCreate`,
+`ContainerInspect`, `ContainerStart`, `ContainerStop`, `ContainerRemove`,
+`Bootstrap`, `Connector`, `Viewer`). Resource limits are enforced before any
+daemon contact: container memory, CPU and pids must be positive and within the
+helper policy (defaults 2 GiB, 2 CPUs, 256 pids), the platform must equal the
+approved platform (`linux/amd64`/`linux/arm64`), the image digest must be the
+configured approved base digest or in the passed approved set, resource names
+and labels must match the fixed `agentcontrol-` prefixes and exact label set,
+the only permitted mount points are `/control`, `/home/worker`, `/workspace`
+and `/session` with exactly four named volumes, and `ContainerCreate` emits
+`--read-only`, `--cap-drop ALL`, only the four fixed capabilities, and
+`no-new-privileges`. A bind mount or a Docker-socket path is not expressible and
+is refused. The helper **fails closed when the approved base digest is empty**:
+the policy validates the configured digest on every container-create and
+bootstrap, so an unconfigured deployment cannot provision.
+
+**Deployment inputs.** `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST` (the
+approved worker base image id) and `AGENTCONTROL_DOCKER_GID` (the host daemon
+socket's group, added to the helper with `group_add`) are operator-supplied,
+normally through a `.env` file. They are documented in `compose.yaml` and the
+README deployment procedure.
+
+**Approval without a host and standing facts.** The portal/API approval path
+prompts for a profile revision only, because the target host is fixed to the
+reserved local host. The managed employee's orientation is still the
+deterministic fragment composition of §11; the comprehension operation requires
+the model to echo the fixed ten-field object, and the three standing-facts
+top-level fields beyond the four identities are the organization/department/
+role/employee-derived `identity`, `department`, `reporting`, `duties`,
+`restrictions` and `escalation` values recorded for the assignment.
+
+**Validation status.** The hermetic suites cover the grammar, the helper
+protocol, the approval/store/coordinator path and the Compose/image contract.
+Separately, the full local managed path has been exercised on one development
+machine: a generic-employee profile build, a real container provision through
+the helper, real OpenCode ACP orientation delivery and comprehension, and a hire
+reaching `Ready` in about 1m50s. That result is local to that dev machine; it is
+not a `home-docker` deployment, `WorkerControl` remains off by default, and it
+does not validate key rotation, compromise re-enrollment or production managed
+hiring.
+
 ## 11. Orientation composition and versioning
 
 - Orientation is a deterministic, ordered composition of versioned fragments:
@@ -1071,8 +1152,11 @@ These are open and must not be presented as decided or owner-accepted:
   The #217 first managed disposable two-host acceptance is complete and the
   owner accepted the profile-based design on 2026-09-18. The #219 approval,
   managed-provisioning and orientation slice is now implemented as code
-  capability (§10.2) and hermetically tested, but **no live owner-approved hire
-  has been executed on any host** and the `home-docker` execution-host
+  capability (§10.2), and #272 freezes approval to the controller-local helper
+  target under no SSH host input (§10.3); both are hermetically tested, and the
+  local managed path additionally reached `Ready` on one development machine, but
+  **no live owner-approved hire has been executed on any host** and the
+  `home-docker` execution-host
   enrollment remains held by the owner, so it is not operationally validated.
   #261 (data-preserving rebuild) and any termination/scheduling policy remain
   future work.
@@ -1086,5 +1170,6 @@ binding/routing/provisioning state machines and its first managed disposable
 two-host path was operationally accepted on 2026-09-18. Viewer/read-model work is
 code-complete; key rotation and production provisioning at scale remain future
 work. The #260 approval/managed-provisioning/orientation slice is implemented and
-hermetically tested (§10.2) but not operationally validated, and #261 remains
-future work.
+hermetically tested (§10.2) and #272 adds local-only managed hiring through the
+helper (§10.3); neither is operationally validated on a deployment host, and #261
+remains future work.

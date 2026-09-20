@@ -22,7 +22,7 @@ public sealed class HireApprovalStoreTests
         using var store = Open(root);
         var seeded = SeedApprovedHire(store, "Developer One", 2, 2048, 256, out var revisionId, out _);
 
-        var request = new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a");
+        var request = new HireRequestApprove(seeded.Hire.Revision, revisionId);
         var approved = store.ApproveHireRequest(seeded.Hire.Id, request, "owner");
 
         Assert.Equal(HireRequestStates.Approved, approved.State);
@@ -40,7 +40,7 @@ public sealed class HireApprovalStoreTests
         Assert.Equal(revisionId, approval.ProfileRevisionId);
         Assert.Equal(seeded.Build.Id, approval.ProfileBuildId);
         Assert.Equal(BuiltDigest, approval.ImageDigest);
-        Assert.Equal("host-a", approval.HostId);
+        Assert.Equal(ExecutionHosts.LocalDockerId, approval.HostId);
         Assert.Equal("linux/amd64", approval.Platform);
         Assert.Equal(2, approval.CpuLimit);
         Assert.Equal(2048, approval.MemoryLimitMiB);
@@ -54,7 +54,7 @@ public sealed class HireApprovalStoreTests
         var summary = store.GetHireRequest(seeded.Hire.Id)!;
         Assert.Equal(seeded.Build.Id, summary.ProfileBuildId);
         Assert.Equal(BuiltDigest, summary.ApprovedImageDigest);
-        Assert.Equal("host-a", summary.ApprovedHostId);
+        Assert.Equal(ExecutionHosts.LocalDockerId, summary.ApprovedHostId);
         Assert.Equal(2, RawScalar(root.Path, $"SELECT COUNT(*) FROM hire_request_events WHERE hire_request_id = '{seeded.Hire.Id}';"));
 
         // A replay of the exact same selection and request revision is idempotent.
@@ -78,12 +78,12 @@ public sealed class HireApprovalStoreTests
         using (var root = new TempStore())
         using (var store = Open(root))
         {
-            PrepareHost(store, limitsSupported: true);
+            PrepareLocalHost(store, limitsSupported: true);
             var unbuiltProfile = store.CreateContainerProfile(new ContainerProfileCreate("unbuilt", "unbuilt", "Unbuilt", null, """{"image":"agentcontrol-worker-base","name":"Unbuilt"}""", null), null);
             var unbuiltRevision = store.GetContainerProfile(unbuiltProfile.Id)!.Revisions.Single();
             var unbuiltHire = CreateDevHire(store, "Unbuilt Hire", 1, 512, 64);
             Assert.Throws<OrganizationConcurrencyException>(() =>
-                store.ApproveHireRequest(unbuiltHire.Id, new HireRequestApprove(unbuiltHire.Revision, unbuiltRevision.Id, "host-a"), "owner"));
+                store.ApproveHireRequest(unbuiltHire.Id, new HireRequestApprove(unbuiltHire.Revision, unbuiltRevision.Id), "owner"));
         }
 
         // Requested resources beyond the probed host capacity.
@@ -92,7 +92,7 @@ public sealed class HireApprovalStoreTests
         {
             var seed = SeedApprovedHire(store, "Too Big", 64, 2048, 256, out var revisionId, out _);
             Assert.Throws<OrganizationValidationException>(() =>
-                store.ApproveHireRequest(seed.Hire.Id, new HireRequestApprove(seed.Hire.Revision, revisionId, "host-a"), "owner"));
+                store.ApproveHireRequest(seed.Hire.Id, new HireRequestApprove(seed.Hire.Revision, revisionId), "owner"));
         }
 
         // A host that reports it cannot enforce limits.
@@ -102,39 +102,55 @@ public sealed class HireApprovalStoreTests
             var build = SeedVerifiedBuild(store, out var revisionId, limitsSupported: false);
             var hire = CreateDevHire(store, "No Limits", 1, 512, 64);
             Assert.Throws<OrganizationValidationException>(() =>
-                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId, "host-a"), "owner"));
+                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner"));
             Assert.Equal(1, RawScalar(root.Path, "SELECT COUNT(*) FROM profile_builds WHERE id = '" + build.Id + "';"));
         }
 
-        // A disabled host.
+        // A disabled host. The reserved local row cannot be disabled through the
+        // API, so the fixture sets it directly as an operator-level state.
         using (var root = new TempStore())
         using (var store = Open(root))
         {
             SeedVerifiedBuild(store, out var revisionId);
-            RawExec(root.Path, "UPDATE execution_hosts SET enabled = 0 WHERE id = 'host-a';");
+            RawExec(root.Path, "UPDATE execution_hosts SET enabled = 0 WHERE id = 'local-docker';");
             var hire = CreateDevHire(store, "Disabled", 1, 512, 64);
             Assert.Throws<OrganizationConcurrencyException>(() =>
-                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId, "host-a"), "owner"));
+                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner"));
         }
 
-        // A host whose platform does not match the verified build.
+        // A verified build that exists only on an SSH host is ineligible: managed
+        // hiring is bound to the controller-local Docker target, and the local row
+        // has no verified build of its own.
         using (var root = new TempStore())
         using (var store = Open(root))
         {
-            store.RegisterExecutionHost("host-a", "host-a.example", 22, "roys", "/known", new ExecutionHostRegistration("host-a", "host-a", "Host A"));
-            var host = store.GetExecutionHost("host-a")!;
-            store.RecordExecutionHostProbe("host-a", host.Revision, new ExecutionHostProbe(
-                "ssh-ed25519", "SHA256:x", "sha256:" + new string('1', 64), "29.0", "1.51", "aarch64", "overlay2", "ext4",
-                false, 64L << 30, 16L << 30, 8, true, "linux/arm64", "valid"));
+            RegisterSshHost(store, limitsSupported: true);
             var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
             var revisionId = store.GetContainerProfile(profile.Id)!.Revisions.Single().Id;
             var queued = store.QueueProfileBuild(revisionId, "host-a", BaseDigest, "linux/amd64", ContextHash, "agentcontrol-profile:x");
             var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
             var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
             store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: BuiltDigest, verified: true, evidenceHash: ContextHash);
+            var hire = CreateDevHire(store, "Ssh Only", 1, 512, 64);
+            Assert.Throws<OrganizationConcurrencyException>(() =>
+                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner"));
+        }
+
+        // A host whose platform does not match the verified build. The verified
+        // build is on the local target while the local probe reports linux/arm64.
+        using (var root = new TempStore())
+        using (var store = Open(root))
+        {
+            PrepareLocalHost(store, limitsSupported: true, imagePlatform: "linux/arm64");
+            var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
+            var revisionId = store.GetContainerProfile(profile.Id)!.Revisions.Single().Id;
+            var queued = store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, BaseDigest, "linux/amd64", ContextHash, "agentcontrol-profile:x");
+            var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+            var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+            store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: BuiltDigest, verified: true, evidenceHash: ContextHash);
             var hire = CreateDevHire(store, "Wrong Platform", 1, 512, 64);
             Assert.Throws<OrganizationValidationException>(() =>
-                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId, "host-a"), "owner"));
+                store.ApproveHireRequest(hire.Id, new HireRequestApprove(hire.Revision, revisionId), "owner"));
         }
 
         // A retired profile and a non-current revision.
@@ -150,13 +166,13 @@ public sealed class HireApprovalStoreTests
             // The original revision is no longer current.
             var oldHire = CreateDevHire(store, "Old Revision", 1, 512, 64);
             Assert.Throws<OrganizationConcurrencyException>(() =>
-                store.ApproveHireRequest(oldHire.Id, new HireRequestApprove(oldHire.Revision, revisionId, "host-a"), "owner"));
+                store.ApproveHireRequest(oldHire.Id, new HireRequestApprove(oldHire.Revision, revisionId), "owner"));
 
             // A retired profile cannot be approved even for its current revision.
             store.RetireContainerProfile(profileId, store.GetContainerProfile(profileId)!.Profile.Revision);
             var retiredHire = CreateDevHire(store, "Retired Hire", 1, 512, 64);
             Assert.Throws<OrganizationConcurrencyException>(() =>
-                store.ApproveHireRequest(retiredHire.Id, new HireRequestApprove(retiredHire.Revision, second.Id, "host-a"), "owner"));
+                store.ApproveHireRequest(retiredHire.Id, new HireRequestApprove(retiredHire.Revision, second.Id), "owner"));
 
             _ = seed;
         }
@@ -168,7 +184,7 @@ public sealed class HireApprovalStoreTests
         using var root = new TempStore();
         using var store = Open(root);
         var first = SeedApprovedHire(store, "Developer One", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(first.Hire.Id, new HireRequestApprove(first.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(first.Hire.Id, new HireRequestApprove(first.Hire.Revision, revisionId), "owner");
 
         var creation = store.CreateManagedEmployeeFromHire(first.Hire.Id);
         Assert.True(creation.Created);
@@ -176,7 +192,7 @@ public sealed class HireApprovalStoreTests
         Assert.Equal(revisionId, creation.ApprovedProfileRevisionId);
         Assert.Equal(first.Build.Id, creation.ApprovedProfileBuildId);
         Assert.Equal(BuiltDigest, creation.ApprovedImageDigest);
-        Assert.Equal("host-a", creation.ApprovedHostId);
+        Assert.Equal(ExecutionHosts.LocalDockerId, creation.ApprovedHostId);
         Assert.StartsWith("emp-", creation.EmployeeId, StringComparison.Ordinal);
         Assert.StartsWith("rtb-", creation.RuntimeBindingId, StringComparison.Ordinal);
         Assert.Null(creation.WorkerId);
@@ -212,7 +228,7 @@ public sealed class HireApprovalStoreTests
 
         // Two requests for the same display name produce unique slugs and display names.
         var second = SeedApprovedHire(store, "Developer One", 2, 2048, 256, out var secondRevisionId, out _);
-        store.ApproveHireRequest(second.Hire.Id, new HireRequestApprove(second.Hire.Revision, secondRevisionId, "host-a"), "owner");
+        store.ApproveHireRequest(second.Hire.Id, new HireRequestApprove(second.Hire.Revision, secondRevisionId), "owner");
         var secondCreation = store.CreateManagedEmployeeFromHire(second.Hire.Id);
         Assert.True(secondCreation.Created);
         Assert.NotEqual(creation.Slug, secondCreation.Slug);
@@ -240,7 +256,7 @@ public sealed class HireApprovalStoreTests
         using var root = new TempStore();
         using var store = Open(root);
         var seeded = SeedApprovedHire(store, "Binding Lookup", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId), "owner");
         var creation = store.CreateManagedEmployeeFromHire(seeded.Hire.Id);
 
         var byBinding = store.GetHireRequestApprovalByBinding(creation.RuntimeBindingId);
@@ -250,7 +266,7 @@ public sealed class HireApprovalStoreTests
         Assert.Equal(revisionId, byBinding.ProfileRevisionId);
         Assert.Equal(seeded.Build.Id, byBinding.ProfileBuildId);
         Assert.Equal(BuiltDigest, byBinding.ImageDigest);
-        Assert.Equal("host-a", byBinding.HostId);
+        Assert.Equal(ExecutionHosts.LocalDockerId, byBinding.HostId);
         Assert.Null(byBinding.WorkerId);
 
         // An unlinked or invalid binding id resolves to nothing rather than faulting.
@@ -264,7 +280,7 @@ public sealed class HireApprovalStoreTests
         using var root = new TempStore();
         using var store = Open(root);
         var seeded = SeedApprovedHire(store, "Developer One", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId), "owner");
         var creation = store.CreateManagedEmployeeFromHire(seeded.Hire.Id);
 
         // Exactly the four layers the composition requires resolve for the managed
@@ -311,6 +327,11 @@ public sealed class HireApprovalStoreTests
         Assert.Contains("<!-- fragment:role", artifact.Content, StringComparison.Ordinal);
         Assert.Contains("<!-- fragment:employee", artifact.Content, StringComparison.Ordinal);
         Assert.Contains($"Identity: {creation.DisplayName} ({creation.EmployeeId})", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("# Standing Facts", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"identity\":\"" + creation.DisplayName + "\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"reporting\":\"owner\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"operate only inside the approved managed runtime and its own persisted workspace\"", artifact.Content, StringComparison.Ordinal);
+        Assert.Contains("\"no controller secrets or authoritative-store edits\"", artifact.Content, StringComparison.Ordinal);
         Assert.Throws<OrganizationNotFoundException>(() => store.GetOrientationStatus(creation.EmployeeId));
     }
 
@@ -320,7 +341,7 @@ public sealed class HireApprovalStoreTests
         using var root = new TempStore();
         using var store = Open(root);
         var seeded = SeedApprovedHire(store, "Developer Two", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId), "owner");
         var creation = store.CreateManagedEmployeeFromHire(seeded.Hire.Id);
         SeedManagedSession(root.Path, creation.RuntimeBindingId, creation.EmployeeId, "ses-managed");
 
@@ -356,7 +377,7 @@ public sealed class HireApprovalStoreTests
         using var store = Open(root);
         var seedIdentity = store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         var seeded = SeedApprovedHire(store, "Developer Three", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId), "owner");
         var creation = store.CreateManagedEmployeeFromHire(seeded.Hire.Id);
         SeedManagedSession(root.Path, creation.RuntimeBindingId, creation.EmployeeId, "ses-recompose");
 
@@ -391,7 +412,7 @@ public sealed class HireApprovalStoreTests
         using var root = new TempStore();
         using var store = Open(root);
         var seeded = SeedApprovedHire(store, "Transition Hire", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId), "owner");
         var approved = store.GetHireRequest(seeded.Hire.Id)!;
 
         // Invalid transitions and stale revisions are rejected.
@@ -438,7 +459,7 @@ public sealed class HireApprovalStoreTests
         using var root = new TempStore();
         using var store = Open(root);
         var seeded = SeedApprovedHire(store, "Immutable Hire", 2, 2048, 256, out var revisionId, out _);
-        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId, "host-a"), "owner");
+        store.ApproveHireRequest(seeded.Hire.Id, new HireRequestApprove(seeded.Hire.Revision, revisionId), "owner");
         var creation = store.CreateManagedEmployeeFromHire(seeded.Hire.Id);
 
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -499,20 +520,30 @@ public sealed class HireApprovalStoreTests
 
     private static ProfileBuildRecord SeedVerifiedBuild(OrganizationStore store, out string revisionId, bool limitsSupported = true)
     {
-        EnsureHost(store, limitsSupported);
+        PrepareLocalHost(store, limitsSupported);
         var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
         revisionId = store.GetContainerProfile(profile.Id)!.Revisions.Single().Id;
-        var existing = store.GetVerifiedProfileBuild(revisionId, "host-a");
+        var existing = store.GetVerifiedProfileBuild(revisionId, ExecutionHosts.LocalDockerId);
         if (existing is not null) return existing;
-        var queued = store.QueueProfileBuild(revisionId, "host-a", BaseDigest, "linux/amd64", ContextHash, "agentcontrol-profile:x");
+        var queued = store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, BaseDigest, "linux/amd64", ContextHash, "agentcontrol-profile:x");
         var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
         var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
         return store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: BuiltDigest, verified: true, evidenceHash: ContextHash);
     }
 
-    private static void EnsureHost(OrganizationStore store, bool limitsSupported) => PrepareHost(store, limitsSupported);
+    /// <summary>
+    /// Probes the reserved controller-local Docker row. The row itself is seeded
+    /// by the store; probing is what makes it enabled and ready for a build.
+    /// </summary>
+    private static void PrepareLocalHost(OrganizationStore store, bool limitsSupported, string imagePlatform = "linux/amd64")
+    {
+        var host = store.GetExecutionHost(ExecutionHosts.LocalDockerId)!;
+        store.RecordLocalExecutionHostProbe(ExecutionHosts.LocalDockerId, host.Revision, new LocalExecutionHostProbe(
+            "29.0", "1.51", "x86_64", "overlay2", "ext4", false, 64L << 30, 16L << 30, 8, limitsSupported, imagePlatform, "valid"));
+    }
 
-    private static void PrepareHost(OrganizationStore store, bool limitsSupported)
+    /// <summary>Registers and probes a ready SSH execution host for boundary tests.</summary>
+    private static void RegisterSshHost(OrganizationStore store, bool limitsSupported)
     {
         store.RegisterExecutionHost("host-a", "host-a.example", 22, "roys", "/known", new ExecutionHostRegistration("host-a", "host-a", "Host A"));
         var host = store.GetExecutionHost("host-a")!;
@@ -654,7 +685,7 @@ public sealed class HireApprovalStoreTests
                 resource_labels_hash, expected_image_digest, expected_platform, controller_id, key_file_path, key_id,
                 bridge_socket_path, lifecycle_status, worker_generation, process_generation, ownership_epoch, enabled,
                 created_at, updated_at, revision)
-            VALUES ('{workerId}', '{bindingId}', 'host-a', (SELECT id FROM organizations LIMIT 1),
+            VALUES ('{workerId}', '{bindingId}', 'local-docker', (SELECT id FROM organizations LIMIT 1),
                 'container-{suffix}', 'control-{suffix}', 'home-{suffix}', 'workspace-{suffix}', 'session-{suffix}',
                 'sha256:{new string('a', 64)}', 'sha256:{new string('b', 64)}', 'linux/amd64', 'controller-a', '/control/key',
                 'sha256:{new string('c', 64)}', '/control/bridge.sock', 'planned', 0, 0, 0, 1, '{now}', '{now}', 1)

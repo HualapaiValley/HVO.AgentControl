@@ -339,11 +339,37 @@ completed, so cancellation cleared the active request but was not rollback.
 The `home-docker` control portal was deployed with separate schema-v7 UI (schema v8 is not yet deployed) and is
 irrelevant to worker flags except portal inspection.
 
+**Three worker classes.** Do not collapse them. (1) The **automatic
+controller-local managed employee** is created by owner approval and provisioned
+through the privileged `docker-helper`; the control image itself has no Docker
+socket and no Docker CLI. (2) A **manually operated remote Docker worker** is
+reached by controller-initiated pinned SSH and `docker exec`; it is never created
+by hiring. (3) **Future manually enrolled standalone workers** that connect
+outbound are **not implemented**: no listener and no enrollment protocol exists.
+Class (2) is the first managed disposable two-host path accepted on 2026-09-18;
+class (1) is the #272 local managed path.
+
+The #272 slice freezes a managed hire to the controller-local Docker target
+(persisted `local-docker` transport kind, schema v11). Approval requires no SSH
+host input. Docker operations execute through
+`HVO.AgentControl.DockerHelper`, which is the only service mounting
+`/var/run/docker.sock`, publishes no ports, runs read-only with `cap_drop: ALL`,
+`no-new-privileges` and `init`, runs as uid 1002, and is the only writer of the
+helper-socket volume shared with control. The helper accepts only the shared
+argv grammar: employee containers receive exactly the four fixed named volumes
+and no bind or Docker-socket mount, and the helper fails closed while the
+approved base digest is empty. `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST`
+and the daemon `AGENTCONTROL_DOCKER_GID` are deployment inputs.
+
 **Still not implemented or operationally validated:** key rotation/compromise
 re-enrollment, production managed hiring/provisioning at scale, and the approval
 and managed-provisioning/orientation slice (#260) itself, which is code-complete
 and hermetically tested but has never run a live owner-approved hire on a host
-(see `docs/PHASE-1-CONTRACTS.md` §10.2). `/api/info` reports
+(see `docs/PHASE-1-CONTRACTS.md` §10.2/§10.3). The local managed path has been
+exercised end to end on one development machine — a generic-employee build, a
+real helper-provisioned container, real OpenCode orientation and a hire reaching
+`Ready` in about 1m50s — but that is a local dev-machine result only, not a
+`home-docker` deployment and not the accepted two-host path. `/api/info` reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
 covering only the first managed disposable two-host path, and carries
 `workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
@@ -769,5 +795,6 @@ V1 is reference only. No V1 database migration or runtime compatibility is
 promised. V2 starts with new state and explicitly provisioned environments.
 The accepted path does not validate key rotation or compromise re-enrollment and
 does not authorize production managed hiring/provisioning. The #260 approval and
-managed-provisioning/orientation paths exist as tested code but have no live
-owner-approved hire evidence on any host.
+managed-provisioning/orientation paths, and the #272 controller-local helper
+path, exist as tested code but have no live owner-approved hire evidence on any
+host.

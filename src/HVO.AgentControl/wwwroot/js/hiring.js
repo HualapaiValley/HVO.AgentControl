@@ -10,12 +10,11 @@ if (root) {
     const submit = root.querySelector('[data-hire-submit]');
     const noRoles = root.querySelector('[data-no-hire-roles]');
     let organization = null;
-    // Profile revisions with a verified build on at least one ready host, keyed
-    // by revision id. The approval selects one revision and one host where the
-    // exact verified build exists; the server re-resolves the build itself.
-    const approvedBuilds = new Map();
+    // Active current profile revisions that have a verified build on the
+    // controller-local Docker target. Managed hiring in this step approves one
+    // revision on that target only; the server re-resolves the exact build.
+    const LOCAL_DOCKER_ID = 'local-docker';
     let activeRevisions = [];
-    let readyHosts = [];
     const rolesForDepartment = () => {
         role.replaceChildren();
         const available = organization.roles.filter((item) => item.departmentId === department.value);
@@ -40,8 +39,6 @@ if (root) {
         const dd = document.createElement('dd'); dd.textContent = pretty(value);
         return [dt, dd];
     };
-    const hostsForRevision = (revisionId) => readyHosts.filter((host) => (approvedBuilds.get(revisionId) || []).includes(host.id));
-
     const renderRequestCard = (request) => {
         const card = document.createElement('article'); card.className = 'request-card'; card.dataset.requestId = request.id; card.dataset.requestState = request.state;
         const title = document.createElement('h3'); title.textContent = request.requestedDisplayName;
@@ -63,7 +60,7 @@ if (root) {
                 frozenRow('Approved profile revision', request.containerProfileRevisionId),
                 frozenRow('Verified profile build', request.profileBuildId),
                 frozenRow('Image digest', request.approvedImageDigest),
-                frozenRow('Execution host', request.approvedHostId),
+                frozenRow('Execution target', 'Controller-local Docker'),
                 frozenRow('Managed employee', request.employeeId),
                 frozenRow('Runtime binding', request.runtimeBindingId),
                 frozenRow('Worker', request.workerId),
@@ -86,21 +83,15 @@ if (root) {
 
         if (request.placement === 'DeveloperContainer') {
             const profileSelect = document.createElement('select'); profileSelect.className = 'approve-profile'; profileSelect.dataset.approveProfile = request.id; profileSelect.setAttribute('aria-label', 'Approved container profile revision');
-            const hostSelect = document.createElement('select'); hostSelect.className = 'approve-host'; hostSelect.dataset.approveHost = request.id; hostSelect.setAttribute('aria-label', 'Execution host');
             const approve = document.createElement('button'); approve.type = 'button'; approve.className = 'btn'; approve.textContent = 'Approve';
             const explanation = document.createElement('span'); explanation.className = 'control-note'; explanation.dataset.approveExplanation = request.id;
             const refreshSelectors = () => {
-                const revisionId = profileSelect.value;
-                hostSelect.replaceChildren();
-                for (const host of hostsForRevision(revisionId)) { const option = document.createElement('option'); option.value = host.id; option.textContent = `${host.displayName} (${host.id})`; hostSelect.append(option); }
-                const selectable = activeRevisions.length > 0 && hostsForRevision(revisionId).length > 0;
+                const selectable = activeRevisions.length > 0;
                 approve.disabled = !selectable;
-                hostSelect.disabled = !selectable;
+                profileSelect.disabled = !selectable;
                 explanation.textContent = selectable
-                    ? 'Approval freezes this exact profile revision and host, creates the managed employee identity and runtime binding, then durably queues provisioning and orientation to Ready.'
-                    : activeRevisions.length === 0
-                        ? 'No active profile revision has a verified image build on a ready host yet. Build and verify a profile revision first; approval then creates the employee identity and binding without provisioning.'
-                        : 'No ready host carries the verified build for that profile revision. Choose another revision or verify a build on a ready host.';
+                    ? 'Approval freezes this exact profile revision on the controller-local Docker target, creates the managed employee identity and runtime binding, then durably queues provisioning and orientation to Ready.'
+                    : 'No active profile revision has a verified image build on the controller-local Docker target yet. Build and verify a profile revision first; approval then creates the employee identity and binding without provisioning.';
             };
             for (const revision of activeRevisions) { const option = document.createElement('option'); option.value = revision.id; option.textContent = `${revision.profileName} r${revision.revisionNumber}`; profileSelect.append(option); }
             profileSelect.disabled = activeRevisions.length === 0;
@@ -108,14 +99,14 @@ if (root) {
             approve.addEventListener('click', async () => {
                 receipt.dataset.status = 'pending'; receipt.textContent = `Approving ${request.id}…`;
                 try {
-                    await fetchJson(`/api/hire-requests/${encodeURIComponent(request.id)}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: request.revision, profileRevisionId: profileSelect.value, hostId: hostSelect.value }) });
+                    await fetchJson(`/api/hire-requests/${encodeURIComponent(request.id)}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision: request.revision, profileRevisionId: profileSelect.value }) });
                     await load();
                     receipt.dataset.status = 'ok'; receipt.textContent = `Approved ${request.id}. The employee identity and binding were created and provisioning is queued; it runs in the background.`;
                 } catch (error) { receipt.dataset.status = 'error'; receipt.textContent = `Approval failed: ${error.message}`; }
             });
             refreshSelectors();
             actions.append(approve);
-            card.append(title, meta, detail, purpose, actions, profileSelect, hostSelect, explanation);
+            card.append(title, meta, detail, purpose, actions, profileSelect, explanation);
             return card;
         }
 
@@ -132,22 +123,18 @@ if (root) {
         status.textContent = `${requests.length} durable request${requests.length === 1 ? '' : 's'}`; delete status.dataset.status; list.hidden = false;
     };
 
-    // Load the active current profile revisions and the exact revisions that have
-    // a verified build on a ready host. The build list is the only authority for
+    // Load the active current profile revisions that have a verified build on the
+    // controller-local Docker target. The build list is the only authority for
     // selectability; the server re-validates the selection at approval time.
     async function loadApprovalOptions() {
-        approvedBuilds.clear();
         activeRevisions = [];
-        readyHosts = [];
         let profiles = [];
         try { profiles = await fetchJson('/api/profiles'); } catch { profiles = []; }
-        try { const hosts = await fetchJson('/api/execution-hosts'); readyHosts = hosts.filter((host) => host.enabled && host.status === 'ready'); } catch { readyHosts = []; }
         await Promise.all(profiles.filter((profile) => profile.status === 'active' && profile.currentRevisionId).map(async (profile) => {
             let builds = [];
             try { builds = await fetchJson(`/api/profiles/${encodeURIComponent(profile.id)}/revisions/${encodeURIComponent(profile.currentRevisionId)}/builds`); } catch { builds = []; }
-            const verifiedHosts = builds.filter((build) => build.state === 'built' && build.verified).map((build) => build.hostId);
-            if (verifiedHosts.length === 0) return;
-            approvedBuilds.set(profile.currentRevisionId, verifiedHosts);
+            const localVerified = builds.some((build) => build.hostId === LOCAL_DOCKER_ID && build.state === 'built' && build.verified);
+            if (!localVerified) return;
             activeRevisions.push({ id: profile.currentRevisionId, profileName: profile.displayName, revisionNumber: profile.currentRevisionNumber, revisionId: profile.currentRevisionId });
         }));
         activeRevisions.sort((left, right) => left.profileName.localeCompare(right.profileName));

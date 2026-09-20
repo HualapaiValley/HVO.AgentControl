@@ -320,7 +320,7 @@ app.MapPost("/api/execution-hosts/{id}/probe", async (HttpContext context, AcpCo
     catch (Exception exception) when (Program.IsRemoteWorkerFailure(exception)) { return Program.RemoteWorkerProblem(exception); }
 })
     .WithName("ProbeExecutionHost").WithTags("Remote workers")
-    .WithSummary("Runs the fixed approved-host capability probe only when WorkerControl is explicitly enabled.");
+    .WithSummary("Runs the fixed execution-target capability probe only when WorkerControl is explicitly enabled.");
 
 app.MapPost("/api/execution-hosts/{id}/disable", (HttpContext context, AcpControlHost control, ExecutionHostRegistry registry, string id, DisableExecutionHostRequest request) =>
 {
@@ -709,7 +709,7 @@ app.MapPost("/api/hire-requests/{id}/reject", (HttpContext context, AcpControlHo
 
 // Owner approval is the durable freeze of one hire against one verified profile
 // build. It creates the managed employee and runtime binding from that freeze,
-// commits the request to Provisioning, then queues the idempotent remote workflow.
+// commits the request to Provisioning, then queues the idempotent local managed workflow.
 // Worker control must be
 // enabled with a usable configuration because the frozen selection is only
 // meaningful when the controller can actually consume it, and the requested
@@ -722,9 +722,9 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
     if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
     var workerOptions = options.Value;
     if (!workerOptions.Enabled)
-        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so no approval was recorded.");
     if (workerOptions.Validate().Count != 0)
-        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Remote worker configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no approval was recorded.");
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so no approval was recorded.");
     try
     {
         var current = store.GetHireRequest(id);
@@ -768,7 +768,7 @@ app.MapPost("/api/hire-requests/{id}/approve", (HttpContext context, AcpControlH
     }
 })
     .WithName("ApproveHireRequest").WithTags("Hiring")
-    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build.")
+    .WithSummary("Records the durable owner approval, creates the managed employee/binding, and durably queues provisioning and orientation to Ready for one DeveloperContainer hire against a verified profile build on the controller-local Docker target.")
     .Produces<HVO.AgentControl.Organization.HireRequestSummary>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
@@ -1982,18 +1982,18 @@ public partial class Program
             title: "Remote worker record not found."),
         HVO.AgentControl.RemoteWorker.WorkerControlDisabledException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
-            title: "Remote worker control is disabled.",
-            detail: "Worker control is switched off, so no host operation was executed."),
+            title: "Worker control is disabled.",
+            detail: "Worker control is switched off, so no execution-target operation was executed."),
         HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
-            title: "Remote worker configuration is invalid.",
-            detail: "Worker control is enabled but its configuration is not usable, so no host operation was executed."),
+            title: "Worker control configuration is invalid.",
+            detail: "Worker control is enabled but its configuration is not usable, so no execution-target operation was executed."),
         HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException unavailable => Results.Problem(
             statusCode: unavailable.Transport ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable,
-            title: unavailable.Transport ? "Remote worker host is unreachable." : "Remote worker host is unavailable.",
+            title: unavailable.Transport ? "Worker execution target is unreachable." : "Worker execution target is unavailable.",
             detail: unavailable.Transport
-                ? "The fixed connector could not reach the approved host."
-                : "The approved host did not return a usable result."),
+                ? "The fixed transport could not reach the execution target."
+                : "The execution target did not return a usable result."),
         HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException => Results.Problem(
             statusCode: StatusCodes.Status502BadGateway,
             title: "Remote worker reconciliation is invalid",

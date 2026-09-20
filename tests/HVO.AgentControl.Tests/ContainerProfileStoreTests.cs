@@ -219,11 +219,19 @@ public sealed class ContainerProfileStoreTests : IDisposable
         _store.CreateContainerProfile(new ContainerProfileCreate("k", "extra", "Extra", null, """{"image":"agentcontrol-worker-base"}""", null), null);
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _store.DatabasePath, Mode = SqliteOpenMode.ReadOnly }.ToString());
         connection.Open();
-        foreach (var (table, expected) in new[] { ("employees", 1L), ("runtime_bindings", 1L), ("execution_hosts", 0L), ("worker_enrollments", 0L), ("hire_requests", 0L), ("container_profiles", 2L) })
+        foreach (var (table, expected) in new[] { ("employees", 1L), ("runtime_bindings", 1L), ("execution_hosts", 1L), ("worker_enrollments", 0L), ("hire_requests", 0L), ("container_profiles", 2L) })
         {
             using var command = connection.CreateCommand();
             command.CommandText = $"SELECT COUNT(*) FROM {table}";
             Assert.Equal(expected, Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        // The one host is the reserved controller-local Docker row, seeded
+        // structural and unprobed: the profile slice never creates a host.
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = $"SELECT COUNT(*) FROM execution_hosts WHERE id = '{ExecutionHosts.LocalDockerId}' AND transport_kind = 'local-docker' AND capability_status = 'unprobed';";
+            Assert.Equal(1L, Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
         }
     }
 

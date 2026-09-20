@@ -27,6 +27,7 @@ namespace HVO.AgentControl.RemoteWorker;
 public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorkerOperations operations, IOptions<WorkerControlOptions> configured, ILogger<ProfileBuildCoordinator> logger)
 {
     private readonly WorkerControlOptions _options = configured.Value;
+    private readonly ExecutionTargetResolver _targets = new(control, configured);
 
     /// <summary>
     /// Build ids this process is actively driving. A row that is
@@ -42,11 +43,13 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     {
         RequireEnabled();
         var store = Store();
-        var host = Approved(hostId);
+        // Queueing is a store-level intent for either target kind. Resolving the
+        // target still requires the host to be a registered execution host.
+        var target = _targets.Resolve(hostId);
         var profile = FindRevision(store, profileRevisionId) ?? throw new OrganizationNotFoundException($"Container profile revision '{profileRevisionId}' does not exist.");
         var (_, contextHash, _) = ProfileBuildContext.Render(profile, _options.ApprovedImageDigest, _options.ApprovedImagePlatform);
         var tag = ResultTag(profile.Id, contextHash);
-        return store.QueueProfileBuild(profile.Id, host.Id, _options.ApprovedImageDigest, _options.ApprovedImagePlatform, contextHash, tag);
+        return store.QueueProfileBuild(profile.Id, target.Id, _options.ApprovedImageDigest, _options.ApprovedImagePlatform, contextHash, tag);
     }
 
     /// <summary>
@@ -69,7 +72,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     {
         var store = Store();
         var build = store.GetProfileBuild(buildId) ?? throw new OrganizationNotFoundException($"Profile build '{buildId}' does not exist.");
-        var host = Approved(build.HostId);
+        var host = _targets.Resolve(build.HostId);
         var revision = FindRevision(store, build.ProfileRevisionId) ?? throw new OrganizationStoreCorruptException("The build's profile revision is missing.");
         if (build.BaseImageDigest != _options.ApprovedImageDigest || build.Platform != _options.ApprovedImagePlatform)
             throw new OrganizationConcurrencyException("The approved base image changed since this build was queued; queue a new build.");
@@ -121,7 +124,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         }
     }
 
-    private async Task<ProfileBuildRecord> ReconcileAsync(OrganizationStore store, ApprovedExecutionHost host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
+    private async Task<ProfileBuildRecord> ReconcileAsync(OrganizationStore store, ExecutionTarget host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
     {
         var inspect = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageInspect, [build.ResultTag], null, cancellationToken).ConfigureAwait(false);
         if (inspect.ErrorCategory == "not-found")
@@ -131,7 +134,7 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
         return await VerifyAsync(store, host, build, revision, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<ProfileBuildRecord> VerifyAsync(OrganizationStore store, ApprovedExecutionHost host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
+    private async Task<ProfileBuildRecord> VerifyAsync(OrganizationStore store, ExecutionTarget host, ProfileBuildRecord build, ContainerProfileRevisionSummary revision, CancellationToken cancellationToken)
     {
         var inspect = await operations.ExecuteAsync(host, RemoteDockerOperation.ImageInspect, [build.ResultTag], null, cancellationToken).ConfigureAwait(false);
         if (inspect.ExitCode != 0) return Fail(store, build, "The built image could not be inspected.", inspect.ErrorCategory);
@@ -185,7 +188,6 @@ public sealed class ProfileBuildCoordinator(AcpControlHost control, IRemoteWorke
     }
 
     private OrganizationStore Store() => control.Organization ?? throw new OrganizationStoreException("The authoritative organization store is unavailable.");
-    private ApprovedExecutionHost Approved(string hostId) => _options.ApprovedHosts.SingleOrDefault(x => x.Id == hostId) ?? throw new KeyNotFoundException("Execution host is not approved.");
     private void RequireEnabled() { if (!_options.Enabled) throw new WorkerControlDisabledException(); if (_options.Validate().Count != 0) throw new WorkerControlConfigurationException("Remote worker configuration is invalid."); }
 }
 

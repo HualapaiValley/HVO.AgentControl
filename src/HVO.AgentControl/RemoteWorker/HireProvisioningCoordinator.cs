@@ -141,7 +141,7 @@ public sealed class HireProvisioningCoordinator(
             current = store.TransitionHireRequestState(hireId, current.Revision, current.State, HireRequestStates.Provisioning, "Provisioning managed worker.");
         }
 
-        var enrollment = await provisioning.PlanAsync(creation.RuntimeBindingId, creation.ApprovedHostId, creation.ApprovedImageDigest, cancellationToken).ConfigureAwait(false);
+        var enrollment = await provisioning.PlanManagedAsync(creation.RuntimeBindingId, cancellationToken).ConfigureAwait(false);
         enrollment = await provisioning.ApplyAllAsync(enrollment.WorkerId, cancellationToken).ConfigureAwait(false);
 
         var afterProvision = store.GetHireRequest(hireId)!;

@@ -412,7 +412,11 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         using var hosts = await client.GetAsync("/api/execution-hosts");
         Assert.Equal(HttpStatusCode.OK, hosts.StatusCode);
         using var hostsDocument = JsonDocument.Parse(await hosts.Content.ReadAsStringAsync());
-        Assert.Empty(hostsDocument.RootElement.EnumerateArray());
+        // Only the reserved controller-local Docker row exists; no SSH host was
+        // registered and the profile slice never creates an enrollment.
+        var host = Assert.Single(hostsDocument.RootElement.EnumerateArray());
+        Assert.Equal(ExecutionHosts.LocalDockerId, host.GetProperty("id").GetString());
+        Assert.Equal("local-docker", host.GetProperty("transportKind").GetString());
 
         // Portal route contract: the pages exist for GET and the wrong method is a truthful 405.
         using var page = await client.GetAsync("/profiles");
@@ -666,7 +670,7 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         request.Headers.Add("Origin", disabled.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
         using var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        Assert.Equal("Remote worker control is disabled.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
     }
 
     [Fact]
@@ -682,7 +686,7 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         request.Headers.Add("Origin", invalid.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
         using var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
-        Assert.Equal("Remote worker configuration is invalid.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
+        Assert.Equal("Worker control configuration is invalid.", (await ReadProblemAsync(response)).GetProperty("title").GetString());
     }
 
     [Fact]
@@ -699,6 +703,8 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         var expectedRevision = beforeDocument.RootElement.GetProperty("revision").GetInt32();
         Assert.Equal(HireRequestStates.Requested, beforeDocument.RootElement.GetProperty("state").GetString());
 
+        // A caller-supplied hostId is an unknown JSON property the endpoint never
+        // reads: placement is always the controller-local Docker target.
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve")
         {
             Content = JsonContent.Create(new { expectedRevision, profileRevisionId = revisionId, hostId = "host-a" }),
@@ -712,7 +718,7 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(revisionId, approved.GetProperty("containerProfileRevisionId").GetString());
         Assert.Equal(build.Id, approved.GetProperty("profileBuildId").GetString());
         Assert.Equal(build.ImageDigest, approved.GetProperty("approvedImageDigest").GetString());
-        Assert.Equal("host-a", approved.GetProperty("approvedHostId").GetString());
+        Assert.Equal(ExecutionHosts.LocalDockerId, approved.GetProperty("approvedHostId").GetString());
         var employeeId = approved.GetProperty("employeeId").GetString();
         var bindingId = approved.GetProperty("runtimeBindingId").GetString();
         Assert.StartsWith("emp-", employeeId, StringComparison.Ordinal);
@@ -777,19 +783,16 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         const string baseDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111";
         const string builtDigest = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222";
         const string contextHash = "sha256:" + "3333333333333333333333333333333333333333333333333333333333333333";
-        if (store.GetExecutionHost("host-a") is null)
-        {
-            store.RegisterExecutionHost("host-a", "host-a.example", 22, "roys", "/known", new ExecutionHostRegistration("host-a", "host-a", "Host A"));
-        }
-        var host = store.GetExecutionHost("host-a")!;
-        store.RecordExecutionHostProbe("host-a", host.Revision, new ExecutionHostProbe(
-            "ssh-ed25519", "SHA256:x", "sha256:" + new string('1', 64), "29.0", "1.51", "x86_64", "overlay2", "ext4",
-            false, 64L << 30, 16L << 30, 8, true, "linux/amd64", "valid"));
+        // Managed hiring freezes a verified build on the controller-local Docker
+        // target, so the build is seeded there.
+        var local = store.GetExecutionHost(ExecutionHosts.LocalDockerId)!;
+        store.RecordLocalExecutionHostProbe(ExecutionHosts.LocalDockerId, local.Revision, new LocalExecutionHostProbe(
+            "29.0", "1.51", "x86_64", "overlay2", "ext4", false, 64L << 30, 16L << 30, 8, true, "linux/amd64", "valid"));
         var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
         var revision = store.GetContainerProfile(profile.Id)!.Revisions.Single();
-        var existing = store.GetVerifiedProfileBuild(revision.Id, "host-a");
+        var existing = store.GetVerifiedProfileBuild(revision.Id, ExecutionHosts.LocalDockerId);
         if (existing is not null) return existing;
-        var queued = store.QueueProfileBuild(revision.Id, "host-a", baseDigest, "linux/amd64", contextHash, "agentcontrol-profile:x");
+        var queued = store.QueueProfileBuild(revision.Id, ExecutionHosts.LocalDockerId, baseDigest, "linux/amd64", contextHash, "agentcontrol-profile:x");
         var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
         var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
         return store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: builtDigest, verified: true, evidenceHash: contextHash);
