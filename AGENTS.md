@@ -11,26 +11,36 @@ Build a Docker-native controller for self-contained OpenCode workers using ACP.
 No Fleet dependency, Claude-specific adapter, shared worker checkout, or
 implicit reuse of existing infrastructure. The active baseline implements a
 single control-host portal plus a disabled-by-default hermetic remote-worker
-controller slice: schema-v10 records, approved-host validation, fixed SSH/Docker
+controller slice: schema-v11 records, approved-host validation, fixed SSH/Docker
 command construction and shared bridge protocol code. Durable hire request and
 revision-bound rejection are shipped, as are immutable container profiles with
 a constrained devcontainer subset (#258) and per-host verified builds (#259).
 Owner approval (#260) is implemented as tested code capability: a
 revision-bound, same-origin owner action freezes one verified profile-revision
-build on a ready host, atomically creates the managed employee identity and
-DeveloperContainer binding, and a resumable coordinator drives
+build, atomically creates the managed employee identity and DeveloperContainer
+binding, and a resumable coordinator drives
 `Approved → Provisioning → Orienting → Ready` from the frozen approval through
-remote orientation delivery and comprehension. Approval commits the request to
+orientation delivery and comprehension. Approval commits the request to
 `Provisioning` and durably queues that work; it runs in the background and is
-rebuilt from persisted state after a restart. It is **not operationally
-validated**: no live
+rebuilt from persisted state after a restart. The #272 work freezes a managed
+hire to the **controller-local Docker target** (`local-docker`): approval
+requires no SSH host input, and every Docker operation runs through a privileged
+`docker-helper` over a Unix socket. The control image has neither the Docker
+daemon socket nor a Docker CLI; the helper is the only service that mounts the
+socket and the only writer of the shared helper-socket volume. It is **not
+operationally validated**: no live
 owner-approved hire has been executed on any host, the
 `home-docker` execution-host enrollment is still held by the owner, and
 `WorkerControl` remains disabled by default. Approval is an explicit owner act
 on a verified selection; nothing provisions without it. No request may
 auto-create an employee and profile updates
 never auto-rebuild employees; #261 (data-preserving rebuild) is out of scope and
-there is no termination or scheduling policy. Live provisioning and
+there is no termination or scheduling policy. Keep the three worker classes
+distinct: (1) automatic controller-local managed employees provisioned through
+the helper; (2) manually operated remote Docker workers reached by
+controller-initiated pinned SSH + `docker exec`, never created by hiring; and
+(3) future manually enrolled standalone workers that connect outbound — **not
+implemented**, no listener or enrollment protocol exists. Live provisioning and
 task routing are implemented hermetically, as are the viewer protocol and fixed
 production worker PTY backend. The first managed disposable two-host path is now
 live-accepted on an authorized disposable topology: pinned ED25519/strict SSH to
@@ -42,7 +52,11 @@ viewer attach were exercised, and the disposable resources were removed. This
 path stays disabled by default; `WorkerControl:Enabled` remains the deployment
 gate and is false by default. Key rotation and compromise re-enrollment, and
 production managed hires/provisioning, are **not** validated by this evidence.
-Distinguish code capability from operationally tested behavior.
+Separately, the local managed path has since reached `Ready` against the real
+`docker-helper` and real OpenCode on one development machine (about 1m50s), and
+that is a local dev-machine result only — not a `home-docker` deployment and not
+the operationally accepted two-host path. Distinguish code capability from
+operationally tested behavior.
 
 ## Repository layout
 

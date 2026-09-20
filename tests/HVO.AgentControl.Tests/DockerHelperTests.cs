@@ -30,11 +30,14 @@ public sealed class DockerHelperTests
         var control = compose[..compose.IndexOf("  docker-helper:", StringComparison.Ordinal)];
         var helper = compose[compose.IndexOf("  docker-helper:", StringComparison.Ordinal)..compose.IndexOf("  worker-local:", StringComparison.Ordinal)];
 
-        Assert.DoesNotContain("docker.sock", control, StringComparison.OrdinalIgnoreCase);
+        // Only mount lines matter: comments may explain the daemon socket, but a
+        // mount of it must appear exactly once in the whole file, and in the helper.
+        static bool MountsDaemonSocket(string line) => line.TrimStart().StartsWith("- ", StringComparison.Ordinal)
+            && line.Contains("docker.sock", StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(control.Split('\n'), MountsDaemonSocket);
         Assert.Contains("docker-helper-socket:/run/agentcontrol-docker-helper", control, StringComparison.Ordinal);
         Assert.Contains("/var/run/docker.sock:/var/run/docker.sock", helper, StringComparison.Ordinal);
-        // Exactly one line in the whole file mentions the daemon socket at all.
-        Assert.Single(compose.Split('\n'), line => line.Contains("docker.sock", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(compose.Split('\n'), MountsDaemonSocket);
         Assert.Contains("read_only: true", helper, StringComparison.Ordinal);
         Assert.Contains("init: true", helper, StringComparison.Ordinal);
         Assert.Contains("no-new-privileges:true", helper, StringComparison.Ordinal);
@@ -47,6 +50,146 @@ public sealed class DockerHelperTests
         Assert.Contains("--uid 1002", dockerfile, StringComparison.Ordinal);
         Assert.Contains("USER 1002:1002", dockerfile, StringComparison.Ordinal);
         Assert.Contains("chmod 0750 /run/agentcontrol-docker-helper", dockerfile, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The helper socket is the only channel the controller may use for Docker.
+    /// Exactly two services mount the shared volume (the helper writes it, the
+    /// control service reads it), the controller has no daemon socket, and the
+    /// helper stage installs the Docker CLI while the final control stage does
+    /// not.
+    /// </summary>
+    [Fact]
+    public void ComposeSharesTheHelperSocketVolumeWithControlOnlyAndKeepsDockerOutOfTheControlImage()
+    {
+        var root = ControllerIsolationLayoutTests.RepositoryRoot();
+        var compose = File.ReadAllText(Path.Combine(root, "compose.yaml"));
+        var dockerfile = File.ReadAllText(Path.Combine(root, "Dockerfile"));
+
+        // The shared helper socket volume is mounted by exactly two services.
+        var socketMounts = compose.Split('\n')
+            .Count(line => line.Contains("docker-helper-socket:/run/agentcontrol-docker-helper", StringComparison.Ordinal));
+        Assert.Equal(2, socketMounts);
+
+        var control = compose[..compose.IndexOf("  docker-helper:", StringComparison.Ordinal)];
+        var helper = compose[compose.IndexOf("  docker-helper:", StringComparison.Ordinal)..compose.IndexOf("  worker-local:", StringComparison.Ordinal)];
+        // The worker service section ends where the top-level volumes block begins;
+        // that block legitimately declares the shared volume.
+        var workerStart = compose.IndexOf("  worker-local:", StringComparison.Ordinal);
+        var volumesStart = compose.IndexOf("\nvolumes:", StringComparison.Ordinal);
+        Assert.True(volumesStart > workerStart, "the top-level volumes block must follow the worker service");
+        var worker = compose[workerStart..volumesStart];
+        Assert.Contains("docker-helper-socket:/run/agentcontrol-docker-helper", control, StringComparison.Ordinal);
+        Assert.Contains("docker-helper-socket:/run/agentcontrol-docker-helper", helper, StringComparison.Ordinal);
+        Assert.DoesNotContain("docker-helper-socket", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("docker.sock", worker, StringComparison.OrdinalIgnoreCase);
+
+        // The final control stage is `final` -> `control` -> `control-runtime`.
+        // Docker's CLI/daemon package is installed only in the helper stage, so
+        // neither the control runtime nor the final image can invoke Docker.
+        var controlStages = Stages(dockerfile, "control-runtime", "control", "final");
+        Assert.DoesNotContain("docker.io", controlStages, StringComparison.Ordinal);
+        Assert.DoesNotContain("docker-ce", controlStages, StringComparison.Ordinal);
+        Assert.DoesNotContain("docker-cli", controlStages, StringComparison.Ordinal);
+        Assert.DoesNotContain("install -y docker", controlStages, StringComparison.Ordinal);
+
+        var helperStage = Stages(dockerfile, "docker-helper");
+        Assert.Contains("docker.io", helperStage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Compose must pass the deployment inputs the helper fails closed without:
+    /// the approved base digest and the daemon's group id. The comments must say
+    /// they are required for deployment and that an empty digest makes the
+    /// helper refuse every container-create until it is set.
+    /// </summary>
+    [Fact]
+    public void ComposePassesTheApprovedBaseDigestAndDockerGidAndDocumentsFailClosed()
+    {
+        var root = ControllerIsolationLayoutTests.RepositoryRoot();
+        var compose = File.ReadAllText(Path.Combine(root, "compose.yaml"));
+
+        Assert.Contains(
+            "AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST: ${AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST:-}",
+            compose,
+            StringComparison.Ordinal);
+        Assert.Contains("${AGENTCONTROL_DOCKER_GID:-", compose, StringComparison.Ordinal);
+        Assert.Contains("group_add", compose, StringComparison.Ordinal);
+
+        // The fail-closed contract must be stated where an operator reads it.
+        Assert.Contains("fail", compose, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST", compose, StringComparison.Ordinal);
+        Assert.Contains("AGENTCONTROL_DOCKER_GID", compose, StringComparison.Ordinal);
+        Assert.Contains("required for deployment", compose, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Returns the concatenated text of the named Dockerfile stages, from the
+    /// `FROM ... AS <name>` line up to the next `FROM`.
+    /// </summary>
+    private static string Stages(string dockerfile, params string[] names)
+    {
+        var wanted = names.ToHashSet(StringComparer.Ordinal);
+        var selected = new List<string>();
+        string? current = null;
+        foreach (var line in dockerfile.Split('\n'))
+        {
+            if (line.StartsWith("FROM ", StringComparison.Ordinal))
+            {
+                var marker = " AS ";
+                var index = line.IndexOf(marker, StringComparison.Ordinal);
+                current = index < 0 ? line[marker.Length..].Trim() : line[(index + marker.Length)..].Trim();
+                continue;
+            }
+            if (current is not null && wanted.Contains(current)) selected.Add(line);
+        }
+        return string.Join('\n', selected);
+    }
+
+    /// <summary>
+    /// An employee container can only ever receive the four fixed named volumes.
+    /// The grammar has no bind-mount form at all, rejects a Docker socket path as
+    /// either a mount name or a mount point, and never emits `-v`/`--volume`.
+    /// </summary>
+    [Fact]
+    public void GrammarMountsOnlyTheFourNamedVolumesAndRefusesAnyBindOrDockerSocket()
+    {
+        var identity = Identity();
+        var volumes = Volumes();
+        var argv = DockerArgv.BuildContainerCreate(new("agentcontrol-worker-x", Digest, "linux/amd64", identity, volumes, 1, 1, 32, [Digest]), Policy);
+
+        // Every emitted mount is a named volume at one of the four fixed points.
+        var mounts = argv.Where((token, index) => index > 0 && argv[index - 1] == "--mount").ToArray();
+        Assert.Equal(4, mounts.Length);
+        Assert.All(mounts, mount => Assert.StartsWith("type=volume,src=agentcontrol-", mount, StringComparison.Ordinal));
+        Assert.DoesNotContain("type=bind", string.Join(' ', argv), StringComparison.Ordinal);
+        Assert.DoesNotContain("-v", argv);
+        Assert.DoesNotContain("--volume", argv);
+
+        // A Docker socket path as the source name or as the mount point is refused.
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(
+            new("agentcontrol-worker-x", Digest, "linux/amd64", identity, [new("/var/run/docker.sock", "/control"), .. volumes.Skip(1)], 1, 1, 32, [Digest]), Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(
+            new("agentcontrol-worker-x", Digest, "linux/amd64", identity, [new("agentcontrol-control-x", "/var/run/docker.sock"), .. volumes.Skip(1)], 1, 1, 32, [Digest]), Policy));
+
+        // A fifth mount, or a duplicate, is refused: the set must match exactly.
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(
+            new("agentcontrol-worker-x", Digest, "linux/amd64", identity, [.. volumes, new("agentcontrol-extra-x", "/control")], 1, 1, 32, [Digest]), Policy));
+    }
+
+    [Fact]
+    public void ApprovedBaseDigestIsRequiredAndTheHelperFailsClosedWhenEmpty()
+    {
+        // The helper's policy is built from the environment; an unset digest is
+        // the empty string. Every container-create must then be refused rather
+        // than silently accept an unapproved image. The same holds for a
+        // malformed digest.
+        var emptyPolicy = new DockerPolicy(string.Empty, "linux/amd64", 1024 * 1024 * 1024, 2, 256, RequireAgentControlPrefixes: true);
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(Spec(), emptyPolicy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildBootstrap(new("agentcontrol-control-x", Digest, "linux/amd64", Identity()), emptyPolicy));
+
+        var malformedPolicy = emptyPolicy with { ApprovedBaseDigest = "not-a-digest" };
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildContainerCreate(Spec(), malformedPolicy));
     }
 
     [Fact]
@@ -190,6 +333,7 @@ public sealed class DockerHelperTests
 
     private static WorkerResourceIdentity Identity() => new("org", "controller", "host", "worker", "binding", "operation");
     private static NamedVolumeMount[] Volumes() => [new("agentcontrol-control-x", "/control"), new("agentcontrol-home-x", "/home/worker"), new("agentcontrol-workspace-x", "/workspace"), new("agentcontrol-session-x", "/session")];
+    private static ContainerCreateSpec Spec() => new("agentcontrol-worker-x", Digest, "linux/amd64", Identity(), Volumes(), 1, 1, 32, [Digest]);
     private sealed class FakeCredentials(int uid) : IPeerCredentialProvider { public int GetUid(Socket socket) => uid; }
     private sealed class FakeRunner : IDockerProcessRunner
     {

@@ -77,6 +77,24 @@ services:
     build:
       context: .
       target: docker-helper
+    # Two inputs are required for deployment and are supplied by the operator,
+    # normally through a `.env` file beside this one (see README "Container"):
+    #
+    #   AGENTCONTROL_DOCKER_GID               the host daemon socket's group id
+    #                                         (`stat -c '%g' /var/run/docker.sock`),
+    #                                         so the helper's uid 1002 can reach it
+    #                                         through group_add.
+    #   AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST
+    #                                         the approved worker base image digest
+    #                                         (`docker image inspect --format '{{.Id}}'
+    #                                         <worker image>`). It must be set; the
+    #                                         helper fails closed - and refuses every
+    #                                         container-create - while it is empty or
+    #                                         malformed.
+    #
+    # Both are read here as `${VAR:-default}`; the empty-string default for the
+    # digest is deliberate so an unconfigured deployment starts but cannot
+    # provision, rather than silently approving an unpinned image.
     environment:
       AGENTCONTROL_DOCKER_HELPER_SOCKET: /run/agentcontrol-docker-helper/helper.sock
       AGENTCONTROL_DOCKER_HELPER_CLIENT_UID: "1001"
@@ -89,6 +107,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - docker-helper-socket:/run/agentcontrol-docker-helper
+    # The daemon socket's group is host-specific; keep the checked-in default for
+    # a standard Docker install and override it with AGENTCONTROL_DOCKER_GID.
     group_add:
       - ${AGENTCONTROL_DOCKER_GID:-998}
     cap_drop:

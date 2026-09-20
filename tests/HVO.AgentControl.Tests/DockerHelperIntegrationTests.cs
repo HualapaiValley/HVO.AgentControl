@@ -61,6 +61,41 @@ public sealed class DockerHelperIntegrationTests
     }
 
     /// <summary>
+    /// Builds the privileged helper's own image stage and inspects it: the Docker
+    /// CLI is present, no setuid/setgid file survives (the helper runs without
+    /// no-new-privileges on a read-only rootfs, so an inherited setuid binary would
+    /// be an escalation surface), and the process identity is the unprivileged
+    /// uid 1002.
+    /// </summary>
+    [Fact]
+    public void RealHelperImageCarriesTheDockerCliNoSetuidFilesAndUser1002()
+    {
+        if (!Available.Value) return;
+        var tag = "hvo-agentcontrol:helper-contract-" + Guid.NewGuid().ToString("N")[..12];
+        try
+        {
+            var build = Run(["build", "--target", "docker-helper", "--tag", tag, RepositoryRoot()], 900_000);
+            Assert.True(build.ExitCode == 0, build.Output);
+
+            // The fixed CLI and the helper entrypoint are both in the image.
+            var cli = Run(["run", "--rm", "--entrypoint", "/usr/bin/docker", tag, "version", "--format", "{{.Client.Version}}"]);
+            Assert.True(cli.ExitCode == 0, cli.Output);
+            var helper = Run(["run", "--rm", "--entrypoint", "/usr/bin/stat", tag, "-c", "%a", "/app/HVO.AgentControl.DockerHelper.dll"]);
+            Assert.Equal("644", helper.Output.Trim());
+
+            // No file may keep a setuid or setgid bit on the runtime rootfs.
+            var setuid = Run(["run", "--rm", "--entrypoint", "/usr/bin/find", tag, "/", "-xdev", "-perm", "/6000", "-type", "f", "-print"]);
+            Assert.True(setuid.ExitCode == 0, setuid.Output);
+            Assert.Equal(string.Empty, setuid.Output.Trim());
+
+            // The image's configured user id is 1002; docker inspect reports it.
+            var user = Run(["image", "inspect", "--format", "{{.Config.User}}", tag]);
+            Assert.Equal("1002:1002", user.Output.Trim());
+        }
+        finally { _ = Run(["image", "rm", "-f", tag]); }
+    }
+
+    /// <summary>
     /// Opens a real bidirectional exec stream against a throwaway container. The
     /// fixed grammar can only exec the worker entry point, which the throwaway
     /// image does not have, so the assertion is that the helper really spawned
@@ -137,13 +172,15 @@ public sealed class DockerHelperIntegrationTests
 
     private static string Platform() => Run(["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"]).Output.Trim();
 
-    private static (int ExitCode, string Output) Run(string[] args)
+    private static string RepositoryRoot() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
+
+    private static (int ExitCode, string Output) Run(string[] args, int timeout = 120_000)
     {
         using var process = new Process { StartInfo = new ProcessStartInfo("docker") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false } };
         foreach (var arg in args) process.StartInfo.ArgumentList.Add(arg);
         process.Start();
         var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
-        if (!process.WaitForExit(120_000)) { process.Kill(true); return (-1, output + " timed out"); }
+        if (!process.WaitForExit(timeout)) { process.Kill(true); return (-1, output + " timed out"); }
         return (process.ExitCode, output);
     }
 }
