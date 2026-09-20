@@ -277,10 +277,40 @@ public sealed class LocalManagedHiringDockerIntegrationTests(ITestOutputHelper o
             var adapter = new RemoteWorkerProvisionerAdapter(routed);
             var provisioning = new RemoteWorkerProvisioningCoordinator(control, adapter, options, new ThrowingSessionFactory());
             var cleanup = new CleanupCoordinator(control, adapter, provisioning, options, NullLogger<CleanupCoordinator>.Instance);
-            var removed = await cleanup.CleanupProfileBuildAsync(queued.Id, "owner", timeout.Token);
 
-            Assert.Equal(ProfileBuildStates.Removed, removed.State);
-            Assert.NotEqual(0, Run(["image", "inspect", resultTag]).ExitCode);
+            // The tag aliases the approved base image, so removing it could delete
+            // the base. Cleanup must refuse before any transport removal and leave
+            // both the tag and the base intact.
+            await Assert.ThrowsAsync<OrganizationValidationException>(() => cleanup.CleanupProfileBuildAsync(queued.Id, "owner", timeout.Token));
+            Assert.Equal(ProfileBuildStates.Failed, store.GetProfileBuild(queued.Id)!.State);
+            Assert.Equal(0, Run(["image", "inspect", resultTag]).ExitCode);
+            Assert.Equal(0, Run(["image", "inspect", baseDigest]).ExitCode);
+
+            // A genuinely orphan image that is neither the approved base nor in use
+            // removes cleanly, proving the safe path still works. Build a tiny
+            // scratch image by importing an empty tar, tag it with the build's
+            // result tag, and prove the tag and image are gone afterwards.
+            var orphanTag = "agentcontrol-profile:prev-orphan-" + Guid.NewGuid().ToString("N")[..12];
+            var imported = Run(["import", "-", "agentcontrol-cleanup-scratch:" + Guid.NewGuid().ToString("N")[..12]]);
+            Assert.Equal(0, imported.ExitCode);
+            var scratchTag = imported.Output.Trim();
+            var retag = Run(["image", "tag", scratchTag, orphanTag]);
+            Assert.Equal(0, retag.ExitCode);
+            var orphanDigest = Run(["image", "inspect", "--format", "{{.Id}}", orphanTag]).Output.Trim();
+            Assert.StartsWith("sha256:", orphanDigest, StringComparison.Ordinal);
+            var orphanProfile = store.CreateContainerProfile(new ContainerProfileCreate(
+                Guid.NewGuid().ToString("N"), "cleanup-orphan-" + Guid.NewGuid().ToString("N")[..8], "Cleanup Orphan",
+                "Scoped cleanup orphan fixture.",
+                """{"image":"agentcontrol-worker-base","name":"Cleanup Orphan"}""", null), null);
+            var orphanRevision = store.GetContainerProfile(orphanProfile.Id)!.Revisions.Single();
+            var orphanQueued = store.QueueProfileBuild(orphanRevision.Id, ExecutionHosts.LocalDockerId, orphanDigest, platform, "sha256:" + new string('8', 64), orphanTag);
+            var orphanBuilding = store.TransitionProfileBuild(orphanQueued.Id, orphanQueued.Revision, ProfileBuildStates.Building);
+            var orphanVerifying = store.TransitionProfileBuild(orphanBuilding.Id, orphanBuilding.Revision, ProfileBuildStates.Verifying);
+            _ = store.TransitionProfileBuild(orphanVerifying.Id, orphanVerifying.Revision, ProfileBuildStates.Failed, failureSummary: "the build failed (remote-command-failed)");
+
+            var orphanRemoved = await cleanup.CleanupProfileBuildAsync(orphanQueued.Id, "owner", timeout.Token);
+            Assert.Equal(ProfileBuildStates.Removed, orphanRemoved.State);
+            Assert.NotEqual(0, Run(["image", "inspect", orphanTag]).ExitCode);
             Assert.Equal(0, Run(["image", "inspect", baseDigest]).ExitCode);
         }
         finally

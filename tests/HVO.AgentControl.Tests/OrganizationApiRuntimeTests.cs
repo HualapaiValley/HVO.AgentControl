@@ -719,6 +719,44 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
     }
 
     [Fact]
+    public async Task RebuildResumeAndAbandonEndpointsValidateIdentityOriginAndConfiguration()
+    {
+        using var disabled = new EnabledRuntimeFactory();
+        using var disabledClient = await ReadyClientAsync(disabled);
+        using var overviewResponse = await disabledClient.GetAsync("/api/organization/portal");
+        using var overview = JsonDocument.Parse(await overviewResponse.Content.ReadAsStringAsync());
+        var seedEmployee = overview.RootElement.GetProperty("employees").EnumerateArray().Single();
+        var seedId = seedEmployee.GetProperty("id").GetString();
+        var origin = disabled.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority);
+
+        // Unauthenticated, malformed and cross-origin requests are refused before any
+        // configuration check for both recovery endpoints.
+        using var anonymousClient = disabled.CreateClient();
+        using var unauthenticatedResume = await anonymousClient.PostAsync($"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/resume", null);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticatedResume.StatusCode);
+        using var malformedResume = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/not-a-rebuild/resume");
+        malformedResume.Headers.Add("Origin", origin);
+        using var malformedResumeResponse = await disabledClient.SendAsync(malformedResume);
+        Assert.Equal(HttpStatusCode.BadRequest, malformedResumeResponse.StatusCode);
+        using var crossOriginAbandon = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/abandon");
+        crossOriginAbandon.Headers.Add("Origin", "https://example.invalid");
+        using var crossOriginAbandonResponse = await disabledClient.SendAsync(crossOriginAbandon);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginAbandonResponse.StatusCode);
+
+        // With valid origin and identifiers, the disabled gate answers 409 for both.
+        using var disabledResume = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/resume");
+        disabledResume.Headers.Add("Origin", origin);
+        using var disabledResumeResponse = await disabledClient.SendAsync(disabledResume);
+        Assert.Equal(HttpStatusCode.Conflict, disabledResumeResponse.StatusCode);
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(disabledResumeResponse)).GetProperty("title").GetString());
+        using var disabledAbandon = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seedId}/rebuilds/rbld-0000000000000000/abandon");
+        disabledAbandon.Headers.Add("Origin", origin);
+        using var disabledAbandonResponse = await disabledClient.SendAsync(disabledAbandon);
+        Assert.Equal(HttpStatusCode.Conflict, disabledAbandonResponse.StatusCode);
+        Assert.Equal("Worker control is disabled.", (await ReadProblemAsync(disabledAbandonResponse)).GetProperty("title").GetString());
+    }
+
+    [Fact]
     public async Task ApproveIs409WhenWorkerControlIsDisabled()
     {
         using var disabled = new EnabledRuntimeFactory();

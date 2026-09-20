@@ -381,6 +381,52 @@ public sealed class HireProvisioningCoordinatorTests
         Assert.True(absentFixture.ManualHoldActive());
     }
 
+    [Fact]
+    public async Task EmployeeRebuildResumesAStrandedIntentAndABandonRestoresRemediation()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "resume");
+
+        // A stranded Intent (crash between commit and hold) is driven to Applied by
+        // ResumeAsync, which takes the hold before doing any work.
+        var intent = fixture.BeginRebuild(target.Id, RebuildDigest);
+        Assert.Equal(EmployeeRebuildStates.Intent, intent.State);
+        var resumed = await fixture.RebuildCoordinator.ResumeAsync(intent.Id, CancellationToken.None);
+        Assert.Equal(EmployeeRebuildStates.Applied, resumed.Rebuild.State);
+        Assert.False(fixture.ManualHoldActive());
+    }
+
+    [Fact]
+    public async Task EmployeeRebuildAbandonRestoresAnOwnersPreexistingHold()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        await fixture.MakeOrientationReadyAsync();
+        var target = fixture.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "abandon");
+
+        // The owner already held dispatch before the rebuild. The coordinator
+        // captures that when it begins and restores it on abandon rather than
+        // clearing a hold it did not take.
+        fixture.Store.SetManualDispatchHold(fixture.EmployeeId, true, "owner inspection");
+        var intent = fixture.BeginRebuild(target.Id, RebuildDigest, holdPreexisting: true);
+        Assert.True(fixture.Store.GetEmployeeRebuild(intent.Id)!.HoldPreexisting);
+        var abandoned = fixture.RebuildCoordinator.AbandonAsync(intent.Id, "owner-abandoned-rebuild");
+        Assert.Equal(EmployeeRebuildStates.Failed, abandoned.State);
+        Assert.True(fixture.ManualHoldActive());
+
+        // A rebuild with no preexisting hold clears cleanly and copies the flag false.
+        using var clean = new Fixture();
+        await clean.EnrollAsync();
+        await clean.MakeOrientationReadyAsync();
+        var cleanTarget = clean.CreateVerifiedRevision(RebuildDigest, "linux/amd64", "abandon-clean");
+        var cleanIntent = clean.BeginRebuild(cleanTarget.Id, RebuildDigest);
+        Assert.False(clean.Store.GetEmployeeRebuild(cleanIntent.Id)!.HoldPreexisting);
+        _ = clean.RebuildCoordinator.AbandonAsync(cleanIntent.Id, "owner-abandoned-rebuild");
+        Assert.False(clean.ManualHoldActive());
+    }
+
     // ---------------------------------------------------------------- fixture
 
     private sealed class Fixture : IDisposable
@@ -519,7 +565,7 @@ public sealed class HireProvisioningCoordinatorTests
             return revision;
         }
 
-        public EmployeeRebuildRecord BeginRebuild(string targetRevisionId, string targetDigest)
+        public EmployeeRebuildRecord BeginRebuild(string targetRevisionId, string targetDigest, bool holdPreexisting = false)
         {
             var status = Store.GetEmployeeProfileStatus(EmployeeId)!;
             var enrollment = Store.GetWorkerEnrollment(status.WorkerId!)!;
@@ -527,7 +573,7 @@ public sealed class HireProvisioningCoordinatorTests
             return Store.BeginEmployeeRebuild(new(
                 EmployeeId, status.RuntimeBindingId, enrollment.WorkerId, enrollment.HostId,
                 status.CurrentProfileRevisionId, status.CurrentImageDigest, status.CurrentRevisionNumber,
-                targetRevisionId, build.Id, targetDigest, build.Platform, false, false, null, enrollment.OwnershipEpoch));
+                targetRevisionId, build.Id, targetDigest, build.Platform, false, false, null, enrollment.OwnershipEpoch, holdPreexisting));
         }
 
         public bool ManualHoldActive() => Raw("SELECT CAST(COUNT(*) AS TEXT) FROM dispatch_holds WHERE runtime_binding_id='" + BindingId + "' AND reason='manual' AND active=1;") != "0";
@@ -874,6 +920,9 @@ public sealed class HireProvisioningCoordinatorTests
             Effects.Add("remove-image:" + imageReference);
             return Task.CompletedTask;
         }
+
+        public Task<string?> InspectImageAsync(ExecutionTarget host, string imageReference, CancellationToken token) =>
+            Task.FromResult(imageReference.StartsWith("sha256:", StringComparison.Ordinal) ? imageReference : null);
 
         public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, "present");
         public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) => Inspect(name, _states.TryGetValue(name, out var state) ? state : "running");

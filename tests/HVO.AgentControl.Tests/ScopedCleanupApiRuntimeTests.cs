@@ -406,6 +406,12 @@ public sealed class RecordingCleanupProvisioner : IRemoteWorkerProvisioner
         return Task.CompletedTask;
     }
 
+    public Task<string?> InspectImageAsync(ExecutionTarget target, string imageReference, CancellationToken token)
+    {
+        if (RemovalTransportLoss) throw new RemoteWorkerUnavailableException("injected transport loss", transport: true);
+        return Task.FromResult(imageReference.StartsWith("sha256:", StringComparison.Ordinal) ? imageReference : null);
+    }
+
     public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget target, string name, CancellationToken token) => Task.FromResult(new RemoteResourceInspection(false, null, new Dictionary<string, string>(), "absent"));
     public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget target, string name, CancellationToken token) => Task.FromResult(new RemoteResourceInspection(false, null, new Dictionary<string, string>(), "absent"));
 }

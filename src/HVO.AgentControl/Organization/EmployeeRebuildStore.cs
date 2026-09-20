@@ -66,6 +66,10 @@ public sealed partial class OrganizationStore
             reset_workspace INTEGER NOT NULL CHECK (reset_workspace IN (0, 1)),
             reset_home INTEGER NOT NULL CHECK (reset_home IN (0, 1)),
             reset_confirmation TEXT CHECK (reset_confirmation IS NULL OR length(reset_confirmation) <= 128),
+            -- True when a manual dispatch hold was already active before the rebuild
+            -- took its own. On completion the rebuild restores the prior state
+            -- instead of clearing a hold it did not create.
+            hold_preexisting INTEGER NOT NULL CHECK (hold_preexisting IN (0, 1)),
             state TEXT NOT NULL CHECK (state IN ('Intent', 'Holding', 'Replacing', 'Verifying', 'Applied', 'Uncertain', 'Failed')),
             ownership_epoch_before INTEGER NOT NULL CHECK (ownership_epoch_before >= 0),
             ownership_epoch_after INTEGER CHECK (ownership_epoch_after IS NULL OR ownership_epoch_after >= 0),
@@ -75,7 +79,14 @@ public sealed partial class OrganizationStore
             failure_summary TEXT CHECK (failure_summary IS NULL OR length(failure_summary) <= 512),
             revision INTEGER NOT NULL CHECK (revision >= 1),
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            -- An applied rebuild must carry durable proof: the evidence hash and a
+            -- strictly greater post-rebuild epoch. This is the database-boundary
+            -- guarantee; the C# checks alone would let any other writer violate it.
+            CHECK (state <> 'Applied' OR (
+                evidence_hash IS NOT NULL
+                AND ownership_epoch_after IS NOT NULL
+                AND ownership_epoch_after > ownership_epoch_before))
         ) WITHOUT ROWID
         """,
         """
@@ -249,13 +260,13 @@ public sealed partial class OrganizationStore
                         id, employee_id, runtime_binding_id, worker_id, host_id,
                         from_profile_revision_id, from_image_digest, from_revision_number,
                         to_profile_revision_id, to_profile_build_id, to_image_digest, to_platform,
-                        reset_workspace, reset_home, reset_confirmation, state,
+                        reset_workspace, reset_home, reset_confirmation, hold_preexisting, state,
                         ownership_epoch_before, ownership_epoch_after, dispatch_hold_reason,
                         requested_by, evidence_hash, failure_summary, revision, created_at, updated_at)
                     VALUES ($id, $employee, $binding, $worker, $host,
                         $fromRevision, $fromDigest, $fromNumber,
                         $toRevision, $toBuild, $toDigest, $toPlatform,
-                        $resetWorkspace, $resetHome, $resetConfirmation, 'Intent',
+                        $resetWorkspace, $resetHome, $resetConfirmation, $holdPreexisting, 'Intent',
                         $epoch, NULL, 'manual',
                         'owner', NULL, NULL, 1, $now, $now)
                     """,
@@ -266,7 +277,8 @@ public sealed partial class OrganizationStore
                     ("$toRevision", request.ToProfileRevisionId), ("$toBuild", request.ToProfileBuildId),
                     ("$toDigest", request.ToImageDigest), ("$toPlatform", request.ToPlatform),
                     ("$resetWorkspace", request.ResetWorkspace ? 1 : 0), ("$resetHome", request.ResetHome ? 1 : 0),
-                    ("$resetConfirmation", request.ResetConfirmation), ("$epoch", request.OwnershipEpochBefore),
+                    ("$resetConfirmation", request.ResetConfirmation), ("$holdPreexisting", request.HoldPreexisting ? 1 : 0),
+                    ("$epoch", request.OwnershipEpochBefore),
                     ("$now", now));
                 transaction.Commit();
                 return ReadRebuilds(connection, null, id: id).Single();
@@ -319,18 +331,26 @@ public sealed partial class OrganizationStore
                 if (!string.Equals(current.State, from, StringComparison.Ordinal)) throw new OrganizationConcurrencyException($"The employee rebuild is not in state {from}.");
 
                 var now = Timestamp();
+                // Evidence is the proof of the exact applied result, so it is set
+                // only on the transition that produces it and never carried forward:
+                // a later re-transition of the same row must not inherit stale proof.
+                // A failure summary likewise belongs only to the failed outcome and
+                // is cleared when the row moves anywhere else.
+                var evidence = string.Equals(to, EmployeeRebuildStates.Applied, StringComparison.Ordinal) ? evidenceHash : null;
                 var affected = Execute(connection, transaction,
                     """
                     UPDATE employee_rebuilds
                     SET state = $state,
                         ownership_epoch_after = COALESCE($after, ownership_epoch_after),
-                        evidence_hash = COALESCE($evidence, evidence_hash),
-                        failure_summary = CASE WHEN $state = 'Applied' THEN NULL WHEN $summary IS NOT NULL THEN $summary ELSE failure_summary END,
+                        evidence_hash = CASE WHEN $state = 'Applied' THEN $evidence
+                                             WHEN $state = 'Failed' THEN evidence_hash
+                                             ELSE NULL END,
+                        failure_summary = CASE WHEN $state IN ('Failed', 'Uncertain') THEN $summary ELSE NULL END,
                         revision = revision + 1,
                         updated_at = $now
                     WHERE id = $id AND revision = $revision AND state = $from
                     """,
-                    ("$state", to), ("$after", ownershipEpochAfter), ("$evidence", evidenceHash),
+                    ("$state", to), ("$after", ownershipEpochAfter), ("$evidence", evidence),
                     ("$summary", summary), ("$now", now), ("$id", id), ("$revision", expectedRevision), ("$from", from));
                 if (affected != 1) throw new OrganizationConcurrencyException("The employee rebuild changed before the transition.");
                 transaction.Commit();
@@ -408,8 +428,11 @@ public sealed partial class OrganizationStore
 
                 if (ids.Count > 0)
                 {
+                    // Preserve an existing sanitized summary; only synthesize the
+                    // interrupted marker when the row carried none, so a real
+                    // failure reason is never overwritten by the restart notice.
                     Execute(connection, transaction,
-                        "UPDATE employee_rebuilds SET state = 'Uncertain', failure_summary = $summary, revision = revision + 1, updated_at = $now WHERE state IN ('Holding', 'Replacing', 'Verifying')",
+                        "UPDATE employee_rebuilds SET state = 'Uncertain', failure_summary = COALESCE(failure_summary, $summary), revision = revision + 1, updated_at = $now WHERE state IN ('Holding', 'Replacing', 'Verifying')",
                         ("$summary", "controller-restarted-during-rebuild"), ("$now", Timestamp()));
                 }
 
@@ -462,7 +485,7 @@ public sealed partial class OrganizationStore
             "SELECT id, employee_id, runtime_binding_id, worker_id, host_id, "
             + "from_profile_revision_id, from_image_digest, from_revision_number, "
             + "to_profile_revision_id, to_profile_build_id, to_image_digest, to_platform, "
-            + "reset_workspace, reset_home, reset_confirmation, state, ownership_epoch_before, ownership_epoch_after, "
+            + "reset_workspace, reset_home, reset_confirmation, hold_preexisting, state, ownership_epoch_before, ownership_epoch_after, "
             + "dispatch_hold_reason, requested_by, evidence_hash, failure_summary, revision, created_at, updated_at "
             + "FROM employee_rebuilds"
             + (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : string.Empty)
@@ -488,16 +511,17 @@ public sealed partial class OrganizationStore
                 reader.GetInt32(12) == 1,
                 reader.GetInt32(13) == 1,
                 reader.IsDBNull(14) ? null : reader.GetString(14),
-                reader.GetString(15),
-                reader.GetInt64(16),
-                reader.IsDBNull(17) ? null : reader.GetInt64(17),
-                reader.GetString(18),
+                reader.GetInt32(15) == 1,
+                reader.GetString(16),
+                reader.GetInt64(17),
+                reader.IsDBNull(18) ? null : reader.GetInt64(18),
                 reader.GetString(19),
-                reader.IsDBNull(20) ? null : reader.GetString(20),
+                reader.GetString(20),
                 reader.IsDBNull(21) ? null : reader.GetString(21),
-                reader.GetInt32(22),
-                DateTimeOffset.Parse(reader.GetString(23), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-                DateTimeOffset.Parse(reader.GetString(24), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
+                reader.IsDBNull(22) ? null : reader.GetString(22),
+                reader.GetInt32(23),
+                DateTimeOffset.Parse(reader.GetString(24), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                DateTimeOffset.Parse(reader.GetString(25), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
         }
 
         return result;

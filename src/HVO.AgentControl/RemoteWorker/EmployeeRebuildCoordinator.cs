@@ -38,7 +38,12 @@ public sealed class EmployeeRebuildCoordinator(
         var status = store.GetEmployeeProfileStatus(employeeId)
             ?? throw new OrganizationNotFoundException($"Managed employee '{employeeId}' does not exist.");
         if (status.WorkerId is null) throw new OrganizationConcurrencyException("The managed employee has no worker enrollment.");
-        if (status.ActiveRebuild is not null) throw new OrganizationConcurrencyException("The worker already has an active employee rebuild; resume it before starting another.");
+
+        // An existing active rebuild is resumed, never duplicated. This also
+        // recovers an Intent or Uncertain row that a previous process left stranded,
+        // which the owner triggers simply by re-issuing the request.
+        if (status.ActiveRebuild is { } active)
+            return (await ResumeAsync(active.Id, cancellationToken).ConfigureAwait(false)).Rebuild;
 
         var requiredConfirmation = OrganizationStore.EmployeeRebuildResetConfirmation.Required(resetWorkspace, resetHome);
         if (!string.Equals(requiredConfirmation, resetConfirmation, StringComparison.Ordinal))
@@ -80,7 +85,8 @@ public sealed class EmployeeRebuildCoordinator(
             resetWorkspace,
             resetHome,
             resetConfirmation,
-            enrollment.OwnershipEpoch));
+            enrollment.OwnershipEpoch,
+            HoldPreexisting: store.IsManualDispatchHeld(employeeId)));
 
         return (await ResumeAsync(rebuild.Id, cancellationToken).ConfigureAwait(false)).Rebuild;
     }
@@ -148,9 +154,12 @@ public sealed class EmployeeRebuildCoordinator(
                 }
                 else if (inspection.IsOriginal && inspection.Running)
                 {
-                    var current = store.GetEmployeeRebuild(rebuild.Id)!;
-                    store.TransitionEmployeeRebuild(current.Id, current.Revision, EmployeeRebuildStates.Uncertain, EmployeeRebuildStates.Replacing, failureSummary: "original-container-intact-resume-rebuild");
-                    reconciled.Add(rebuild.Id);
+                    // The original container is intact and the replacement never
+                    // happened, so the rebuild is safe to drive again in this same
+                    // pass. Leaving it in Replacing without a driver would strand it
+                    // until the next restart only flipped it back to Uncertain.
+                    var driven = await ResumeAsync(rebuild.Id, cancellationToken).ConfigureAwait(false);
+                    reconciled.Add(driven.Rebuild.Id);
                 }
             }
             catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
@@ -165,16 +174,16 @@ public sealed class EmployeeRebuildCoordinator(
     {
         var store = Store();
         var current = store.GetEmployeeRebuild(rebuild.Id)!;
+
+        // Take the hold before advancing to Holding so the destructive window is
+        // always covered, even for an Intent recovered after a restart. Taking the
+        // hold is idempotent, so resuming any state re-asserts it.
+        store.SetManualDispatchHold(current.EmployeeId, true, "rebuild " + current.Id);
         if (current.State == EmployeeRebuildStates.Intent)
         {
-            store.SetManualDispatchHold(current.EmployeeId, true, "rebuild " + current.Id);
             current = Transition(store, current.Id, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
             if (WorkerConnectionManager.InstanceFor(control) is { } holdingManager)
                 await holdingManager.InvalidateCachedSessionAsync(current.WorkerId, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            store.SetManualDispatchHold(current.EmployeeId, true, "rebuild " + current.Id);
         }
 
         current = store.GetEmployeeRebuild(current.Id)!;
@@ -225,7 +234,7 @@ public sealed class EmployeeRebuildCoordinator(
 
         var evidence = Hash(string.Join('\n', current.WorkerId, current.ToImageDigest, current.ToProfileRevisionId, status.OwnershipEpoch));
         var applied = store.TransitionEmployeeRebuild(current.Id, current.Revision, current.State, EmployeeRebuildStates.Applied, evidenceHash: evidence, ownershipEpochAfter: status.OwnershipEpoch);
-        store.SetManualDispatchHold(applied.EmployeeId, false, null);
+        ReleaseRebuildHold(store, applied);
         return new(applied, store.GetWorkerEnrollment(enrollment.WorkerId)!, status);
     }
 
@@ -243,12 +252,47 @@ public sealed class EmployeeRebuildCoordinator(
             }
             current = store.GetEmployeeRebuild(rebuildId)!;
             var failed = store.TransitionEmployeeRebuild(current.Id, current.Revision, current.State, EmployeeRebuildStates.Failed, failureSummary: "deterministic-rebuild-validation-failed");
-            store.SetManualDispatchHold(failed.EmployeeId, false, null);
+            ReleaseRebuildHold(store, failed);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             TransitionToUncertain(store, rebuildId, "container-state-unknown-after-failure");
         }
+    }
+
+    /// <summary>
+    /// Releases the rebuild's manual dispatch hold, restoring the owner's hold when
+    /// one was already active before the rebuild began. A rebuild never clears a
+    /// hold it did not take.
+    /// </summary>
+    private static void ReleaseRebuildHold(OrganizationStore store, EmployeeRebuildRecord rebuild)
+    {
+        if (rebuild.HoldPreexisting) store.SetManualDispatchHold(rebuild.EmployeeId, true, "manual hold re-applied after rebuild " + rebuild.Id);
+        else store.SetManualDispatchHold(rebuild.EmployeeId, false, null);
+    }
+
+    /// <summary>
+    /// Owner-explicit abandonment of a rebuild that cannot be completed: an Intent
+    /// that never took the hold, or an Uncertain row whose container state the
+    /// operator has reconciled externally. It records a sanitized Failed outcome and
+    /// releases the rebuild hold (restoring any pre-existing owner hold) so the
+    /// employee is not stranded behind a hold nobody can clear. It never touches a
+    /// container or volume.
+    /// </summary>
+    public EmployeeRebuildRecord AbandonAsync(string rebuildId, string sanitizedReason)
+    {
+        RequireEnabled();
+        var store = Store();
+        var current = store.GetEmployeeRebuild(rebuildId)
+            ?? throw new OrganizationNotFoundException($"Employee rebuild '{rebuildId}' does not exist.");
+        if (current.State is EmployeeRebuildStates.Applied or EmployeeRebuildStates.Failed)
+            return current;
+        if (current.State is not (EmployeeRebuildStates.Intent or EmployeeRebuildStates.Holding or EmployeeRebuildStates.Replacing or EmployeeRebuildStates.Verifying or EmployeeRebuildStates.Uncertain))
+            throw new OrganizationConcurrencyException($"An employee rebuild in state {current.State} cannot be abandoned.");
+        var failed = store.TransitionEmployeeRebuild(current.Id, current.Revision, current.State, EmployeeRebuildStates.Failed, failureSummary: sanitizedReason);
+        ReleaseRebuildHold(store, failed);
+        logger.LogWarning("Employee rebuild {RebuildId} was abandoned by the owner.", rebuildId);
+        return failed;
     }
 
     private static EmployeeRebuildRecord Transition(OrganizationStore store, string id, string from, string to)

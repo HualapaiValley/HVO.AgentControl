@@ -751,6 +751,29 @@ public sealed partial class OrganizationStore
         return GetOrientationStatus(employeeId).Ready;
     }
 
+    /// <summary>
+    /// True when a manual dispatch hold is currently active for the employee's
+    /// binding. A rebuild records this before it takes its own hold so it can
+    /// restore the owner's hold on completion rather than clearing one it did not
+    /// create.
+    /// </summary>
+    public bool IsManualDispatchHeld(string employeeId)
+    {
+        return TranslateStoreFaults(() =>
+        {
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    "SELECT EXISTS(SELECT 1 FROM dispatch_holds h JOIN runtime_bindings b ON b.id = h.runtime_binding_id JOIN employees e ON e.id = b.employee_id WHERE e.id = $employee AND h.reason = $reason AND h.active = 1)";
+                command.Parameters.AddWithValue("$employee", employeeId);
+                command.Parameters.AddWithValue("$reason", DispatchHoldReasons.Manual);
+                return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+            }
+        });
+    }
+
     public OrientationStatus SetManualDispatchHold(string employeeId, bool held, string? detail)
     {
         return TranslateStoreFaults(() =>

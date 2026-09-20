@@ -521,7 +521,8 @@ public sealed record EmployeeRebuildCreate(
     bool ResetWorkspace,
     bool ResetHome,
     string? ResetConfirmation,
-    long OwnershipEpochBefore);
+    long OwnershipEpochBefore,
+    bool HoldPreexisting = false);
 
 /// <summary>
 /// Owner-facing profile status for one managed employee: the profile revision the
@@ -577,6 +578,7 @@ public sealed record EmployeeRebuildRecord(
     bool ResetWorkspace,
     bool ResetHome,
     string? ResetConfirmation,
+    bool HoldPreexisting,
     string State,
     long OwnershipEpochBefore,
     long? OwnershipEpochAfter,

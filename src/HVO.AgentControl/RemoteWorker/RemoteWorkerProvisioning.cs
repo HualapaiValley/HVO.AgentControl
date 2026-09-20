@@ -54,6 +54,13 @@ public interface IRemoteWorkerProvisioner
     Task RemoveContainerAsync(ExecutionTarget target, string container, CancellationToken token);
     Task RemoveVolumeAsync(ExecutionTarget target, string volume, CancellationToken token);
     Task RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken token);
+    /// <summary>
+    /// Inspects one image reference (tag or digest). Returns null when the image
+    /// does not exist; a transport failure is raised as an uncertain effect. Used
+    /// by cleanup to resolve a tag to the digest it currently names before any
+    /// destructive step.
+    /// </summary>
+    Task<string?> InspectImageAsync(ExecutionTarget target, string imageReference, CancellationToken token);
 }
 
 public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations operations) : IRemoteWorkerProvisioner
@@ -101,6 +108,29 @@ public sealed class RemoteWorkerProvisionerAdapter(IRemoteWorkerOperations opera
         var result = await operations.RemoveImageAsync(target, imageReference, token).ConfigureAwait(false);
         if (result.ExitCode == 0 || result.ErrorCategory == "not-found") return;
         throw new RemoteWorkerUnavailableException("Worker provisioning image removal failed.", result.ErrorCategory == "transport");
+    }
+
+    public async Task<string?> InspectImageAsync(ExecutionTarget target, string imageReference, CancellationToken token)
+    {
+        var result = await operations.ExecuteAsync(target, RemoteDockerOperation.ImageInspect, [imageReference], null, token).ConfigureAwait(false);
+        if (result.ErrorCategory == "not-found") return null;
+        if (result.ExitCode != 0) throw new RemoteWorkerUnavailableException("Worker provisioning image inspect failed.", result.ErrorCategory == "transport");
+        string? digest;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+            digest = document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array && document.RootElement.GetArrayLength() > 0
+                ? document.RootElement[0].TryGetProperty("Id", out var id) ? id.GetString() : null
+                : document.RootElement.TryGetProperty("Id", out var single) ? single.GetString() : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            throw new RemoteWorkerUnavailableException("Worker provisioning image inspect output was not valid JSON.", transport: false);
+        }
+        if (digest is null || digest.Length == 0) return null;
+        if (!digest.StartsWith("sha256:", StringComparison.Ordinal) || digest.Length != 71)
+            throw new RemoteWorkerUnavailableException("Worker provisioning image inspect did not return an exact digest.", transport: false);
+        return digest;
     }
 
     private static string Require(RemoteOperationResult result)
@@ -438,10 +468,18 @@ public sealed class RemoteWorkerProvisioningCoordinator
             }
 
             // The persisted enrollment carries the organization that owns it, so a
-            // renamed or replaced current organization cannot widen this match.
-            var identity = Identity(enrollment, resource.OperationId);
-            try { RemoteWorkerCommandBuilder.RequireOwnedLabels(inspection.Labels, identity); }
-            catch (ForeignResourceException) { store.TransitionResource(resource.Id, resource.Revision, resource.State, "foreign"); continue; }
+            // renamed or replaced current organization cannot widen this match. A
+            // rebuilt container carries the target revision's profile label while
+            // the enrollment's frozen digest still names the original revision, so
+            // an owned container is accepted under either label. Anything that
+            // matches neither is foreign and is never removed.
+            var currentRevision = CurrentProfileRevisionFor(store, enrollment);
+            var originalRevision = enrollment.ExpectedImageDigest == _options.ApprovedImageDigest ? null : ProfileRevisionFor(enrollment);
+            if (!IsOwnedUnderEitherRevision(inspection.Labels, enrollment, resource.OperationId, currentRevision, originalRevision))
+            {
+                store.TransitionResource(resource.Id, resource.Revision, resource.State, "foreign");
+                continue;
+            }
 
             try
             {
@@ -835,6 +873,23 @@ public sealed class RemoteWorkerProvisioningCoordinator
 
     private static WorkerResourceIdentity Identity(WorkerEnrollmentRecord e, string operation, string? profileRevisionId) =>
         new(e.OrganizationId, e.ControllerId, e.HostId, e.WorkerId, e.RuntimeBindingId, operation, profileRevisionId);
+
+    /// <summary>
+    /// True when the inspection labels match the exact operation identity under
+    /// either the current (post-rebuild) or the original (pre-rebuild) revision
+    /// label. Both are the controller's own container; a label set matching neither
+    /// is foreign. Revision is the only field a rebuild changes, so a false here
+    /// still means the resource is not ours under any known identity.
+    /// </summary>
+    private static bool IsOwnedUnderEitherRevision(IReadOnlyDictionary<string, string> labels, WorkerEnrollmentRecord e, string operation, string? currentRevision, string? originalRevision)
+    {
+        foreach (var revision in new[] { currentRevision, originalRevision }.Distinct(StringComparer.Ordinal))
+        {
+            try { RemoteWorkerCommandBuilder.RequireOwnedLabels(labels, Identity(e, operation, revision)); return true; }
+            catch (ForeignResourceException) { }
+        }
+        return false;
+    }
 
     private string ProfileRevisionFor(WorkerEnrollmentRecord e) =>
         Store().ListProfileBuilds(hostId: e.HostId).SingleOrDefault(b => b.State == ProfileBuildStates.Built && b.Verified && b.ImageDigest == e.ExpectedImageDigest)?.ProfileRevisionId

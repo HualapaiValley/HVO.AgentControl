@@ -2434,6 +2434,7 @@ public sealed class RemoteWorkerControlTests
         public Task RemoveContainerAsync(ExecutionTarget host, string container, CancellationToken token) { Targets.Add(host); Effects.Add("remove-container:" + container); _labels.Remove(container); _containerStates.Remove(container); return Task.CompletedTask; }
         public Task RemoveVolumeAsync(ExecutionTarget host, string volume, CancellationToken token) { Targets.Add(host); Effects.Add("remove-volume:" + volume); _labels.Remove(volume); return Task.CompletedTask; }
         public Task RemoveImageAsync(ExecutionTarget host, string imageReference, CancellationToken token) { Targets.Add(host); Effects.Add("remove-image:" + imageReference); return Task.CompletedTask; }
+        public Task<string?> InspectImageAsync(ExecutionTarget host, string imageReference, CancellationToken token) { Targets.Add(host); return Task.FromResult(imageReference.StartsWith("sha256:", StringComparison.Ordinal) ? imageReference : null); }
 
         public Task<RemoteResourceInspection> InspectVolumeAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, "present"); }
         public Task<RemoteResourceInspection> InspectContainerAsync(ExecutionTarget host, string name, CancellationToken token) { Targets.Add(host); return Inspect(name, _containerStates.TryGetValue(name, out var state) ? state : "running"); }

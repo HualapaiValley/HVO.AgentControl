@@ -275,6 +275,100 @@ public sealed class EmployeeRebuildStoreTests
     }
 
     [Fact]
+    public void AppliedInvariantIsEnforcedAtTheDatabaseBoundary()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+        var created = fixture.Store.BeginEmployeeRebuild(Create(fixture));
+        var holding = fixture.Store.TransitionEmployeeRebuild(created.Id, created.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
+        var replacing = fixture.Store.TransitionEmployeeRebuild(created.Id, holding.Revision, EmployeeRebuildStates.Holding, EmployeeRebuildStates.Replacing);
+
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = root.Path,
+            Mode = SqliteOpenMode.ReadWrite,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        foreach (var sql in new[]
+        {
+            // Applied with no evidence.
+            $"UPDATE employee_rebuilds SET state='Applied', evidence_hash=NULL, ownership_epoch_after=1 WHERE id='{created.Id}'",
+            // Applied with no post-rebuild epoch.
+            $"UPDATE employee_rebuilds SET state='Applied', evidence_hash='{EvidenceHash}', ownership_epoch_after=NULL WHERE id='{created.Id}'",
+            // Applied whose epoch did not advance past the pre-rebuild epoch.
+            $"UPDATE employee_rebuilds SET state='Applied', evidence_hash='{EvidenceHash}', ownership_epoch_after=ownership_epoch_before WHERE id='{created.Id}'",
+        })
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            Assert.Throws<SqliteException>(() => command.ExecuteNonQuery());
+        }
+
+        // A valid applied transition still succeeds through the store: Replacing
+        // moves to Verifying first, then Applied.
+        var verifying2 = fixture.Store.TransitionEmployeeRebuild(created.Id, replacing.Revision, EmployeeRebuildStates.Replacing, EmployeeRebuildStates.Verifying);
+        var applied = fixture.Store.TransitionEmployeeRebuild(created.Id, verifying2.Revision, EmployeeRebuildStates.Verifying, EmployeeRebuildStates.Applied, evidenceHash: EvidenceHash, ownershipEpochAfter: 5);
+        Assert.Equal(EmployeeRebuildStates.Applied, applied.State);
+    }
+
+    [Fact]
+    public void HoldPreexistingRoundTripsThroughTheRecord()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+
+        var preexisting = fixture.Store.BeginEmployeeRebuild(Create(fixture) with { HoldPreexisting = true });
+        Assert.True(preexisting.HoldPreexisting);
+        Assert.True(fixture.Store.GetEmployeeRebuild(preexisting.Id)!.HoldPreexisting);
+    }
+
+    [Fact]
+    public void InterruptedMarkingPreservesAnExistingSummary()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+        var created = fixture.Store.BeginEmployeeRebuild(Create(fixture));
+        var holding = fixture.Store.TransitionEmployeeRebuild(created.Id, created.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Holding);
+        var replacing = fixture.Store.TransitionEmployeeRebuild(created.Id, holding.Revision, EmployeeRebuildStates.Holding, EmployeeRebuildStates.Replacing, failureSummary: "host refused the swap");
+
+        // Replace does not carry a summary in the normal machine, so set one through
+        // Uncertain first, then re-mark: the synthesized restart notice must not
+        // overwrite the real reason.
+        var uncertain = fixture.Store.TransitionEmployeeRebuild(created.Id, replacing.Revision, EmployeeRebuildStates.Replacing, EmployeeRebuildStates.Uncertain, failureSummary: "host refused the swap");
+        Assert.Equal("host refused the swap", uncertain.FailureSummary);
+        Assert.Empty(fixture.Store.MarkInterruptedEmployeeRebuildsUncertain());
+        Assert.Equal("host refused the swap", fixture.Store.GetEmployeeRebuild(created.Id)!.FailureSummary);
+    }
+
+    [Fact]
+    public void SharedResultTagIsDetectedForCleanup()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+        // The seeded verified target build and a failed build for the same revision
+        // and context share the deterministic result tag. The failed row is inserted
+        // directly because the build queue deliberately serializes one live slot per
+        // revision/host; this test is about the tag-sharing read, not queueing.
+        var target = fixture.Store.GetProfileBuild(fixture.ToBuildId)!;
+        var now = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        ExecuteRaw(
+            root.Path,
+            $"""
+            INSERT INTO profile_builds (
+                id, profile_revision_id, host_id, base_image_digest, platform, context_hash, result_tag, state,
+                image_digest, verified, failure_summary, evidence_hash, requested_by, revision, started_at, finished_at, created_at, updated_at)
+            VALUES ('pbld-shared-tag-000000000000', '{fixture.ToRevisionId}', '{ExecutionHosts.LocalDockerId}', '{BaseDigest}', 'linux/amd64', '{ContextHash}', '{target.ResultTag}', 'failed',
+                NULL, 0, 'shared tag', NULL, 'owner', 1, NULL, NULL, '{now}', '{now}')
+            """);
+
+        Assert.True(fixture.Store.IsResultTagShared("pbld-shared-tag-000000000000", ExecutionHosts.LocalDockerId, target.ResultTag));
+        Assert.True(fixture.Store.IsResultTagShared(target.Id, ExecutionHosts.LocalDockerId, target.ResultTag));
+        // A distinct tag is not shared.
+        Assert.False(fixture.Store.IsResultTagShared("pbld-shared-tag-000000000000", ExecutionHosts.LocalDockerId, "agentcontrol-profile:unique-000000000000"));
+    }
+
+    [Fact]
     public void MarkInterruptedRebuildsUncertainIsMarkOnceAndKeepsTheActiveSlot()
     {
         using var root = new TempStore();

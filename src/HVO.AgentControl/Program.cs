@@ -643,6 +643,133 @@ app.MapGet("/api/employees/{id}/rebuilds", (AcpControlHost host, string id) =>
     .ProducesProblem(StatusCodes.Status404NotFound)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
+// Resumes one durable rebuild from wherever it lies, including an Intent or
+// Uncertain row a previous process left behind. This is the recovery trigger the
+// employee page offers when a rebuild did not reach a terminal state.
+app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/resume", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, string rebuildId) =>
+{
+    if (!Program.IsValidEmployeeId(id) || !Program.IsValidEmployeeRebuildId(rebuildId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee rebuild.", detail: "A bounded stable employee and rebuild id are required.");
+    if (Program.RejectCrossOrigin(context, "Employee rebuild resume") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not resumed.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not resumed.");
+    try
+    {
+        var rebuild = store.GetEmployeeRebuild(rebuildId);
+        if (rebuild is null || !string.Equals(rebuild.EmployeeId, id, StringComparison.Ordinal))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+        var result = await coordinator.ResumeAsync(rebuildId, context.RequestAborted);
+        var resumedStatus = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The resumed employee profile status is missing.");
+        return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(result.Rebuild, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(resumedStatus)));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationValidationException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee rebuild.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: $"Reconcile the open '{exception.Kind}' recovery obligation before retrying.");
+    }
+    catch (Exception exception) when (Program.IsEmployeeRebuildEffectUncertain(exception))
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild recovery is required.", detail: "The durable rebuild intent has an uncertain remote effect. Reconcile or resume it before starting another rebuild.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlDisabledException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not resumed.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not resumed.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status502BadGateway, title: "Employee rebuild transport failed.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Employee rebuild unavailable.");
+    }
+})
+    .WithName("ResumeEmployeeRebuild").WithTags("Organization")
+    .WithSummary("Resumes one durable employee rebuild from Intent, Holding, Replacing, Verifying or Uncertain and drives it toward Applied or a sanitized terminal outcome.")
+    .Produces<HVO.AgentControl.Organization.EmployeeRebuildResponse>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Owner-explicit abandonment of a rebuild that cannot complete. It records a
+// sanitized Failed outcome and releases the rebuild hold, restoring any owner
+// hold that predated it, so an employee is never stranded behind a hold no one
+// can clear. It never touches a container or volume.
+app.MapPost("/api/employees/{id}/rebuilds/{rebuildId}/abandon", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeRebuildCoordinator coordinator, Microsoft.Extensions.Options.IOptions<HVO.AgentControl.RemoteWorker.WorkerControlOptions> options, string id, string rebuildId) =>
+{
+    if (!Program.IsValidEmployeeId(id) || !Program.IsValidEmployeeRebuildId(rebuildId))
+        return Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid employee rebuild.", detail: "A bounded stable employee and rebuild id are required.");
+    if (Program.RejectCrossOrigin(context, "Employee rebuild abandon") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    var workerOptions = options.Value;
+    if (!workerOptions.Enabled)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not abandoned.");
+    if (workerOptions.Validate().Count != 0)
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not abandoned.");
+    try
+    {
+        var rebuild = store.GetEmployeeRebuild(rebuildId);
+        if (rebuild is null || !string.Equals(rebuild.EmployeeId, id, StringComparison.Ordinal))
+            return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+        var abandoned = coordinator.AbandonAsync(rebuildId, "owner-abandoned-rebuild");
+        var abandonedStatus = store.GetEmployeeProfileStatus(id) ?? throw new HVO.AgentControl.Organization.OrganizationStoreCorruptException("The abandoned employee profile status is missing.");
+        return Results.Ok(new HVO.AgentControl.Organization.EmployeeRebuildResponse(abandoned, HVO.AgentControl.Organization.PortalOrganizationReadModel.ToProfileStatusDetail(abandonedStatus)));
+    }
+    catch (HVO.AgentControl.Organization.OrganizationNotFoundException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status404NotFound, title: "Employee rebuild not found.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationConcurrencyException exception)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Employee rebuild conflicted.", detail: exception.Message);
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlDisabledException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control is disabled.", detail: "Worker control is switched off, so the rebuild was not abandoned.");
+    }
+    catch (HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Worker control configuration is invalid.", detail: "Worker control is enabled but its configuration is not usable, so the rebuild was not abandoned.");
+    }
+    catch (HVO.AgentControl.Organization.OrganizationStoreException)
+    {
+        return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Employee rebuild unavailable.");
+    }
+})
+    .WithName("AbandonEmployeeRebuild").WithTags("Organization")
+    .WithSummary("Records a sanitized Failed outcome for one non-terminal employee rebuild and releases its dispatch hold, restoring any owner hold that predated it. Never touches a container or volume.")
+    .Produces<HVO.AgentControl.Organization.EmployeeRebuildResponse>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status400BadRequest)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
 app.MapGet("/api/departments/{id}", (AcpControlHost host, IRemoteWorkerStatusProvider remoteWorkers, string id) =>
 {
     if (!Program.IsValidDepartmentId(id))
@@ -2245,6 +2372,10 @@ public partial class Program
     /// <summary>Validates the bounded stable ID used by profile build routes.</summary>
     public static bool IsValidProfileBuildId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.ProfileBuildPrefix, MaximumContainerProfileIdLength);
+
+    /// <summary>Validates the bounded stable ID used by employee rebuild routes.</summary>
+    public static bool IsValidEmployeeRebuildId(string? value) =>
+        IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.RebuildPrefix, MaximumContainerProfileIdLength);
 
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {

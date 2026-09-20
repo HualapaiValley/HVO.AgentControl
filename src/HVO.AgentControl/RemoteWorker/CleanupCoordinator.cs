@@ -48,17 +48,42 @@ public sealed class CleanupCoordinator(
         if (build.State is not (ProfileBuildStates.Failed or ProfileBuildStates.Rejected))
             throw new OrganizationConcurrencyException($"Profile build '{profileBuildId}' is {build.State}; only a failed or rejected build can be removed.");
 
-        // The use check belongs here, not in the transport: the transport only
-        // removes the exact reference it is given.
-        if (build.ImageDigest is { } digest) EnsureImageNotInUse(digest);
+        // The result tag is derived from the revision and context, so a failed
+        // build can share it with a later verified build of the same revision and
+        // context. Removing that shared tag would detach the verified row's image.
+        // Refuse rather than risk the live image; the tag is not unique per build.
+        if (store.IsResultTagShared(build.Id, build.HostId, build.ResultTag))
+            throw new OrganizationValidationException("Another non-removed build on this host shares the build's result tag; removing it could detach an image still in use.");
+
+        // A build that recorded an in-use digest is refused before any transport
+        // call: its digest is pinned by an enrollment, frozen approval or rebuild,
+        // so nothing about this build's cleanup may touch the host.
+        if (build.ImageDigest is { } recordedDigest) EnsureImageNotInUse(recordedDigest);
 
         var host = _targets.Resolve(build.HostId);
+
         var removed = new List<string> { build.ResultTag };
         try
         {
+            // Resolve what the tag currently points at. Removing the tag can delete
+            // the image when nothing else references it, so a tag that resolves to an
+            // approved base, an in-use digest or another build's reference is
+            // refused before any transport removal. Resolution is inside the
+            // uncertain boundary because a transport failure here leaves the effect
+            // unknown exactly as removal does.
+            var tagDigest = await remote.InspectImageAsync(host, build.ResultTag, cancellationToken).ConfigureAwait(false);
+            if (tagDigest is not null) EnsureTagTargetRemovable(tagDigest);
             await remote.RemoveImageAsync(host, build.ResultTag, cancellationToken).ConfigureAwait(false);
-            if (build.ImageDigest is { } imageDigest && !string.Equals(imageDigest, build.ResultTag, StringComparison.Ordinal))
+
+            // Remove the resolved digest too when it is a distinct reference and not
+            // in use, so a dangling image left by the failed build is reclaimed. Only
+            // do this when the tag did not already delete the image, and never
+            // without the same guard. Prefer the resolved digest over the recorded
+            // one.
+            var digestReference = tagDigest ?? build.ImageDigest;
+            if (digestReference is { } imageDigest && !string.Equals(imageDigest, build.ResultTag, StringComparison.Ordinal))
             {
+                EnsureImageNotInUse(imageDigest);
                 removed.Add(imageDigest);
                 await remote.RemoveImageAsync(host, imageDigest, cancellationToken).ConfigureAwait(false);
             }
@@ -102,6 +127,19 @@ public sealed class CleanupCoordinator(
         var usage = Store().ImageDigestUsage(imageDigest);
         if (usage.Count > 0)
             throw new OrganizationValidationException($"The image is still in use ({string.Join(", ", usage)}); it cannot be removed.");
+    }
+
+    /// <summary>
+    /// Refuses to remove a tag whose target must survive: the configured approved
+    /// base image or any digest an enrollment, frozen approval or rebuild names.
+    /// Removing the tag could delete the image when no other reference remains, so
+    /// the target is protected before the tag is touched.
+    /// </summary>
+    private void EnsureTagTargetRemovable(string imageDigest)
+    {
+        if (string.Equals(imageDigest, _options.ApprovedImageDigest, StringComparison.Ordinal))
+            throw new OrganizationValidationException("The build's tag points at the approved base image; removing it could delete the base.");
+        EnsureImageNotInUse(imageDigest);
     }
 
     private void RequireEnabled()

@@ -518,8 +518,16 @@ public sealed class ScopedCleanupTests : IAsyncLifetime
         public List<string> Effects { get; } = [];
         public List<string> RemovedImages { get; } = [];
         public bool RemovalTransportLoss { get; set; }
+        /// <summary>Map of result tag to the digest it currently resolves to, as the host would report.</summary>
+        public Dictionary<string, string> TagDigests { get; } = new(StringComparer.Ordinal);
 
         public void Seed(string name, IReadOnlyDictionary<string, string> labels) => _labels[name] = labels;
+
+        public Task<string?> InspectImageAsync(ExecutionTarget host, string imageReference, CancellationToken token)
+        {
+            if (RemovalTransportLoss) throw new RemoteWorkerUnavailableException("injected transport loss", transport: true);
+            return Task.FromResult(TagDigests.TryGetValue(imageReference, out var digest) ? digest : imageReference.StartsWith("sha256:", StringComparison.Ordinal) ? imageReference : null);
+        }
 
         public Task<HostProbePayload> ProbeAsync(ExecutionTarget host, CancellationToken token) => throw new NotSupportedException();
         public Task<string> CreateVolumeAsync(ExecutionTarget host, VolumeCreateSpec spec, CancellationToken token) => throw new NotSupportedException();
@@ -554,8 +562,19 @@ public sealed class ScopedCleanupTests : IAsyncLifetime
     {
         public RemoteOperationResult Result { get; set; } = new(0, "", "none");
         public List<string> RequestedImages { get; } = [];
+        /// <summary>ImageInspect result per reference; a missing key answers not-found.</summary>
+        public Dictionary<string, RemoteOperationResult> Inspects { get; } = new(StringComparer.Ordinal);
         public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) { RequestedImages.Add(imageReference); return Task.FromResult(Result); }
-        public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemoteOperationResult> ExecuteAsync(ExecutionTarget target, RemoteDockerOperation operation, IReadOnlyList<string> tokens, byte[]? standardInput, CancellationToken cancellationToken)
+        {
+            if (operation != RemoteDockerOperation.ImageInspect) throw new NotSupportedException();
+            // A digest reference always resolves to itself; a tag resolves only when
+            // the test registered it, otherwise the image is provably absent.
+            if (tokens.Count == 1 && Inspects.TryGetValue(tokens[0], out var configured)) return Task.FromResult(configured);
+            if (tokens.Count == 1 && tokens[0].StartsWith("sha256:", StringComparison.Ordinal))
+                return Task.FromResult(new RemoteOperationResult(0, $"[{{\"Id\":\"{tokens[0]}\"}}]", "none"));
+            return Task.FromResult(new RemoteOperationResult(1, "", "not-found"));
+        }
         public Task<RemoteOperationResult> CreateVolumeAsync(ExecutionTarget target, VolumeCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => throw new NotSupportedException();

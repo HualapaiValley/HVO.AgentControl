@@ -302,6 +302,34 @@ public sealed partial class OrganizationStore
         });
     }
 
+    /// <summary>
+    /// True when any build other than <paramref name="profileBuildId"/> that has not
+    /// already been <c>removed</c> shares the same <c>result_tag</c> on the same
+    /// host. The tag is derived from the revision and context, so a failed build and
+    /// a later verified build of the same revision/context share one tag; removing
+    /// that tag from the failed row would detach the image the verified row still
+    /// names. Cleanup must refuse in that case rather than guess.
+    /// </summary>
+    public bool IsResultTagShared(string profileBuildId, string hostId, string resultTag)
+    {
+        if (!IsBoundedIdentifier(profileBuildId, OrganizationIds.ProfileBuildPrefix) || string.IsNullOrEmpty(resultTag))
+            return true;
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT EXISTS(SELECT 1 FROM profile_builds WHERE host_id = $host AND result_tag = $tag AND id <> $id AND state <> 'removed')";
+                command.Parameters.AddWithValue("$host", hostId);
+                command.Parameters.AddWithValue("$tag", resultTag);
+                command.Parameters.AddWithValue("$id", profileBuildId);
+                return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1;
+            }
+        });
+    }
+
     private static bool Exists(SqliteConnection connection, string sql, string digest)
     {
         using var command = connection.CreateCommand();
