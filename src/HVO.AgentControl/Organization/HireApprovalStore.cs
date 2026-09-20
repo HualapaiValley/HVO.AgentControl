@@ -518,7 +518,7 @@ public sealed partial class OrganizationStore
     /// this outside the general state machine prevents an arbitrary caller from
     /// moving a Failed hire back to Provisioning without that proof.
     /// </summary>
-    public HireRequestSummary ResumeFailedHireRequest(string id, int expectedRevision)
+    internal HireRequestSummary ResumeFailedHireRequest(string id, int expectedRevision)
     {
         if (!IsBoundedIdentifier(id, OrganizationIds.HireRequestPrefix) || expectedRevision < 1)
             throw new OrganizationValidationException("A stable hire request id and current revision are required.");

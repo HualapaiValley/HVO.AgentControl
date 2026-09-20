@@ -425,6 +425,22 @@ public sealed class RemoteWorkerProvisioningCoordinator
         };
         if (kindCounts.Count != expectedKinds.Count || expectedKinds.Any(x => !kindCounts.TryGetValue(x.Key, out var count) || count != x.Value))
             throw new WorkerRecoveryRequiredException("The failed hire's provisioning operation topology is not the fixed eight-step plan.", "hire-plan-shape-invalid");
+        var expectedOperationDescriptors = new[]
+        {
+            (Kind: "enroll-key", IntentHash: Hash(enrollment.KeyId)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.ControlVolumeName)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.HomeVolumeName)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.WorkspaceVolumeName)),
+            (Kind: "volume-create", IntentHash: Hash(enrollment.SessionVolumeName)),
+            (Kind: "bootstrap", IntentHash: Hash(enrollment.KeyId + enrollment.ControlVolumeName)),
+            (Kind: "container-create", IntentHash: Hash(enrollment.ContainerName)),
+            (Kind: "start", IntentHash: Hash(enrollment.ContainerName)),
+        }.OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.IntentHash, StringComparer.Ordinal).ToArray();
+        var actualOperationDescriptors = operations
+            .Select(x => (x.Kind, x.IntentHash))
+            .OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.IntentHash, StringComparer.Ordinal).ToArray();
+        if (!actualOperationDescriptors.SequenceEqual(expectedOperationDescriptors))
+            throw new WorkerRecoveryRequiredException("The failed hire's provisioning operation identities do not match the frozen fixed plan.", "hire-plan-identity-invalid");
         var resources = store.ListWorkerResources(workerId);
         if (resources.Count != 5 || resources.Any(x => x.State != "present" || x.WorkerId != workerId || x.HostId != enrollment.HostId))
             throw new WorkerRecoveryRequiredException("The failed hire's five provisioning resources are not durably present.", "hire-resources-not-present");

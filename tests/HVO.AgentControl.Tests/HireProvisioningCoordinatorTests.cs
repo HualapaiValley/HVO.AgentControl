@@ -317,6 +317,27 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnerResumeOfFailedHireRefusesCountCorrectButWrongOperationIdentity()
+    {
+        using var fixture = new Fixture();
+        await fixture.ApproveManagedHireAsync();
+        var creation = fixture.Store.CreateManagedEmployeeFromHire(fixture.HireId);
+        var enrollment = await fixture.Provisioning.PlanManagedAsync(creation.RuntimeBindingId, CancellationToken.None);
+        _ = await fixture.Provisioning.ApplyAllAsync(enrollment.WorkerId, CancellationToken.None);
+        var requested = fixture.Store.GetHireRequest(fixture.HireId)!;
+        var provisioning = fixture.Store.TransitionHireRequestState(requested.Id, requested.Revision, HireRequestStates.Approved, HireRequestStates.Provisioning);
+        var failed = fixture.Store.TransitionHireRequestState(provisioning.Id, provisioning.Revision, HireRequestStates.Provisioning, HireRequestStates.Failed, "bridge-startup-race");
+        fixture.Execute("UPDATE provisioning_operations SET intent_hash='sha256:" + new string('f', 64) + "' WHERE kind='start'");
+        var before = fixture.Provisioner.Effects.Count;
+
+        var recovery = await Assert.ThrowsAsync<WorkerRecoveryRequiredException>(() => fixture.Coordinator.ResumeFailedAsync(fixture.HireId, failed.Revision, CancellationToken.None));
+
+        Assert.Equal("hire-plan-identity-invalid", recovery.Kind);
+        Assert.Equal(HireRequestStates.Failed, fixture.Store.GetHireRequest(fixture.HireId)!.State);
+        Assert.Equal(before, fixture.Provisioner.Effects.Count);
+    }
+
+    [Fact]
     public async Task OwnerResumePostTransitionUncertainFailureIsDurablyContained()
     {
         using var fixture = new Fixture();
