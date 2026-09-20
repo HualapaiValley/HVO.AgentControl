@@ -100,6 +100,17 @@ public sealed class OrganizationApiRuntimeTests : IClassFixture<EnabledRuntimeFa
         Assert.False(detail.GetProperty("terminal").GetProperty("available").GetBoolean());
         Assert.DoesNotContain(_factory.Host.OrganizationIdentity.TmuxOwnerToken, detailBody, StringComparison.Ordinal);
         Assert.DoesNotContain("tmuxOwnerToken", detailBody, StringComparison.Ordinal);
+
+        // The additive profile-status projection is present and all-null for the
+        // internal seed employee, which is not a managed employee.
+        var profileStatus = detail.GetProperty("profileStatus");
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("currentProfileRevisionId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("currentRevisionNumber").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("currentImageDigest").ValueKind);
+        Assert.False(profileStatus.GetProperty("newerRevisionAvailable").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("newerRevisionNumber").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("activeRebuildState").ValueKind);
+        Assert.Equal(JsonValueKind.Null, profileStatus.GetProperty("activeRebuildId").ValueKind);
     }
 
     [Fact]
@@ -738,6 +749,83 @@ public sealed class HireApprovalApiRuntimeTests : IClassFixture<WorkerControlVal
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM employees WHERE id = @id", employeeId!));
         Assert.Equal(1, CountRaw(store, "SELECT COUNT(*) FROM managed_enrollment_resources WHERE runtime_binding_id = @id", bindingId!));
         Assert.Equal(0, CountRaw(store, "SELECT COUNT(*) FROM worker_enrollments", null));
+    }
+
+    [Fact]
+    public async Task EmployeeDetailIncludesAdditiveManagedProfileStatus()
+    {
+        // A dedicated runtime so creating a newer profile revision does not
+        // disturb the class fixture's shared store used by the other tests.
+        using var factory = new WorkerControlValidRuntimeFactory();
+        using var client = await ReadyClientAsync(factory);
+        var store = factory.Host.Organization!;
+        var build = SeedVerifiedBuild(store);
+        var id = await CreateDevHireAsync(client, "Profile Status Developer");
+
+        using (var before = await client.GetAsync($"/api/hire-requests/{id}"))
+        using (var beforeDocument = JsonDocument.Parse(await before.Content.ReadAsStringAsync()))
+        {
+            var expectedRevision = beforeDocument.RootElement.GetProperty("revision").GetInt32();
+            using var approve = new HttpRequestMessage(HttpMethod.Post, $"/api/hire-requests/{id}/approve")
+            {
+                Content = JsonContent.Create(new { expectedRevision, profileRevisionId = build.ProfileRevisionId }),
+            };
+            approve.Headers.Add("Origin", factory.ClientOptions.BaseAddress.GetLeftPart(UriPartial.Authority));
+            using var approved = await client.SendAsync(approve);
+            Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
+        }
+
+        var employeeId = store.GetHireRequestApproval(id)!.EmployeeId;
+        Assert.NotNull(employeeId);
+
+        // The additive projection reports the frozen revision/digest and no newer
+        // target while the profile's current revision is the frozen one.
+        using (var response = await client.GetAsync($"/api/employees/{employeeId}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var status = document.RootElement.GetProperty("profileStatus");
+            Assert.Equal(build.ProfileRevisionId, status.GetProperty("currentProfileRevisionId").GetString());
+            Assert.Equal(1, status.GetProperty("currentRevisionNumber").GetInt32());
+            Assert.Equal(build.ImageDigest, status.GetProperty("currentImageDigest").GetString());
+            Assert.False(status.GetProperty("newerRevisionAvailable").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("newerRevisionNumber").ValueKind);
+            Assert.Equal(JsonValueKind.Null, status.GetProperty("activeRebuildState").ValueKind);
+        }
+
+        // A newer revision with a verified build on the host becomes the offered
+        // ready target; the existing detail fields are unchanged.
+        var profile = store.ListContainerProfiles().Single(p => p.Slug == ContainerProfileSeed.GenericEmployeeSlug);
+        var newerRevision = store.CreateContainerProfileRevision(profile.Id, new ContainerProfileRevisionCreate(
+            store.GetContainerProfile(profile.Id)!.Profile.Revision,
+            """{"image":"agentcontrol-worker-base","name":"API Newer Target"}""",
+            null));
+        var newerBuild = BuildVerifiedFor(store, newerRevision.Id);
+        Assert.NotNull(newerBuild);
+        using (var response = await client.GetAsync($"/api/employees/{employeeId}"))
+        using (var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
+        {
+            var root = document.RootElement;
+            Assert.Equal(employeeId, root.GetProperty("id").GetString());
+            var status = root.GetProperty("profileStatus");
+            // The frozen current revision is unchanged; only the newer target is added.
+            Assert.Equal(build.ProfileRevisionId, status.GetProperty("currentProfileRevisionId").GetString());
+            Assert.Equal(1, status.GetProperty("currentRevisionNumber").GetInt32());
+            Assert.Equal(build.ImageDigest, status.GetProperty("currentImageDigest").GetString());
+            Assert.True(status.GetProperty("newerRevisionAvailable").GetBoolean());
+            Assert.Equal(2, status.GetProperty("newerRevisionNumber").GetInt32());
+        }
+    }
+
+    private static ProfileBuildRecord BuildVerifiedFor(OrganizationStore store, string revisionId)
+    {
+        const string baseDigest = "sha256:" + "4444444444444444444444444444444444444444444444444444444444444444";
+        const string builtDigest = "sha256:" + "5555555555555555555555555555555555555555555555555555555555555555";
+        const string contextHash = "sha256:" + "6666666666666666666666666666666666666666666666666666666666666666";
+        var queued = store.QueueProfileBuild(revisionId, ExecutionHosts.LocalDockerId, baseDigest, "linux/amd64", contextHash, "agentcontrol-profile:api-newer");
+        var building = store.TransitionProfileBuild(queued.Id, queued.Revision, ProfileBuildStates.Building);
+        var verifying = store.TransitionProfileBuild(building.Id, building.Revision, ProfileBuildStates.Verifying);
+        return store.TransitionProfileBuild(verifying.Id, verifying.Revision, ProfileBuildStates.Built, imageDigest: builtDigest, verified: true, evidenceHash: contextHash);
     }
 
     private static async Task<HttpClient> ReadyClientAsync(EnabledRuntimeFactory factory)

@@ -483,7 +483,8 @@ app.MapGet("/api/organization/portal", (AcpControlHost host, HVO.AgentControl.Re
             host.OrganizationIdentity,
             host.GetStatus(),
             remoteWorkers,
-            store.ListHireRequests());
+            store.ListHireRequests(),
+            store);
         return Results.Ok(result);
     }
     catch (HVO.AgentControl.Organization.OrganizationStoreException)
@@ -527,7 +528,8 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
             host.OrganizationIdentity,
             host.GetStatus(),
             id,
-            remoteWorkers);
+            remoteWorkers,
+            store);
         return employee is null
             ? Results.Problem(
                 statusCode: StatusCodes.Status404NotFound,
@@ -578,7 +580,8 @@ app.MapGet("/api/departments/{id}", (AcpControlHost host, IRemoteWorkerStatusPro
             host.OrganizationIdentity,
             host.GetStatus(),
             id,
-            remoteWorkers);
+            remoteWorkers,
+            store);
         return department is null
             ? Results.Problem(
                 statusCode: StatusCodes.Status404NotFound,

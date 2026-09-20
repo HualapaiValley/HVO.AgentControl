@@ -523,6 +523,33 @@ public sealed record EmployeeRebuildCreate(
     string? ResetConfirmation,
     long OwnershipEpochBefore);
 
+/// <summary>
+/// Owner-facing profile status for one managed employee: the profile revision the
+/// enrollment is currently frozen to, its image digest, whether the profile has a
+/// newer revision with a verified build ready on the employee's host, and the
+/// active rebuild operation when one exists. It is a read-only projection over
+/// the immutable approval, profile and worker records; it mutates nothing. A
+/// non-managed (or base) employee has no managed enrollment resources and yields
+/// null from the store helper.
+/// </summary>
+public sealed record EmployeeProfileStatus(
+    string EmployeeId,
+    string RuntimeBindingId,
+    string? WorkerId,
+    string HostId,
+    string CurrentProfileRevisionId,
+    int CurrentRevisionNumber,
+    string CurrentProfileId,
+    string CurrentProfileDisplayName,
+    string CurrentImageDigest,
+    string CurrentPlatform,
+    bool NewerRevisionAvailable,
+    string? NewerRevisionId,
+    int? NewerRevisionNumber,
+    string? NewerVerifiedBuildId,
+    string? NewerVerifiedImageDigest,
+    EmployeeRebuildRecord? ActiveRebuild);
+
 public sealed record EmployeeRebuildRecord(
     string Id,
     string EmployeeId,

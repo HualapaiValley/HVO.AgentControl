@@ -312,19 +312,110 @@ public sealed class EmployeeRebuildStoreTests
         Assert.Equal(revisionBefore, fixture.Store.GetEmployeeRebuild(first.Id)!.Revision);
     }
 
+    [Fact]
+    public void ProfileStatusIsNullForNonManagedEmployeesAndInvalidIds()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+
+        // The internal seed employee is not a managed employee: no managed
+        // enrollment resources exist for its binding.
+        var seed = fixture.Store.GetOverview().Employees.Single(e => e.Slug == OrganizationSeed.AdoptedEmployeeSlug);
+        Assert.Null(fixture.Store.GetEmployeeProfileStatus(seed.Id));
+
+        Assert.Null(fixture.Store.GetEmployeeProfileStatus("not-an-employee"));
+        Assert.Null(fixture.Store.GetEmployeeProfileStatus("emp-0000000000000000"));
+    }
+
+    [Fact]
+    public void ProfileStatusReportsTheFrozenCurrentRevisionAndDigest()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+
+        var status = fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId);
+
+        Assert.NotNull(status);
+        Assert.Equal(fixture.EmployeeId, status!.EmployeeId);
+        Assert.Equal(fixture.BindingId, status.RuntimeBindingId);
+        Assert.Equal(fixture.WorkerId, status.WorkerId);
+        Assert.Equal(ExecutionHosts.LocalDockerId, status.HostId);
+        Assert.Equal(fixture.ToRevisionId, status.CurrentProfileRevisionId);
+        Assert.Equal(2, status.CurrentRevisionNumber);
+        Assert.Equal(ToDigest, status.CurrentImageDigest);
+        Assert.Equal("linux/amd64", status.CurrentPlatform);
+        Assert.False(string.IsNullOrWhiteSpace(status.CurrentProfileId));
+        Assert.Equal(ContainerProfileSeed.GenericEmployeeDisplayName, status.CurrentProfileDisplayName);
+
+        // The profile's current revision is the frozen one, so nothing newer.
+        Assert.False(status.NewerRevisionAvailable);
+        Assert.Null(status.NewerRevisionId);
+        Assert.Null(status.NewerRevisionNumber);
+        Assert.Null(status.NewerVerifiedBuildId);
+        Assert.Null(status.NewerVerifiedImageDigest);
+        Assert.Null(status.ActiveRebuild);
+    }
+
+    [Fact]
+    public void NewerRevisionIsReportedOnlyWhenAVerifiedBuildExistsOnTheEmployeeHost()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+
+        // A newer (third) revision exists but has no verified build yet: the
+        // status must not offer it as a ready target.
+        var newer = fixture.Store.CreateContainerProfileRevision(
+            fixture.ProfileId,
+            new ContainerProfileRevisionCreate(
+                fixture.Store.GetContainerProfile(fixture.ProfileId)!.Profile.Revision,
+                """{"image":"agentcontrol-worker-base","name":"Rebuild Target Three"}""",
+                null));
+        var unbuilt = fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!;
+        Assert.False(unbuilt.NewerRevisionAvailable);
+        Assert.Null(unbuilt.NewerRevisionId);
+
+        // Once the newer revision has a verified build on the employee's host it
+        // becomes the offered target with its exact build id and digest.
+        var build = BuildVerified(fixture.Store, newer.Id, ToDigest, "linux/amd64");
+        var available = fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!;
+        Assert.True(available.NewerRevisionAvailable);
+        Assert.Equal(newer.Id, available.NewerRevisionId);
+        Assert.Equal(3, available.NewerRevisionNumber);
+        Assert.Equal(build.Id, available.NewerVerifiedBuildId);
+        Assert.Equal(ToDigest, available.NewerVerifiedImageDigest);
+    }
+
+    [Fact]
+    public void ActiveRebuildSurfacesAndTerminalRebuildDoesNot()
+    {
+        using var root = new TempStore();
+        using var fixture = SeedFixture(root);
+
+        var created = fixture.Store.BeginEmployeeRebuild(Create(fixture));
+        var active = fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!.ActiveRebuild;
+        Assert.NotNull(active);
+        Assert.Equal(created.Id, active!.Id);
+        Assert.Equal(EmployeeRebuildStates.Intent, active.State);
+
+        // A terminal rebuild is historical, not the active operation.
+        fixture.Store.TransitionEmployeeRebuild(created.Id, created.Revision, EmployeeRebuildStates.Intent, EmployeeRebuildStates.Failed, failureSummary: "not needed");
+        Assert.Null(fixture.Store.GetEmployeeProfileStatus(fixture.EmployeeId)!.ActiveRebuild);
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private sealed record ManagedWorker(string EmployeeId, string BindingId, string WorkerId);
 
     private sealed class RebuildFixture : IDisposable
     {
-        public RebuildFixture(TempStore root, OrganizationStore store, string employeeId, string bindingId, string workerId, string fromRevisionId, string toRevisionId, string toBuildId)
+        public RebuildFixture(TempStore root, OrganizationStore store, string employeeId, string bindingId, string workerId, string profileId, string fromRevisionId, string toRevisionId, string toBuildId)
         {
             Root = root;
             Store = store;
             EmployeeId = employeeId;
             BindingId = bindingId;
             WorkerId = workerId;
+            ProfileId = profileId;
             FromRevisionId = fromRevisionId;
             ToRevisionId = toRevisionId;
             ToBuildId = toBuildId;
@@ -335,6 +426,7 @@ public sealed class EmployeeRebuildStoreTests
         public string EmployeeId { get; }
         public string BindingId { get; }
         public string WorkerId { get; }
+        public string ProfileId { get; }
         public string FromRevisionId { get; }
         public string ToRevisionId { get; }
         public string ToBuildId { get; }
@@ -357,7 +449,7 @@ public sealed class EmployeeRebuildStoreTests
             null));
         var toBuild = BuildVerified(store, toRevision.Id, ToDigest, "linux/amd64");
         var worker = AddManagedWorker(store, root.Path, FromDigest, toRevision.Id, "Rebuild Worker", "wrk-rebuild-1");
-        return new RebuildFixture(root, store, worker.EmployeeId, worker.BindingId, worker.WorkerId, fromRevision.Id, toRevision.Id, toBuild.Id);
+        return new RebuildFixture(root, store, worker.EmployeeId, worker.BindingId, worker.WorkerId, profile.Id, fromRevision.Id, toRevision.Id, toBuild.Id);
     }
 
     private static ProfileBuildRecord BuildVerified(OrganizationStore store, string revisionId, string imageDigest, string platform)
