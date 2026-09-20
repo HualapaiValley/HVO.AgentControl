@@ -40,6 +40,8 @@ public sealed class DockerHelperTests
         Assert.Single(compose.Split('\n'), MountsDaemonSocket);
         Assert.Contains("read_only: true", helper, StringComparison.Ordinal);
         Assert.Contains("init: true", helper, StringComparison.Ordinal);
+        Assert.Contains("user: \"1002:1001\"", helper, StringComparison.Ordinal);
+        Assert.Contains("AGENTCONTROL_DOCKER_HELPER_GID: \"-1\"", helper, StringComparison.Ordinal);
         Assert.Contains("no-new-privileges:true", helper, StringComparison.Ordinal);
         Assert.Contains("- ALL", helper, StringComparison.Ordinal);
         Assert.Contains("group_add", helper, StringComparison.Ordinal);
@@ -49,6 +51,7 @@ public sealed class DockerHelperTests
         Assert.Contains(" AS docker-helper", dockerfile, StringComparison.Ordinal);
         Assert.Contains("--uid 1002", dockerfile, StringComparison.Ordinal);
         Assert.Contains("USER 1002:1002", dockerfile, StringComparison.Ordinal);
+        Assert.Contains("chown 1002:1001 /run/agentcontrol-docker-helper", dockerfile, StringComparison.Ordinal);
         Assert.Contains("chmod 0750 /run/agentcontrol-docker-helper", dockerfile, StringComparison.Ordinal);
     }
 

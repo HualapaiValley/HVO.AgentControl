@@ -146,6 +146,9 @@ ENTRYPOINT ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"]
 # docker.io package supplies the CLI from the same signed distribution archive
 # used by the base image, avoiding an additional third-party apt trust root.
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS docker-helper
+# The empty named socket volume copies the mountpoint metadata on first use.
+# GID 1001 is the controller group; the helper keeps UID 1002 and Compose adds
+# the host Docker-socket gid only as a supplementary group.
 RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && userdel ubuntu \
@@ -153,7 +156,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends docker.io ca-ce
     && groupadd --gid 1002 dockerhelper \
     && useradd --uid 1002 --gid 1002 --home-dir /nonexistent --shell /usr/sbin/nologin --no-create-home dockerhelper \
     && mkdir -p /app /run/agentcontrol-docker-helper \
-    && chown 1002:1002 /run/agentcontrol-docker-helper \
+    && chown 1002:1001 /run/agentcontrol-docker-helper \
     && chmod 0750 /run/agentcontrol-docker-helper
 COPY --from=build /docker-helper-app/ /app/
 RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + && chmod -R go-w /app
