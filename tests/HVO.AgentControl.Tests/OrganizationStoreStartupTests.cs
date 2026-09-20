@@ -50,6 +50,38 @@ public sealed class OrganizationStoreStartupTests
             pollInterval: TimeSpan.FromMilliseconds(10)));
     }
 
+    [Fact]
+    public async Task WaitTreatsTransientStoreFaultAsNotReady()
+    {
+        var calls = 0;
+        using var temp = new TempDirectory();
+        using var store = new OrganizationStore(Path.Combine(temp.Path, OrganizationStore.DatabaseFileName));
+        store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+
+        var result = await OrganizationStoreStartup.WaitAsync(
+            () => Interlocked.Increment(ref calls) < 3
+                ? throw new OrganizationStoreException("opening")
+                : store,
+            CancellationToken.None,
+            timeout: TimeSpan.FromSeconds(2),
+            pollInterval: TimeSpan.FromMilliseconds(10));
+
+        Assert.Same(store, result);
+        Assert.True(calls >= 3);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task WaitRejectsNonPositivePollingIntervals(int milliseconds)
+    {
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => OrganizationStoreStartup.WaitAsync(
+            static () => null,
+            CancellationToken.None,
+            timeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(milliseconds)));
+    }
+
     private sealed class TempDirectory : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "agentcontrol-store-startup-" + Guid.NewGuid().ToString("N"));

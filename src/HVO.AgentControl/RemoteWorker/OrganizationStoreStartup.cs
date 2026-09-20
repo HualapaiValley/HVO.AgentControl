@@ -1,4 +1,5 @@
 using HVO.AgentControl.Organization;
+using System.Diagnostics;
 
 namespace HVO.AgentControl.RemoteWorker;
 
@@ -21,16 +22,28 @@ internal static class OrganizationStoreStartup
         TimeSpan? pollInterval = null)
     {
         ArgumentNullException.ThrowIfNull(read);
-        var deadline = DateTimeOffset.UtcNow + (timeout ?? Timeout);
+        var maximum = timeout ?? Timeout;
+        var interval = pollInterval ?? PollInterval;
+        if (maximum <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout), "The organization-store startup timeout must be positive.");
+        if (interval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(pollInterval), "The organization-store polling interval must be positive.");
+        var elapsed = Stopwatch.StartNew();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (read() is { } store) return store;
-            var remaining = deadline - DateTimeOffset.UtcNow;
+            try
+            {
+                if (read() is { } store) return store;
+            }
+            catch (OrganizationStoreException)
+            {
+                // Store construction/opening can transiently expose its own typed
+                // failure while AcpControlHost is still establishing authority.
+                // Treat it exactly like null during this bounded startup window;
+                // request paths still report immediate sanitized failures.
+            }
+            var remaining = maximum - elapsed.Elapsed;
             if (remaining <= TimeSpan.Zero) return null;
-            await Task.Delay(
-                remaining < (pollInterval ?? PollInterval) ? remaining : pollInterval ?? PollInterval,
-                cancellationToken).ConfigureAwait(false);
+            await Task.Delay(remaining < interval ? remaining : interval, cancellationToken).ConfigureAwait(false);
         }
     }
 }
