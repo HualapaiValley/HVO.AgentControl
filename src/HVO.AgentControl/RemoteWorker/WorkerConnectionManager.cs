@@ -167,7 +167,7 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             var lease = await EnsureConnectedAndSynchronizedLockedAsync(command.WorkerId, entry, cancellationToken).ConfigureAwait(false);
             await RefreshStatusLockedAsync(command.WorkerId, entry, lease, cancellationToken).ConfigureAwait(false);
             EnsureSessionReadyForWork(Store(), command.WorkerId, command.NativeSessionId, lease.Status);
-            var envelope = new { method = "session/prompt", @params = new { sessionId = command.SessionId, prompt = command.Prompt } };
+            var envelope = new { method = "session/prompt", @params = new { sessionId = command.SessionId, prompt = new object[] { new { type = "text", text = command.Prompt } } } };
             var payload = Hash(JsonSerializer.Serialize(envelope, WorkerProtocol.JsonOptions));
             var turnId = "turn-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
             var store = Store();

@@ -16,6 +16,31 @@ import threading
 
 SESSION_ID = "ses_proxy_capture_0001"
 WRITE_LOCK = threading.Lock()
+MAX_PROMPT_BLOCKS = 32
+MAX_PROMPT_BYTES = 256 * 1024
+
+
+def valid_prompt_content(params):
+    # Mirror the pinned OpenCode/ACP session/prompt validation: a non-empty,
+    # bounded array of text content blocks. Anything else is -32602.
+    if not isinstance(params, dict):
+        return False
+    prompt = params.get("prompt")
+    if not isinstance(prompt, list) or not prompt or len(prompt) > MAX_PROMPT_BLOCKS:
+        return False
+    total = 0
+    for block in prompt:
+        if not isinstance(block, dict):
+            return False
+        if block.get("type") != "text":
+            return False
+        text = block.get("text")
+        if not isinstance(text, str) or not text or "\x00" in text:
+            return False
+        total += len(text.encode("utf-8"))
+        if total > MAX_PROMPT_BYTES:
+            return False
+    return True
 
 
 def capture():
@@ -62,6 +87,9 @@ for line in sys.stdin:
     elif method == "session/load":
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/prompt":
-        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+        if not valid_prompt_content(message.get("params")):
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Invalid params"}})
+        else:
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
     elif method is not None:
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})

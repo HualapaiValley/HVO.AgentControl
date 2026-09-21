@@ -31,6 +31,34 @@ WRITE_LOCK = threading.Lock()
 PROMPT_COUNT = 0
 SESSION_LOADED = False
 
+MAX_PROMPT_BLOCKS = 32
+MAX_PROMPT_BYTES = 256 * 1024
+
+
+def valid_prompt_content(params):
+    # Mirror the pinned OpenCode/ACP validation the live runtime enforces on
+    # session/prompt: a non-empty, bounded array of text content blocks. A bare
+    # string prompt, a missing/empty/oversized array and any non-text block are
+    # rejected with -32602 Invalid params, exactly as the real runtime does.
+    if not isinstance(params, dict):
+        return False
+    prompt = params.get("prompt")
+    if not isinstance(prompt, list) or not prompt or len(prompt) > MAX_PROMPT_BLOCKS:
+        return False
+    total = 0
+    for block in prompt:
+        if not isinstance(block, dict):
+            return False
+        if block.get("type") != "text":
+            return False
+        text = block.get("text")
+        if not isinstance(text, str) or not text or "\x00" in text:
+            return False
+        total += len(text.encode("utf-8"))
+        if total > MAX_PROMPT_BYTES:
+            return False
+    return True
+
 
 def log_call(method):
     if not CALLS:
@@ -101,6 +129,9 @@ for line in sys.stdin:
                 time.sleep(0.05)
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     elif method == "session/prompt":
+        if not valid_prompt_content(message.get("params")):
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Invalid params"}})
+            continue
         PROMPT_COUNT += 1
         if SCENARIO == "orientation_hang" and PROMPT_COUNT > 1:
             pass

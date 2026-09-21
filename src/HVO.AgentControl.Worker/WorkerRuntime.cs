@@ -818,6 +818,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         foreach (var property in envelope.EnumerateObject()) if (property.Name is not ("method" or "params")) throw new WorkerProtocolException("ACP envelope contains unsupported fields.");
         if (!envelope.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object || !parameters.TryGetProperty("sessionId", out var session) || session.ValueKind != JsonValueKind.String || session.GetString() is not { } sessionId) throw new WorkerProtocolException("session/prompt requires sessionId.");
         WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+        WorkerProtocol.ValidatePromptContentBlocks(parameters);
     }
 
     private static JsonDocument NormalizeCancellationEnvelope(JsonElement envelope)

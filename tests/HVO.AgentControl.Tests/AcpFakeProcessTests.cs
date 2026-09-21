@@ -131,6 +131,46 @@ public sealed class AcpFakeProcessTests
     }
 
     [Fact]
+    public async Task FakeRejectsMalformedPromptContentBlocksAsInvalidParams()
+    {
+        await using var fake = FakeSession.Start("happy");
+
+        var cases = new (string Name, object? Params)[]
+        {
+            ("string", new Dictionary<string, object?> { ["sessionId"] = AcpFakeServer.DefaultSessionId, ["prompt"] = "bare string" }),
+            ("missing", new Dictionary<string, object?> { ["sessionId"] = AcpFakeServer.DefaultSessionId }),
+            ("empty", new Dictionary<string, object?> { ["sessionId"] = AcpFakeServer.DefaultSessionId, ["prompt"] = Array.Empty<object>() }),
+            ("non-text", new Dictionary<string, object?> { ["sessionId"] = AcpFakeServer.DefaultSessionId, ["prompt"] = new object[] { new Dictionary<string, object?> { ["type"] = "image", ["text"] = "hello" } } }),
+            ("empty-text", new Dictionary<string, object?> { ["sessionId"] = AcpFakeServer.DefaultSessionId, ["prompt"] = new object[] { new Dictionary<string, object?> { ["type"] = "text", ["text"] = "" } } }),
+        };
+
+        foreach (var item in cases)
+        {
+            var exception = await Assert.ThrowsAsync<AcpRemoteException>(() => fake.Session.RequestAsync(
+                "session/prompt",
+                item.Params,
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None));
+            Assert.Equal(-32602, exception.Code);
+        }
+
+        // A well-formed content-block prompt still round-trips on the same session.
+        var ok = await fake.Session.RequestAsync(
+            "session/prompt",
+            new Dictionary<string, object?>
+            {
+                ["sessionId"] = AcpFakeServer.DefaultSessionId,
+                ["prompt"] = new object[]
+                {
+                    new Dictionary<string, object?> { ["type"] = "text", ["text"] = "hello" },
+                },
+            },
+            TimeSpan.FromSeconds(5),
+            CancellationToken.None);
+        Assert.Equal("end_turn", ok.GetProperty("stopReason").GetString());
+    }
+
+    [Fact]
     public async Task OutOfOrderResponsesCorrelateToCorrectRequests()
     {
         await using var fake = FakeSession.Start("happy");

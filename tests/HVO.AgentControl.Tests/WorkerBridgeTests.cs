@@ -101,7 +101,7 @@ public sealed class WorkerBridgeTests
         {
             Start(store);
             var lease = store.AcquireLease("controller-test", Nonce(1));
-            using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+            using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
             store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, "req-v7", prompt.RootElement, "turn-v7");
             store.MarkForwarded("req-v7");
             store.AppendEvent("v7-event", "{\"preserved\":true}");
@@ -232,7 +232,7 @@ public sealed class WorkerBridgeTests
     public void DispatchGateRejectsHoldExpiryAndReplayGapBeforeRequestPersistence()
     {
         using var temp = new WorkerTemp(); var clock = new FakeClock(); using var store = new WorkerStore(temp.Options(lease: TimeSpan.FromSeconds(2)), clock); Start(store);
-        var lease = store.AcquireLease("controller-test", Nonce(1)); using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        var lease = store.AcquireLease("controller-test", Nonce(1)); using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         store.SetHold(true, "manual"); Assert.Throws<WorkerProtocolException>(() => store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "held", payload.RootElement, "turn"));
         store.SetHold(false, null); clock.Advance(TimeSpan.FromSeconds(3)); Assert.Throws<WorkerProtocolException>(() => store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "expired", payload.RootElement, "turn"));
         var fresh = store.AcquireLease("controller-test", Nonce(2)); store.SetHold(false, null); Assert.Throws<WorkerProtocolException>(() => store.Replay(store.WorkerGeneration, 1));
@@ -244,7 +244,7 @@ public sealed class WorkerBridgeTests
     public void SemanticRequestIdempotencyDoesNotDuplicateAndChangedValueRejects()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
-        using var firstJson = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"b\":2,\"a\":1}}"); using var sameJson = JsonDocument.Parse("{\"params\":{\"a\":1,\"b\":2,\"sessionId\":\"ses-test\"},\"method\":\"session/prompt\"}"); using var changed = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"a\":2,\"b\":2}}");
+        using var firstJson = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"first\"}],\"b\":2,\"a\":1}}"); using var sameJson = JsonDocument.Parse("{\"params\":{\"a\":1,\"b\":2,\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"first\"}]},\"method\":\"session/prompt\"}"); using var changed = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"first\"}],\"a\":2,\"b\":2}}");
         var first = store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "req", firstJson.RootElement, "turn"); var same = store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "req", sameJson.RootElement, "turn");
         Assert.Equal(first.PayloadHash, same.PayloadHash); Assert.Throws<WorkerProtocolException>(() => store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "req", changed.RootElement, "turn")); Assert.Equal(1L, CountRows(System.IO.Path.Combine(temp.Path, "bridge.db"), "requests"));
     }
@@ -414,7 +414,7 @@ public sealed class WorkerBridgeTests
         Assert.True(store.Status().AcpInitialized);
         Assert.Null(store.Status().SessionId);
 
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "before-load", prompt.RootElement, "turn-before", CancellationToken.None));
 
         var load = runtime.LoadSessionAsync(lease.Epoch, lease.ConnectionNonce, "ses-test");
@@ -518,7 +518,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"permission\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}],\"text\":\"permission\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "host-request", envelope.RootElement, "host-turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","requestId":"spoofed-request","turnId":"spoofed-turn","decisionId":"spoofed-decision","toolCall":{"toolCallId":"tc-1","kind":"read","title":"diagnostic:public","status":"pending","rawInput":{"secret":"do-not-retain"}},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
@@ -540,7 +540,7 @@ public sealed class WorkerBridgeTests
         input.Enqueue("""{"jsonrpc":"2.0","id":8001,"method":"session/request_permission","params":{"options":[{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1);
         Assert.Null(store.Status().PendingPermission); Assert.Equal("running", store.Status().ProcessState);
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         input.Enqueue("""{"jsonrpc":"2.0","id":8002,"method":"session/request_permission","params":{"sessionId":"ses-other","options":[{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
@@ -632,7 +632,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new GatedFlushStream(2); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.FirstFlush.Task.WaitAsync(TimeSpan.FromSeconds(2));
         input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]}}""" + "\n");
@@ -652,7 +652,7 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = throwOnRead ? new FailingGateStream() : new GateStream();
         await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"transport\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}],\"text\":\"transport\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
@@ -661,7 +661,7 @@ public sealed class WorkerBridgeTests
         Assert.Equal(throwOnRead ? "transport-uncertain" : "exited", store.Status().ProcessState); Assert.Equal(throwOnRead ? "acp-transport-uncertain" : "process-exited", store.Status().HoldReason);
         var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         Assert.Equal("uncertain", replayed.State);
-        using var fresh = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var fresh = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "new", fresh.RootElement, "turn2", CancellationToken.None));
         Assert.Equal(1, output.Text.Count(character => character == '\n'));
     }
@@ -671,7 +671,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
@@ -687,7 +687,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"delayed\"}}"); using var disconnected = new CancellationTokenSource();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}],\"text\":\"delayed\"}}"); using var disconnected = new CancellationTokenSource();
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", disconnected.Token);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var receipt = await submit.WaitAsync(TimeSpan.FromSeconds(2));
@@ -703,7 +703,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var first = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "prompt-1", prompt.RootElement, "turn-1", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "prompt-2", prompt.RootElement, "turn-2", CancellationToken.None));
@@ -721,7 +721,7 @@ public sealed class WorkerBridgeTests
     public async Task StoreSerializesConcurrentConnectionUse()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1000)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
-        using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var payload = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var tasks = Enumerable.Range(0, 100).Select(index => Task.Run(() =>
         {
             store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
@@ -847,7 +847,7 @@ public sealed class WorkerBridgeTests
     public void CancellationIntentIsDurableIdempotentAndChangedReuseRejects()
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
         using var first = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"one\"}}");
         using var same = JsonDocument.Parse("{\"params\":{\"sessionId\":\"one\"},\"method\":\"session/cancel\"}");
         using var changed = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"two\"}}");
@@ -864,7 +864,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}"); store.RegisterGatedRequest(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn"); store.MarkForwarding("target");
         using var invalid = JsonDocument.Parse(envelopeJson);
 
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-bad-jsonrpc", "target", invalid.RootElement, CancellationToken.None));
@@ -877,7 +877,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new FailAfterNewlinesStream(1); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses\"}}");
         await Assert.ThrowsAsync<WorkerOperationUncertainException>(() => runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-failed", "target", cancellation.RootElement, CancellationToken.None));
@@ -903,7 +903,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new GatedFlushStream(2); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}"); var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.FirstFlush.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancelEnvelope = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses\"}}"); using var disconnected = new CancellationTokenSource();
         var cancel = runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-1", "target", cancelEnvelope.RootElement, disconnected.Token);
@@ -979,7 +979,7 @@ public sealed class WorkerBridgeTests
         using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(12));
         using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
 
-        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-async", turnId = "turn-async", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-async", turnId = "turn-async", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test", prompt = new object[] { new { type = "text", text = "bounded task" } } } } }, CancellationToken.None);
         using (var submitted = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", submitted!.RootElement.GetProperty("result").GetProperty("state").GetString());
 
         await WorkerProtocol.WriteFrameAsync(stream, new { operation = "status" }, CancellationToken.None);
@@ -1008,7 +1008,7 @@ public sealed class WorkerBridgeTests
         using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(13));
         using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
 
-        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-permission", turnId = "turn-permission", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-permission", turnId = "turn-permission", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test", prompt = new object[] { new { type = "text", text = "bounded task" } } } } }, CancellationToken.None);
         using (var submitted = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", submitted!.RootElement.GetProperty("result").GetProperty("state").GetString());
         input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"reject_once"}]}}""" + "\n");
         await Eventually(() => store.Status().PendingPermission is not null);
@@ -1036,7 +1036,7 @@ public sealed class WorkerBridgeTests
         using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(14));
         using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
 
-        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-permission-generic", turnId = "turn-permission-generic", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-permission-generic", turnId = "turn-permission-generic", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test", prompt = new object[] { new { type = "text", text = "bounded task" } } } } }, CancellationToken.None);
         using (var submitted = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None)) Assert.Equal("forwarded", submitted!.RootElement.GetProperty("result").GetProperty("state").GetString());
         // The pinned real shape offers generic IDs; the worker retains the exact IDs.
         input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"once"},{"optionId":"always"},{"optionId":"reject"}]}}""" + "\n");
@@ -1117,7 +1117,7 @@ public sealed class WorkerBridgeTests
         var key = new byte[32]; await using var bridge = new WorkerBridge(temp.Options(), store, runtime, key.ToArray()); using var shutdown = new CancellationTokenSource(); var run = bridge.RunAsync(shutdown.Token); await Eventually(() => File.Exists(temp.Options().SocketPath));
         using var stream = await AuthenticateAsync(temp.Options(), key, Nonce(32));
         using var authenticated = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None); var lease = authenticated!.RootElement.GetProperty("lease");
-        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-uncertain", turnId = "turn-uncertain", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test" } } }, CancellationToken.None);
+        await WorkerProtocol.WriteFrameAsync(stream, new { operation = "submit", epoch = lease.GetProperty("epoch").GetInt64(), connectionNonce = lease.GetProperty("connectionNonce").GetString(), requestId = "req-uncertain", turnId = "turn-uncertain", envelope = new { method = "session/prompt", @params = new { sessionId = "ses-test", prompt = new object[] { new { type = "text", text = "bounded task" } } } } }, CancellationToken.None);
         using var uncertain = await WorkerProtocol.ReadFrameAsync(stream, CancellationToken.None);
         Assert.Equal("worker-operation-uncertain", uncertain!.RootElement.GetProperty("error").GetString());
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -1142,7 +1142,7 @@ public sealed class WorkerBridgeTests
     {
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses-test\"}}");
@@ -1165,7 +1165,7 @@ public sealed class WorkerBridgeTests
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "unsupported", unsupported.RootElement, "turn", CancellationToken.None));
         using var missing = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{}}");
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "missing", missing.RootElement, "turn", CancellationToken.None));
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"text\":\"raw-request-secret\"}}");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}],\"text\":\"raw-request-secret\"}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", prompt.RootElement, "turn-a", CancellationToken.None); await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
         await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", prompt.RootElement, "turn-b", CancellationToken.None));
@@ -1184,6 +1184,54 @@ public sealed class WorkerBridgeTests
         var journalText = string.Join('|', new[] { databasePath, databasePath + "-wal", databasePath + "-shm" }.Where(File.Exists).Select(path => Encoding.UTF8.GetString(File.ReadAllBytes(path))));
         Assert.Contains("req", journalText, StringComparison.Ordinal); Assert.Contains("turn-a", journalText, StringComparison.Ordinal); Assert.Contains("ses-test", journalText, StringComparison.Ordinal);
         Assert.DoesNotContain("raw-request-secret", journalText, StringComparison.Ordinal); Assert.DoesNotContain("raw-result-secret", journalText, StringComparison.Ordinal); Assert.DoesNotContain(oversizedCode, journalText, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":"bare string"}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test"}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[]}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":{"type":"text","text":"hello"}}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"image","text":"hello"}]}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"text"}]}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"text","text":""}]}}""")]
+    [InlineData("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"text","text":"nul\u0000text"}]}}""")]
+    public async Task MalformedPromptContentBlocksAreRejectedBeforeAnyRequestJournalOrAcpWrite(string json)
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        using var envelope = JsonDocument.Parse(json);
+        // Both enforcement points reject the same shape before durable registration.
+        Assert.Throws<WorkerProtocolException>(() => store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, "malformed-store", envelope.RootElement, "turn-store"));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "malformed-runtime", envelope.RootElement, "turn-runtime", CancellationToken.None));
+        var databasePath = System.IO.Path.Combine(temp.Path, "bridge.db");
+        using (var connection = Open(databasePath))
+        {
+            Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM requests")));
+            Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM events")));
+        }
+        Assert.Equal(string.Empty, output.Text);
+    }
+
+    [Fact]
+    public async Task OversizedPromptContentBlocksAreRejectedBeforeAnyRequestJournalOrAcpWrite()
+    {
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        var blocks = string.Join(',', Enumerable.Repeat("""{"type":"text","text":"x"}""", WorkerProtocol.MaxPromptContentBlocks + 1));
+        using var tooMany = JsonDocument.Parse($"{{\"method\":\"session/prompt\",\"params\":{{\"sessionId\":\"ses-test\",\"prompt\":[{blocks}]}}}}");
+        Assert.Throws<WorkerProtocolException>(() => store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, "many", tooMany.RootElement, "turn-many"));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "many", tooMany.RootElement, "turn-many", CancellationToken.None));
+        var oversizedText = new string('x', WorkerProtocol.MaxPromptContentBytes + 1);
+        using var tooLarge = JsonDocument.Parse($"{{\"method\":\"session/prompt\",\"params\":{{\"sessionId\":\"ses-test\",\"prompt\":[{{\"type\":\"text\",\"text\":\"{oversizedText}\"}}]}}}}");
+        Assert.Throws<WorkerProtocolException>(() => store.RegisterAndBeginForwardingGated(lease.Epoch, lease.ConnectionNonce, "large", tooLarge.RootElement, "turn-large"));
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "large", tooLarge.RootElement, "turn-large", CancellationToken.None));
+        var databasePath = System.IO.Path.Combine(temp.Path, "bridge.db");
+        using (var connection = Open(databasePath))
+        {
+            Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM requests")));
+            Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM events")));
+        }
+        Assert.Equal(string.Empty, output.Text);
     }
 
     [Fact]
@@ -1281,7 +1329,7 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         var observations = new OneShotFailingObservationSink(store);
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output, observations); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         input.Enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{}}\n");
@@ -1299,7 +1347,7 @@ public sealed class WorkerBridgeTests
         Assert.Null(store.Status().JournalFailure);
         Assert.False(store.Status().DispatchHeld);
 
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
@@ -1330,7 +1378,7 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1, eventBytes: 128)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         store.AppendEvent("full", "{}");
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var first = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var first = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-one", first.RootElement, "turn-one", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var firstId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
@@ -1339,7 +1387,7 @@ public sealed class WorkerBridgeTests
         await Eventually(() => store.GetRequest("req-one")?.State == "completed" && store.Status().ActiveRequestId is null);
         Assert.IsType<WorkerReplayLossException>(Record.Exception(() => store.AppendEvent("another", "{}")));
         store.ReconcileReplayLoss(store.Status().ReplayLoss!.WorkerGeneration, store.Status().ReplayLoss!.MarkerSequence);
-        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-two", second.RootElement, "turn-two", CancellationToken.None);
         await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
         var secondId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
@@ -1355,7 +1403,7 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1, eventBytes: 128)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         store.AppendEvent("full", "{}");
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var prompt = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "target", prompt.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         using var cancellation = JsonDocument.Parse("{\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"ses-test\"}}");
@@ -1373,7 +1421,7 @@ public sealed class WorkerBridgeTests
         using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options(eventLimit: 1, eventBytes: 256)); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
         store.AppendEvent("full", "{}");
         await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
-        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\"}}");
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
         var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(2));
         input.Enqueue("""{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"ses-test","options":[{"optionId":"reject_once"}]}}""" + "\n");

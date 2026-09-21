@@ -38,6 +38,17 @@ public static class WorkerProtocol
     /// <summary>The maximum UTF-8 bytes retained for one model-authored task report.</summary>
     public const int MaxModelTaskReportBytes = 16 * 1024;
 
+    /// <summary>The maximum number of ACP content blocks one <c>session/prompt</c> may carry.</summary>
+    public const int MaxPromptContentBlocks = 32;
+
+    /// <summary>
+    /// The maximum total UTF-8 bytes of the text carried by one
+    /// <c>session/prompt</c> content-block array. This bounds decoded source text;
+    /// the controller's stricter prompt limits keep its JSON-escaped envelope
+    /// inside the authenticated bridge frame limit.
+    /// </summary>
+    public const int MaxPromptContentBytes = 256 * 1024;
+
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false, MaxDepth = MaxControlJsonDepth };
 
     /// <summary>
@@ -239,6 +250,47 @@ public static class WorkerProtocol
             var valid = character is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_' or '.' or ':';
             if (allowBase64Punctuation) valid |= character is '+' or '/' or '=';
             if (!valid) throw new WorkerProtocolException($"Invalid {name}.");
+        }
+    }
+
+    /// <summary>
+    /// Requires <c>params.prompt</c> to be the ACP content-block shape the pinned
+    /// runtime accepts: a non-empty array of at most
+    /// <see cref="MaxPromptContentBlocks"/> objects that each carry a string
+    /// <c>type</c> of exactly <c>text</c> and a non-empty, NUL-free string
+    /// <c>text</c>, with the total text bounded to
+    /// <see cref="MaxPromptContentBytes"/>. A bare string prompt, a missing or
+    /// empty array, and any non-text block are rejected before durable
+    /// registration or an ACP write, so a malformed shape can never reach the
+    /// live OpenCode process or be journaled.
+    /// </summary>
+    public static void ValidatePromptContentBlocks(JsonElement parameters)
+    {
+        if (parameters.ValueKind != JsonValueKind.Object
+            || !parameters.TryGetProperty("prompt", out var prompt)
+            || prompt.ValueKind != JsonValueKind.Array
+            || prompt.GetArrayLength() is 0 or > MaxPromptContentBlocks)
+        {
+            throw new WorkerProtocolException("session/prompt requires a bounded non-empty prompt content-block array.");
+        }
+
+        var total = 0;
+        foreach (var block in prompt.EnumerateArray())
+        {
+            if (block.ValueKind != JsonValueKind.Object
+                || !block.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String
+                || !string.Equals(type.GetString(), "text", StringComparison.Ordinal)
+                || !block.TryGetProperty("text", out var text)
+                || text.ValueKind != JsonValueKind.String
+                || text.GetString() is not { Length: > 0 } value
+                || value.IndexOf('\0') >= 0)
+            {
+                throw new WorkerProtocolException("session/prompt content blocks must be non-empty text blocks.");
+            }
+
+            total += Encoding.UTF8.GetByteCount(value);
+            if (total > MaxPromptContentBytes) throw new WorkerProtocolException("session/prompt content blocks exceed the bounded size.");
         }
     }
 
