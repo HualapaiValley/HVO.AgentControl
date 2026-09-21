@@ -358,8 +358,9 @@ was removed. Cancellation limitation: OpenCode reported the cancelled turn
 completed, so cancellation cleared the active request but was not rollback.
 The `home-docker` control portal is deployed from promoted `main` `59d0d68`, with
 schema v13; `quick_check` is clean and foreign-key errors are zero. The live
-`/api/info` reports `TaskControlOperationallyValidated=true` with the exact
-scope above. WorkerControl is enabled through the ignored Compose override; product/Compose
+`/api/info` reports `TaskControlOperationallyValidated=true` with
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
+WorkerControl is enabled through the ignored Compose override; product/Compose
 remains `true` by default.
 
 **Three worker classes.** Do not collapse them. (1) The **automatic
