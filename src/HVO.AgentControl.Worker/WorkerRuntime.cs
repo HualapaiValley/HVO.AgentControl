@@ -611,9 +611,15 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 }
             }
             else outcome = SanitizeOutcome(result, state);
-            var terminal = FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, () => _store.CompleteRequest(requestId, state, outcome));
-            TryAppendObservation("acp-response", SanitizeObservation(result, requestId, correlationId));
-            return terminal;
+            var observation = SanitizeObservation(result, requestId, correlationId);
+            return FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, () =>
+            {
+                _store.CompleteRequest(requestId, state, outcome);
+                // Journaled before the slot is released so an append failure holds dispatch
+                // before any successor can be admitted, and so response events stay ordered
+                // ahead of the next request's frames.
+                TryAppendObservation("acp-response", observation);
+            });
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
         {
@@ -643,12 +649,15 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
     }
 
-    // Releases the prompt slot and publishes the terminal durable state as one admission-gated
-    // step. Admission (BeginSubmit) takes the same gate before probing the prompt slot, so a
-    // caller that observes the terminal state (or a cleared active request) in the store can
-    // never then be refused because the in-memory slot is still held, and a caller admitted
-    // before this step still sees the prior request as active. The terminal write runs last so
-    // the store never shows a finished request while the slot is still owned.
+    /// <summary>
+    /// Releases the prompt slot and publishes the terminal durable state as one admission-gated
+    /// step. Admission (<see cref="BeginSubmit"/>) takes the same gate before probing the prompt
+    /// slot, so serialization, not write order, is what guarantees that a caller which observes
+    /// the terminal state in the store is never then refused because the in-memory slot is still
+    /// held, and that a caller admitted before this step still sees the prior request as active.
+    /// Within the step the durable active request is cleared before the terminal state is
+    /// written, so the store never shows a finished request that still names itself active.
+    /// </summary>
     private StoredRequest FinalizeRequest(string requestId, bool prompt, bool promptOwned, ActivePromptContext? promptContext, TurnTextCapture? reportCapture, ref bool finalized, Action publishTerminalState)
     {
         if (finalized) return _store.GetRequest(requestId)!;
@@ -665,8 +674,8 @@ public sealed class WorkerRuntime : IAsyncDisposable
                         if (ReferenceEquals(_activeTaskReportCapture, reportCapture)) _activeTaskReportCapture = null;
                     }
                 }
-                try { publishTerminalState(); }
-                finally { if (prompt) _store.SetActiveRequest(null); }
+                if (prompt) _store.SetActiveRequest(null);
+                publishTerminalState();
                 return _store.GetRequest(requestId)!;
             }
             finally
