@@ -1359,6 +1359,32 @@ public sealed class WorkerBridgeTests
     }
 
     [Fact]
+    public async Task ReplayOfInFlightRequestReportsDurableStateOnceItAdvancesPastForwarded()
+    {
+        // #322: while the operation is still registered in memory, a same-id replay must report
+        // the durable request state, not the forwarded receipt snapshot, once that state has
+        // advanced out of band (as the reader's termination path or a generation advance does).
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        // Still in flight: a replay reports the forwarded receipt.
+        Assert.Equal("forwarded", (await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2))).State);
+        store.MarkUncertain("req");
+        Assert.Equal("uncertain", store.GetRequest("req")!.State);
+        Assert.Equal("req", store.Status().ActiveRequestId);
+        var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("uncertain", replayed.State);
+        Assert.Single(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        using var altered = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"different\"}]}}");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", altered.RootElement, "turn", CancellationToken.None));
+        input.Complete();
+        await Eventually(() => store.Status().ActiveRequestId is null && store.Status().ProcessState == "exited");
+        Assert.Equal("uncertain", store.GetRequest("req")!.State);
+    }
+
+    [Fact]
     public async Task ObservedTerminalStateAlwaysAdmitsNextPromptAndReplayReportsDurableTruth()
     {
         // #322: finalization (clear active request, write terminal state, journal the response,
@@ -1385,8 +1411,11 @@ public sealed class WorkerBridgeTests
             Assert.Null(store.Status().ActiveRequestId);
             Assert.Equal("completed", store.GetRequest("req")!.State);
             // A submit issued now cannot be refused as "another prompt active"; it blocks on the
-            // admission gate until finalization completes.
-            next = Task.Run(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None));
+            // admission gate until finalization completes. The delegate is proven to have started
+            // (not merely unscheduled) before the blocked state is asserted.
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            next = Task.Run(() => { started.SetResult(); return runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None); });
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
             await Task.Delay(100);
             Assert.False(next.IsCompleted);
             Assert.Single(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
