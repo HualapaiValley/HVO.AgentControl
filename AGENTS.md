@@ -47,11 +47,11 @@ the only path to `Verified`. It is **operationally validated** as of 2026-09-21:
 the first local managed employee (`emp-933d24fc110222a5`) ran two bounded tasks
 end to end and each reached `Verified` through independent host verification on
 the controller-local Docker target, across a control restart, a cancellation/hold
-exercise and an employee orientation revision. In this evidence change `/api/info`
-reports `TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
+exercise and an employee orientation revision. The deployed `home-docker` build
+(promoted `main` `59d0d68`) reports `TaskControlImplemented=true`,
+`TaskControlOperationallyValidated=true` and
 `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
-once promoted; the currently deployed `cae2ebc` build still reports the task flags
-false, and there is no scheduler. The task flags are never collapsed into the
+live; there is no scheduler. The task flags are never collapsed into the
 worker-control flags. Keep the three worker classes
 distinct: (1) automatic controller-local managed employees provisioned through
 the helper; (2) manually operated remote Docker workers reached by
@@ -79,11 +79,11 @@ exercise was observed (`Cancelled`/`cancellation-observed`, a fresh-key dispatch
 refused `409`), and an orientation revision was delivered and comprehended with
 no image rebuild. Evidence: promoted/deployed `main` evolved through `fa81286`,
 `5854601`, `579783f`, `3e496c4` and `cae2ebc` while live defects were reviewed and
-promoted. The live evidence was collected on that deployed `cae2ebc` / schema v13,
-whose `/api/info` still reports `TaskControlOperationallyValidated=false`.
-`98b8f30` was promoted as `cae2ebc` with an identical tree; only the later
-evidence commits remain unpromoted, and `/api/info` will report the task flags
-true after those commits are promoted. Schema is v13; the
+promoted. The live evidence was collected on the then-deployed `cae2ebc` / schema
+v13 (`98b8f30` promoted with an identical tree). The evidence commit `34370f2` was
+then promoted as `main` `59d0d68` and deployed to `home-docker`; the worker base
+digest was unchanged, so only control was recreated, and `/api/info` now reports
+the task flags true live. Schema is v13; the
 pre-deploy full snapshot `agentcontrol-v2-backup-pre-fa81286` verified 35 files /
 9,399,203 bytes with exact schema-v12 DB hash `59f05e4…`; helper socket
 `1002:1001` `0660`. Accepted Task 1 `tsk-2b4bcf5890861fe123ea207f` (`req-d1218e7aed229aa650f8f0e3`,
