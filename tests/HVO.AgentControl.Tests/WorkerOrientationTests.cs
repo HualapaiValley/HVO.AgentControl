@@ -485,6 +485,41 @@ public sealed class WorkerOrientationTests
             Assert.DoesNotContain("Working on", item.PayloadJson, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task TaskSubmitRetainsAValidFinalReportAfterProgressExceedsTheReportBound()
+    {
+        var report = """{"summary":"tail","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var completed = await RunTaskReportCaptureAsync(new string('x', WorkerProtocol.MaxModelTaskReportBytes + 1024) + report);
+        Assert.Equal(report, completed.OutcomeJson);
+    }
+
+    [Theory]
+    [InlineData("trailing")]
+    [InlineData("nested")]
+    [InlineData("fenced")]
+    public async Task TaskSubmitRejectsAmbiguousFinalReportSuffixes(string scenario)
+    {
+        var report = """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var text = scenario switch
+        {
+            "trailing" => report + " trailing prose",
+            "nested" => "{\"wrapper\":" + report + "}",
+            "fenced" => "progress\n```json\n" + report,
+            _ => throw new InvalidOperationException(),
+        };
+        var failed = await RunTaskReportCaptureAsync(text);
+        Assert.Equal("{\"category\":\"model-report-invalid\"}", failed.OutcomeJson);
+    }
+
+    [Fact]
+    public async Task TaskSubmitUsesTheLastOfTwoFinalReports()
+    {
+        var first = """{"summary":"first","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var last = """{"summary":"last","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var completed = await RunTaskReportCaptureAsync(first + "\n" + last);
+        Assert.Equal(last, completed.OutcomeJson);
+    }
+
     [Theory]
     [InlineData("malformed")]
     [InlineData("overflow")]
@@ -585,6 +620,32 @@ public sealed class WorkerOrientationTests
             await Task.Delay(10, timeout.Token);
         }
         throw new Xunit.Sdk.XunitException($"Request {requestId} did not reach {expected}.");
+    }
+
+    private static async Task<StoredRequest> RunTaskReportCaptureAsync(string text)
+    {
+        using var temp = new WorkerTemp();
+        using var store = new WorkerStore(temp.Options());
+        SeedInstalledOrientation(store, "ora-1", "v1", "orientation-current.md", "# Orientation\n");
+        await using var input = new GateStream();
+        await using var output = new CaptureStream();
+        await using var runtime = new WorkerRuntime(store, input, output, store);
+        runtime.Start();
+        var lease = store.AcquireLease("controller-test", Nonce(23));
+        store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
+        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"text","text":"bounded task"}]}}""");
+        await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-suffix", envelope.RootElement, "turn-task-suffix", CancellationToken.None, captureTaskReport: true);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue(ChunkFrame("ses-test", text));
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"stopReason\":\"end_turn\"}}}}\n");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (true)
+        {
+            var current = store.GetRequest("req-task-suffix")!;
+            if (current.State is "completed" or "failed") return current;
+            await Task.Delay(25, timeout.Token);
+        }
     }
 
     private static void SeedInstalledOrientation(WorkerStore store, string assignmentId, string version, string fileName, string content)

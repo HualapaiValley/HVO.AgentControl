@@ -357,7 +357,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
     /// bounded and overflows closed. It seals on the response frame whose id
     /// matches the bound request, so late chunks cannot corrupt a completed turn.
     /// </summary>
-    private sealed class TurnTextCapture(string sessionId, int maximumBytes)
+    private sealed class TurnTextCapture(string sessionId, int maximumBytes, bool retainTail = false)
     {
         private readonly object _gate = new();
         private readonly StringBuilder _buffer = new();
@@ -414,9 +414,24 @@ public sealed class WorkerRuntime : IAsyncDisposable
             {
                 if (_sealed || _overflowed) return;
                 var bytes = System.Text.Encoding.UTF8.GetByteCount(text);
-                if (_bytes > maximumBytes - bytes) { _overflowed = true; _buffer.Clear(); return; }
-                _buffer.Append(text);
-                _bytes += bytes;
+                if (!retainTail)
+                {
+                    if (_bytes > maximumBytes - bytes) { _overflowed = true; _buffer.Clear(); return; }
+                    _buffer.Append(text);
+                    _bytes += bytes;
+                    return;
+                }
+                if (_bytes <= maximumBytes - bytes)
+                {
+                    _buffer.Append(text);
+                    _bytes += bytes;
+                    return;
+                }
+                var combined = System.Text.Encoding.UTF8.GetBytes(_buffer.ToString() + text);
+                var start = Math.Max(0, combined.Length - maximumBytes);
+                while (start < combined.Length && (combined[start] & 0xc0) == 0x80) start++;
+                _buffer.Clear().Append(System.Text.Encoding.UTF8.GetString(combined.AsSpan(start)));
+                _bytes = combined.Length - start;
             }
         }
 
@@ -545,7 +560,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
             if (prompt)
             {
                 promptContext = new ActivePromptContext(requestId, registered.TurnId, registered.ProcessGeneration, registered.OwnershipEpoch, correlationId.Value, registered.SessionId);
-                reportCapture = captureTaskReport ? new TurnTextCapture(registered.SessionId, WorkerProtocol.MaxModelTaskReportBytes) : null;
+                reportCapture = captureTaskReport ? new TurnTextCapture(registered.SessionId, WorkerProtocol.MaxModelTaskReportBytes, retainTail: true) : null;
                 reportCapture?.BindRequest(correlationId.Value);
                 lock (_activePromptGate)
                 {
@@ -841,9 +856,10 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (end == 0) return false;
         for (var start = text.LastIndexOf('{', end - 1); start >= 0; start = start == 0 ? -1 : text.LastIndexOf('{', start - 1))
         {
+            if (text.AsSpan(0, start).Contains("```", StringComparison.Ordinal)) continue;
             try
             {
-                using var document = JsonDocument.Parse(text[start..end], new JsonDocumentOptions { MaxDepth = 32 });
+                using var document = JsonDocument.Parse(text.AsMemory(start, end - start), new JsonDocumentOptions { MaxDepth = 32 });
                 if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _)) return true;
             }
             catch (JsonException) { }
