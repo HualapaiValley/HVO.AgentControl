@@ -890,12 +890,12 @@ public sealed class WorkerRuntime : IAsyncDisposable
         try
         {
             using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { MaxDepth = 32 });
-            if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _))
+            if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out var shapeFailure))
             {
                 failure = string.Empty;
                 return true;
             }
-            failure = "report-shape";
+            failure = shapeFailure ?? "report-shape";
             return false;
         }
         catch (JsonException)
