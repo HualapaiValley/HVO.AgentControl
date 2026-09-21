@@ -55,7 +55,16 @@ public sealed class WorkspaceTaskVerifierTests
         var workspace = Path.Combine(temp.Path, "workspace");
         var project = Path.Combine(workspace, "project");
         Directory.CreateDirectory(project);
-        File.WriteAllText(Path.Combine(project, "CopyFixture.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        File.WriteAllText(Path.Combine(project, "CopyFixture.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <Target Name="VSTest">
+                <CallTarget Targets="Build" />
+              </Target>
+            </Project>
+            """);
         File.WriteAllText(Path.Combine(project, "Class1.cs"), "public static class Class1 { public static int Value => 1; }");
         Directory.CreateDirectory(Path.Combine(project, ".task-nuget"));
         RunProcess(hostDotnet, project, ["restore", "--packages", Path.Combine(project, ".task-nuget"), "--ignore-failed-sources"]);
@@ -67,7 +76,9 @@ public sealed class WorkspaceTaskVerifierTests
         }
 
         var result = RunReal(workspace, hostDotnet, "project", ["."], 20, 1024 * 1024, 60);
-        Assert.Equal("passed", result.GetProperty("state").GetString());
+        Assert.True(
+            string.Equals("passed", result.GetProperty("state").GetString(), StringComparison.Ordinal),
+            result.GetRawText());
         Assert.Equal(sourceBefore, File.ReadAllBytes(Path.Combine(project, "Class1.cs")));
         Assert.True(Directory.Exists(Path.Combine(project, "obj")));
         Assert.False(Directory.Exists(Path.Combine(project, "bin")));
