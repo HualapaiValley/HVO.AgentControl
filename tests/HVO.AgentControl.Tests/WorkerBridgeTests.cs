@@ -1341,6 +1341,7 @@ public sealed class WorkerBridgeTests
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
         await Eventually(() => store.GetRequest("req")?.State == "completed");
+        Assert.Null(store.Status().ActiveRequestId);
         Assert.Throws<WorkerProtocolException>(() => store.ReconcileJournalFailure(marker.OperationId + "x", marker.WorkerGeneration));
         Assert.True(store.Status().DispatchHeld);
         store.ReconcileJournalFailure(marker.OperationId, marker.WorkerGeneration);
@@ -1354,6 +1355,83 @@ public sealed class WorkerBridgeTests
         Assert.Equal("forwarded", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{nextId},\"result\":{{}}}}\n");
         await Eventually(() => store.GetRequest("next")?.State == "completed");
+        Assert.Equal("running", store.Status().ProcessState);
+    }
+
+    [Fact]
+    public async Task ReplayOfInFlightRequestReportsDurableStateOnceItAdvancesPastForwarded()
+    {
+        // #322: while the operation is still registered in memory, a same-id replay must report
+        // the durable request state, not the forwarded receipt snapshot, once that state has
+        // advanced out of band (as the reader's termination path or a generation advance does).
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output); runtime.Start();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        // Still in flight: a replay reports the forwarded receipt.
+        Assert.Equal("forwarded", (await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2))).State);
+        store.MarkUncertain("req");
+        Assert.Equal("uncertain", store.GetRequest("req")!.State);
+        Assert.Equal("req", store.Status().ActiveRequestId);
+        var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("uncertain", replayed.State);
+        Assert.Single(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        using var altered = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"different\"}]}}");
+        await Assert.ThrowsAsync<WorkerProtocolException>(() => runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", altered.RootElement, "turn", CancellationToken.None));
+        input.Complete();
+        await Eventually(() => store.Status().ActiveRequestId is null && store.Status().ProcessState == "exited");
+        Assert.Equal("uncertain", store.GetRequest("req")!.State);
+    }
+
+    [Fact]
+    public async Task ObservedTerminalStateAlwaysAdmitsNextPromptAndReplayReportsDurableTruth()
+    {
+        // #322: finalization (clear active request, write terminal state, journal the response,
+        // release the prompt slot) is one admission-gated step. The observation sink parks the
+        // operation inside that step, which holds the window open deterministically instead of
+        // relying on scheduler luck: while parked, the terminal state is already durable but the
+        // slot is still owned, so a new submit must block on the gate rather than be refused,
+        // and once the step completes the same-id replay must report durable truth.
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        var observations = new BlockingObservationSink(store, "acp-response");
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output, observations); runtime.Start();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        var acpId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
+        await observations.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Task<StoredRequest> next;
+        using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
+        try
+        {
+            // Parked inside finalization: the active request is already cleared and the terminal
+            // state already durable, in that order, while the slot is still owned.
+            Assert.Null(store.Status().ActiveRequestId);
+            Assert.Equal("completed", store.GetRequest("req")!.State);
+            // A submit issued now cannot be refused as "another prompt active"; it blocks on the
+            // admission gate until finalization completes. The delegate is proven to have started
+            // (not merely unscheduled) before the blocked state is asserted.
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            next = Task.Run(() => { started.SetResult(); return runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None); });
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.Delay(100);
+            Assert.False(next.IsCompleted);
+            Assert.Single(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        }
+        finally { observations.Release.TrySetResult(); }
+        await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+        Assert.Equal("forwarded", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        Assert.Equal("next", store.Status().ActiveRequestId);
+        // The prior request's response observation is journaled before the successor is admitted.
+        Assert.Contains(store.Replay(store.WorkerGeneration, 0).Events, item => item.Kind == "acp-response");
+        var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{nextId},\"result\":{{}}}}\n");
+        await Eventually(() => store.GetRequest("next")?.State == "completed" && store.Status().ActiveRequestId is null);
+        // A same-id replay of the finished request reports its durable state, not the receipt.
+        var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("completed", replayed.State);
         Assert.Equal("running", store.Status().ProcessState);
     }
 
@@ -1659,6 +1737,17 @@ public sealed class WorkerBridgeTests
         public WorkerEvent AppendEvent(string kind, string payloadJson)
         {
             if (Interlocked.Exchange(ref _failed, 1) == 0) throw new WorkerStoreException("injected recoverable append failure");
+            return store.AppendEvent(kind, payloadJson);
+        }
+        public JournalFailure SetJournalFailure(string errorCategory) => store.SetJournalFailure(errorCategory);
+    }
+    private sealed class BlockingObservationSink(WorkerStore store, string blockedKind) : IWorkerObservationSink
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public WorkerEvent AppendEvent(string kind, string payloadJson)
+        {
+            if (kind == blockedKind && Entered.TrySetResult() && !Release.Task.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("The blocked observation was never released.");
             return store.AppendEvent(kind, payloadJson);
         }
         public JournalFailure SetJournalFailure(string errorCategory) => store.SetJournalFailure(errorCategory);

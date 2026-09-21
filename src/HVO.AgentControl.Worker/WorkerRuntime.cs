@@ -515,6 +515,10 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 var existing = _store.GetRequest(requestId) ?? throw new WorkerProtocolException("Active request has no durable identity.");
                 var hash = Convert.ToHexString(WorkerProtocol.CanonicalPayloadHash(envelope)).ToLowerInvariant();
                 if (existing.PayloadHash != hash || existing.TurnId != turnId) throw new WorkerProtocolException("Request id was reused with different authorization data.");
+                // The forwarded receipt is a snapshot taken when the frame was written. Once
+                // the durable state has moved past forwarding, a replay must report that
+                // durable truth rather than the stale receipt.
+                if (existing.State != "forwarding") return Task.FromResult(existing);
                 return existingOperation.Forwarded.Task.WaitAsync(connectionToken);
             }
             var promptOwned = prompt && _promptLock.Wait(0);
@@ -554,6 +558,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         long? correlationId = null;
         ActivePromptContext? promptContext = null;
         TurnTextCapture? reportCapture = null;
+        var finalized = false;
         try
         {
             if (prompt) _store.SetActiveRequest(requestId);
@@ -606,14 +611,22 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 }
             }
             else outcome = SanitizeOutcome(result, state);
-            _store.CompleteRequest(requestId, state, outcome);
-            TryAppendObservation("acp-response", SanitizeObservation(result, requestId, correlationId));
-            return _store.GetRequest(requestId)!;
+            var observation = SanitizeObservation(result, requestId, correlationId);
+            return FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, () =>
+            {
+                _store.CompleteRequest(requestId, state, outcome);
+                // Journaled before the slot is released so an append failure holds dispatch
+                // before any successor can be admitted, and so response events stay ordered
+                // ahead of the next request's frames.
+                TryAppendObservation("acp-response", observation);
+            });
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
         {
-            var current = _store.GetRequest(requestId);
-            if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
+            // If the terminal write itself failed inside FinalizeRequest the slot is already
+            // released; the durable state is then still forwarded and is marked uncertain here.
+            if (finalized) MarkUncertainIfOpen(requestId);
+            else FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, () => MarkUncertainIfOpen(requestId));
             var uncertain = new WorkerOperationUncertainException("ACP request completion is uncertain.", exception);
             forwarded.TrySetException(uncertain);
             throw uncertain;
@@ -626,17 +639,50 @@ public sealed class WorkerRuntime : IAsyncDisposable
         finally
         {
             if (correlationId is { } id) _responses.TryRemove(id, out _);
-            if (promptContext is not null)
+            if (!finalized) FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, static () => { });
+        }
+    }
+
+    private void MarkUncertainIfOpen(string requestId)
+    {
+        var current = _store.GetRequest(requestId);
+        if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
+    }
+
+    /// <summary>
+    /// Releases the prompt slot and publishes the terminal durable state as one admission-gated
+    /// step. Admission (<see cref="BeginSubmit"/>) takes the same gate before probing the prompt
+    /// slot, so serialization, not write order, is what guarantees that a caller which observes
+    /// the terminal state in the store is never then refused because the in-memory slot is still
+    /// held, and that a caller admitted before this step still sees the prior request as active.
+    /// Within the step the durable active request is cleared before the terminal state is
+    /// written, so the store never shows a finished request that still names itself active.
+    /// </summary>
+    private StoredRequest FinalizeRequest(string requestId, bool prompt, bool promptOwned, ActivePromptContext? promptContext, TurnTextCapture? reportCapture, ref bool finalized, Action publishTerminalState)
+    {
+        if (finalized) return _store.GetRequest(requestId)!;
+        finalized = true;
+        lock (_submitGate)
+        {
+            try
             {
-                lock (_activePromptGate)
+                if (promptContext is not null)
                 {
-                    if (ReferenceEquals(_activePrompt, promptContext)) _activePrompt = null;
-                    if (ReferenceEquals(_activeTaskReportCapture, reportCapture)) _activeTaskReportCapture = null;
+                    lock (_activePromptGate)
+                    {
+                        if (ReferenceEquals(_activePrompt, promptContext)) _activePrompt = null;
+                        if (ReferenceEquals(_activeTaskReportCapture, reportCapture)) _activeTaskReportCapture = null;
+                    }
                 }
+                if (prompt) _store.SetActiveRequest(null);
+                publishTerminalState();
+                return _store.GetRequest(requestId)!;
             }
-            if (prompt) _store.SetActiveRequest(null);
-            if (promptOwned) _promptLock.Release();
-            _operations.TryRemove(requestId, out _);
+            finally
+            {
+                if (promptOwned) _promptLock.Release();
+                _operations.TryRemove(requestId, out _);
+            }
         }
     }
 
