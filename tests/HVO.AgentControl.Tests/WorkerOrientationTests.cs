@@ -493,6 +493,22 @@ public sealed class WorkerOrientationTests
         Assert.Equal(report, completed.OutcomeJson);
     }
 
+    [Fact]
+    public async Task TaskSubmitRetainsAValidReportAcrossMultibyteTailBoundaries()
+    {
+        var report = """{"summary":"utf8","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var completed = await RunTaskReportCaptureAsync(string.Concat(Enumerable.Repeat("é😀", WorkerProtocol.MaxModelTaskReportBytes)) + report);
+        Assert.Equal(report, completed.OutcomeJson);
+    }
+
+    [Fact]
+    public async Task TaskSubmitAcceptsAnUnfencedReportAfterAClosedProgressFence()
+    {
+        var report = """{"summary":"after fence","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var completed = await RunTaskReportCaptureAsync("progress\n```csharp\nvar x = 1;\n```\n" + report);
+        Assert.Equal(report, completed.OutcomeJson);
+    }
+
     [Theory]
     [InlineData("trailing")]
     [InlineData("nested")]

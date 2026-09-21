@@ -354,8 +354,9 @@ public sealed class WorkerRuntime : IAsyncDisposable
     /// recognizes only <c>session/update</c> notifications whose
     /// <c>sessionId</c> matches, whose <c>sessionUpdate</c> is
     /// <c>agent_message_chunk</c>, and whose text is a string; the buffer is
-    /// bounded and overflows closed. It seals on the response frame whose id
-    /// matches the bound request, so late chunks cannot corrupt a completed turn.
+    /// bounded. Orientation capture overflows closed; task reports retain only a
+    /// bounded UTF-8 tail. It seals on the response frame whose id matches the
+    /// bound request, so late chunks cannot corrupt a completed turn.
     /// </summary>
     private sealed class TurnTextCapture(string sessionId, int maximumBytes, bool retainTail = false)
     {
@@ -856,7 +857,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (end == 0) return false;
         for (var start = text.LastIndexOf('{', end - 1); start >= 0; start = start == 0 ? -1 : text.LastIndexOf('{', start - 1))
         {
-            if (text.AsSpan(0, start).Contains("```", StringComparison.Ordinal)) continue;
+            if (HasUnbalancedFence(text.AsSpan(0, start))) continue;
             try
             {
                 using var document = JsonDocument.Parse(text.AsMemory(start, end - start), new JsonDocumentOptions { MaxDepth = 32 });
@@ -866,6 +867,18 @@ public sealed class WorkerRuntime : IAsyncDisposable
         }
         canonical = null;
         return false;
+    }
+
+    private static bool HasUnbalancedFence(ReadOnlySpan<char> prefix)
+    {
+        var count = 0;
+        for (var index = prefix.IndexOf("```", StringComparison.Ordinal); index >= 0;)
+        {
+            count++;
+            prefix = prefix[(index + 3)..];
+            index = prefix.IndexOf("```", StringComparison.Ordinal);
+        }
+        return (count & 1) != 0;
     }
 
     private static string SanitizeOutcome(JsonElement result, string state)
