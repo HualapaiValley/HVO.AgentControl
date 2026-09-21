@@ -87,9 +87,12 @@ revision-bound Sync/Cancel/Verify controls, and revision-bound manual
 dispatch-hold set/clear controls. The same employee-scoped, revision-bound
 routes re-deliver current orientation and run comprehension for an existing
 managed employee by reusing the hire coordination machinery and a deliberate
-container replacement, with no image build. `/api/info` reports the capability
-separately as `TaskControlImplemented=true`,
-`TaskControlOperationallyValidated=false` and `TaskControlValidatedScope=null`.
+container replacement, with no image build. In this evidence change, `/api/info`
+reports the capability separately as `TaskControlImplemented=true`,
+`TaskControlOperationallyValidated=true` and
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`;
+the currently deployed `cae2ebc` build still reports
+`TaskControlOperationallyValidated=false` until this evidence change is promoted.
 The #217 hermetic controller records are retained in the current schema-v13 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
@@ -124,8 +127,8 @@ permission handling covered `[once, always, reject]` and safe-reject
 `[reject]`, with a same-lease reject moving pending→decided and the prompt
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
-control portal on `home-docker` is deployed from promoted `main` `7d4078b`, with
-schema v12. `quick_check` is clean and foreign-key errors are zero. WorkerControl
+control portal on `home-docker` is deployed from promoted `main` `cae2ebc`, with
+schema v13. `quick_check` is clean and foreign-key errors are zero. WorkerControl
 is enabled through the ignored Compose override; product/Compose remains `true` by
 default.
 
@@ -152,28 +155,55 @@ The authorization to run the first managed disposable two-host path does not
 extend to a production live owner-approved hire: the #260 approval,
 managed-provisioning
 and orientation slice has live `home-docker` evidence: employee
-`emp-933d24fc110222a` reached `Ready` with one worker container and four
+`emp-933d24fc110222a5` reached `Ready` with one worker container and four
 persistent volumes, live-model orientation comprehension, and no duplicates after
 restart/recovery. The #257 live rebuild completed r1→r2 as `Applied`, advancing
 epoch `600 → 604` while preserving home/workspace/session hashes and one
 container/four volumes. Any termination/scheduling policy remains out of scope.
 
-The bounded task capability (#220) remains **not deployed and not operationally
-validated**. There has been no live bounded task, controller-restart task
-reconciliation, cancellation/hold acceptance, independent host task
-verification, or second task, so `/api/info` reports
-`TaskControlOperationallyValidated=false`
-with `TaskControlValidatedScope=null`; the task capability is never folded into
-the worker-control flags. There is no task scheduler: a task is a single
-owner-triggered bounded action, and an employee's independent host verification —
-not the model report, and not turn completion — is the only path to `Verified`.
+**#220 operational acceptance (2026-09-21).** The bounded task capability is now
+operationally validated: the first local managed employee `emp-933d24fc110222a5`
+(binding `rtb-c9d9c8ddd79782ac`, worker `wrk-abd43903583bafdc827260fc`, native
+session `ses_f3faf2abeffejfDyHp0hJAr3Kp`) ran two bounded tasks end to end and
+each reached `Verified` through independent host verification on the
+controller-local Docker target (`local-docker`) with model `cliproxy/default`
+(medium), OpenCode `1.18.30` and .NET SDK `10.0.401`. Accepted Task 1
+`tsk-2b4bcf5890861fe123ea207f` reached `Verified` at epoch `638`/gen 9; accepted
+Task 2 `tsk-1d8bb1474fb1ddb302c3a90b` reached `Verified` at epoch `652`/gen 11.
+They ran across a control restart that left the worker container ID/start time
+unchanged, a cancellation/hold exercise (`tsk-a3641507078ab7cfe0ae574f`
+`Cancelled`/`cancellation-observed`; manual hold active; a fresh-key dispatch
+returned `409`; clearing the manual hold did not clear other holds), and an
+orientation revision re-delivery/comprehension (assignment `ora-0e0f11942e116e1d`
+version `8baab878…`, generation 11, live-model evidence hash `4b77aa77…`) with no
+image rebuild. The employee was progressively rebuilt without resets to profile
+revision 7 `prev-7562a71e52c383c9`, image
+`sha256:123d8558d8e79544da5ca3db40d600a65c162dad93a9d72bd2d55b8e6b81ed01`, and
+kept exactly one container and four volumes; persistence hashes were unchanged
+(home `4ff559…`, workspace `16a63a…`, session `daa42c…`). One exact uncertainty
+recovery `rbld-88f4472d02d3ba55` was `Applied` after helper approved-digest
+correction, advancing epoch `636→637` with no duplicate intent or resources.
+Cleanup previewed 27 files / 253,490 bytes only at `/workspace/acceptance-220`,
+removed only that root, and never deleted organization or employee volumes. Live
+#220 defects found and fixed: the ACP prompt string-vs-content-block-array shape
+(`tsk-481dfa…`), a restart-spanning task that created project/build but produced
+an invalid model report (`tsk-1e61…`, no duplicate submit/task/container), and a
+first Task 2 attempt `tsk-1a0f…` that `Completed` but host verification `Failed`
+because the spec allowed only `Directory.Build.targets` and the verifier copy
+omitted project inputs — a correct independent failure, not a success.
+`/api/info` reports `TaskControlOperationallyValidated=true` with
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
+in this evidence change once promoted; the currently deployed `cae2ebc` build,
+where the evidence was collected, still reports the flags false. The task
+capability is never folded into the worker-control flags. A task is a single owner-triggered bounded action, and an
+employee's independent host verification — not the model report and not turn
+completion — is the only path to `Verified`. Cancellation is not rollback; a
+worker restart does not resume a vanished tool stack. There is no scheduler, multi-agent routing, production repository/GitHub write or release publication.
+The successful acceptance depended on explicit exact test-object guidance; that
+dependence is a recorded limitation. This completes #220 Phase 1 acceptance, not
+a release.
 
-The live `home-docker` hire and rebuild results do not validate key rotation or
-compromise re-enrollment. They do not authorize production managed
-hiring/provisioning at scale or the unvalidated #220 task
-capability described above.
-The accepted path does not validate key rotation or compromise re-enrollment.
-The accepted path does not authorize production managed hiring/provisioning.
+The accepted path does not validate key rotation or compromise re-enrollment and does not authorize production managed hiring/provisioning.
 
 ### Run locally
 

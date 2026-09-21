@@ -704,14 +704,14 @@ globally rejected.
   profile updates never auto-rebuild employees (#261 adds the explicit
   data-preserving rebuild).
 
-### 10.2 Owner approval, managed provisioning and remote orientation (#260; code capability, not operationally validated)
+### 10.2 Owner approval, managed provisioning and remote orientation (#260; live local managed hire completed)
 
 The owner accepted the profile-based design on 2026-09-18. #258 (profiles) and
 #259 (per-host builds) are shipped; #260 (this section) adds the approval,
 managed-employee creation, provisioning and orientation slice, and #261 adds the
-explicit data-preserving rebuild. This section describes **code capability**. No
-live owner-approved hire has been executed on any host, the `home-docker`
- deployment evidence is now live: employee `emp-933d24fc110222a` reached `Ready`
+explicit data-preserving rebuild. This section describes the code capability, and
+the live `home-docker` local managed hire completed: employee
+`emp-933d24fc110222a5` reached `Ready`
  with one container/four persistent volumes and live-model comprehension, with no
  duplicate after restart/recovery. The #257 rebuild completed r1→r2 as `Applied`
  (epoch 600→604), preserving home/workspace/session hashes and one container/four
@@ -907,20 +907,25 @@ their exact field set (unknown or missing fields fail closed).
   effect) and `failed` (deterministic malformed/oversized/non-terminal output,
   which an owner-authorized retry may repeat).
 
-**Still not implemented and not to be inferred:** no live owner-approved hire has
-run on any host; the `home-docker` enrollment is held; `WorkerControl` is off by
-default; #261 (data-preserving rebuild) and any termination/scheduling policy are
-out of scope. Approval is a host record of a verified selection, not a
-provisioned employee.
+**Still not implemented and not to be inferred:** key rotation/compromise
+re-enrollment and production managed hiring/provisioning at scale remain
+unvalidated; `WorkerControl` is off by default and enabled only through the
+ignored Compose override; #261 (data-preserving rebuild) and any
+termination/scheduling policy are out of scope. The live local managed hire did
+complete on `home-docker`, but approval is a host record of a verified selection
+and is not itself a provisioned employee.
 
-### 10.3 Local-only managed hiring through the privileged Docker helper (#272; code capability plus a local dev-machine run)
+### 10.3 Local-only managed hiring through the privileged Docker helper (#272; code capability plus a live local managed hire)
 
 #272 freezes a managed hire to the **controller-local Docker target** and moves
 every Docker operation for it out of the controller into a privileged helper.
 This is the only managed-hiring target in this phase. It is code capability with
-hermetic coverage, plus one end-to-end run on a development machine; it is **not**
-operationally validated and no live owner-approved hire has run on a deployment
-host.
+hermetic coverage and is now backed by the live local managed hire on
+`home-docker` (employee `emp-933d24fc110222a5` reached `Ready` with one worker
+container and four volumes, live-model orientation comprehension and no
+duplicates after restart/recovery). Key rotation/compromise re-enrollment and
+production managed hiring/provisioning at scale remain out of scope and
+unvalidated.
 
 **Execution target kinds (schema v11).** An execution host row carries a
 constrained `transport_kind`, exactly `local-docker` or `ssh-docker`. The
@@ -1088,7 +1093,7 @@ hiring.
   completion. The Overview shows company summary, employee counts by department
   and state, pending approvals, and linked failures needing owner attention.
 
-### 12.1 Bounded task contract (#220, schema v13; implemented as code capability)
+### 12.1 Bounded task contract (#220, schema v13; implemented, live accepted, and operationally validated)
 
 - **Bounded specification.** `WorkerTaskSpec` version 1 carries a bounded
   description; an absolute workspace root strictly under `/workspace/`; 1–32
@@ -1149,12 +1154,25 @@ hiring.
   authoritative native session, confirm the load, and run the bounded tool-free
   comprehension. **No image build occurs.** Stale orientation continues to block
   dispatch through the existing holds.
-- **Capability truth.** `/api/info` reports `TaskControlImplemented=true`,
-  `TaskControlOperationallyValidated=false` and `TaskControlValidatedScope=null`.
- The capability remains not deployed and not operationally validated: no live
- bounded task, controller-restart reconciliation, cancellation/hold acceptance,
- independent host verification, or second task has occurred. There is no
- scheduler: a task is a single owner-triggered bounded action, never automatic.
+- **Capability truth.** In this evidence change `/api/info` reports
+  `TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
+  `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`;
+  the currently deployed `cae2ebc` build, on which the evidence was collected,
+  still reports the task flags false until this evidence change is promoted.
+  The capability is operationally validated as of 2026-09-21: the first local
+  managed employee ran two bounded tasks end to end and each reached `Verified`
+  through independent host verification on the controller-local Docker target,
+  across a control restart (worker container ID/start time unchanged), a
+  cancellation/hold exercise (cancelled task `Cancelled`/`cancellation-observed`;
+  a fresh-key dispatch under manual hold returned `409`), an orientation revision
+  delivery/comprehension with no image rebuild, and an exact uncertainty recovery
+  with no duplicate intent or resources. There is still no
+  scheduler: a task is a single owner-triggered bounded action, never automatic.
+  The scope excludes any scheduler, multi-agent routing, production
+  repository/GitHub write and release publication. Several live attempts failed
+  first on protocol/report-shape and task-input-scope defects that are now
+  corrected; the successful acceptance depended on explicit exact test-object
+  guidance.
 - `GET /api/employees/{id}/tasks`, `GET /api/tasks/{id}` and the additive
   `recentTasks` on `GET /api/employees/{id}` expose the same read models the
   employee page consumes. The employee page never shows raw secrets.
@@ -1193,9 +1211,9 @@ by `GET /api/employees/{id}/rebuilds`. The employee page reports newer revisions
 without action and displays Applied/Uncertain/Failed history with only the stored
 sanitized failure summary. Controller secrets are never projected.
 
-This is code capability with hermetic validation. No live employee rebuild has
-run on a deployment host. `home-docker` is on promoted `main` `7d4078b` / schema v12, and
-`WorkerControl` remains disabled by default.
+This is code capability with hermetic validation plus the live #257 rebuild that
+completed on `home-docker`. `home-docker` is on promoted `main` `cae2ebc` / schema v13,
+and `WorkerControl` remains disabled by default.
 
 ## 13. Fresh disposable teardown/rebuild test
 
@@ -1267,10 +1285,12 @@ These are open and must not be presented as decided or owner-accepted:
   managed-provisioning and orientation slice is now implemented as code
   capability (§10.2), and #272 freezes approval to the controller-local helper
   target under no SSH host input (§10.3); both are hermetically tested, and the
-  local managed path additionally reached `Ready` on one development machine, but
-  **the live owner-approved hire completed on `home-docker`** and the
+  local managed path additionally reached `Ready` on one development machine. The
+  live owner-approved hire completed on `home-docker` and the 2026-09-21 first
+  local managed two-task restart verification completed (#220, §12.1); the
   `home-docker` execution-host
-  enrollment remains held by the owner, so it is not operationally validated.
+  enrollment remains held by the owner. Key rotation/compromise re-enrollment and
+  production hiring/provisioning at scale remain unvalidated.
   #261 (data-preserving rebuild) and any termination/scheduling policy remain
   future work.
 
@@ -1284,5 +1304,8 @@ two-host path was operationally accepted on 2026-09-18. Viewer/read-model work i
 code-complete; key rotation and production provisioning at scale remain future
 work. The #260 approval/managed-provisioning/orientation slice is implemented and
 hermetically tested (§10.2) and #272 adds local-only managed hiring through the
-helper (§10.3); neither is operationally validated on a deployment host, and #261
+helper (§10.3); the live local managed hire completed on `home-docker`, and the
+#220 bounded task capability completed its first local managed two-task restart
+verification on 2026-09-21 (§12.1). Key rotation and production provisioning at
+scale remain unvalidated, and #261
 remains future work.
