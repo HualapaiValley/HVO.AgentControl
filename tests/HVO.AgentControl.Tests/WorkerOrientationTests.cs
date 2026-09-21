@@ -585,6 +585,7 @@ public sealed class WorkerOrientationTests
         await WaitForRequestState(store, "req-task-invalid", "failed");
         var failed = store.GetRequest("req-task-invalid")!;
         Assert.Contains("\"category\":\"model-report-invalid\"", failed.OutcomeJson, StringComparison.Ordinal);
+        if (scenario == "bad-denial") Assert.Contains("\"reason\":\"model-report-denied\"", failed.OutcomeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(text[..Math.Min(text.Length, 32)], failed.OutcomeJson, StringComparison.Ordinal);
     }
 
