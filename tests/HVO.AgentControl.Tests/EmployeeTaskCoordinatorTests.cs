@@ -66,6 +66,9 @@ public sealed class EmployeeTaskCoordinatorTests
         Assert.Null(detail.Verification);
         Assert.Null(detail.Task.ModelReportHash);
         Assert.Equal(1, session.SubmitCount);
+        var promptBlock = session.LastPrompt.EnumerateArray().Single();
+        Assert.Equal("text", promptBlock.GetProperty("type").GetString());
+        Assert.Contains("Add a bounded health endpoint", promptBlock.GetProperty("text").GetString(), StringComparison.Ordinal);
         Assert.Equal(fixture.EmployeeId, detail.Task.EmployeeId);
         Assert.Single(fixture.Store.ListWorkerTasks(employeeId: fixture.EmployeeId));
         Assert.Single(fixture.Store.ListWorkerTasks());
@@ -399,6 +402,7 @@ public sealed class EmployeeTaskCoordinatorTests
         public WorkerBridgeLease Lease { get; }
 
         public int SubmitCount { get; private set; }
+        public JsonElement LastPrompt { get; private set; }
 
         public void Complete(string requestId, string? outcome = null) =>
             _requests[requestId] = (_requests[requestId].TurnId, 1, 1, "completed", outcome ?? "{\"summary\":\"done\",\"changedPaths\":[\"src/a.cs\"],\"tests\":[{\"recipeId\":\"dotnet-test-release\",\"status\":\"passed\",\"summary\":\"passed\"}],\"deniedAction\":null,\"limitations\":[]}");
@@ -429,6 +433,8 @@ public sealed class EmployeeTaskCoordinatorTests
         {
             var requestId = root.GetProperty("requestId").GetString()!;
             var turnId = root.GetProperty("turnId").GetString()!;
+            LastPrompt = root.GetProperty("envelope").GetProperty("params").GetProperty("prompt").Clone();
+            if (LastPrompt.ValueKind != JsonValueKind.Array) throw new InvalidOperationException("Fake worker: ACP prompt must be a content-block array.");
             SubmitCount++;
             _requests[requestId] = (turnId, 1, 1, "forwarded", null);
             return Stored(requestId, turnId, "forwarded", null);

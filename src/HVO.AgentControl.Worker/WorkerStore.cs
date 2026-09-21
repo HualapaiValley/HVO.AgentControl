@@ -1381,6 +1381,7 @@ public sealed class WorkerStore : IDisposable, IWorkerObservationSink
         if (payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("method", out var method) || method.ValueKind != JsonValueKind.String || method.GetString() != "session/prompt") throw new WorkerProtocolException("Only session/prompt submissions are supported.");
         if (!payload.TryGetProperty("params", out var parameters) || parameters.ValueKind != JsonValueKind.Object || !parameters.TryGetProperty("sessionId", out var session) || session.ValueKind != JsonValueKind.String || session.GetString() is not { } sessionId) throw new WorkerProtocolException("session/prompt requires sessionId.");
         WorkerProtocol.ValidateIdentifier(sessionId, WorkerProtocol.MaxIdentifierLength, "session id");
+        WorkerProtocol.ValidatePromptContentBlocks(parameters);
         return sessionId;
     }
     private void IncrementWorkerGenerationAndReconcileStartup()

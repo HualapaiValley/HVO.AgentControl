@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
@@ -60,6 +61,63 @@ public sealed class CliProxyRequestCaptureTests
         // ACP launched as the control role, not an arbitrary argv.
         Assert.Equal("acp", capture.RootElement.GetProperty("args")[0].GetString());
     }
+
+    [Theory]
+    [InlineData("\"bare string\"")]
+    [InlineData("[]")]
+    [InlineData("[{\"type\":\"image\",\"text\":\"hello\"}]")]
+    [InlineData("[{\"type\":\"text\",\"text\":\"\"}]")]
+    public async Task CaptureFakeRejectsMalformedPromptContentBlocksAsInvalidParams(string promptJson)
+    {
+        using var executable = CreateCaptureExecutable();
+        var home = Directory.CreateTempSubdirectory("cliproxy-capture-home-");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "python3",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add(executable.Path);
+        startInfo.Environment["HOME"] = home.FullName;
+        using var process = Process.Start(startInfo)!;
+        try
+        {
+            await WriteAsync(process, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1}}");
+            var initialize = JsonDocument.Parse(await ReadFrameAsync(process));
+            Assert.Equal(1, initialize.RootElement.GetProperty("id").GetInt32());
+
+            await WriteAsync(process, $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{{\"sessionId\":\"ses\",\"prompt\":{promptJson}}}}}");
+            var response = JsonDocument.Parse(await ReadFrameAsync(process));
+            Assert.Equal(2, response.RootElement.GetProperty("id").GetInt32());
+            Assert.Equal(-32602, response.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+
+            await WriteAsync(process, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses\",\"prompt\":[{\"type\":\"text\",\"text\":\"hello\"}]}}");
+            var ok = JsonDocument.Parse(await ReadFrameAsync(process));
+            Assert.Equal("end_turn", ok.RootElement.GetProperty("result").GetProperty("stopReason").GetString());
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            home.Delete(recursive: true);
+        }
+    }
+
+    private static async Task WriteAsync(Process process, string frame)
+    {
+        await process.StandardInput.WriteAsync(frame + "\n");
+        await process.StandardInput.FlushAsync();
+    }
+
+    private static async Task<string> ReadFrameAsync(Process process) =>
+        await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10))
+        ?? throw new Xunit.Sdk.XunitException("the capture fake closed stdout before answering");
 
     [Theory]
     [InlineData(HttpStatusCode.OK, "selected", "configured", true)]
