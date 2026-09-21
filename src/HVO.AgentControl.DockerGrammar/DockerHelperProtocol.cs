@@ -8,7 +8,8 @@ public static class DockerHelperProtocol
     public const string DefaultSocketPath = "/run/agentcontrol-docker-helper/helper.sock";
     public const int MaxOutputBytes = 1024 * 1024;
     public const int MaxBinaryBytes = 64 * 1024 * 1024;
-    public const int MaxTimeoutSeconds = 1800;
+    public const int WorkspaceVerifyOverheadSeconds = 30;
+    public const int MaxTimeoutSeconds = 1800 + WorkspaceVerifyOverheadSeconds;
     /// <summary>Bound on how long an accepted connection may take to deliver its request envelope.</summary>
     public const int EnvelopeTimeoutSeconds = 30;
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false, MaxDepth = 64, Converters = { new JsonStringEnumConverter() } };
@@ -23,6 +24,7 @@ public sealed record DockerHelperRequest(
     HVO.AgentControl.RemoteWorker.ContainerCreateSpec? ContainerCreate = null,
     HVO.AgentControl.RemoteWorker.BootstrapSpec? Bootstrap = null,
     HVO.AgentControl.RemoteWorker.ImageBuildSpec? ImageBuild = null,
+    HVO.AgentControl.RemoteWorker.WorkspaceVerifySpec? WorkspaceVerify = null,
     int BinaryLength = 0,
     int TimeoutSeconds = 60);
 

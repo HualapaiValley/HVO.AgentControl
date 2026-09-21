@@ -23,6 +23,7 @@ public interface IRemoteWorkerOperations
     Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken);
     Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken);
     Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken);
+    Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec specification, CancellationToken cancellationToken) => throw new WorkerControlConfigurationException("Workspace verification is available only through the controller-local Docker helper.");
 
     /// <summary>
     /// Removes one image by exact digest or controller-shaped local tag. The fixed
@@ -236,6 +237,7 @@ public sealed class LocalDockerExecutionOperations(LocalDockerHelperClient clien
     public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => client.CreateContainerAsync(target, specification, cancellationToken);
     public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => client.BootstrapAsync(target, specification, standardInput, cancellationToken);
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => client.BuildImageAsync(target, specification, contextTar, cancellationToken);
+    public Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec specification, CancellationToken cancellationToken) => client.WorkspaceVerifyAsync(target, specification, cancellationToken);
     public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => ExecuteAsync(target, RemoteDockerOperation.ImageRemove, [imageReference], null, cancellationToken);
     public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => client.ProbeAsync(target, cancellationToken);
 }
@@ -248,6 +250,7 @@ public sealed class RoutingExecutionOperations(ISshExecutionOperations ssh, ILoc
     public Task<RemoteOperationResult> CreateContainerAsync(ExecutionTarget target, ContainerCreateSpec specification, CancellationToken cancellationToken) => Select(target).CreateContainerAsync(target, specification, cancellationToken);
     public Task<RemoteOperationResult> BootstrapAsync(ExecutionTarget target, BootstrapSpec specification, byte[] standardInput, CancellationToken cancellationToken) => Select(target).BootstrapAsync(target, specification, standardInput, cancellationToken);
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec specification, byte[] contextTar, CancellationToken cancellationToken) => Select(target).BuildImageAsync(target, specification, contextTar, cancellationToken);
+    public Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec specification, CancellationToken cancellationToken) => Select(target).WorkspaceVerifyAsync(target, specification, cancellationToken);
     public Task<RemoteOperationResult> RemoveImageAsync(ExecutionTarget target, string imageReference, CancellationToken cancellationToken) => Select(target).RemoveImageAsync(target, imageReference, cancellationToken);
     public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget target, CancellationToken cancellationToken) => Select(target).ProbeHostAsync(target, cancellationToken);
 }

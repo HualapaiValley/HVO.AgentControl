@@ -30,8 +30,29 @@ public sealed record RemoteBindingSessionRecord(string BindingId, string Employe
 public sealed record WorkerCursorRecord(string WorkerId, long AcknowledgedWorkerGeneration, long AcknowledgedSequence, long ObservedWorkerGeneration, long ObservedProcessGeneration, long ObservedOwnershipEpoch, string Status, string? HoldSummary, string? ActiveRequestId, string? PendingPermissionHash, bool ViewerSupported, bool ViewerAvailable, string ConnectionState, DateTimeOffset? ObservedAt, int Revision);
 public sealed record WorkerPendingPermissionRecord(string WorkerId, string DecisionId, long ProcessGeneration, long OwnershipEpoch, string RequestId, string TurnId, string PayloadHash, IReadOnlyList<string> OptionIds, string State, DateTimeOffset ObservedAt, int Revision, IReadOnlyList<string>? SafeRejectOptionIds = null);
 public sealed record WorkerEventRecord(string WorkerId, long WorkerGeneration, long Sequence, string Kind, string PayloadHash, int PayloadBytes, DateTimeOffset CommittedAt);
-public sealed record WorkerTaskRecord(string Id, string EmployeeId, string RuntimeBindingId, string WorkerId, string DescriptionHash, string State, int Revision);
-public sealed record WorkerRequestRecord(string Id, string TaskId, string SessionRecordId, string NativeSessionId, string EmployeeId, string RuntimeBindingId, string WorkerId, string PayloadHash, string State, long OwnershipEpoch, long ProcessGeneration, string TurnId, string? OutcomeHash, string? OutcomeCategory, int? OutcomeBytes, string IdempotencyKey, int Revision)
+/// <summary>
+/// One durable worker task. The task specification is the bounded contract the
+/// host may verify; the model report is model evidence only. Both are surfaced
+/// with their canonical hashes and timestamps so an owner view can reason about
+/// the exact persisted bytes without re-serializing them.
+/// </summary>
+public sealed record WorkerTaskRecord(
+    string Id,
+    string EmployeeId,
+    string RuntimeBindingId,
+    string WorkerId,
+    string DescriptionHash,
+    string State,
+    int Revision,
+    string TaskSpecJson,
+    string TaskSpecHash,
+    string? ModelReportJson,
+    string? ModelReportHash,
+    DateTimeOffset? ModelReportedAt,
+    string? FailureDetail,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+public sealed record WorkerRequestRecord(string Id, string TaskId, string SessionRecordId, string NativeSessionId, string EmployeeId, string RuntimeBindingId, string WorkerId, string PayloadHash, string State, long OwnershipEpoch, long ProcessGeneration, string TurnId, string? OutcomeHash, string? OutcomeCategory, int? OutcomeBytes, string IdempotencyKey, int Revision, DateTimeOffset CreatedAt, DateTimeOffset? ForwardedAt, DateTimeOffset? CompletedAt, DateTimeOffset UpdatedAt)
 {
     public string SessionId => NativeSessionId;
 }
@@ -196,9 +217,7 @@ public sealed partial class OrganizationStore
     public IReadOnlyList<WorkerEventRecord> ListWorkerEvents(string? workerId = null) => Query("SELECT worker_id,worker_generation,sequence,kind,payload_hash,payload_bytes,committed_at FROM worker_events" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY worker_id,worker_generation,sequence", ReadEvent, workerId);
     public IReadOnlyList<WorkerPendingPermissionRecord> ListWorkerPendingPermissions(string? workerId = null) => Query("SELECT worker_id,decision_id,process_generation,ownership_epoch,request_id,turn_id,payload_hash,options_json,state,observed_at,revision FROM worker_pending_permissions" + (workerId is null ? "" : " WHERE worker_id=$id") + " ORDER BY observed_at,decision_id", ReadPendingPermission, workerId);
     public WorkerPendingPermissionRecord? GetWorkerPendingPermission(string workerId, string decisionId) => ListWorkerPendingPermissions(workerId).SingleOrDefault(x => x.DecisionId == decisionId);
-    public IReadOnlyList<WorkerTaskRecord> ListWorkerTasks() => Query<WorkerTaskRecord>("SELECT id,employee_id,runtime_binding_id,worker_id,description_hash,state,revision FROM worker_tasks ORDER BY created_at,id", r => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetInt32(6)));
-    public WorkerTaskRecord? GetWorkerTask(string id) => ListWorkerTasks().SingleOrDefault(x => x.Id == id);
-    public IReadOnlyList<WorkerRequestRecord> ListWorkerRequests() => Query("SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,revision FROM worker_requests ORDER BY created_at,id", ReadRequest);
+    public IReadOnlyList<WorkerRequestRecord> ListWorkerRequests() => Query("SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,created_at,forwarded_at,completed_at,updated_at,revision FROM worker_requests ORDER BY created_at,id", ReadRequest);
     public IReadOnlyList<WorkerRequestRecord> ListWorkerRequestsForReconciliation(string workerId, IReadOnlyCollection<string> states)
     {
         ValidateIdentifier(workerId, nameof(workerId));
@@ -210,7 +229,7 @@ public sealed partial class OrganizationStore
             using var c = OpenConnection(_databasePath);
             using var q = c.CreateCommand();
             var stateParameters = requestedStates.Select((_, index) => "$state" + index.ToString(CultureInfo.InvariantCulture)).ToArray();
-            q.CommandText = $"SELECT r.id,r.task_id,r.session_id,r.native_session_id,r.employee_id,r.runtime_binding_id,r.worker_id,r.payload_hash,r.state,r.ownership_epoch,r.process_generation,r.turn_id,r.outcome_hash,r.outcome_category,r.outcome_bytes,r.idempotency_key,r.revision FROM worker_requests r WHERE r.worker_id=$worker AND r.state IN({string.Join(',', stateParameters)}) AND NOT EXISTS(SELECT 1 FROM worker_recovery_audit a JOIN worker_recovery_obligations o ON o.id=a.obligation_id WHERE r.state='Uncertain' AND a.worker_id=r.worker_id AND a.kind='request-uncertain' AND a.disposition='acknowledged-after-external-reconciliation' AND o.marker_json=$markerPrefix || r.id || $markerSuffix) ORDER BY r.created_at,r.id";
+            q.CommandText = $"SELECT r.id,r.task_id,r.session_id,r.native_session_id,r.employee_id,r.runtime_binding_id,r.worker_id,r.payload_hash,r.state,r.ownership_epoch,r.process_generation,r.turn_id,r.outcome_hash,r.outcome_category,r.outcome_bytes,r.idempotency_key,r.created_at,r.forwarded_at,r.completed_at,r.updated_at,r.revision FROM worker_requests r WHERE r.worker_id=$worker AND r.state IN({string.Join(',', stateParameters)}) AND NOT EXISTS(SELECT 1 FROM worker_recovery_audit a JOIN worker_recovery_obligations o ON o.id=a.obligation_id WHERE r.state='Uncertain' AND a.worker_id=r.worker_id AND a.kind='request-uncertain' AND a.disposition='acknowledged-after-external-reconciliation' AND o.marker_json=$markerPrefix || r.id || $markerSuffix) ORDER BY r.created_at,r.id";
             q.Parameters.AddWithValue("$worker", workerId);
             q.Parameters.AddWithValue("$markerPrefix", "{\"kind\":\"request-uncertain\",\"requestId\":\"");
             q.Parameters.AddWithValue("$markerSuffix", "\"}");
@@ -491,16 +510,33 @@ public sealed partial class OrganizationStore
         }
     }
 
+    /// <summary>
+    /// The pre-#220 low-level dispatch entry point. It synthesizes the same
+    /// bounded legacy compatibility specification used for migrated v12 rows: a
+    /// single allowed read tool and a fixed workspace root. It is retained only
+    /// for existing low-level callers and tests and is never a verified #220
+    /// task; new work must call <see cref="BeginWorkerRequest(BeginWorkerRequest, WorkerTaskSpec)"/>.
+    /// </summary>
     public WorkerRequestRecord BeginWorkerRequest(BeginWorkerRequest request)
     {
-        foreach (var value in new[] { request.EmployeeId, request.RuntimeBindingId, request.WorkerId, request.SessionRecordId, request.NativeSessionId, request.IdempotencyKey }) ValidateIdentifier(value, "request identity"); if (!IsHash(request.PayloadHash) || !IsHash(request.DescriptionHash)) throw new OrganizationValidationException("Request hashes are invalid."); if (request.ExpectedOwnershipEpoch < 1 || request.ExpectedProcessGeneration < 0 || request.TurnId is null) throw new OrganizationValidationException("Exact worker ownership and turn identity are required."); ValidateIdentifier(request.TurnId, "turn identity");
-        lock (_gate)
+        foreach (var value in new[] { request.EmployeeId, request.RuntimeBindingId, request.WorkerId, request.SessionRecordId, request.NativeSessionId, request.IdempotencyKey }) ValidateIdentifier(value, "request identity");
+        if (!IsHash(request.PayloadHash) || !IsHash(request.DescriptionHash)) throw new OrganizationValidationException("Request hashes are invalid.");
+        if (request.ExpectedOwnershipEpoch < 1 || request.ExpectedProcessGeneration < 0 || request.TurnId is null) throw new OrganizationValidationException("Exact worker ownership and turn identity are required.");
+        ValidateIdentifier(request.TurnId, "turn identity");
+        var (specJson, specHash) = CompatibilityTaskSpecForDescriptionHash(request.DescriptionHash);
+        return TranslateStoreFaults(() =>
         {
-            RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); using (var existing = c.CreateCommand()) { existing.Transaction = tx; existing.CommandText = "SELECT id,payload_hash,session_id,native_session_id,employee_id,runtime_binding_id,ownership_epoch,process_generation,turn_id FROM worker_requests WHERE worker_id=$w AND idempotency_key=$k"; Add(existing, ("$w", request.WorkerId), ("$k", request.IdempotencyKey)); using var r = existing.ExecuteReader(); if (r.Read()) { if (r.GetString(1) != request.PayloadHash || r.GetString(2) != request.SessionRecordId || r.GetString(3) != request.NativeSessionId || r.GetString(4) != request.EmployeeId || r.GetString(5) != request.RuntimeBindingId) throw new OrganizationConcurrencyException("Idempotency key was reused with changed authorization or payload."); var existingId = r.GetString(0); r.Close(); tx.Commit(); return GetWorkerRequest(existingId)!; } }
-            using (var gate = c.CreateCommand()) { gate.Transaction = tx; gate.CommandText = "SELECT COUNT(*) FROM employees e JOIN runtime_bindings b ON b.employee_id=e.id AND b.id=$b AND b.placement='DeveloperContainer' JOIN acp_sessions s ON s.id=$s AND s.native_session_id=$native AND s.employee_id=e.id AND s.status='active' JOIN worker_enrollments w ON w.runtime_binding_id=b.id AND w.worker_id=$w AND w.enabled=1 AND w.lifecycle_status='enrolled' JOIN worker_cursors c ON c.worker_id=w.worker_id AND c.connection_state='authenticated' AND c.status='running' AND c.hold_summary IS NULL AND c.observed_ownership_epoch=$epoch AND c.observed_process_generation=$process WHERE e.id=$e AND w.ownership_epoch=$epoch AND w.process_generation=$process AND EXISTS(SELECT 1 FROM orientation_assignments o WHERE o.runtime_binding_id=b.id AND o.employee_id=e.id AND o.session_id=s.id AND o.state='Comprehended') AND NOT EXISTS(SELECT 1 FROM dispatch_holds h WHERE h.runtime_binding_id=b.id AND h.active=1)"; Add(gate, ("$b", request.RuntimeBindingId), ("$s", request.SessionRecordId), ("$native", request.NativeSessionId), ("$w", request.WorkerId), ("$e", request.EmployeeId), ("$epoch", request.ExpectedOwnershipEpoch), ("$process", request.ExpectedProcessGeneration)); if (Convert.ToInt64(gate.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationConcurrencyException("Exact employee, binding, active session, orientation, enrollment, and authenticated running worker are required."); }
-            var task = "tsk-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant(); var id = "req-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant(); var now = Now(); using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "INSERT INTO worker_tasks VALUES($t,$e,$b,$w,$d,'Requested',$now,$now,1); INSERT INTO worker_requests VALUES($id,$t,$s,$native,$e,$b,$w,$p,'Intent',$epoch,$process,$turn,NULL,NULL,NULL,$k,$now,NULL,NULL,$now,1)"; Add(q, ("$t", task), ("$e", request.EmployeeId), ("$b", request.RuntimeBindingId), ("$w", request.WorkerId), ("$d", request.DescriptionHash), ("$id", id), ("$s", request.SessionRecordId), ("$native", request.NativeSessionId), ("$p", request.PayloadHash), ("$epoch", request.ExpectedOwnershipEpoch), ("$process", request.ExpectedProcessGeneration), ("$turn", request.TurnId), ("$k", request.IdempotencyKey), ("$now", now)); q.ExecuteNonQuery(); }
-            tx.Commit(); return GetWorkerRequest(id)!;
-        }
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var c = OpenConnection(_databasePath);
+                using var tx = c.BeginTransaction();
+                var record = BeginWorkerRequestCore(c, tx, request, specJson, specHash);
+                tx.Commit();
+                return GetWorkerRequest(record.Id)!;
+            }
+        });
     }
 
     public WorkerRequestRecord TransitionWorkerRequest(string id, int expectedRevision, string from, string to, string? outcomeCategory = null, string? outcomeJson = null)
@@ -638,7 +674,83 @@ public sealed partial class OrganizationStore
             return GetWorkerRecoveryObligation(obligationId)!;
         }
     }
-    public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
+    public int ReconcileControllerStartup()
+    {
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            var forwarding = new List<(string Id, string Worker)>();
+            using (var read = c.CreateCommand())
+            {
+                read.Transaction = tx;
+                read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'";
+                using var r = read.ExecuteReader();
+                while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1)));
+            }
+
+            long intents;
+            long pendingVerifications;
+            using (var count = c.CreateCommand())
+            {
+                count.Transaction = tx;
+                count.CommandText = "SELECT (SELECT COUNT(*) FROM worker_requests WHERE state='Intent'), (SELECT COUNT(*) FROM worker_task_verifications WHERE state='Pending')";
+                using var reader = count.ExecuteReader();
+                _ = reader.Read();
+                intents = reader.GetInt64(0);
+                pendingVerifications = reader.GetInt64(1);
+            }
+
+            var now = Now();
+            using (var q = c.CreateCommand())
+            {
+                q.Transaction = tx;
+                q.CommandText =
+                    """
+                    UPDATE worker_requests
+                    SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1
+                    WHERE state='Intent';
+                    UPDATE worker_requests
+                    SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1
+                    WHERE state='Forwarding';
+                    UPDATE worker_tasks
+                    SET state='Uncertain',updated_at=$now,revision=revision+1
+                    WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain'));
+                    UPDATE worker_cancellations
+                    SET state='Uncertain',updated_at=$now,revision=revision+1
+                    WHERE state='Forwarded';
+                    UPDATE worker_task_verifications
+                    SET state='Uncertain',failure_detail='controller-restart-during-verification',updated_at=$now,revision=revision+1
+                    WHERE state='Pending';
+                    UPDATE dispatch_holds
+                    SET active=0,detail=NULL,cleared_at=$now,revision=revision+1
+                    WHERE reason='task-verification' AND active=1
+                      AND EXISTS (
+                          SELECT 1
+                          FROM worker_task_verifications v
+                          JOIN worker_tasks t ON t.id=v.task_id
+                          JOIN worker_requests r ON r.id=(
+                              SELECT latest.id FROM worker_requests latest
+                              WHERE latest.task_id=t.id
+                              ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)
+                          WHERE v.state='Uncertain'
+                            AND v.failure_detail='controller-restart-during-verification'
+                            AND v.updated_at=$now
+                            AND t.runtime_binding_id=dispatch_holds.runtime_binding_id
+                            AND r.task_id=t.id
+                            AND dispatch_holds.detail=v.verifier_version);
+                    """;
+                q.Parameters.AddWithValue("$now", now);
+                q.ExecuteNonQuery();
+            }
+
+            foreach (var item in forwarding)
+                AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id));
+            tx.Commit();
+            return checked((int)(intents + forwarding.Count + pendingVerifications));
+        }
+    }
 
     /// <summary>
     /// A provisioning step left in <c>Applying</c> by a previous process has an
@@ -692,9 +804,9 @@ public sealed partial class OrganizationStore
         return (envelope.OfferedIds ?? [], envelope.SafeRejectIds ?? []);
     }
     private sealed record PendingPermissionOptionsEnvelope(int Version, IReadOnlyList<string> OfferedIds, IReadOnlyList<string> SafeRejectIds);
-    private static WorkerRequestRecord ReadRequest(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), r.GetString(7), r.GetString(8), r.GetInt64(9), r.GetInt64(10), r.GetString(11), N(r, 12), N(r, 13), I(r, 14), r.GetString(15), r.GetInt32(16));
+    private static WorkerRequestRecord ReadRequest(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4), r.GetString(5), r.GetString(6), r.GetString(7), r.GetString(8), r.GetInt64(9), r.GetInt64(10), r.GetString(11), N(r, 12), N(r, 13), I(r, 14), r.GetString(15), r.GetInt32(20), DateTimeOffset.Parse(r.GetString(16), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind), N(r, 17) is { } forwarded ? DateTimeOffset.Parse(forwarded, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) : null, N(r, 18) is { } completed ? DateTimeOffset.Parse(completed, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) : null, DateTimeOffset.Parse(r.GetString(19), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
     private static ExecutionHostRecord ReadHost(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), N(r, 4), I(r, 5), N(r, 6), N(r, 7) is null ? "unconfigured" : "configured", N(r, 8), N(r, 9), N(r, 10), N(r, 11), N(r, 12), r.GetString(13), N(r, 14), N(r, 15), N(r, 16), B(r, 17), L(r, 18), L(r, 19), I(r, 20), B(r, 21), N(r, 22), r.GetString(23), N(r, 24) is { } d ? DateTimeOffset.Parse(d, CultureInfo.InvariantCulture) : null, r.GetBoolean(25), r.GetBoolean(26), r.GetString(27), r.GetInt32(28));
-    private static WorkerRequestRecord GetWorkerRequestIn(SqliteConnection c, SqliteTransaction tx, string id) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,revision FROM worker_requests WHERE id=$id"; q.Parameters.AddWithValue("$id", id); using var r = q.ExecuteReader(); if (!r.Read()) throw new OrganizationNotFoundException("Worker request not found."); return ReadRequest(r); }
+    private static WorkerRequestRecord GetWorkerRequestIn(SqliteConnection c, SqliteTransaction tx, string id) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT id,task_id,session_id,native_session_id,employee_id,runtime_binding_id,worker_id,payload_hash,state,ownership_epoch,process_generation,turn_id,outcome_hash,outcome_category,outcome_bytes,idempotency_key,created_at,forwarded_at,completed_at,updated_at,revision FROM worker_requests WHERE id=$id"; q.Parameters.AddWithValue("$id", id); using var r = q.ExecuteReader(); if (!r.Read()) throw new OrganizationNotFoundException("Worker request not found."); return ReadRequest(r); }
     private static void RequireEnrollment(SqliteConnection c, SqliteTransaction tx, string worker) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT COUNT(*) FROM worker_enrollments WHERE worker_id=$w AND enabled=1 AND lifecycle_status='enrolled'"; q.Parameters.AddWithValue("$w", worker); if (Convert.ToInt64(q.ExecuteScalar(), CultureInfo.InvariantCulture) != 1) throw new OrganizationConcurrencyException("Worker enrollment is not current and verified."); }
     private static WorkerCursorRecord? ReadCursorIn(SqliteConnection c, SqliteTransaction tx, string worker) { using var q = c.CreateCommand(); q.Transaction = tx; q.CommandText = "SELECT worker_id,acknowledged_worker_generation,acknowledged_sequence,observed_worker_generation,observed_process_generation,observed_ownership_epoch,status,hold_summary,active_request_id,pending_permission_hash,viewer_supported,viewer_available,connection_state,observed_at,revision FROM worker_cursors WHERE worker_id=$w"; q.Parameters.AddWithValue("$w", worker); using var r = q.ExecuteReader(); return r.Read() ? ReadCursor(r) : null; }
     private static void ProjectPendingPermission(SqliteConnection c, SqliteTransaction tx, string worker, ControllerWorkerStatus status, string now)

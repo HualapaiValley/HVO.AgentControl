@@ -1,0 +1,822 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+
+namespace HVO.AgentControl.Organization;
+
+public sealed partial class OrganizationStore
+{
+    private const int MaxModelReportSummaryLength = 2048;
+    private const int MaxModelReportChangedPathCount = 64;
+    private const int MaxModelReportTestCount = 64;
+    private const int MaxModelReportTestLength = 256;
+    private const int MaxModelReportDeniedLength = 512;
+    private const int MaxModelReportLimitationCount = 32;
+    private const int MaxModelReportLimitationsLength = 1024;
+    private const int MaxVerifierVersionLength = 64;
+    private const string WorkspaceVerifierFamily = "workspace-task-verify-v1";
+
+    /// <summary>
+    /// Atomically persists one normalized task specification and its request.
+    /// The task carries the bounded spec bytes and hash, and the request is the
+    /// exact authorized forwarding intent. Nothing about the task is left to a
+    /// raw prompt: the caller cannot persist free-form command text.
+    /// </summary>
+    public WorkerRequestRecord BeginWorkerRequest(BeginWorkerRequest request, WorkerTaskSpec taskSpec)
+    {
+        ArgumentNullException.ThrowIfNull(taskSpec);
+        var normalized = NormalizeWorkerTaskSpec(taskSpec);
+        var specJson = SerializeWorkerTaskSpec(normalized);
+        var specHash = HashText(specJson);
+        if (Encoding.UTF8.GetByteCount(specJson) > MaxTaskSpecJsonLength)
+            throw new OrganizationValidationException("The task specification is too large.");
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var record = BeginWorkerRequestCore(connection, transaction, request, specJson, specHash);
+                transaction.Commit();
+                return GetWorkerRequest(record.Id)!;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Shared atomic insert of a task specification and its request. The exact
+    /// employee, binding, session, orientation, enrollment and authenticated
+    /// worker gate is unchanged from the pre-#220 contract.
+    /// </summary>
+    internal WorkerRequestRecord BeginWorkerRequestCore(
+        SqliteConnection c,
+        SqliteTransaction tx,
+        BeginWorkerRequest request,
+        string taskSpecJson,
+        string taskSpecHash)
+    {
+        foreach (var value in new[] { request.EmployeeId, request.RuntimeBindingId, request.WorkerId, request.SessionRecordId, request.NativeSessionId, request.IdempotencyKey }) ValidateIdentifier(value, "request identity");
+        if (!IsHash(request.PayloadHash) || !IsHash(request.DescriptionHash) || !IsHash(taskSpecHash))
+            throw new OrganizationValidationException("Request hashes are invalid.");
+        if (Encoding.UTF8.GetByteCount(taskSpecJson) is < 2 or > MaxTaskSpecJsonLength)
+            throw new OrganizationValidationException("The task specification is not bounded.");
+        if (request.ExpectedOwnershipEpoch < 1 || request.ExpectedProcessGeneration < 0 || request.TurnId is null)
+            throw new OrganizationValidationException("Exact worker ownership and turn identity are required.");
+        ValidateIdentifier(request.TurnId, "turn identity");
+
+        using (var existing = c.CreateCommand())
+        {
+            existing.Transaction = tx;
+            existing.CommandText = "SELECT id,payload_hash,session_id,native_session_id,employee_id,runtime_binding_id,ownership_epoch,process_generation,turn_id,task_id FROM worker_requests WHERE worker_id=$w AND idempotency_key=$k";
+            Add(existing, ("$w", request.WorkerId), ("$k", request.IdempotencyKey));
+            using var r = existing.ExecuteReader();
+            if (r.Read())
+            {
+                if (r.GetString(1) != request.PayloadHash || r.GetString(2) != request.SessionRecordId || r.GetString(3) != request.NativeSessionId || r.GetString(4) != request.EmployeeId || r.GetString(5) != request.RuntimeBindingId)
+                    throw new OrganizationConcurrencyException("Idempotency key was reused with changed authorization or payload.");
+                var existingId = r.GetString(0);
+                var existingTaskId = r.GetString(9);
+                r.Close();
+                // An idempotent replay may not silently substitute a different
+                // specification for the durable task it already created.
+                var existingSpecHash = ReadTaskSpecHash(c, tx, existingTaskId);
+                if (!string.Equals(existingSpecHash, taskSpecHash, StringComparison.Ordinal))
+                    throw new OrganizationConcurrencyException("Idempotency key was reused with a changed task specification.");
+                return GetWorkerRequestIn(c, tx, existingId);
+            }
+        }
+
+        using (var gate = c.CreateCommand())
+        {
+            gate.Transaction = tx;
+            gate.CommandText = "SELECT COUNT(*) FROM employees e JOIN runtime_bindings b ON b.employee_id=e.id AND b.id=$b AND b.placement='DeveloperContainer' JOIN acp_sessions s ON s.id=$s AND s.native_session_id=$native AND s.employee_id=e.id AND s.status='active' JOIN worker_enrollments w ON w.runtime_binding_id=b.id AND w.worker_id=$w AND w.enabled=1 AND w.lifecycle_status='enrolled' JOIN worker_cursors c ON c.worker_id=w.worker_id AND c.connection_state='authenticated' AND c.status='running' AND c.hold_summary IS NULL AND c.observed_ownership_epoch=$epoch AND c.observed_process_generation=$process WHERE e.id=$e AND w.ownership_epoch=$epoch AND w.process_generation=$process AND EXISTS(SELECT 1 FROM orientation_assignments o WHERE o.runtime_binding_id=b.id AND o.employee_id=e.id AND o.session_id=s.id AND o.state='Comprehended') AND NOT EXISTS(SELECT 1 FROM dispatch_holds h WHERE h.runtime_binding_id=b.id AND h.active=1)";
+            Add(gate, ("$b", request.RuntimeBindingId), ("$s", request.SessionRecordId), ("$native", request.NativeSessionId), ("$w", request.WorkerId), ("$e", request.EmployeeId), ("$epoch", request.ExpectedOwnershipEpoch), ("$process", request.ExpectedProcessGeneration));
+            if (Convert.ToInt64(gate.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                throw new OrganizationConcurrencyException("Exact employee, binding, active session, orientation, enrollment, and authenticated running worker are required.");
+        }
+
+        var task = "tsk-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+        var id = "req-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+        var now = Now();
+        using (var q = c.CreateCommand())
+        {
+            q.Transaction = tx;
+            q.CommandText =
+                """
+                INSERT INTO worker_tasks (
+                    id, employee_id, runtime_binding_id, worker_id, description_hash,
+                    task_spec_json, task_spec_hash, model_report_json, model_report_hash,
+                    model_reported_at, failure_detail, state, created_at, updated_at, revision)
+                VALUES ($t, $e, $b, $w, $d, $spec, $specHash, NULL, NULL, NULL, NULL, 'Requested', $now, $now, 1);
+                INSERT INTO worker_requests (
+                    id, task_id, session_id, native_session_id, employee_id, runtime_binding_id,
+                    worker_id, payload_hash, state, ownership_epoch, process_generation, turn_id,
+                    outcome_hash, outcome_category, outcome_bytes, idempotency_key,
+                    created_at, forwarded_at, completed_at, updated_at, revision)
+                VALUES ($id, $t, $s, $native, $e, $b, $w, $p, 'Intent', $epoch, $process, $turn,
+                    NULL, NULL, NULL, $k, $now, NULL, NULL, $now, 1)
+                """;
+            Add(q,
+                ("$t", task), ("$e", request.EmployeeId), ("$b", request.RuntimeBindingId), ("$w", request.WorkerId),
+                ("$d", request.DescriptionHash), ("$spec", taskSpecJson), ("$specHash", taskSpecHash),
+                ("$id", id), ("$s", request.SessionRecordId), ("$native", request.NativeSessionId),
+                ("$p", request.PayloadHash), ("$epoch", request.ExpectedOwnershipEpoch),
+                ("$process", request.ExpectedProcessGeneration), ("$turn", request.TurnId),
+                ("$k", request.IdempotencyKey), ("$now", now));
+            q.ExecuteNonQuery();
+        }
+
+        return GetWorkerRequestIn(c, tx, id);
+    }
+
+    private static string? ReadTaskSpecHash(SqliteConnection c, SqliteTransaction tx, string taskId)
+    {
+        using var q = c.CreateCommand();
+        q.Transaction = tx;
+        q.CommandText = "SELECT task_spec_hash FROM worker_tasks WHERE id=$id";
+        q.Parameters.AddWithValue("$id", taskId);
+        var value = q.ExecuteScalar();
+        return value is null or DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Records one model-authored task report. The report is model evidence only:
+    /// it never changes the task's execution state and can never produce
+    /// <c>Verified</c>. It is accepted only on a <c>Completed</c> task and is
+    /// set-once: an identical replay returns the existing row, a different report
+    /// is a conflict.
+    /// </summary>
+    public WorkerTaskRecord RecordWorkerTaskModelReport(string taskId, int expectedRevision, ModelTaskReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (!IsBoundedIdentifier(taskId, "tsk-") || expectedRevision < 1)
+            throw new OrganizationValidationException("A stable task id and current revision are required.");
+        var (reportJson, reportHash) = NormalizeModelTaskReport(report);
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var task = ReadWorkerTaskIn(connection, transaction, taskId)
+                    ?? throw new OrganizationNotFoundException($"Worker task '{taskId}' does not exist.");
+                if (!string.Equals(task.State, WorkerTaskStates.Completed, StringComparison.Ordinal))
+                    throw new OrganizationValidationException("A model report may only be recorded for a completed task.");
+                if (task.ModelReportHash is not null)
+                {
+                    if (string.Equals(task.ModelReportHash, reportHash, StringComparison.Ordinal))
+                    {
+                        transaction.Commit();
+                        return task;
+                    }
+
+                    throw new OrganizationConcurrencyException("The task already carries a different model report.");
+                }
+
+                if (task.Revision != expectedRevision)
+                    throw new OrganizationConcurrencyException("The worker task changed; reload and retry with its current revision.");
+
+                var affected = Execute(connection, transaction,
+                    """
+                    UPDATE worker_tasks
+                    SET model_report_json = $json,
+                        model_report_hash = $hash,
+                        model_reported_at = $now,
+                        updated_at = $now,
+                        revision = revision + 1
+                    WHERE id = $id AND revision = $revision AND state = 'Completed' AND model_report_hash IS NULL
+                    """,
+                    ("$json", reportJson), ("$hash", reportHash), ("$now", Timestamp()), ("$id", taskId), ("$revision", expectedRevision));
+                if (affected != 1)
+                    throw new OrganizationConcurrencyException("The worker task changed before the report could be recorded.");
+                transaction.Commit();
+                return ReadWorkerTaskIn(connection, null, taskId)!;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Atomically records an exact terminal worker request, its model report when
+    /// required, and any observed cancellation. A malformed report is rejected
+    /// before mutation. Cancellation is observation, not rollback: a normally
+    /// completed request remains Completed with a diagnostic detail, while a failed
+    /// request with a forwarded/uncertain cancellation becomes Cancelled.
+    /// </summary>
+    public WorkerRequestRecord ReconcileWorkerTaskTerminalRequest(
+        string requestId,
+        int expectedRequestRevision,
+        string expectedRequestState,
+        string remoteState,
+        string? outcomeCategory,
+        string? outcomeJson,
+        ModelTaskReport? report)
+    {
+        if (remoteState is not ("Completed" or "Failed"))
+            throw new OrganizationValidationException("A terminal worker request state is required.");
+        (string Json, string Hash)? normalizedReport = report is null ? null : NormalizeModelTaskReport(report);
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var request = GetWorkerRequestIn(connection, transaction, requestId);
+                if (request.Revision != expectedRequestRevision || request.State != expectedRequestState)
+                    throw new OrganizationConcurrencyException("The worker request changed before terminal reconciliation.");
+                var task = ReadWorkerTaskIn(connection, transaction, request.TaskId)
+                    ?? throw new OrganizationStoreCorruptException("The worker request task is missing.");
+                var activeCancellation = ReadActiveCancellation(connection, transaction, requestId);
+                var cancellationObserved = remoteState == "Completed" || outcomeCategory is "cancelled" or "cancellation-observed";
+                var cancellation = cancellationObserved ? activeCancellation : null;
+                var now = Timestamp();
+                var outcomeBytes = outcomeJson is null ? (int?)null : Encoding.UTF8.GetByteCount(outcomeJson);
+                if (outcomeBytes > 64 * 1024) throw new OrganizationValidationException("Outcome metadata is too large.");
+                Execute(connection, transaction,
+                    "UPDATE worker_requests SET state=$state,outcome_hash=$hash,outcome_category=$category,outcome_bytes=$bytes,completed_at=$now,updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND state=$from",
+                    ("$state", remoteState), ("$hash", outcomeJson is null ? null : HashText(outcomeJson)),
+                    ("$category", SanitizeRemote(outcomeCategory, 64)), ("$bytes", outcomeBytes), ("$now", now),
+                    ("$id", requestId), ("$revision", expectedRequestRevision), ("$from", expectedRequestState));
+
+                var completedAfterCancellation = remoteState == "Completed" && cancellation is not null;
+                var cancelled = remoteState == "Failed" && cancellation is not null;
+                var taskState = cancelled ? WorkerTaskStates.Cancelled : remoteState == "Completed" ? WorkerTaskStates.Completed : WorkerTaskStates.Failed;
+                var failure = completedAfterCancellation ? "cancellation-requested-but-completed" : cancelled ? "cancellation-observed" : outcomeCategory;
+                var reportJson = normalizedReport?.Json;
+                var reportHash = normalizedReport?.Hash;
+                var taskRows = Execute(connection, transaction,
+                    """
+                    UPDATE worker_tasks
+                    SET state=$state,
+                        model_report_json=COALESCE(model_report_json,$report),
+                        model_report_hash=COALESCE(model_report_hash,$reportHash),
+                        model_reported_at=CASE WHEN model_report_json IS NULL AND $report IS NOT NULL THEN $now ELSE model_reported_at END,
+                        failure_detail=COALESCE($failure,failure_detail),
+                        updated_at=$now,
+                        revision=revision+1
+                    WHERE id=$task AND state IN ('Running','Uncertain')
+                      AND (($reportHash IS NULL AND model_report_hash IS NULL) OR model_report_hash IS NULL OR model_report_hash=$reportHash)
+                    """,
+                    ("$state", taskState), ("$report", reportJson), ("$reportHash", reportHash),
+                    ("$failure", StripBounded(failure, MaxFailureDetailLength)), ("$now", now), ("$task", task.Id));
+                if (taskRows != 1) throw new OrganizationConcurrencyException("The worker task changed or carries a conflicting model report.");
+                if (cancellation is not null && cancellation.State != "Observed")
+                {
+                    var cancellationRows = Execute(connection, transaction,
+                        "UPDATE worker_cancellations SET state='Observed',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND state IN ('Forwarded','Uncertain')",
+                        ("$now", now), ("$id", cancellation.Id), ("$revision", cancellation.Revision));
+                    if (cancellationRows != 1) throw new OrganizationConcurrencyException("The worker cancellation changed before observation.");
+                }
+                ClearRecovery(connection, transaction, request.WorkerId, "request-uncertain", HashText(request.Id));
+                transaction.Commit();
+                return GetWorkerRequest(requestId)!;
+            }
+        });
+    }
+
+    private static WorkerCancellationRecord? ReadActiveCancellation(SqliteConnection connection, SqliteTransaction transaction, string requestId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT id,request_id,payload_hash,state,ownership_epoch,process_generation,revision FROM worker_cancellations WHERE request_id=$request AND state IN ('Forwarded','Uncertain','Observed') ORDER BY created_at DESC,id DESC LIMIT 1";
+        command.Parameters.AddWithValue("$request", requestId);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? new WorkerCancellationRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt32(6)) : null;
+    }
+
+    /// <summary>
+    /// Begins exactly one host verification for a completed task that already
+    /// carries a model report. A task without a report cannot be verified, and a
+    /// second verification for the same task is a conflict unless it is the
+    /// identical replay.
+    /// </summary>
+    public WorkerTaskVerificationRecord BeginWorkerTaskVerification(string taskId, int expectedTaskRevision, string verifierVersion)
+    {
+        if (!IsBoundedIdentifier(taskId, "tsk-") || expectedTaskRevision < 1)
+            throw new OrganizationValidationException("A stable task id and current revision are required.");
+        if (!string.Equals(verifierVersion, WorkspaceVerifierFamily, StringComparison.Ordinal))
+            throw new OrganizationValidationException("The verifier identity is not recognized.");
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var task = ReadWorkerTaskIn(connection, transaction, taskId)
+                    ?? throw new OrganizationNotFoundException($"Worker task '{taskId}' does not exist.");
+
+                // The current attempt is resolved before the eligibility checks so
+                // a Pending or Passed replay is idempotent and never depends on the
+                // hold, the task revision, or any other task's verification state.
+                var existing = ReadWorkerTaskVerificationIn(connection, transaction, taskId);
+                if (existing?.State is WorkerTaskVerificationStates.Pending or WorkerTaskVerificationStates.Passed)
+                {
+                    // A Pending replay owns the exact binding hold. If the hold was
+                    // cleared out from under it (for example an operator action),
+                    // reacquire the same reason/detail so dispatch stays fenced for
+                    // the whole pending attempt rather than silently freeing it.
+                    if (existing.State == WorkerTaskVerificationStates.Pending)
+                        UpsertTaskVerificationHold(connection, transaction, task.RuntimeBindingId, existing.VerifierVersion);
+                    transaction.Commit();
+                    return existing;
+                }
+
+                if (!string.Equals(task.State, WorkerTaskStates.Completed, StringComparison.Ordinal))
+                    throw new OrganizationValidationException("Only a completed task can begin host verification.");
+                if (task.ModelReportHash is null)
+                    throw new OrganizationValidationException("A task with no model report cannot begin host verification.");
+                if (task.Revision != expectedTaskRevision)
+                    throw new OrganizationConcurrencyException("The worker task changed; reload and retry with its current revision.");
+
+                // A binding carries at most one Pending verification: its single
+                // task-verification hold fences the whole binding. Before creating a
+                // new attempt, reject any Pending verification whose task resolves to
+                // the same binding. This is checked inside the transaction after the
+                // binding's task lock is taken, so concurrent Begin calls serialize
+                // on SQLite's single writer and cannot both observe an empty set.
+                using (var conflict = connection.CreateCommand())
+                {
+                    conflict.Transaction = transaction;
+                    conflict.CommandText =
+                        """
+                        SELECT COUNT(*)
+                        FROM worker_task_verifications v
+                        JOIN worker_tasks other ON other.id=v.task_id
+                        WHERE v.state='Pending' AND v.task_id<>$task AND other.runtime_binding_id=$binding
+                        """;
+                    Add(conflict, ("$task", task.Id), ("$binding", task.RuntimeBindingId));
+                    if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                        throw new OrganizationConcurrencyException("Another host verification is already pending for this binding.");
+                }
+
+                using (var gate = connection.CreateCommand())
+                {
+                    gate.Transaction = transaction;
+                    gate.CommandText =
+                        """
+                        SELECT COUNT(*)
+                        FROM worker_requests r
+                        JOIN worker_enrollments w ON w.worker_id=r.worker_id AND w.runtime_binding_id=r.runtime_binding_id
+                        JOIN acp_sessions s ON s.id=r.session_id AND s.native_session_id=r.native_session_id AND s.employee_id=r.employee_id
+                        WHERE r.task_id=$task AND r.employee_id=$employee AND r.runtime_binding_id=$binding AND r.worker_id=$worker
+                          AND r.state IN ('Completed','Failed') AND w.enabled=1 AND w.lifecycle_status='enrolled'
+                          AND w.ownership_epoch=r.ownership_epoch AND w.process_generation=r.process_generation
+                          AND NOT EXISTS (
+                              SELECT 1 FROM worker_requests active
+                              WHERE active.worker_id=r.worker_id AND active.state IN ('Intent','Forwarding','Forwarded','Uncertain'))
+                        """;
+                    Add(gate, ("$task", task.Id), ("$employee", task.EmployeeId), ("$binding", task.RuntimeBindingId), ("$worker", task.WorkerId));
+                    if (Convert.ToInt64(gate.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                        throw new OrganizationConcurrencyException("Host verification requires the exact terminal request, enrollment ownership, session, and no active worker request.");
+                }
+
+                var attempt = existing is null ? 1 : VerifierAttempt(existing.VerifierVersion) + 1;
+                var version = WorkspaceVerifierFamily + "." + attempt.ToString(CultureInfo.InvariantCulture);
+                if (version.Length > MaxVerifierVersionLength) throw new OrganizationStoreCorruptException("The verifier attempt identity exceeded its bound.");
+                var id = OrganizationIds.NewTaskVerificationId();
+                var now = Timestamp();
+                Execute(connection, transaction,
+                    """
+                    INSERT INTO worker_task_verifications (
+                        id, task_id, state, manifest_json, manifest_hash, test_summary_json,
+                        test_summary_hash, denied_action_json, denied_action_hash,
+                        verifier_version, failure_detail, verified_at, created_at, updated_at, revision)
+                    VALUES ($id, $task, 'Pending', NULL, NULL, NULL, NULL, NULL, NULL, $version, NULL, NULL, $now, $now, 1)
+                    """,
+                    ("$id", id), ("$task", taskId), ("$version", version), ("$now", now));
+                UpsertTaskVerificationHold(connection, transaction, task.RuntimeBindingId, version);
+                transaction.Commit();
+                return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Activates the single internal <c>task-verification</c> hold for a binding
+    /// with the exact verifier version as its detail. The reason is unique per
+    /// binding, so a replayed Pending attempt reacquires (and a new attempt
+    /// replaces) the same row rather than accumulating holds. Completion and
+    /// restart reconciliation clear the hold only on the exact detail match.
+    /// </summary>
+    private static void UpsertTaskVerificationHold(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string bindingId,
+        string verifierVersion)
+    {
+        Execute(connection, transaction,
+            """
+            INSERT INTO dispatch_holds (id,runtime_binding_id,reason,active,detail,created_at,cleared_at,revision)
+            VALUES ($hold,$binding,'task-verification',1,$detail,$now,NULL,1)
+            ON CONFLICT(runtime_binding_id,reason) DO UPDATE SET
+                active=1,detail=excluded.detail,cleared_at=NULL,revision=dispatch_holds.revision+1
+            """,
+            ("$hold", OrganizationIds.NewHoldId()), ("$binding", bindingId),
+            ("$detail", verifierVersion), ("$now", Timestamp()));
+    }
+
+    /// <summary>
+    /// Completes one host verification. A <c>Passed</c> verification requires the
+    /// manifest and test-summary evidence and atomically moves the task
+    /// <c>Completed → Verified</c>. <c>Failed</c> and <c>Uncertain</c> leave the
+    /// task <c>Completed</c> and record a bounded failure detail instead: a model
+    /// report plus a failed verification is still not task success.
+    /// </summary>
+    public WorkerTaskVerificationRecord CompleteWorkerTaskVerification(string id, int expectedRevision, HostTaskVerification verification)
+    {
+        ArgumentNullException.ThrowIfNull(verification);
+        if (!IsBoundedIdentifier(id, OrganizationIds.TaskVerificationPrefix) || expectedRevision < 1)
+            throw new OrganizationValidationException("A stable verification id and current revision are required.");
+        if (!WorkerTaskVerificationStates.IsDefined(verification.State) || verification.State == WorkerTaskVerificationStates.Pending)
+            throw new OrganizationValidationException("A verification must complete as Passed, Failed or Uncertain.");
+
+        string? manifestJson = null;
+        string? testSummaryJson = null;
+        string? deniedActionJson = null;
+        string? failureDetail = null;
+        string? manifestHash = null;
+        string? testSummaryHash = null;
+        string? deniedActionHash = null;
+
+        if (verification.State == WorkerTaskVerificationStates.Passed)
+        {
+            manifestJson = NormalizeBoundedJson(verification.ManifestJson, MaxManifestJsonLength, "verification manifest")
+                ?? throw new OrganizationValidationException("A passed verification requires a manifest.");
+            testSummaryJson = NormalizeBoundedJson(verification.TestSummaryJson, MaxTestSummaryJsonLength, "verification test summary")
+                ?? throw new OrganizationValidationException("A passed verification requires a test summary.");
+            deniedActionJson = NormalizeBoundedJson(verification.DeniedActionJson, MaxDeniedActionJsonLength, "verification denied action");
+            manifestHash = HashText(manifestJson);
+            testSummaryHash = HashText(testSummaryJson);
+            deniedActionHash = deniedActionJson is null ? null : HashText(deniedActionJson);
+            if (verification.FailureDetail is not null)
+                throw new OrganizationValidationException("A passed verification carries no failure detail.");
+        }
+        else
+        {
+            failureDetail = StripBounded(verification.FailureDetail, MaxFailureDetailLength)
+                ?? throw new OrganizationValidationException("A failed or uncertain verification requires a sanitized failure detail.");
+            deniedActionJson = NormalizeBoundedJson(verification.DeniedActionJson, MaxDeniedActionJsonLength, "verification denied action");
+            deniedActionHash = deniedActionJson is null ? null : HashText(deniedActionJson);
+        }
+
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var transaction = connection.BeginTransaction();
+                var current = ReadWorkerTaskVerificationIn(connection, transaction, id: id)
+                    ?? throw new OrganizationNotFoundException($"Worker task verification '{id}' does not exist.");
+                if (current.Revision != expectedRevision)
+                    throw new OrganizationConcurrencyException("The worker task verification changed; reload and retry with its current revision.");
+                if (!string.Equals(current.State, WorkerTaskVerificationStates.Pending, StringComparison.Ordinal))
+                    throw new OrganizationConcurrencyException("Only a pending host verification can be completed.");
+
+                var task = ReadWorkerTaskIn(connection, transaction, current.TaskId)
+                    ?? throw new OrganizationNotFoundException("The verified task no longer exists.");
+                if (!string.Equals(task.State, WorkerTaskStates.Completed, StringComparison.Ordinal))
+                    throw new OrganizationConcurrencyException("Only a completed task can complete host verification.");
+
+                var now = Timestamp();
+                var affected = Execute(connection, transaction,
+                    """
+                    UPDATE worker_task_verifications
+                    SET state = $state,
+                        manifest_json = $manifest, manifest_hash = $manifestHash,
+                        test_summary_json = $summary, test_summary_hash = $summaryHash,
+                        denied_action_json = $denied, denied_action_hash = $deniedHash,
+                        failure_detail = $failure,
+                        verified_at = CASE WHEN $state = 'Passed' THEN $now ELSE NULL END,
+                        updated_at = $now,
+                        revision = revision + 1
+                    WHERE id = $id AND revision = $revision AND state = 'Pending'
+                    """,
+                    ("$state", verification.State), ("$manifest", manifestJson), ("$manifestHash", manifestHash),
+                    ("$summary", testSummaryJson), ("$summaryHash", testSummaryHash),
+                    ("$denied", deniedActionJson), ("$deniedHash", deniedActionHash),
+                    ("$failure", failureDetail), ("$now", now), ("$id", id), ("$revision", expectedRevision));
+                if (affected != 1)
+                    throw new OrganizationConcurrencyException("The worker task verification changed before completion.");
+
+                if (verification.State == WorkerTaskVerificationStates.Passed)
+                {
+                    // The only durable path to Verified: a passed host verification,
+                    // atomically with the task transition.
+                    var taskRows = Execute(connection, transaction,
+                        "UPDATE worker_tasks SET state = 'Verified', updated_at = $now, revision = revision + 1 WHERE id = $task AND state = 'Completed'",
+                        ("$now", now), ("$task", current.TaskId));
+                    if (taskRows != 1)
+                        throw new OrganizationConcurrencyException("The task was not completed and could not be verified.");
+                }
+
+                Execute(connection, transaction,
+                    "UPDATE dispatch_holds SET active=0,detail=NULL,cleared_at=$now,revision=revision+1 WHERE runtime_binding_id=$binding AND reason='task-verification' AND active=1 AND detail=$version",
+                    ("$now", now), ("$binding", task.RuntimeBindingId), ("$version", current.VerifierVersion));
+                transaction.Commit();
+                return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
+            }
+        });
+    }
+
+    /// <summary>Returns one durable task with its specification, report and timestamps.</summary>
+    public WorkerTaskRecord? GetWorkerTask(string id)
+    {
+        if (!IsBoundedIdentifier(id, "tsk-")) return null;
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                return ReadWorkerTaskIn(connection, null, id);
+            }
+        });
+    }
+
+    /// <summary>Lists tasks, optionally scoped by employee and/or worker.</summary>
+    public IReadOnlyList<WorkerTaskRecord> ListWorkerTasks(string? employeeId = null, string? workerId = null)
+    {
+        if (employeeId is not null && !IsBoundedIdentifier(employeeId, OrganizationIds.EmployeePrefix)) return [];
+        if (workerId is not null && !IsBoundedIdentifier(workerId, "wrk-")) return [];
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                return ReadWorkerTasks(connection, null, id: null, employeeId: employeeId, workerId: workerId);
+            }
+        });
+    }
+
+    /// <summary>Returns the host verification for a task, or null when none exists.</summary>
+    public WorkerTaskVerificationRecord? GetWorkerTaskVerification(string taskId)
+    {
+        if (!IsBoundedIdentifier(taskId, "tsk-")) return null;
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            RequireOpen();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                return ReadWorkerTaskVerificationIn(connection, null, taskId);
+            }
+        });
+    }
+
+    private static WorkerTaskRecord? ReadWorkerTaskIn(SqliteConnection c, SqliteTransaction? tx, string id)
+    {
+        var tasks = ReadWorkerTasks(c, tx, id: id);
+        return tasks.Count == 0 ? null : tasks[0];
+    }
+
+    private static IReadOnlyList<WorkerTaskRecord> ReadWorkerTasks(
+        SqliteConnection c,
+        SqliteTransaction? tx,
+        string? id = null,
+        string? employeeId = null,
+        string? workerId = null)
+    {
+        using var q = c.CreateCommand();
+        q.Transaction = tx;
+        var where = new List<string>();
+        if (id is not null) { where.Add("id = $id"); q.Parameters.AddWithValue("$id", id); }
+        if (employeeId is not null) { where.Add("employee_id = $employee"); q.Parameters.AddWithValue("$employee", employeeId); }
+        if (workerId is not null) { where.Add("worker_id = $worker"); q.Parameters.AddWithValue("$worker", workerId); }
+        q.CommandText =
+            "SELECT id, employee_id, runtime_binding_id, worker_id, description_hash, "
+            + "task_spec_json, task_spec_hash, model_report_json, model_report_hash, model_reported_at, "
+            + "failure_detail, state, created_at, updated_at, revision FROM worker_tasks"
+            + (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : string.Empty)
+            + " ORDER BY created_at, id";
+
+        var result = new List<WorkerTaskRecord>();
+        using var reader = q.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add(new WorkerTaskRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(11),
+                reader.GetInt32(14),
+                reader.GetString(5),
+                reader.GetString(6),
+                N(reader, 7),
+                N(reader, 8),
+                N(reader, 9) is { } reported ? DateTimeOffset.Parse(reported, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) : null,
+                N(reader, 10),
+                DateTimeOffset.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                DateTimeOffset.Parse(reader.GetString(13), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
+        }
+
+        return result;
+    }
+
+    private static int VerifierAttempt(string version)
+    {
+        var prefix = WorkspaceVerifierFamily + ".";
+        if (!version.StartsWith(prefix, StringComparison.Ordinal)
+            || !int.TryParse(version.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var attempt)
+            || attempt < 1)
+            throw new OrganizationStoreCorruptException("A persisted verifier attempt identity is invalid.");
+        return attempt;
+    }
+
+    private static WorkerTaskVerificationRecord? ReadWorkerTaskVerificationIn(
+        SqliteConnection c,
+        SqliteTransaction? tx,
+        string? taskId = null,
+        string? id = null)
+    {
+        using var q = c.CreateCommand();
+        q.Transaction = tx;
+        q.CommandText =
+            "SELECT id, task_id, state, manifest_json, manifest_hash, test_summary_json, test_summary_hash, "
+            + "denied_action_json, denied_action_hash, verifier_version, failure_detail, verified_at, "
+            + "created_at, updated_at, revision FROM worker_task_verifications WHERE "
+            + (id is not null ? "id = $id" : "task_id = $task")
+            + (id is null ? " ORDER BY created_at DESC, id DESC LIMIT 1" : string.Empty);
+        q.Parameters.AddWithValue(id is not null ? "$id" : "$task", id ?? taskId!);
+        using var reader = q.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new WorkerTaskVerificationRecord(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            N(reader, 3),
+            N(reader, 4),
+            N(reader, 5),
+            N(reader, 6),
+            N(reader, 7),
+            N(reader, 8),
+            reader.GetString(9),
+            N(reader, 10),
+            N(reader, 11) is { } verified ? DateTimeOffset.Parse(verified, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) : null,
+            DateTimeOffset.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            DateTimeOffset.Parse(reader.GetString(13), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            reader.GetInt32(14));
+    }
+
+    internal static (string Json, string Hash) NormalizeModelTaskReport(ModelTaskReport report)
+    {
+        var summary = SanitizeBounded(report.Summary, MaxModelReportSummaryLength);
+        if (string.IsNullOrEmpty(summary))
+            throw new OrganizationValidationException("A model report requires a bounded summary.");
+
+        var changedPaths = NormalizeReportList(report.ChangedPaths, MaxModelReportChangedPathCount, "changed path", allowRelativePath: true);
+        var tests = NormalizeModelTaskTests(report.Tests);
+        var denied = NormalizeDeniedAction(report.DeniedAction);
+        var limitations = NormalizeReportList(report.Limitations, MaxModelReportLimitationCount, "limitation", allowRelativePath: false, MaxModelReportLimitationsLength);
+
+        var envelope = new CanonicalModelReport(summary, changedPaths, tests, denied, limitations);
+        var json = JsonSerializer.Serialize(envelope, CanonicalJsonOptions);
+        if (Encoding.UTF8.GetByteCount(json) > MaxModelReportJsonLength)
+            throw new OrganizationValidationException("The model report is too large.");
+        return (json, HashText(json));
+    }
+
+    internal static ModelTaskReport DeserializeModelTaskReport(string json)
+    {
+        if (Encoding.UTF8.GetByteCount(json) > MaxModelReportJsonLength)
+            throw new OrganizationValidationException("The model report is too large.");
+        try
+        {
+            var report = JsonSerializer.Deserialize<ModelTaskReport>(json, CanonicalJsonOptions)
+                ?? throw new OrganizationValidationException("The model report is empty.");
+            _ = NormalizeModelTaskReport(report);
+            return report;
+        }
+        catch (JsonException exception)
+        {
+            throw new OrganizationValidationException("The model report is malformed.", exception);
+        }
+    }
+
+    private sealed record CanonicalModelReport(
+        string Summary,
+        IReadOnlyList<string> ChangedPaths,
+        IReadOnlyList<ModelTaskTestReport> Tests,
+        ModelTaskDeniedAction? DeniedAction,
+        IReadOnlyList<string> Limitations);
+
+    private static ModelTaskTestReport[] NormalizeModelTaskTests(IReadOnlyList<ModelTaskTestReport>? tests)
+    {
+        if (tests is null) return [];
+        if (tests.Count > MaxModelReportTestCount)
+            throw new OrganizationValidationException($"A model report may carry at most {MaxModelReportTestCount} tests.");
+        return tests.Select(test =>
+        {
+            if (test is null) throw new OrganizationValidationException("A model report test is invalid.");
+            var recipe = test.RecipeId is null ? null : SanitizeBounded(test.RecipeId, MaxModelReportTestLength);
+            if (recipe is not null && !WorkerTaskTestRecipes.IsDefined(recipe))
+                throw new OrganizationValidationException("A model report test recipe is not recognized.");
+            var status = SanitizeBounded(test.Status, 32);
+            if (status is not ("passed" or "failed" or "not-run"))
+                throw new OrganizationValidationException("A model report test status is invalid.");
+            var summary = SanitizeBounded(test.Summary, MaxModelReportTestLength)
+                ?? throw new OrganizationValidationException("A model report test summary is required.");
+            return new ModelTaskTestReport(recipe, status, summary);
+        }).OrderBy(test => test.RecipeId, StringComparer.Ordinal).ThenBy(test => test.Status, StringComparer.Ordinal).ThenBy(test => test.Summary, StringComparer.Ordinal).ToArray();
+    }
+
+    private static ModelTaskDeniedAction? NormalizeDeniedAction(ModelTaskDeniedAction? denied)
+    {
+        if (denied is null) return null;
+        var requested = SanitizeBounded(denied.Requested, MaxModelReportDeniedLength)
+            ?? throw new OrganizationValidationException("A denied action request is required.");
+        var action = SanitizeBounded(denied.Action, MaxModelReportDeniedLength)
+            ?? throw new OrganizationValidationException("A denied action is required.");
+        var result = SanitizeBounded(denied.Result, MaxModelReportDeniedLength)
+            ?? throw new OrganizationValidationException("A denied action result is required.");
+        if (!denied.NoSideEffect)
+            throw new OrganizationValidationException("A denied action must state that no side effect occurred.");
+        return new ModelTaskDeniedAction(requested, action, result, true);
+    }
+
+    private static string[] NormalizeReportList(IReadOnlyList<string>? values, int maximum, string kind, bool allowRelativePath, int itemMaximum = MaxModelReportTestLength)
+    {
+        if (values is null) return [];
+        if (values.Count > maximum) throw new OrganizationValidationException($"A model report may carry at most {maximum} {kind}s.");
+        var normalized = values
+            .Select(value => SanitizeBounded(value, itemMaximum))
+            .Select(value => string.IsNullOrEmpty(value)
+                ? throw new OrganizationValidationException($"A model report {kind} must not be empty.")
+                : value)
+            .Select(value =>
+            {
+                if (allowRelativePath && !IsSafeAbsoluteSegmentPath(value))
+                    throw new OrganizationValidationException("A claimed changed path must be a safe relative path.");
+                return value;
+            })
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
+        return normalized;
+    }
+
+    private static string HashText(string value) =>
+        "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    /// <summary>Strips control characters and enforces a maximum length, returning null when empty.</summary>
+    private static string? SanitizeBounded(string? value, int maximum)
+    {
+        if (value is null) return null;
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0) return null;
+        foreach (var ch in trimmed)
+        {
+            if (char.IsControl(ch)) throw new OrganizationValidationException("Task text must not contain control characters.");
+        }
+
+        if (trimmed.Length > maximum) throw new OrganizationValidationException($"Task text must be at most {maximum} characters.");
+        return trimmed;
+    }
+
+    /// <summary>
+    /// Removes control characters, trims and enforces a maximum length, returning
+    /// null when nothing remains. Used for host-authored detail where the exact
+    /// bytes are not evidence and need only be bounded and safe.
+    /// </summary>
+    private static string? StripBounded(string? value, int maximum)
+    {
+        if (value is null) return null;
+        var stripped = new string(value.Where(ch => !char.IsControl(ch)).ToArray()).Trim();
+        if (stripped.Length == 0) return null;
+        if (stripped.Length > maximum) throw new OrganizationValidationException($"Task text must be at most {maximum} characters.");
+        return stripped;
+    }
+
+    /// <summary>
+    /// Validates that a value is bounded JSON text and returns it unchanged. The
+    /// evidence is stored as exact canonical bytes; only its length is bounded here.
+    /// </summary>
+    private static string? NormalizeBoundedJson(string? value, int maximum, string kind)
+    {
+        if (value is null) return null;
+        var trimmed = value.Trim();
+        if (trimmed.Length == 0) return null;
+        if (Encoding.UTF8.GetByteCount(trimmed) > maximum)
+            throw new OrganizationValidationException($"The {kind} is too large.");
+        return trimmed;
+    }
+}

@@ -35,6 +35,9 @@ public static class WorkerProtocol
     public const int MaxOrientationComprehensionFieldLength = 2048;
     public const int MaxOrientationComprehensionListItems = 32;
 
+    /// <summary>The maximum UTF-8 bytes retained for one model-authored task report.</summary>
+    public const int MaxModelTaskReportBytes = 16 * 1024;
+
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false, MaxDepth = MaxControlJsonDepth };
 
     /// <summary>
@@ -433,6 +436,111 @@ public static class OrientationEvidenceShape
         }
         return true;
     }
+}
+
+/// <summary>Storage-independent validation and canonicalization of a model task report.</summary>
+public static class ModelTaskReportShape
+{
+    private static readonly string[] ExpectedFields = ["changedPaths", "deniedAction", "limitations", "summary", "tests"];
+
+    public static bool TryCanonicalize(JsonElement element, out string? canonical, out string? failure)
+    {
+        canonical = null;
+        failure = null;
+        if (element.ValueKind != JsonValueKind.Object) return Fail("model-report-not-object", out failure);
+        var names = element.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray();
+        if (!names.SequenceEqual(ExpectedFields, StringComparer.Ordinal)) return Fail("model-report-field-set", out failure);
+        if (!TryString(element, "summary", 2048, out var summary)) return Fail("model-report-summary", out failure);
+        if (!TryList(element, "changedPaths", 64, 256, path: true, out var changedPaths)) return Fail("model-report-paths", out failure);
+        if (!TryTests(element, out var tests)) return Fail("model-report-tests", out failure);
+        if (!TryDenied(element, out var denied)) return Fail("model-report-denied", out failure);
+        if (!TryList(element, "limitations", 32, 1024, path: false, out var limitations)) return Fail("model-report-limitations", out failure);
+
+        var ordered = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["summary"] = summary,
+            ["changedPaths"] = changedPaths.Order(StringComparer.Ordinal).ToArray(),
+            ["tests"] = tests.OrderBy(test => test.RecipeId, StringComparer.Ordinal).ThenBy(test => test.Status, StringComparer.Ordinal).ThenBy(test => test.Summary, StringComparer.Ordinal).ToArray(),
+            ["deniedAction"] = denied,
+            ["limitations"] = limitations.Order(StringComparer.Ordinal).ToArray(),
+        };
+        canonical = JsonSerializer.Serialize(ordered, WorkerProtocol.JsonOptions);
+        if (Encoding.UTF8.GetByteCount(canonical) > WorkerProtocol.MaxModelTaskReportBytes)
+        {
+            canonical = null;
+            return Fail("model-report-overflow", out failure);
+        }
+        return true;
+    }
+
+    private static bool TryTests(JsonElement element, out List<TestValue> tests)
+    {
+        tests = [];
+        if (!element.TryGetProperty("tests", out var property) || property.ValueKind != JsonValueKind.Array) return false;
+        foreach (var item in property.EnumerateArray())
+        {
+            if (tests.Count >= 64 || item.ValueKind != JsonValueKind.Object) return false;
+            var names = item.EnumerateObject().Select(value => value.Name).Order(StringComparer.Ordinal).ToArray();
+            if (!names.SequenceEqual(new[] { "recipeId", "status", "summary" }, StringComparer.Ordinal)) return false;
+            string? recipe = null;
+            if (!item.TryGetProperty("recipeId", out var recipeElement)) return false;
+            if (recipeElement.ValueKind == JsonValueKind.String)
+            {
+                recipe = recipeElement.GetString();
+                if (!Bounded(recipe, 256)) return false;
+            }
+            else if (recipeElement.ValueKind != JsonValueKind.Null) return false;
+            if (!TryString(item, "status", 32, out var status) || status is not ("passed" or "failed" or "not-run")) return false;
+            if (!TryString(item, "summary", 256, out var summary)) return false;
+            tests.Add(new(recipe, status!, summary!));
+        }
+        return true;
+    }
+
+    private static bool TryDenied(JsonElement element, out DeniedValue? denied)
+    {
+        denied = null;
+        if (!element.TryGetProperty("deniedAction", out var property)) return false;
+        if (property.ValueKind == JsonValueKind.Null) return true;
+        if (property.ValueKind != JsonValueKind.Object) return false;
+        var names = property.EnumerateObject().Select(value => value.Name).Order(StringComparer.Ordinal).ToArray();
+        if (!names.SequenceEqual(new[] { "action", "noSideEffect", "requested", "result" }, StringComparer.Ordinal)) return false;
+        if (!TryString(property, "requested", 512, out var requested)
+            || !TryString(property, "action", 512, out var action)
+            || !TryString(property, "result", 512, out var result)
+            || !property.TryGetProperty("noSideEffect", out var noSideEffect)
+            || noSideEffect.ValueKind != JsonValueKind.True) return false;
+        denied = new(requested!, action!, result!, true);
+        return true;
+    }
+
+    private static bool TryList(JsonElement element, string name, int maximumCount, int maximumLength, bool path, out List<string> values)
+    {
+        values = [];
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Array) return false;
+        foreach (var item in property.EnumerateArray())
+        {
+            if (values.Count >= maximumCount || item.ValueKind != JsonValueKind.String) return false;
+            var value = item.GetString();
+            if (!Bounded(value, maximumLength) || path && !SafeRelativePath(value!)) return false;
+            if (!values.Contains(value!, StringComparer.Ordinal)) values.Add(value!);
+        }
+        return true;
+    }
+
+    private static bool TryString(JsonElement element, string name, int maximum, out string? value)
+    {
+        value = null;
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.String) return false;
+        value = property.GetString()?.Trim();
+        return Bounded(value, maximum);
+    }
+
+    private static bool Bounded(string? value, int maximum) => value is { Length: > 0 } && value.Length <= maximum && !value.Any(char.IsControl);
+    private static bool SafeRelativePath(string value) => value == "." || !value.StartsWith('/') && !value.EndsWith('/') && !value.Contains("//", StringComparison.Ordinal) && value.Split('/').All(segment => segment is not ("" or "." or "..") && segment.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '_' or '-'));
+    private static bool Fail(string value, out string? failure) { failure = value; return false; }
+    private sealed record TestValue([property: System.Text.Json.Serialization.JsonPropertyName("recipeId")] string? RecipeId, [property: System.Text.Json.Serialization.JsonPropertyName("status")] string Status, [property: System.Text.Json.Serialization.JsonPropertyName("summary")] string Summary);
+    private sealed record DeniedValue([property: System.Text.Json.Serialization.JsonPropertyName("requested")] string Requested, [property: System.Text.Json.Serialization.JsonPropertyName("action")] string Action, [property: System.Text.Json.Serialization.JsonPropertyName("result")] string Result, [property: System.Text.Json.Serialization.JsonPropertyName("noSideEffect")] bool NoSideEffect);
 }
 
 public class WorkerProtocolException(string message, Exception? inner = null) : Exception(message, inner);

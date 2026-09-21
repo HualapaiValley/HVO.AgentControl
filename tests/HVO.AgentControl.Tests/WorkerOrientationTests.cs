@@ -421,6 +421,105 @@ public sealed class WorkerOrientationTests
     }
 
     [Fact]
+    public async Task TaskSubmitCapturesCanonicalReportAndNeverJournalsRawText()
+    {
+        using var temp = new WorkerTemp();
+        var options = temp.Options();
+        using var store = new WorkerStore(options);
+        SeedInstalledOrientation(store, "ora-1", "v1", "orientation-current.md", "# Orientation\n");
+        await using var input = new GateStream();
+        await using var output = new CaptureStream();
+        await using var runtime = new WorkerRuntime(store, input, output, store);
+        runtime.Start();
+        var lease = store.AcquireLease("controller-test", Nonce(2));
+        store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
+        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":"bounded task"}}""");
+
+        var forwarded = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-report", envelope.RootElement, "turn-task-report", CancellationToken.None, captureTaskReport: true);
+        Assert.Equal("forwarded", forwarded.State);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        var report = """{"summary":"done","changedPaths":["src/b.cs","src/a.cs"],"tests":[{"recipeId":"dotnet-test-release","status":"passed","summary":"all passed"}],"deniedAction":null,"limitations":[]}""";
+        input.Enqueue(ChunkFrame("ses-other", "raw-secret-ignored"));
+        input.Enqueue(ChunkFrame("ses-test", report[..40]));
+        input.Enqueue(ChunkFrame("ses-test", report[40..]));
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"stopReason\":\"end_turn\"}}}}\n");
+
+        await WaitForRequestState(store, "req-task-report", "completed");
+        var completed = store.GetRequest("req-task-report")!;
+        Assert.Equal("""{"summary":"done","changedPaths":["src/a.cs","src/b.cs"],"tests":[{"recipeId":"dotnet-test-release","status":"passed","summary":"all passed"}],"deniedAction":null,"limitations":[]}""", completed.OutcomeJson);
+        foreach (var item in store.Replay(store.WorkerGeneration, 0).Events)
+        {
+            Assert.DoesNotContain("raw-secret-ignored", item.PayloadJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("all passed", item.PayloadJson, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("malformed")]
+    [InlineData("overflow")]
+    [InlineData("fenced")]
+    [InlineData("bad-denial")]
+    public async Task TaskSubmitFailsClosedWhenReportIsInvalid(string scenario)
+    {
+        using var temp = new WorkerTemp();
+        var options = temp.Options();
+        using var store = new WorkerStore(options);
+        SeedInstalledOrientation(store, "ora-1", "v1", "orientation-current.md", "# Orientation\n");
+        await using var input = new GateStream();
+        await using var output = new CaptureStream();
+        await using var runtime = new WorkerRuntime(store, input, output, store);
+        runtime.Start();
+        var lease = store.AcquireLease("controller-test", Nonce(3));
+        store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
+        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":"bounded task"}}""");
+        await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-invalid", envelope.RootElement, "turn-task-invalid", CancellationToken.None, captureTaskReport: true);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        var valid = """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var text = scenario switch
+        {
+            "malformed" => "{not-json",
+            "overflow" => new string('x', WorkerProtocol.MaxModelTaskReportBytes + 1),
+            "fenced" => "```json\n" + valid + "\n```",
+            "bad-denial" => """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":{"requested":"secret","action":"read","result":"denied","noSideEffect":false},"limitations":[]}""",
+            _ => throw new InvalidOperationException(),
+        };
+        input.Enqueue(ChunkFrame("ses-test", text));
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"stopReason\":\"end_turn\"}}}}\n");
+
+        await WaitForRequestState(store, "req-task-invalid", "failed");
+        var failed = store.GetRequest("req-task-invalid")!;
+        Assert.Equal("{\"category\":\"model-report-invalid\"}", failed.OutcomeJson);
+        Assert.DoesNotContain(text[..Math.Min(text.Length, 32)], failed.OutcomeJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TaskSubmitEmitsCanonicalCancelledOutcomeWhenForwardedCancellationStopsTheTurn()
+    {
+        using var temp = new WorkerTemp();
+        using var store = new WorkerStore(temp.Options());
+        SeedInstalledOrientation(store, "ora-1", "v1", "orientation-current.md", "# Orientation\n");
+        await using var input = new GateStream();
+        await using var output = new CaptureStream();
+        await using var runtime = new WorkerRuntime(store, input, output, store);
+        runtime.Start();
+        var lease = store.AcquireLease("controller-test", Nonce(4));
+        store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
+        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":"bounded task"}}""");
+        await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-cancel", envelope.RootElement, "turn-task-cancel", CancellationToken.None, captureTaskReport: true);
+        await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
+        using var cancellation = JsonDocument.Parse("""{"method":"session/cancel","params":{"sessionId":"ses-test"}}""");
+        var forwarded = await runtime.CancelAsync(lease.Epoch, lease.ConnectionNonce, "cancel-task", "req-task-cancel", cancellation.RootElement, CancellationToken.None);
+        Assert.Equal("forwarded", forwarded.State);
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"stopReason\":\"cancelled\"}}}}\n");
+
+        await WaitForRequestState(store, "req-task-cancel", "failed");
+        Assert.Equal("{\"category\":\"cancelled\"}", store.GetRequest("req-task-cancel")!.OutcomeJson);
+    }
+
+    [Fact]
     public void StoreMigratesExactSchemaV10AndAddsUsableOrientationComprehension()
     {
         using var temp = new WorkerTemp();
@@ -445,6 +544,17 @@ public sealed class WorkerOrientationTests
             Assert.Equal(1L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM orientation_comprehension")));
             Assert.Equal("comprehended", migrated.Status().OrientationComprehensionState);
         }
+    }
+
+    private static async Task WaitForRequestState(WorkerStore store, string requestId, string expected)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (!timeout.IsCancellationRequested)
+        {
+            if (store.GetRequest(requestId)?.State == expected) return;
+            await Task.Delay(10, timeout.Token);
+        }
+        throw new Xunit.Sdk.XunitException($"Request {requestId} did not reach {expected}.");
     }
 
     private static void SeedInstalledOrientation(WorkerStore store, string assignmentId, string version, string fileName, string content)

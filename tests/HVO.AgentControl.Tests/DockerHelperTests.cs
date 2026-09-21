@@ -215,6 +215,31 @@ public sealed class DockerHelperTests
     }
 
     [Fact]
+    public void WorkspaceVerificationGrammarIsTypedReadOnlyAndBounded()
+    {
+        var spec = new WorkspaceVerifySpec(Identity("prev-0123456789abcdef"), "agentcontrol-workspace-x", "project", ["src", "tests"], "dotnet-test-release", 300, 384, 64L * 1024 * 1024, Digest, "linux/amd64", [Digest], 512L * 1024 * 1024, 1);
+        var argv = DockerArgv.BuildWorkspaceVerify(spec, Policy);
+        var command = string.Join(' ', argv);
+        Assert.Contains("--pull never", command, StringComparison.Ordinal);
+        Assert.Contains("--network none", command, StringComparison.Ordinal);
+        Assert.Contains("--read-only", argv);
+        Assert.Contains("--cap-drop ALL", command, StringComparison.Ordinal);
+        Assert.Contains("--security-opt no-new-privileges", command, StringComparison.Ordinal);
+        Assert.Contains("type=volume,src=agentcontrol-workspace-x,dst=/workspace,readonly,volume-nocopy", argv);
+        Assert.DoesNotContain("type=bind", command, StringComparison.Ordinal);
+        Assert.Equal("/usr/local/bin/workspace-task-verify", argv[Array.IndexOf(argv, "-S") + 1]);
+        var verifier = File.ReadAllText(Path.Combine(ControllerIsolationLayoutTests.RepositoryRoot(), "src/container/workspace-task-verify.py"));
+        Assert.Contains("/opt/dotnet-sdk/dotnet", verifier, StringComparison.Ordinal);
+        Assert.Contains("--no-restore", verifier, StringComparison.Ordinal);
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { WorkspaceRoot = "../etc" }, Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { AllowedPaths = ["src", "../secret"] }, Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { TestRecipeId = "shell" }, Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { TargetImageDigest = "latest" }, Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { MaxFiles = 385 }, Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { MaxBytes = 64L * 1024 * 1024 + 1 }, Policy));
+    }
+
+    [Fact]
     public void GrammarRefusesInjectionMountTamperingWrongPathsDigestsLabelsAndCeilings()
     {
         var identity = Identity(); var volumes = Volumes();
@@ -246,6 +271,16 @@ public sealed class DockerHelperTests
 
         response = await ExchangeAsync(new DockerHelperRequest("request", "id", DockerOperation.ImageBuild, ImageBuild: new(Digest, "linux/amd64", "prev-0123456789abcdef", Digest, "agentcontrol-result:x", false), BinaryLength: DockerHelperProtocol.MaxBinaryBytes + 1), new FakeCredentials(1001), expectedUid: 1001);
         Assert.Equal("protocol-error", response.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task WorkspaceVerificationRefusesForeignVolumeLabelsBeforeRun()
+    {
+        var spec = new WorkspaceVerifySpec(Identity(), "agentcontrol-workspace-x", "project", ["."], "dotnet-test-release", 30, 10, 1024, Digest, "linux/amd64", [Digest], 1024, 1);
+        var runner = new ScriptedWorkspaceRunner(foreign: true);
+        var response = await ExchangeAsync(new DockerHelperRequest("request", "verify", DockerOperation.WorkspaceVerify, WorkspaceVerify: spec, TimeoutSeconds: 30), new FakeCredentials(1001), 1001, runner);
+        Assert.Equal("request-rejected", response.GetProperty("error").GetString());
+        Assert.DoesNotContain(DockerOperation.WorkspaceVerify, runner.Operations);
     }
 
     [Fact]
@@ -351,7 +386,7 @@ public sealed class DockerHelperTests
         try { File.Delete(path); } catch (IOException) { }
     }
 
-    private static async Task<JsonElement> ExchangeAsync(DockerHelperRequest request, IPeerCredentialProvider credentials, int expectedUid)
+    private static async Task<JsonElement> ExchangeAsync(DockerHelperRequest request, IPeerCredentialProvider credentials, int expectedUid, IDockerProcessRunner? runner = null)
     {
         var path = Path.Combine(Path.GetTempPath(), "agentcontrol-helper-test-" + Guid.NewGuid().ToString("N")[..8] + ".sock");
         using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
@@ -359,7 +394,7 @@ public sealed class DockerHelperTests
         using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         await client.ConnectAsync(new UnixDomainSocketEndPoint(path));
         var accepted = await listener.AcceptAsync();
-        await using var server = new DockerHelperServer(new(path + ".unused", expectedUid, -1, Policy), credentials, new FakeRunner());
+        await using var server = new DockerHelperServer(new(path + ".unused", expectedUid, -1, Policy), credentials, runner ?? new FakeRunner());
         using var stream = new NetworkStream(client, ownsSocket: false);
         // The request is written before the handler runs: an unauthorized peer is
         // refused and disconnected without ever reading the request, so writing
@@ -372,13 +407,31 @@ public sealed class DockerHelperTests
         return response!.RootElement.Clone();
     }
 
-    private static WorkerResourceIdentity Identity() => new("org", "controller", "host", "worker", "binding", "operation");
+    private static WorkerResourceIdentity Identity(string? profileRevisionId = null) => new("org", "controller", "host", "worker", "binding", "operation", profileRevisionId);
     private static NamedVolumeMount[] Volumes() => [new("agentcontrol-control-x", "/control"), new("agentcontrol-home-x", "/home/worker"), new("agentcontrol-workspace-x", "/workspace"), new("agentcontrol-session-x", "/session")];
     private static ContainerCreateSpec Spec() => new("agentcontrol-worker-x", Digest, "linux/amd64", Identity(), Volumes(), 1, 1, 32, [Digest]);
     private sealed class FakeCredentials(int uid) : IPeerCredentialProvider { public int GetUid(Socket socket) => uid; }
     private sealed class FakeRunner : IDockerProcessRunner
     {
         public Task<DockerHelperResult> RunAsync(string id, DockerOperation operation, string[] argv, byte[]? input, TimeSpan timeout, CancellationToken token) => Task.FromResult(new DockerHelperResult("result", id, 0, string.Empty, "none"));
+        public Task<Process> StartStreamAsync(string[] argv, CancellationToken token) => throw new NotSupportedException();
+    }
+
+    private sealed class ScriptedWorkspaceRunner(bool foreign) : IDockerProcessRunner
+    {
+        public List<DockerOperation> Operations { get; } = [];
+        public Task<DockerHelperResult> RunAsync(string id, DockerOperation operation, string[] argv, byte[]? input, TimeSpan timeout, CancellationToken token)
+        {
+            Operations.Add(operation);
+            if (operation == DockerOperation.VolumeInspect)
+            {
+                var labels = Identity().Labels.ToDictionary(x => x.Key, x => x.Value);
+                if (foreign) labels["agentcontrol.worker"] = "foreign";
+                return Task.FromResult(new DockerHelperResult("result", id, 0, JsonSerializer.Serialize(new { Labels = labels }), "none"));
+            }
+            if (operation == DockerOperation.ImageInspect) return Task.FromResult(new DockerHelperResult("result", id, 0, JsonSerializer.Serialize(new { Id = Digest, Config = new { Labels = new Dictionary<string, string>() } }), "none"));
+            return Task.FromResult(new DockerHelperResult("result", id, 0, "{}", "none"));
+        }
         public Task<Process> StartStreamAsync(string[] argv, CancellationToken token) => throw new NotSupportedException();
     }
 

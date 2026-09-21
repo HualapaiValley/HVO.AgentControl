@@ -54,7 +54,13 @@ public sealed class WorkerBridgeSessionFactory(IWorkerConnector connector, IOpti
     }
 }
 
-public sealed record RemoteDispatchCommand(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt)
+/// <summary>
+/// A low-level dispatch command. <see cref="TaskSpec"/> is the bounded #220 task
+/// contract; when it is null the command falls back to the deterministic legacy
+/// compatibility specification below, which is not acceptable for a verified
+/// #220 task and exists only so pre-#220 callers keep working.
+/// </summary>
+public sealed record RemoteDispatchCommand(string EmployeeId, string RuntimeBindingId, string WorkerId, string SessionRecordId, string NativeSessionId, string IdempotencyKey, string Prompt, WorkerTaskSpec? TaskSpec = null)
 {
     public string SessionId => NativeSessionId;
 }
@@ -165,14 +171,29 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
             var payload = Hash(JsonSerializer.Serialize(envelope, WorkerProtocol.JsonOptions));
             var turnId = "turn-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
             var store = Store();
-            var request = store.BeginWorkerRequest(new(command.EmployeeId, command.RuntimeBindingId, command.WorkerId, command.SessionRecordId, command.NativeSessionId, command.IdempotencyKey, payload, Hash(command.Prompt), lease.Ownership.Epoch, lease.Status.ProcessGeneration, turnId));
+            // The optional task specification is the bounded #220 contract. When a
+            // low-level caller does not supply one, a constrained compatibility
+            // specification is synthesized from the prompt. It is deliberately a
+            // read-only, single-turn, fixed-root route and is never acceptable for
+            // a verified #220 task.
+            var taskSpec = command.TaskSpec ?? new WorkerTaskSpec(
+                Description: BoundedLegacyDescription(command.Prompt),
+                WorkspaceRoot: "/workspace/legacy-request",
+                AllowedPaths: ["."],
+                AllowedTools: [WorkerTaskTools.Read],
+                ForbiddenActions: ["unspecified external writes"],
+                MaximumSeconds: Math.Clamp(_options.OperationTimeoutSeconds, 1, OrganizationStore.MaxTaskMaximumSeconds),
+                TestRecipeId: null,
+                Version: 1,
+                MaximumTurns: 1);
+            var request = store.BeginWorkerRequest(new(command.EmployeeId, command.RuntimeBindingId, command.WorkerId, command.SessionRecordId, command.NativeSessionId, command.IdempotencyKey, payload, Hash(command.Prompt), lease.Ownership.Epoch, lease.Status.ProcessGeneration, turnId), taskSpec);
             if (request.State != "Intent") return request;
             if (request.OwnershipEpoch != lease.Ownership.Epoch || request.ProcessGeneration != lease.Status.ProcessGeneration)
                 return store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Interrupted", "ownership-changed");
             request = store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
             try
             {
-                var mutation = lease.Session.Mutation("submit", new Dictionary<string, object?> { ["requestId"] = request.Id, ["envelope"] = envelope, ["turnId"] = request.TurnId });
+                var mutation = lease.Session.Mutation("submit", new Dictionary<string, object?> { ["requestId"] = request.Id, ["envelope"] = envelope, ["turnId"] = request.TurnId, ["captureTaskReport"] = command.TaskSpec is not null });
                 var result = await lease.Session.InvokeAsync("submit", mutation, true, cancellationToken).ConfigureAwait(false);
                 Touch(lease);
                 var remote = DeserializeRequired<BridgeStoredRequest>(result.Result, "Worker submit result");
@@ -903,7 +924,41 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
         if (remote.RequestId != local.Id || remote.OwnershipEpoch != local.OwnershipEpoch || remote.ProcessGeneration != local.ProcessGeneration || remote.TurnId != local.TurnId || remote.SessionId != local.NativeSessionId) throw new WorkerReconciliationInvalidException("Worker request correlation does not match the durable controller intent.");
         var to = remote.State switch { "forwarding" or "forwarded" => "Forwarded", "completed" => "Completed", "failed" => "Failed", "uncertain" => "Uncertain", _ => throw new WorkerReconciliationInvalidException("Worker request state is invalid.") };
         if (local.State == to) return local;
+        if (to is "Completed" or "Failed")
+        {
+            var task = store.GetWorkerTask(local.TaskId) ?? throw new WorkerReconciliationInvalidException("Worker request task is missing.");
+            var spec = OrganizationStore.DeserializeWorkerTaskSpec(task.TaskSpecJson);
+            var legacy = spec.WorkspaceRoot == "/workspace/legacy-request";
+            ModelTaskReport? report = null;
+            var category = to == "Failed" ? ReadOutcomeCategory(remote.OutcomeJson) ?? "failed" : "completed";
+            if (to == "Completed" && !legacy)
+            {
+                try
+                {
+                    report = remote.OutcomeJson is null ? null : OrganizationStore.DeserializeModelTaskReport(remote.OutcomeJson);
+                }
+                catch (OrganizationValidationException exception)
+                {
+                    throw new WorkerReconciliationInvalidException("Worker model report is invalid.", exception);
+                }
+                if (report is null) throw new WorkerReconciliationInvalidException("Worker model report is absent.");
+                if (report.Tests.Any(test => test.RecipeId is not null && !string.Equals(test.RecipeId, spec.TestRecipeId, StringComparison.Ordinal)))
+                    throw new WorkerReconciliationInvalidException("Worker model report test recipe does not match the task specification.");
+            }
+            return store.ReconcileWorkerTaskTerminalRequest(local.Id, local.Revision, local.State, to, category, remote.OutcomeJson, report);
+        }
         return store.TransitionWorkerRequest(local.Id, local.Revision, local.State, to, to.ToLowerInvariant(), remote.OutcomeJson);
+    }
+
+    private static string? ReadOutcomeCategory(string? outcomeJson)
+    {
+        if (outcomeJson is null) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(outcomeJson, new JsonDocumentOptions { MaxDepth = 8 });
+            return document.RootElement.TryGetProperty("category", out var category) && category.ValueKind == JsonValueKind.String ? category.GetString() : null;
+        }
+        catch (JsonException) { return null; }
     }
 
     private static async Task<BridgeWorkerStatus> StatusAsync(IWorkerBridgeSession session, CancellationToken token)
@@ -939,6 +994,20 @@ public sealed class WorkerConnectionManager : IAsyncDisposable
     private static string SanitizeKind(string kind) { var value = new string(kind.Where(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_').Take(64).ToArray()); return value.Length > 0 ? value : "event"; }
     private static string SanitizeJson(string json) { using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 }); return JsonSerializer.Serialize(document.RootElement, WorkerProtocol.JsonOptions); }
     private static string Hash(string value) => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    /// <summary>
+    /// A bounded, control-free description for the legacy compatibility task
+    /// specification, derived from the low-level prompt. The raw prompt is never
+    /// persisted as the task description; only this trimmed summary is.
+    /// </summary>
+    private static string BoundedLegacyDescription(string prompt)
+    {
+        var normalized = new string(prompt.Where(ch => !char.IsControl(ch)).ToArray())
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var joined = string.Join(' ', normalized);
+        if (joined.Length == 0) return "legacy-request";
+        return joined.Length <= 256 ? joined : joined[..256];
+    }
     /// <summary>
     /// True when <paramref name="ex"/> means the owner session itself is no longer
     /// trustworthy. A bare <see cref="OperationCanceledException"/> is deliberately
