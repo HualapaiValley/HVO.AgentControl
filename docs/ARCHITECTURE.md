@@ -356,11 +356,10 @@ reject pending→decided and prompt completion (compatibility fix PR #255).
 Cleanup was exact: zero labeled containers, volumes or tags, and the local key
 was removed. Cancellation limitation: OpenCode reported the cancelled turn
 completed, so cancellation cleared the active request but was not rollback.
-The `home-docker` control portal is deployed from promoted `main` `cae2ebc`, with
-schema v13; `quick_check` is clean and foreign-key errors are zero. The
-task-control flags in that currently deployed `cae2ebc` build still report
-`TaskControlOperationallyValidated=false`; this evidence change is a later,
-not-yet-promoted code line that reports the new values once promoted.
+The `home-docker` control portal is deployed from promoted `main` `59d0d68`, with
+schema v13; `quick_check` is clean and foreign-key errors are zero. The live
+`/api/info` reports `TaskControlOperationallyValidated=true` with
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
 WorkerControl is enabled through the ignored Compose override; product/Compose
 remains `true` by default.
 
@@ -406,11 +405,11 @@ accepted local managed path. `/api/info` reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
 covering only the first managed disposable two-host path, and carries
 `workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
-bound on exactly that claim; in this evidence change it separately reports
-`TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
+bound on exactly that claim; the deployed `home-docker` build (promoted `main`
+`59d0d68`) separately reports `TaskControlImplemented=true`,
+`TaskControlOperationallyValidated=true` and
 `taskControlValidatedScope="first-local-managed-two-task-restart-verification"`
-for the bounded task capability once promoted, whereas the currently deployed
-`cae2ebc` build still reports the task flags false.
+for the bounded task capability.
 `WorkerControlEnabled`
 remains the deployment/configuration gate and is false by default. The optional Compose worker profile is disabled by default, has
 no published port or Docker socket, is read-only outside named volumes/tmpfs,
@@ -839,11 +838,12 @@ backed by live evidence: the `home-docker` hire and #257 rebuild, and the
 2026-09-21 first local managed two-task restart verification on the
 controller-local Docker target. Promoted/deployed `main` evolved through
 `fa81286`, `5854601`, `579783f`, `3e496c4` and `cae2ebc` while live defects were
-reviewed and promoted; the live evidence was collected on that deployed
-`cae2ebc` / schema v13; `98b8f30` was promoted as `cae2ebc` (identical tree),
-and only later evidence branch commits remain unpromoted. The final production
-line will be a later promotion. There is still no scheduler, multi-agent routing, production
+reviewed and promoted; the live evidence was collected on the then-deployed
+`cae2ebc` / schema v13 (`98b8f30` promoted with an identical tree). The evidence
+commit `34370f2` was then promoted as `main` `59d0d68` and deployed with an
+unchanged worker base digest (control recreated only, no employee rebuild).
+There is still no scheduler, multi-agent routing, production
 repository/GitHub write or release publication; several live #220 attempts failed
 first on protocol/report-shape and task-input-scope defects that are now
 corrected, and the successful acceptance depended on explicit exact test-object
-guidance. `home-docker` is on promoted `main` `cae2ebc` / schema v13.
+guidance. `home-docker` is on promoted `main` `59d0d68` / schema v13.

@@ -45,7 +45,7 @@ Status reflects the active code, not the standalone POC.
    r1→r2 as `Applied`, epoch 600→604, preserving home/workspace/session hashes
    and one container/four volumes; it was code capability with hermetic coverage
    plus that live rebuild on `home-docker`. `home-docker` is promoted `main`
-   `cae2ebc` / schema v13. #220
+   `59d0d68` / schema v13. #220
    (schema v13) adds the durable bounded task domain: an owner-only,
    same-origin, employee-revision-bound bounded task specification with a
    canonical normalized shape, a captured model report explicitly labeled
@@ -60,12 +60,11 @@ Status reflects the active code, not the standalone POC.
    through independent host verification on the controller-local Docker target,
    across a control restart, a cancellation/hold exercise, an orientation
    revision delivery/comprehension and an exact uncertainty recovery, with one
-   container/four volumes and unchanged persistence hashes. In this evidence
-   change `/api/info` reports `TaskControlImplemented=true`,
-   `TaskControlOperationallyValidated=true`,
-   `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
-   once promoted; the currently deployed `cae2ebc` build where the evidence was
-   collected still reports the task flags false.
+   container/four volumes and unchanged persistence hashes. The evidence was
+   collected on the then-deployed `cae2ebc` build; the evidence commit was
+   promoted as `59d0d68` and deployed, so the live `/api/info` reports
+   `TaskControlImplemented=true`, `TaskControlOperationallyValidated=true`,
+   `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
    There is no scheduler, multi-agent routing, production repository/GitHub write
    or release publication; several live attempts failed first on
    protocol/report-shape and task-input-scope defects that are now corrected, and
