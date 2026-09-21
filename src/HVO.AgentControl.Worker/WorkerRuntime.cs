@@ -515,6 +515,10 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 var existing = _store.GetRequest(requestId) ?? throw new WorkerProtocolException("Active request has no durable identity.");
                 var hash = Convert.ToHexString(WorkerProtocol.CanonicalPayloadHash(envelope)).ToLowerInvariant();
                 if (existing.PayloadHash != hash || existing.TurnId != turnId) throw new WorkerProtocolException("Request id was reused with different authorization data.");
+                // The forwarded receipt is a snapshot taken when the frame was written. Once
+                // the durable state has moved past forwarding, a replay must report that
+                // durable truth rather than the stale receipt.
+                if (existing.State != "forwarding") return Task.FromResult(existing);
                 return existingOperation.Forwarded.Task.WaitAsync(connectionToken);
             }
             var promptOwned = prompt && _promptLock.Wait(0);
@@ -554,6 +558,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         long? correlationId = null;
         ActivePromptContext? promptContext = null;
         TurnTextCapture? reportCapture = null;
+        var finalized = false;
         try
         {
             if (prompt) _store.SetActiveRequest(requestId);
@@ -606,14 +611,16 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 }
             }
             else outcome = SanitizeOutcome(result, state);
-            _store.CompleteRequest(requestId, state, outcome);
+            var terminal = FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, () => _store.CompleteRequest(requestId, state, outcome));
             TryAppendObservation("acp-response", SanitizeObservation(result, requestId, correlationId));
-            return _store.GetRequest(requestId)!;
+            return terminal;
         }
         catch (Exception exception) when (exception is not OperationCanceledException || !_lifetime.IsCancellationRequested)
         {
-            var current = _store.GetRequest(requestId);
-            if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
+            // If the terminal write itself failed inside FinalizeRequest the slot is already
+            // released; the durable state is then still forwarded and is marked uncertain here.
+            if (finalized) MarkUncertainIfOpen(requestId);
+            else FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, () => MarkUncertainIfOpen(requestId));
             var uncertain = new WorkerOperationUncertainException("ACP request completion is uncertain.", exception);
             forwarded.TrySetException(uncertain);
             throw uncertain;
@@ -626,17 +633,47 @@ public sealed class WorkerRuntime : IAsyncDisposable
         finally
         {
             if (correlationId is { } id) _responses.TryRemove(id, out _);
-            if (promptContext is not null)
+            if (!finalized) FinalizeRequest(requestId, prompt, promptOwned, promptContext, reportCapture, ref finalized, static () => { });
+        }
+    }
+
+    private void MarkUncertainIfOpen(string requestId)
+    {
+        var current = _store.GetRequest(requestId);
+        if (current?.State is "forwarding" or "forwarded") _store.MarkUncertain(requestId);
+    }
+
+    // Releases the prompt slot and publishes the terminal durable state as one admission-gated
+    // step. Admission (BeginSubmit) takes the same gate before probing the prompt slot, so a
+    // caller that observes the terminal state (or a cleared active request) in the store can
+    // never then be refused because the in-memory slot is still held, and a caller admitted
+    // before this step still sees the prior request as active. The terminal write runs last so
+    // the store never shows a finished request while the slot is still owned.
+    private StoredRequest FinalizeRequest(string requestId, bool prompt, bool promptOwned, ActivePromptContext? promptContext, TurnTextCapture? reportCapture, ref bool finalized, Action publishTerminalState)
+    {
+        if (finalized) return _store.GetRequest(requestId)!;
+        finalized = true;
+        lock (_submitGate)
+        {
+            try
             {
-                lock (_activePromptGate)
+                if (promptContext is not null)
                 {
-                    if (ReferenceEquals(_activePrompt, promptContext)) _activePrompt = null;
-                    if (ReferenceEquals(_activeTaskReportCapture, reportCapture)) _activeTaskReportCapture = null;
+                    lock (_activePromptGate)
+                    {
+                        if (ReferenceEquals(_activePrompt, promptContext)) _activePrompt = null;
+                        if (ReferenceEquals(_activeTaskReportCapture, reportCapture)) _activeTaskReportCapture = null;
+                    }
                 }
+                try { publishTerminalState(); }
+                finally { if (prompt) _store.SetActiveRequest(null); }
+                return _store.GetRequest(requestId)!;
             }
-            if (prompt) _store.SetActiveRequest(null);
-            if (promptOwned) _promptLock.Release();
-            _operations.TryRemove(requestId, out _);
+            finally
+            {
+                if (promptOwned) _promptLock.Release();
+                _operations.TryRemove(requestId, out _);
+            }
         }
     }
 

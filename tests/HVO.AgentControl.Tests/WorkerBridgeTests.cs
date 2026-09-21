@@ -1341,6 +1341,7 @@ public sealed class WorkerBridgeTests
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
         await Eventually(() => store.GetRequest("req")?.State == "completed");
+        Assert.Null(store.Status().ActiveRequestId);
         Assert.Throws<WorkerProtocolException>(() => store.ReconcileJournalFailure(marker.OperationId + "x", marker.WorkerGeneration));
         Assert.True(store.Status().DispatchHeld);
         store.ReconcileJournalFailure(marker.OperationId, marker.WorkerGeneration);
@@ -1354,6 +1355,44 @@ public sealed class WorkerBridgeTests
         Assert.Equal("forwarded", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
         input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{nextId},\"result\":{{}}}}\n");
         await Eventually(() => store.GetRequest("next")?.State == "completed");
+        Assert.Equal("running", store.Status().ProcessState);
+    }
+
+    [Fact]
+    public async Task ObservedTerminalStateAlwaysAdmitsNextPromptAndReplayReportsDurableTruth()
+    {
+        // #322: the prompt slot must be released no later than the terminal durable state
+        // becomes visible, and a same-id replay after that point must report the durable
+        // state rather than the forwarded receipt snapshot. The observation sink blocks the
+        // response observation so the window between the terminal write and the operation's
+        // cleanup is held open deterministically instead of relying on scheduler luck.
+        using var temp = new WorkerTemp(); using var store = new WorkerStore(temp.Options()); Start(store); var lease = store.AcquireLease("controller-test", Nonce(1));
+        var observations = new BlockingObservationSink(store, "acp-response");
+        await using var input = new GateStream(); await using var output = new CaptureStream(); await using var runtime = new WorkerRuntime(store, input, output, observations); runtime.Start();
+        using var envelope = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
+        var submit = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None);
+        Assert.Equal("forwarded", (await submit.WaitAsync(TimeSpan.FromSeconds(2))).State);
+        var acpId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{acpId},\"result\":{{\"ok\":true}}}}\n");
+        await observations.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            // The operation is parked inside the response observation. The store already shows
+            // the terminal state, so the slot must already be free and the replay durable.
+            Assert.Equal("completed", store.GetRequest("req")!.State);
+            Assert.Null(store.Status().ActiveRequestId);
+            var replayed = await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req", envelope.RootElement, "turn", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal("completed", replayed.State);
+            using var second = JsonDocument.Parse("{\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"ses-test\",\"prompt\":[{\"type\":\"text\",\"text\":\"bounded task\"}]}}");
+            var next = runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "next", second.RootElement, "next-turn", CancellationToken.None);
+            await Eventually(() => output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 2);
+            Assert.Equal("forwarded", (await next.WaitAsync(TimeSpan.FromSeconds(2))).State);
+            Assert.Equal("next", store.Status().ActiveRequestId);
+        }
+        finally { observations.Release.TrySetResult(); }
+        var nextId = JsonDocument.Parse(output.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries)[1]).RootElement.GetProperty("id").GetInt64();
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":{nextId},\"result\":{{}}}}\n");
+        await Eventually(() => store.GetRequest("next")?.State == "completed" && store.Status().ActiveRequestId is null);
         Assert.Equal("running", store.Status().ProcessState);
     }
 
@@ -1659,6 +1698,17 @@ public sealed class WorkerBridgeTests
         public WorkerEvent AppendEvent(string kind, string payloadJson)
         {
             if (Interlocked.Exchange(ref _failed, 1) == 0) throw new WorkerStoreException("injected recoverable append failure");
+            return store.AppendEvent(kind, payloadJson);
+        }
+        public JournalFailure SetJournalFailure(string errorCategory) => store.SetJournalFailure(errorCategory);
+    }
+    private sealed class BlockingObservationSink(WorkerStore store, string blockedKind) : IWorkerObservationSink
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public WorkerEvent AppendEvent(string kind, string payloadJson)
+        {
+            if (kind == blockedKind && Entered.TrySetResult()) Release.Task.Wait(TimeSpan.FromSeconds(5));
             return store.AppendEvent(kind, payloadJson);
         }
         public JournalFailure SetJournalFailure(string errorCategory) => store.SetJournalFailure(errorCategory);
