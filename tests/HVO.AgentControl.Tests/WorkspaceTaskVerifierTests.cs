@@ -56,6 +56,7 @@ public sealed class WorkspaceTaskVerifierTests
         var project = Path.Combine(workspace, "project");
         Directory.CreateDirectory(project);
         File.WriteAllText(Path.Combine(project, "CopyFixture.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        File.WriteAllText(Path.Combine(project, "Directory.Build.targets"), "<Project><Target Name=\"VSTest\" DependsOnTargets=\"Build\" /></Project>");
         File.WriteAllText(Path.Combine(project, "Class1.cs"), "public static class Class1 { public static int Value => 1; }");
         Directory.CreateDirectory(Path.Combine(project, ".task-nuget"));
         RunProcess(hostDotnet, project, ["restore", "--packages", Path.Combine(project, ".task-nuget"), "--ignore-failed-sources"]);
@@ -67,13 +68,23 @@ public sealed class WorkspaceTaskVerifierTests
         }
 
         var result = RunReal(workspace, hostDotnet, "project", ["."], 20, 1024 * 1024, 60);
-        Assert.Equal("passed", result.GetProperty("state").GetString());
+        Assert.True(
+            string.Equals("passed", result.GetProperty("state").GetString(), StringComparison.Ordinal),
+            result.GetRawText());
         Assert.Equal(sourceBefore, File.ReadAllBytes(Path.Combine(project, "Class1.cs")));
         Assert.True(Directory.Exists(Path.Combine(project, "obj")));
         Assert.False(Directory.Exists(Path.Combine(project, "bin")));
         Assert.True(Directory.Exists(Path.Combine(temp.Path, "real-copy", "project", "obj")));
+        Assert.True(File.Exists(Path.Combine(temp.Path, "real-copy", "project", "bin", "Release", "net10.0", "CopyFixture.dll")));
         var manifestPaths = result.GetProperty("manifest").GetProperty("files").EnumerateArray().Select(item => item.GetProperty("path").GetString()!).ToArray();
         Assert.DoesNotContain(manifestPaths, path => path.StartsWith("obj/", StringComparison.Ordinal) || path.StartsWith("bin/", StringComparison.Ordinal) || path.StartsWith(".task-nuget/", StringComparison.Ordinal));
+
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(Path.Combine(project, "Class1.cs"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.WriteAllText(Path.Combine(project, "Class1.cs"), "public static class Class1 { public static int Value => missing; }");
+        var failed = RunReal(workspace, hostDotnet, "project", ["."], 20, 1024 * 1024, 60);
+        Assert.Equal("failed", failed.GetProperty("state").GetString());
+        Assert.Equal("test-failed", failed.GetProperty("failureDetail").GetString());
     }
 
     [Theory]
