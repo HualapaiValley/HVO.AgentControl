@@ -1093,7 +1093,7 @@ hiring.
   completion. The Overview shows company summary, employee counts by department
   and state, pending approvals, and linked failures needing owner attention.
 
-### 12.1 Bounded task contract (#220, schema v13; implemented as code capability)
+### 12.1 Bounded task contract (#220, schema v13; implemented, live accepted, and operationally validated)
 
 - **Bounded specification.** `WorkerTaskSpec` version 1 carries a bounded
   description; an absolute workspace root strictly under `/workspace/`; 1–32

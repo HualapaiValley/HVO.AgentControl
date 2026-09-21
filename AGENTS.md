@@ -81,10 +81,11 @@ no image rebuild. Evidence: promoted/deployed `main` evolved through `fa81286`,
 `5854601`, `579783f`, `3e496c4` and `cae2ebc` while live defects were reviewed and
 promoted. The live evidence was collected on that deployed `cae2ebc` / schema v13,
 whose `/api/info` still reports `TaskControlOperationallyValidated=false`; the
-evidence docs branch `98b8f30` and this evidence change head `9846991` are not yet
+ `98b8f30` was promoted as `cae2ebc` (identical tree); only later evidence branch
+ commits remain unpromoted. The
 production, and `/api/info` **will** report the task flags true only after this
-evidence change is promoted. The task code at this evidence head already reports
-true. The final production line will be a later promotion. Schema is v13; the
+ later evidence branch commits are promoted. The final production line will be a
+ later promotion. Schema is v13; the
 pre-deploy full snapshot `agentcontrol-v2-backup-pre-fa81286` verified 35 files /
 9,399,203 bytes with exact schema-v12 DB hash `59f05e4…`; helper socket
 `1002:1001` `0660`. Accepted Task 1 `tsk-2b4bcf5890861fe123ea207f` (`req-d1218e7aed229aa650f8f0e3`,

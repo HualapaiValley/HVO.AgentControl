@@ -408,7 +408,7 @@ covering only the first managed disposable two-host path, and carries
 `workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
 bound on exactly that claim; in this evidence change it separately reports
 `TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
-`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
+`taskControlValidatedScope="first-local-managed-two-task-restart-verification"`
 for the bounded task capability once promoted, whereas the currently deployed
 `cae2ebc` build still reports the task flags false.
 `WorkerControlEnabled`
@@ -840,9 +840,9 @@ backed by live evidence: the `home-docker` hire and #257 rebuild, and the
 controller-local Docker target. Promoted/deployed `main` evolved through
 `fa81286`, `5854601`, `579783f`, `3e496c4` and `cae2ebc` while live defects were
 reviewed and promoted; the live evidence was collected on that deployed
-`cae2ebc` / schema v13, the evidence docs branch `98b8f30` and this evidence
-change head `9846991` are not yet production, and the final production line will
-be a later promotion. There is still no scheduler, multi-agent routing, production
+`cae2ebc` / schema v13; `98b8f30` was promoted as `cae2ebc` (identical tree),
+and only later evidence branch commits remain unpromoted. The final production
+line will be a later promotion. There is still no scheduler, multi-agent routing, production
 repository/GitHub write or release publication; several live #220 attempts failed
 first on protocol/report-shape and task-input-scope defects that are now
 corrected, and the successful acceptance depended on explicit exact test-object
