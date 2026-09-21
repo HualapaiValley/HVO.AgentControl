@@ -28,7 +28,7 @@ Status reflects the active code, not the standalone POC.
    takes no host input and Docker operations run through the privileged
    `docker-helper`, while the control image has neither the daemon socket nor a
    Docker CLI. It has **not** run a live owner-approved hire on any host and
-   `WorkerControl` is off by default, so it is
+   `WorkerControl` is enabled through the ignored Compose override; product/Compose remains `true` by default, so it is
    not operationally validated; the local managed path did reach `Ready` once on
    a development machine, which is not a deployment result. The three worker
    classes stay distinct: automatic controller-local managed employees through the
@@ -41,7 +41,24 @@ Status reflects the active code, not the standalone POC.
    by default, requires exact typed confirmation for resets, and synchronously
    drives a durable single-flight, dispatch-held, epoch-fenced staged operation.
    It never auto-adopts a profile revision. No live rebuild has run on a
-   deployment host, and `home-docker` remains on `802eb6f` / schema v9. The schema
+    deployment host. The live #257 rebuild completed r1→r2 as `Applied`, epoch
+    600→604, preserving home/workspace/session hashes and one container/four
+    volumes. `home-docker` is promoted `main` `7d4078b` / schema v12. #220
+   (schema v13) adds the durable bounded task domain: an owner-only,
+   same-origin, employee-revision-bound bounded task specification with a
+   canonical normalized shape, a captured model report explicitly labeled
+   unverified, and typed independent host verification as the only path to
+   `Verified`. The employee page exposes the bounded task form, current/recent
+   task cards with Sync/Cancel/Verify controls, and revision-bound manual
+   dispatch-hold set/clear controls that never clear stale or policy holds;
+   employee-scoped orientation re-delivery and comprehension reuse the hire
+   machinery with a deliberate container replacement and no image build. The
+    task path remains not deployed and not operationally validated: no live
+    bounded task, restart reconciliation, cancellation/hold acceptance,
+    independent host verification, or second task, and
+   `/api/info` reports `TaskControlImplemented=true`,
+   `TaskControlOperationallyValidated=false`, `TaskControlValidatedScope=null`.
+   There is no scheduler. The schema
    also has a sanitized deduplicated controller event inbox, conditional
    request/cancellation/provisioning transitions, exact recovery markers and
    restart reconciliation. The first managed disposable two-host path was
@@ -55,7 +72,9 @@ Status reflects the active code, not the standalone POC.
    host. Durable pending requested hires are visible and the `/hiring` page
    supports profile-revision/ready-host selection, approve/reject and frozen
    approval display; the approval action itself is code capability and has no
-   live operational evidence (see item 3). Worker lifecycle,
+   live operational evidence (see item 3). The employee detail page also shows
+   the bounded task/recent-task read model and the manual hold state; the task
+   capability itself has no live evidence. Worker lifecycle,
    hiring, tasks, proxied native web and multi-host routing remain future work.
 7. **Development workflow — not implemented:** manager delegation, independent
    review, exact-head evidence, GitHub App integration and bounded write

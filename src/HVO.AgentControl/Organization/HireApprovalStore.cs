@@ -140,6 +140,42 @@ public sealed partial class OrganizationStore
     }
 
     /// <summary>
+    /// Resolves the frozen managed enrollment resources for one employee by
+    /// joining the employee's runtime binding to the resources table. Returns null
+    /// for a non-managed or internal employee. Never mutates anything.
+    /// </summary>
+    public ManagedEnrollmentResourcesRecord? GetManagedEnrollmentResourcesForEmployee(string employeeId)
+    {
+        if (!IsBoundedIdentifier(employeeId, OrganizationIds.EmployeePrefix)) return null;
+        return TranslateStoreFaults(() =>
+        {
+            ThrowIfDisposed();
+            lock (_gate)
+            {
+                using var connection = OpenConnection();
+                using var command = connection.CreateCommand();
+                command.CommandText =
+                    """
+                    SELECT r.runtime_binding_id, r.cpu_limit, r.memory_limit_mib, r.pids_limit,
+                           r.approved_profile_revision_id, r.approved_profile_build_id, r.approved_image_digest,
+                           r.approved_host_id, r.platform, r.created_at, r.revision
+                    FROM managed_enrollment_resources r
+                    JOIN runtime_bindings b ON b.id = r.runtime_binding_id
+                    WHERE b.employee_id = $employee
+                    """;
+                command.Parameters.AddWithValue("$employee", employeeId);
+                using var reader = command.ExecuteReader();
+                if (!reader.Read()) return null;
+                return new ManagedEnrollmentResourcesRecord(
+                    reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3),
+                    reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(7), reader.GetString(8),
+                    DateTimeOffset.Parse(reader.GetString(9), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    reader.GetInt32(10));
+            }
+        });
+    }
+
+    /// <summary>
     /// Resolves the frozen owner approval that owns a runtime binding. A managed
     /// enrollment is planned from a binding id alone, so this is the only stable
     /// link back to the exact approval revision a later worker link must carry.

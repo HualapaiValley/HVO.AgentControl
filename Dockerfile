@@ -135,10 +135,11 @@ RUN ln -s /usr/local/lib/node_modules/opencode-ai/bin/opencode.exe /usr/local/bi
 COPY --from=build /worker-app/ /app/
 COPY src/container/worker-supervisor.py /usr/local/bin/worker-supervisor
 COPY src/container/profile-image-verify.py /usr/local/bin/profile-image-verify
+COPY src/container/workspace-task-verify.py /usr/local/bin/workspace-task-verify
 RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
-    && chown -R root:root /app /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify \
+    && chown -R root:root /app /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify /usr/local/bin/workspace-task-verify \
     && chmod -R go-w /app \
-    && chmod 0755 /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify
+    && chmod 0755 /usr/local/bin/worker-supervisor /usr/local/bin/profile-image-verify /usr/local/bin/workspace-task-verify
 ENV LANG=C.UTF-8
 ENTRYPOINT ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"]
 

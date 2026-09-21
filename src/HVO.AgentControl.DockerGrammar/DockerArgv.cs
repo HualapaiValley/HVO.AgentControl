@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace HVO.AgentControl.RemoteWorker;
 
-public enum DockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector, Viewer, LocalStorageFree }
+public enum DockerOperation { Probe, VersionProbe, StorageFree, ImageInspect, ImageTag, ImageBuild, ImageVerify, ImageRemove, VolumeCreate, VolumeInspect, VolumeRemove, ContainerCreate, ContainerInspect, ContainerStart, ContainerStop, ContainerRemove, Bootstrap, Connector, Viewer, LocalStorageFree, WorkspaceVerify }
 
 public sealed record WorkerResourceIdentity(string OrganizationId, string ControllerId, string HostId, string WorkerId, string BindingId, string OperationId, string? ProfileRevisionId = null)
 {
@@ -23,6 +23,7 @@ public sealed record NamedVolumeMount(string Name, string ContainerPath, bool Re
 public sealed record ContainerCreateSpec(string Name, string ImageDigest, string Platform, WorkerResourceIdentity Identity, IReadOnlyList<NamedVolumeMount> Volumes, long MemoryBytes, decimal CpuLimit, int PidsLimit, IReadOnlyList<string>? ApprovedDigests = null, IReadOnlyDictionary<string, string>? EmployeeEnvironment = null);
 public sealed record BootstrapSpec(string ControlVolumeName, string ImageDigest, string Platform, WorkerResourceIdentity Identity);
 public sealed record ImageBuildSpec(string BaseImageDigest, string Platform, string ProfileRevisionId, string ContextHash, string ResultTag, bool NetworkRequired);
+public sealed record WorkspaceVerifySpec(WorkerResourceIdentity Identity, string WorkspaceVolumeName, string WorkspaceRoot, IReadOnlyList<string> AllowedPaths, string TestRecipeId, int MaximumSeconds, int MaxFiles, long MaxBytes, string TargetImageDigest, string Platform, IReadOnlyList<string> ApprovedDigests, long MemoryBytes, decimal CpuLimit);
 public sealed record DockerPolicy(string ApprovedBaseDigest, string ApprovedPlatform, long MaxMemoryBytes, decimal MaxCpu, int MaxPids, string WorkerTarget = "/app/HVO.AgentControl.Worker.dll", bool RequireAgentControlPrefixes = false);
 
 public sealed class DockerGrammarException(string message) : Exception(message);
@@ -36,6 +37,7 @@ public static class DockerArgv
     private static readonly Regex Digest = new("^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant);
     private static readonly Regex ProfileRevisionId = new("^prev-[a-f0-9]{16}$", RegexOptions.CultureInvariant);
     private static readonly Regex ImageReference = new("^agentcontrol-[a-z0-9-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", RegexOptions.CultureInvariant);
+    private static readonly Regex RelativePath = new("^(?:[A-Za-z0-9._-]+)(?:/[A-Za-z0-9._-]+)*$", RegexOptions.CultureInvariant);
     private static readonly HashSet<string> ContainerPaths = ["/control", "/home/worker", "/workspace", "/session"];
     private static readonly HashSet<string> AllowedEnvironmentKeys = ["TZ", "LANG", "LC_ALL", "EDITOR", "VISUAL", "DOTNET_ROOT", "PATH", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_NOLOGO", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE", "NPM_CONFIG_UPDATE_NOTIFIER", "NPM_CONFIG_FUND", "PYTHONDONTWRITEBYTECODE", "PIP_DISABLE_PIP_VERSION_CHECK"];
 
@@ -92,6 +94,25 @@ public static class DockerArgv
         return [.. parts];
     }
 
+    public static string[] BuildWorkspaceVerify(WorkspaceVerifySpec spec, DockerPolicy policy)
+    {
+        RequirePrefix(spec.WorkspaceVolumeName, "agentcontrol-workspace-");
+        RequireApprovedImage(spec.TargetImageDigest, spec.Platform, spec.ApprovedDigests, policy, allowApprovedSet: true);
+        if (spec.TestRecipeId != "dotnet-test-release") throw new DockerGrammarException("Workspace verification recipe is not approved.");
+        if (spec.MaximumSeconds is < 1 or > 1800 || spec.MaxFiles is < 1 or > 384 || spec.MaxBytes is < 1 or > 64L * 1024 * 1024) throw new DockerGrammarException("Workspace verification bounds are invalid.");
+        if (spec.MemoryBytes <= 0 || spec.MemoryBytes > policy.MaxMemoryBytes || spec.CpuLimit <= 0 || spec.CpuLimit > policy.MaxCpu) throw new DockerGrammarException("Workspace verification resource limits exceed helper policy.");
+        var root = ValidRelativePath(spec.WorkspaceRoot, allowDot: false);
+        if (spec.AllowedPaths is not { Count: >= 1 and <= 32 }) throw new DockerGrammarException("Workspace verification allowed paths are invalid.");
+        var allowed = spec.AllowedPaths.Select(path => ValidRelativePath(path, allowDot: true)).Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        if (allowed.Length != spec.AllowedPaths.Count) throw new DockerGrammarException("Workspace verification allowed paths must be unique.");
+        var parts = new List<string> { "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", Number(spec.MemoryBytes), "--cpus", Number(spec.CpuLimit), "--user", "1102:1102", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m", "--mount", $"type=volume,src={ValidResource(spec.WorkspaceVolumeName)},dst=/workspace,readonly,volume-nocopy", "--platform", ValidPlatform(spec.Platform), "--entrypoint", "/usr/bin/python3" };
+        foreach (var label in ExactLabels(spec.Identity)) { parts.Add("--label"); parts.Add(Label(label.Key, label.Value)); }
+        parts.Add(ValidDigest(spec.TargetImageDigest));
+        parts.AddRange(["-I", "-S", "/usr/local/bin/workspace-task-verify", "--root", root, "--recipe", spec.TestRecipeId, "--maximum-seconds", Number(spec.MaximumSeconds), "--max-files", Number(spec.MaxFiles), "--max-bytes", Number(spec.MaxBytes)]);
+        foreach (var path in allowed) { parts.Add("--allowed-path"); parts.Add(path); }
+        return [.. parts];
+    }
+
     public static string[] BuildBootstrap(BootstrapSpec spec, DockerPolicy policy)
     {
         if (policy.RequireAgentControlPrefixes) RequirePrefix(spec.ControlVolumeName, "agentcontrol-control-"); else ValidResource(spec.ControlVolumeName);
@@ -136,6 +157,7 @@ public static class DockerArgv
     private static void RequireApprovedImage(string digest, string platform, IReadOnlyList<string>? approvedDigests, DockerPolicy policy, bool allowApprovedSet) { ValidDigest(policy.ApprovedBaseDigest); ValidDigest(digest); if (platform != policy.ApprovedPlatform) throw new DockerGrammarException("Container platform differs from helper policy."); if (!string.Equals(digest, policy.ApprovedBaseDigest, StringComparison.Ordinal) && (!allowApprovedSet || approvedDigests is null || approvedDigests.Any(x => !Digest.IsMatch(x)) || !approvedDigests.Contains(policy.ApprovedBaseDigest, StringComparer.Ordinal) || !approvedDigests.Contains(digest, StringComparer.Ordinal))) throw new DockerGrammarException("Container image is not approved."); }
     private static void ValidateEnvironmentEntry(string name, string value) { if (!AllowedEnvironmentKeys.Contains(name) || value.Length > 256 || value.Any(c => char.IsControl(c) || c > 0x7e) || value.Contains("${", StringComparison.Ordinal) || value.Contains("$(", StringComparison.Ordinal)) throw new DockerGrammarException("Container environment entry is invalid."); if (name == "PATH" && value != "/opt/dotnet-sdk:/usr/local/bin:/usr/bin:/bin") throw new DockerGrammarException("Container PATH is invalid."); if (name == "DOTNET_ROOT" && value != "/opt/dotnet-sdk") throw new DockerGrammarException("Container DOTNET_ROOT is invalid."); }
     private static string ValidAbsolutePath(string value) { if (value is not { Length: >= 1 and <= 512 } || !AbsolutePath.IsMatch(value) || value.Split('/').Any(segment => segment is "." or "..")) throw new DockerGrammarException("The storage path is not a fixed absolute path."); return value; }
+    private static string ValidRelativePath(string value, bool allowDot) { if (allowDot && value == ".") return value; if (value is not { Length: >= 1 and <= 512 } || !RelativePath.IsMatch(value) || value.Split('/').Any(segment => segment is "." or "..")) throw new DockerGrammarException("Workspace path is not a safe relative path."); return value; }
     private static string ValidDigest(string value) => Digest.IsMatch(value) ? value : throw new DockerGrammarException("Image digest is invalid.");
     private static string ValidImageReference(string value) => Digest.IsMatch(value) ? value : ValidLocalImageReference(value);
     private static string ValidLocalImageReference(string value) => ImageReference.IsMatch(value) && value.Length <= 200 ? value : throw new DockerGrammarException("Image reference is invalid.");

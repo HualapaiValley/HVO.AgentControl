@@ -285,7 +285,7 @@ public static class ImageContractVerifier
     /// </summary>
     public static readonly IReadOnlyList<string> RequiredIdenticalArtifacts =
     [
-        "/usr/local/bin/worker-supervisor", "/usr/local/bin/profile-image-verify", "/app", "/usr/bin/dotnet", "/usr/share/dotnet",
+        "/usr/local/bin/worker-supervisor", "/usr/local/bin/profile-image-verify", "/usr/local/bin/workspace-task-verify", "/app", "/usr/bin/dotnet", "/usr/share/dotnet",
         "/usr/local/bin/node", "/usr/local/lib/node_modules/opencode-ai", "/usr/local/bin/opencode",
         // PID 1 is `#!/usr/bin/env python3`: env, the interpreter and its symlink must
         // be byte-identical, and every standard-library file the base ships must be

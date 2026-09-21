@@ -24,11 +24,13 @@ public static class RemoteWorkerServiceCollectionExtensions
         services.AddHostedService<WorkerConnectionHostedService>();
         services.AddSingleton<RemoteWorkerProvisioningCoordinator>();
         services.AddSingleton<RemoteOrientationCoordinator>();
+        services.AddSingleton<EmployeeOrientationCoordinator>();
         services.AddSingleton<HireProvisioningCoordinator>();
         services.AddSingleton<EmployeeRebuildCoordinator>();
         services.AddSingleton<HireProvisioningHostedService>();
         services.AddHostedService(static services => services.GetRequiredService<HireProvisioningHostedService>());
         services.AddSingleton<IRemoteWorkerStatusProvider, RemoteWorkerStatusProvider>();
+        services.AddSingleton<EmployeeTaskCoordinator>();
         services.AddSingleton<ExecutionHostRegistry>();
         services.AddSingleton<ProfileBuildCoordinator>();
         services.AddSingleton<CleanupCoordinator>();

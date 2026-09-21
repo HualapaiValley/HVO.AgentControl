@@ -108,8 +108,7 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
     {
         Status = StatusCodes.Status500InternalServerError,
         Title = "An unexpected error occurred.",
-        Type = "https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.1",
-        // The default writer applies CustomizeProblemDetails, but a client that
+        Type = "https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.1",        // The default writer applies CustomizeProblemDetails, but a client that
         // declines application/problem+json makes TryWriteAsync return false.
         // Populate the required contract fields before either write path so the
         // fallback still carries instance and traceId.
@@ -266,6 +265,13 @@ if (app.Environment.IsEnvironment("ExceptionPathTests"))
 // and stays false by default; the live acceptance ran an explicitly enabled,
 // disposable isolation. WorkerControlValidatedScope carries the exact bound in
 // band so a client can distinguish the accepted path from the excluded ones.
+//
+// Task-control capability truth (#220). TaskControlImplemented is true because
+// the bounded task specification, employee-scoped dispatch, model-report capture
+// and typed independent verification slices are implemented and hermetically
+// tested. TaskControlOperationallyValidated is false and its scope is null: no
+// live bounded task has been dispatched, run and host-verified on a deployment
+// host. It is never collapsed into the worker-control flags above.
 app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     "HVO.AgentControl",
     2,
@@ -274,7 +280,10 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     WorkerControlCodeAvailable: true,
     WorkerControlEnabled: workerControlEnabled,
     WorkerControlOperationallyValidated: true,
-    WorkerControlValidatedScope: Program.WorkerControlValidatedScope)))
+    WorkerControlValidatedScope: Program.WorkerControlValidatedScope,
+    TaskControlImplemented: true,
+    TaskControlOperationallyValidated: false,
+    TaskControlValidatedScope: null)))
     .WithName("GetInfo")
     .WithTags("Control")
     .WithSummary("Describes the control-host baseline.")
@@ -289,7 +298,10 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
         "authorized disposable topology). They explicitly exclude key rotation and " +
         "compromise re-enrollment and production managed hiring/provisioning. " +
         "workerControlEnabled is the separate deployment/configuration gate and is " +
-        "false in the default configuration.")
+        "false in the default configuration. taskControlImplemented reports the " +
+        "bounded employee-task code capability; taskControlOperationallyValidated " +
+        "is false and taskControlValidatedScope is null because no live bounded task " +
+        "has been dispatched, run and host-verified on a deployment host.")
     .Produces<InfoResponse>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
 
@@ -552,6 +564,176 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
     .ProducesProblem(StatusCodes.Status400BadRequest)
     .ProducesProblem(StatusCodes.Status401Unauthorized)
     .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Owner-only employee-scoped task surface (#220). The caller states the employee
+// revision it acted on and an idempotency key; the controller resolves the exact
+// managed binding, session, worker and ownership epoch server-side and dispatches
+// a host-generated prompt from the bounded task specification. No caller-supplied
+// binding, worker or session identity is accepted by these endpoints.
+app.MapPost("/api/employees/{id}/tasks", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, HVO.AgentControl.RemoteWorker.EmployeeTaskCreate request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedEmployeeRevision < 1
+        || string.IsNullOrWhiteSpace(request.IdempotencyKey) || request.TaskSpec is null)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee task.", detail: "A bounded employee id, current employee revision, idempotency key and task specification are required.");
+    if (Program.RejectCrossOrigin(context, "Employee task dispatch") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.CreateAsync(id, request, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("CreateEmployeeTask").WithTags("Employee tasks")
+    .WithSummary("Dispatches one bounded task to the exact ready managed employee using an idempotency key.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/employees/{id}/tasks", (AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, int? limit) =>
+{
+    if (!Program.IsValidEmployeeId(id))
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee task query.", detail: "A bounded stable employee id is required.");
+    if (limit is < 1 or > HVO.AgentControl.Organization.OrganizationStore.MaxRecentEmployeeTasks)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee task query.", detail: $"The limit must be between 1 and {HVO.AgentControl.Organization.OrganizationStore.MaxRecentEmployeeTasks}.");
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(coordinator.Recent(id, limit ?? HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator.DefaultRecentLimit)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("ListEmployeeTasks").WithTags("Employee tasks")
+    .WithSummary("Returns the bounded newest-first task history for one employee.")
+    .Produces<IReadOnlyList<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapGet("/api/tasks/{taskId}", (AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId) =>
+{
+    if (!Program.IsValidWorkerTaskId(taskId))
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid worker task.", detail: "A bounded stable task id is required.");
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(coordinator.Get(taskId)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("GetWorkerTaskDetail").WithTags("Employee tasks")
+    .WithSummary("Returns one durable task, its exact request, model report, and latest host-verification attempt.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/tasks/{taskId}/sync", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskSync request) =>
+{
+    if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid worker task synchronization.", detail: "A bounded stable task id and current task revision are required.");
+    if (Program.RejectCrossOrigin(context, "Worker task synchronization") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.SyncAsync(taskId, request, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("SynchronizeWorkerTask").WithTags("Employee tasks")
+    .WithSummary("Reconciles one exact durable task request without resubmitting the remote effect.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskSyncDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/tasks/{taskId}/verify", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskVerify request) =>
+{
+    if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid worker task verification.", detail: "A bounded stable task id and current task revision are required.");
+    if (Program.RejectCrossOrigin(context, "Worker task verification") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.VerifyAsync(taskId, request.ExpectedTaskRevision, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("VerifyWorkerTask").WithTags("Employee tasks")
+    .WithSummary("Runs the fixed independent verifier against a private copy of the task workspace using its applied profile image.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/tasks/{taskId}/cancel", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskCancel request) =>
+{
+    if (!Program.IsValidWorkerTaskId(taskId) || request is null || request.ExpectedTaskRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid worker task cancellation.", detail: "A bounded stable task id and current task revision are required.");
+    if (Program.RejectCrossOrigin(context, "Worker task cancellation") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(await coordinator.CancelAsync(taskId, request, context.RequestAborted)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("CancelWorkerTask").WithTags("Employee tasks")
+    .WithSummary("Forwards cancellation for the task's exact active request; terminal observation is recorded by synchronization.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskCancellationDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPut("/api/employees/{id}/dispatch-hold", (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, HVO.AgentControl.RemoteWorker.EmployeeDispatchHoldUpdate request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedEmployeeRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid employee dispatch hold.", detail: "A bounded stable employee id and current employee revision are required.");
+    if (Program.RejectCrossOrigin(context, "Employee dispatch hold") is { } rejection) return rejection;
+    if (host.Organization is null) return Program.WorkerStoreUnavailable();
+    try { return Results.Ok(coordinator.SetDispatchHold(id, request)); }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("SetEmployeeDispatchHold").WithTags("Employee tasks")
+    .WithSummary("Sets or clears only the owner's manual dispatch hold for one managed employee.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeDispatchHoldDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+// Owner-only, employee-scoped orientation control for a managed employee. These
+// reuse the same remote coordination machinery a hire drives: compose the current
+// artifact, install it over the bridge, replace the container to load it, and run
+// the bounded comprehension. They never build an image or provision resources.
+app.MapPost("/api/employees/{id}/orientation/deliver", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeOrientationCoordinator orientation, string id, HVO.AgentControl.RemoteWorker.EmployeeOrientationDeliver request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedEmployeeRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid orientation delivery.", detail: "A bounded employee id and current employee revision are required.");
+    if (Program.RejectCrossOrigin(context, "Employee orientation delivery") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var result = await orientation.DeliverAsync(store, id, request.ExpectedEmployeeRevision, context.RequestAborted);
+        return Results.Ok(new HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail(result.Status));
+    }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("DeliverEmployeeOrientation").WithTags("Employee tasks")
+    .WithSummary("Composes, installs and loads the current orientation for one managed employee without an image rebuild.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/employees/{id}/orientation/comprehension/run", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeOrientationCoordinator orientation, string id, HVO.AgentControl.RemoteWorker.EmployeeOrientationComprehension request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedOrientationRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid orientation comprehension.", detail: "A bounded employee id and current orientation revision are required.");
+    if (Program.RejectCrossOrigin(context, "Employee orientation comprehension") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var status = await orientation.RunComprehensionAsync(store, id, request.ExpectedOrientationRevision, context.RequestAborted);
+        return Results.Ok(new HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail(status));
+    }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("RunEmployeeOrientationComprehension").WithTags("Employee tasks")
+    .WithSummary("Runs the bounded tool-free comprehension for a delivered and loaded employee orientation.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 // Rebuilds run synchronously after BeginEmployeeRebuild commits the durable
@@ -1994,6 +2176,9 @@ public partial class Program
     public const int MaximumHireRequestIdLength = 64;
     public const int MaximumContainerProfileIdLength = 64;
 
+    /// <summary>Maximum length accepted for a stable worker task id on the wire.</summary>
+    public const int MaximumWorkerTaskIdLength = 64;
+
     /// <summary>
     /// Fixed owner-approval identity recorded with every owner approval. It is
     /// host-derived and deliberately not taken from the request body, so a caller
@@ -2340,6 +2525,85 @@ public partial class Program
         detail: "The control runtime is disabled or the authoritative store has not opened.");
 
     /// <summary>
+    /// True when <paramref name="exception"/> is one the employee-task endpoints
+    /// translate into their own RFC 9457 contract. A malformed task specification
+    /// is a 422 caller error, unlike the low-level remote-worker contract where
+    /// the same exception is a 400.
+    /// </summary>
+    public static bool IsEmployeeTaskFailure(Exception exception) =>
+        exception is HVO.AgentControl.Organization.OrganizationValidationException
+            or HVO.AgentControl.Organization.OrganizationConcurrencyException
+            or HVO.AgentControl.Organization.OrganizationNotFoundException
+            or HVO.AgentControl.Organization.OrganizationStoreException
+            or HVO.AgentControl.RemoteWorker.RemoteWorkerException
+            or HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException
+            or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException
+            or HVO.AgentControl.RemoteWorker.WorkerRemoteException
+            or HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException
+            or HVO.AgentControl.RemoteWorker.ForeignResourceException
+            or HVO.AgentControl.Worker.WorkerOperationUncertainException
+            or KeyNotFoundException;
+
+    /// <summary>
+    /// Maps an employee-task failure to the single RFC 9457 error contract. An
+    /// invalid specification is 422; unknown employee or task is 404; a revision,
+    /// hold, recovery or session conflict is 409; a disabled or misconfigured
+    /// controller is 409; an uncertain bridge outcome is 502 matching the existing
+    /// remote mapping; and an unreadable or unwritable store is 503.
+    /// </summary>
+    public static IResult EmployeeTaskProblem(Exception exception) => exception switch
+    {
+        HVO.AgentControl.Organization.OrganizationValidationException => Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Employee task is invalid."),
+        HVO.AgentControl.Organization.OrganizationConcurrencyException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Employee task conflicted.",
+            detail: "The employee, worker or task state changed. Reload and retry."),
+        HVO.AgentControl.RemoteWorker.WorkerRecoveryRequiredException recovery => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Remote worker recovery is required.",
+            detail: $"An operator must reconcile the open '{recovery.Kind}' obligation before this operation can proceed."),
+        HVO.AgentControl.Organization.OrganizationNotFoundException => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Employee task record not found."),
+        KeyNotFoundException => Results.Problem(
+            statusCode: StatusCodes.Status404NotFound,
+            title: "Employee task record not found."),
+        HVO.AgentControl.RemoteWorker.WorkerControlDisabledException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Worker control is disabled.",
+            detail: "Worker control is switched off, so no task was dispatched."),
+        HVO.AgentControl.RemoteWorker.WorkerControlConfigurationException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Worker control configuration is invalid.",
+            detail: "Worker control is enabled but its configuration is not usable, so no task was dispatched."),
+        HVO.AgentControl.RemoteWorker.ForeignResourceException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Worker resource ownership conflicted.",
+            detail: "The resource is not exactly owned by this controller operation."),
+        HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException unavailable => Results.Problem(
+            statusCode: unavailable.Transport ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable,
+            title: unavailable.Transport ? "Worker execution target is unreachable." : "Worker execution target is unavailable.",
+            detail: unavailable.Transport
+                ? "The fixed transport could not reach the execution target."
+                : "The execution target did not return a usable result."),
+        HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException => Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "Remote worker reconciliation is invalid",
+            detail: "Worker returned state that could not be correlated; dispatch remains held."),
+        HVO.AgentControl.RemoteWorker.WorkerWriteUncertainException or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException or HVO.AgentControl.Worker.WorkerOperationUncertainException or HVO.AgentControl.RemoteWorker.WorkerRemoteException => Results.Problem(
+            statusCode: StatusCodes.Status502BadGateway,
+            title: "Remote worker bridge is unavailable.",
+            detail: "The bridge transport failed or the remote operation outcome is uncertain."),
+        HVO.AgentControl.Organization.OrganizationStoreException => Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Worker store unavailable.",
+            detail: "The authoritative store could not be read or written."),
+        _ => throw exception,
+    };
+
+    /// <summary>
     /// Resolves the configured owner password for the startup auth gate.
     /// </summary>
     /// <remarks>
@@ -2434,6 +2698,10 @@ public partial class Program
     public static bool IsValidEmployeeRebuildId(string? value) =>
         IsValidStableId(value, HVO.AgentControl.Organization.OrganizationIds.RebuildPrefix, MaximumContainerProfileIdLength);
 
+    /// <summary>Validates the bounded stable ID used by worker task routes.</summary>
+    public static bool IsValidWorkerTaskId(string? value) =>
+        IsValidStableId(value, "tsk-", MaximumWorkerTaskIdLength);
+
     private static bool IsValidStableId(string? value, string prefix, int maximumLength)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > maximumLength)
@@ -2497,7 +2765,7 @@ public sealed record RoleInstructionsUpdate(string? StandingInstructions, int? R
 public sealed record ManualHoldUpdate(bool Held, string? Detail);
 public sealed record GrantRevokeRequest(int ExpectedRevision);
 
-public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated, string WorkerControlValidatedScope);
+public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated, string WorkerControlValidatedScope, bool TaskControlImplemented, bool TaskControlOperationallyValidated, string? TaskControlValidatedScope);
 
 public sealed record ModelResponse(string Model);
 

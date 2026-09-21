@@ -51,7 +51,10 @@ from the `generation = 2` identity.
   effects recoverable rather than retrying blind. No live rebuild has run on a
   deployment host.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
-  Schema v12 adds immutable durable employee rebuild intents and staged states;
+  Schema v13 adds the durable bounded task specification, model report and typed
+  independent host-verification domain (`worker_tasks` rebuilt with the canonical
+  spec and optional report; additive `worker_task_verifications`). Schema v12 adds
+  immutable durable employee rebuild intents and staged states;
   schema v11 adds the constrained local/SSH execution-host transport kind.
   Schema v10 migrates only the exact released v9 signature after creating and
 
@@ -347,8 +350,10 @@ reject pending→decided and prompt completion (compatibility fix PR #255).
 Cleanup was exact: zero labeled containers, volumes or tags, and the local key
 was removed. Cancellation limitation: OpenCode reported the cancelled turn
 completed, so cancellation cleared the active request but was not rollback.
-The `home-docker` control portal was deployed with separate schema-v7 UI (schema v8 is not yet deployed) and is
-irrelevant to worker flags except portal inspection.
+The `home-docker` control portal is deployed from promoted `main` `7d4078b`, with
+schema v12; `quick_check` is clean and foreign-key errors are zero. WorkerControl
+is enabled through the ignored Compose override; product/Compose remains `true`
+by default.
 
 **Three worker classes.** Do not collapse them. (1) The **automatic
 controller-local managed employee** is created by owner approval and provisioned
@@ -376,7 +381,13 @@ and the daemon `AGENTCONTROL_DOCKER_GID` are deployment inputs.
 re-enrollment, production managed hiring/provisioning at scale, and the approval
 and managed-provisioning/orientation slice (#260) itself, which is code-complete
 and hermetically tested but has never run a live owner-approved hire on a host
-(see `docs/PHASE-1-CONTRACTS.md` §10.2/§10.3). The local managed path has been
+(see `docs/PHASE-1-CONTRACTS.md` §10.2/§10.3). The bounded task capability (#220,
+schema v13) is likewise code-complete and hermetically tested but no live bounded
+task has been dispatched, run and host-verified on any deployment host; the
+employee-scoped task surface is a single owner-triggered bounded action, there is
+no scheduler, and only the typed independent host verification — never a model
+report and never turn completion — moves a task to `Verified`. The local managed
+path has been
 exercised end to end on one development machine — a generic-employee build, a
 real helper-provisioned container, real OpenCode orientation and a hire reaching
 `Ready` in about 1m50s — but that is a local dev-machine result only, not a
@@ -384,7 +395,10 @@ real helper-provisioned container, real OpenCode orientation and a hire reaching
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
 covering only the first managed disposable two-host path, and carries
 `workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
-bound on exactly that claim; `WorkerControlEnabled`
+bound on exactly that claim; it separately reports
+`TaskControlImplemented=true`, `TaskControlOperationallyValidated=false` and
+`TaskControlValidatedScope=null` for the bounded task capability.
+`WorkerControlEnabled`
 remains the deployment/configuration gate and is false by default. The optional Compose worker profile is disabled by default, has
 no published port or Docker socket, is read-only outside named volumes/tmpfs,
 has process/CPU/memory limits and disables automatic restart. That hermetic
@@ -807,6 +821,7 @@ promised. V2 starts with new state and explicitly provisioned environments.
 The accepted path does not validate key rotation or compromise re-enrollment and
 does not authorize production managed hiring/provisioning. The #260 approval and
 managed-provisioning/orientation paths, the #272 controller-local helper path,
-and the #261 data-preserving rebuild path exist as tested code but have no live
-owner-approved hire or rebuild evidence on any deployment host. `home-docker`
-remains on `802eb6f` / schema v9.
+the #261 data-preserving rebuild path, and the #220 bounded task path exist as
+tested code but have no live owner-approved hire, rebuild or bounded-task
+evidence on any deployment host. `home-docker` is on promoted `main` `7d4078b` /
+schema v12; #220 remains not deployed and not operationally validated.

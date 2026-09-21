@@ -100,7 +100,8 @@ public sealed class LocalManagedHiringDockerIntegrationTests(ITestOutputHelper o
             var sessions = new RecordingSessionFactory(realSessions);
             provisioning = new RemoteWorkerProvisioningCoordinator(control, new RemoteWorkerProvisionerAdapter(routed), options, sessions);
             var orientation = new RemoteOrientationCoordinator(sessions);
-            var coordinator = new HireProvisioningCoordinator(control, provisioning, orientation, options, NullLogger<HireProvisioningCoordinator>.Instance);
+            var employeeOrientation = new EmployeeOrientationCoordinator(provisioning, orientation);
+            var coordinator = new HireProvisioningCoordinator(control, provisioning, employeeOrientation, options, NullLogger<HireProvisioningCoordinator>.Instance);
 
             var overview = store.GetOverview();
             var department = overview.Departments.Single(item => item.Slug == OrganizationSeed.OperationsSlug);
@@ -175,6 +176,20 @@ public sealed class LocalManagedHiringDockerIntegrationTests(ITestOutputHelper o
                 Assert.Contains("orientation-comprehension", sessions.Operations);
                 stages.Add("orientation comprehension and Ready");
                 output.WriteLine("Managed path reached Ready using the real worker/OpenCode provider path.");
+
+                // Owner re-delivery of the current orientation for an existing
+                // managed employee must reach the same confirmed state through the
+                // dedicated coordinator, with no image build and no provisioning.
+                var employeeRevision = store.GetOverview().Employees.Single(item => item.Id == creation.EmployeeId).Revision;
+                var redelivered = await employeeOrientation.DeliverAsync(store, creation.EmployeeId, employeeRevision, timeout.Token);
+                // Re-delivering the unchanged current artifact is idempotent: the
+                // already-comprehended assignment is preserved rather than regressed.
+                Assert.True(redelivered.Status.State is OrientationStates.Delivered or OrientationStates.Comprehended,
+                    $"unexpected re-delivery orientation state: {redelivered.Status.State}");
+                Assert.False(redelivered.Status.RestartRequired);
+                Assert.Equal(completed.Orientation.SessionId, redelivered.Status.SessionId);
+                Assert.True(redelivered.Status.LoadedRuntimeGeneration >= redelivered.Status.RequiredRuntimeGeneration);
+                stages.Add("owner re-delivery of current orientation for an existing managed employee");
             }
             else
             {

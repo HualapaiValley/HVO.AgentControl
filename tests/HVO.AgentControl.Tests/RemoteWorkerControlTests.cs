@@ -73,16 +73,18 @@ public sealed class RemoteWorkerControlTests
     }
 
     [Fact]
-    public void FreshSchemaIsV12AndCarriesRemoteWorkerHiringProfileBuildApprovalAndEmployeeRebuildTablesWithoutSeededEnrollment()
+    public void FreshSchemaIsV13AndCarriesRemoteWorkerHiringProfileBuildApprovalAndEmployeeRebuildAndVerificationTablesWithoutSeededEnrollment()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "control.db");
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using var connection = Open(path);
-        Assert.Equal(12L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
-        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "hire_request_approvals", "managed_enrollment_resources", "container_profiles", "container_profile_revisions", "profile_builds", "employee_rebuilds", "profile_build_removals" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
+        Assert.Equal(13L, Convert.ToInt64(Scalar(connection, "SELECT version FROM schema_version")));
+        foreach (var table in new[] { "execution_hosts", "worker_enrollments", "worker_cursors", "worker_events", "worker_pending_permissions", "worker_tasks", "worker_task_verifications", "worker_requests", "provisioning_operations", "resource_records", "worker_recovery_obligations", "worker_recovery_audit", "remote_terminal_viewers", "worker_event_retention", "hire_requests", "hire_request_events", "hire_request_approvals", "managed_enrollment_resources", "container_profiles", "container_profile_revisions", "profile_builds", "employee_rebuilds", "profile_build_removals" }) Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM worker_enrollments")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM employee_rebuilds")));
         Assert.Equal(0L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM profile_build_removals")));
+        Assert.Equal(1L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM pragma_table_info('worker_tasks') WHERE name='task_spec_json'")));
+        Assert.Equal(3L, Convert.ToInt64(Scalar(connection, "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'worker_task_verifications%'")));
         // The reserved controller-local Docker row is seeded by a fresh create.
         Assert.Equal(1L, Convert.ToInt64(Scalar(connection, $"SELECT COUNT(*) FROM execution_hosts WHERE id='{ExecutionHosts.LocalDockerId}' AND slug='{ExecutionHosts.LocalDockerSlug}' AND transport_kind='local-docker' AND endpoint_host IS NULL AND endpoint_port IS NULL AND endpoint_user IS NULL AND known_hosts_path IS NULL AND os='linux' AND capability_status='unprobed' AND enabled=1 AND enrolled=0 AND status='registered'")));
     }
@@ -94,12 +96,31 @@ public sealed class RemoteWorkerControlTests
         using (var store = new OrganizationStore(path)) store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         using (var connection = Open(path))
         {
-            foreach (var trigger in new[] { "hire_request_approvals_frozen_immutable", "hire_request_approvals_no_delete", "hire_request_approvals_no_replace", "managed_enrollment_resources_frozen_immutable", "managed_enrollment_resources_no_delete", "managed_enrollment_resources_no_replace", "employee_rebuilds_identity_immutable", "employee_rebuilds_no_delete", "employee_rebuilds_no_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
-            foreach (var table in new[] { "profile_build_removals", "hire_request_approvals", "managed_enrollment_resources", "employee_rebuilds" }) connection.Execute($"DROP TABLE {table}");
+            foreach (var trigger in new[] { "hire_request_approvals_frozen_immutable", "hire_request_approvals_no_delete", "hire_request_approvals_no_replace", "managed_enrollment_resources_frozen_immutable", "managed_enrollment_resources_no_delete", "managed_enrollment_resources_no_replace", "employee_rebuilds_identity_immutable", "employee_rebuilds_no_delete", "employee_rebuilds_no_replace", "worker_task_verifications_identity_immutable", "worker_task_verifications_no_delete", "worker_task_verifications_no_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
+            foreach (var table in new[] { "profile_build_removals", "hire_request_approvals", "managed_enrollment_resources", "employee_rebuilds", "worker_task_verifications" }) connection.Execute($"DROP TABLE {table}");
             foreach (var index in new[] { "one_active_profile_build_per_revision_host", "one_verified_profile_build_per_revision_host" }) connection.Execute($"DROP INDEX {index}");
             foreach (var trigger in new[] { "profile_builds_identity_immutable", "profile_builds_no_delete", "profile_builds_no_replace", "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
             foreach (var table in new[] { "profile_builds", "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
-            connection.Execute("UPDATE schema_version SET version=3");
+            connection.Execute(
+                """
+                PRAGMA foreign_keys=OFF;
+                CREATE TABLE dispatch_holds_v3 (
+                    id TEXT PRIMARY KEY,
+                    runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+                    reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
+                    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+                    detail TEXT,
+                    created_at TEXT NOT NULL,
+                    cleared_at TEXT,
+                    revision INTEGER NOT NULL,
+                    UNIQUE (runtime_binding_id, reason)
+                );
+                INSERT INTO dispatch_holds_v3 SELECT * FROM dispatch_holds WHERE reason <> 'task-verification';
+                DROP TABLE dispatch_holds;
+                ALTER TABLE dispatch_holds_v3 RENAME TO dispatch_holds;
+                UPDATE schema_version SET version=3;
+                PRAGMA foreign_keys=ON;
+                """);
         }
         var policyBefore = Raw(path, "SELECT version || ':' || revision || ':' || summary FROM permission_policies");
         using (var migrated = new OrganizationStore(path)) migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
@@ -2258,7 +2279,7 @@ public sealed class RemoteWorkerControlTests
         public Task<HostProbePayload> ProbeHostAsync(ExecutionTarget host, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
-    private sealed class RemoteStoreFixture : IDisposable
+    internal sealed class RemoteStoreFixture : IDisposable
     {
         private readonly TempDirectory _temp = new(); public string DatabasePath { get; }
         public OrganizationStore Store { get; }

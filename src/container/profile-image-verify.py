@@ -175,7 +175,7 @@ def main():
 
     artifacts = {path: same(path) for path in (
         "/usr/local/bin/worker-supervisor", "/usr/local/bin/profile-image-verify",
-        "/app", "/usr/share/dotnet", "/usr/local/lib/node_modules/opencode-ai",
+        "/usr/local/bin/workspace-task-verify", "/app", "/usr/share/dotnet", "/usr/local/lib/node_modules/opencode-ai",
         "/usr/local/bin/node", "/usr/bin/dotnet", "/usr/local/bin/opencode",
         "/usr/bin/python3", "/usr/bin/python3.12", "/usr/bin/env", "/bin/sh",
         "/usr/bin/dash", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
