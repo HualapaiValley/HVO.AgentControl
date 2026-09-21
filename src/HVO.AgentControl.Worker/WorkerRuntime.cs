@@ -591,14 +591,16 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 if (!string.Equals(stopReason, "end_turn", StringComparison.Ordinal) || captured.Overflowed || string.IsNullOrWhiteSpace(captured.Text))
                 {
                     state = "failed";
-                    outcome = TaskReportFailureOutcome();
+                    outcome = TaskReportFailureOutcome(!string.Equals(stopReason, "end_turn", StringComparison.Ordinal)
+                        ? "stop-reason"
+                        : captured.Overflowed ? "capture-overflow" : "capture-empty");
                 }
                 else
                 {
-                    if (!TryCanonicalizeFinalTaskReport(captured.Text, out var canonical))
+                    if (!TryCanonicalizeFinalTaskReport(captured.Text, out var canonical, out var failure))
                     {
                         state = "failed";
-                        outcome = TaskReportFailureOutcome();
+                        outcome = TaskReportFailureOutcome(failure);
                     }
                     else outcome = canonical!;
                 }
@@ -846,47 +848,60 @@ public sealed class WorkerRuntime : IAsyncDisposable
         if (envelope.TryGetProperty("params", out var parameters)) value["params"] = parameters.Clone();
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(value, WorkerProtocol.JsonOptions));
     }
-    private static string TaskReportFailureOutcome() => JsonSerializer.Serialize(new { category = "model-report-invalid" }, WorkerProtocol.JsonOptions);
+    private static string TaskReportFailureOutcome(string reason = "invalid-report") => JsonSerializer.Serialize(new { category = "model-report-invalid", reason }, WorkerProtocol.JsonOptions);
     private static string CancelledOutcome() => JsonSerializer.Serialize(new { category = "cancelled" }, WorkerProtocol.JsonOptions);
 
-    private static bool TryCanonicalizeFinalTaskReport(string text, out string? canonical)
+    private static bool TryCanonicalizeFinalTaskReport(string text, out string? canonical, out string failure)
     {
         canonical = null;
+        failure = "no-final-json";
         var end = text.Length;
         while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
         if (end == 0) return false;
         if (text.AsSpan(0, end).EndsWith("```", StringComparison.Ordinal))
         {
             var closing = end - 3;
-            var opening = text.LastIndexOf("```json", closing - 1, StringComparison.Ordinal);
-            if (opening >= 0)
+            if (closing > 0)
             {
-                var jsonStart = opening + "```json".Length;
-                while (jsonStart < closing && char.IsWhiteSpace(text[jsonStart])) jsonStart++;
-                var jsonEnd = closing;
-                while (jsonEnd > jsonStart && char.IsWhiteSpace(text[jsonEnd - 1])) jsonEnd--;
-                if (TryCanonicalizeTaskReportCandidate(text.AsMemory(jsonStart, jsonEnd - jsonStart), out canonical)) return true;
+                var opening = text.LastIndexOf("```json", closing - 1, StringComparison.Ordinal);
+                if (opening >= 0
+                    && (opening == 0 || text[opening - 1] == '\n')
+                    && !HasUnbalancedFence(text.AsSpan(0, opening)))
+                {
+                    var jsonStart = opening + "```json".Length;
+                    while (jsonStart < closing && char.IsWhiteSpace(text[jsonStart])) jsonStart++;
+                    var jsonEnd = closing;
+                    while (jsonEnd > jsonStart && char.IsWhiteSpace(text[jsonEnd - 1])) jsonEnd--;
+                    if (TryCanonicalizeTaskReportCandidate(text.AsMemory(jsonStart, jsonEnd - jsonStart), out canonical, out failure)) return true;
+                }
             }
         }
         for (var start = text.LastIndexOf('{', end - 1); start >= 0; start = start == 0 ? -1 : text.LastIndexOf('{', start - 1))
         {
             if (HasUnbalancedFence(text.AsSpan(0, start))) continue;
-            if (TryCanonicalizeTaskReportCandidate(text.AsMemory(start, end - start), out canonical)) return true;
+            if (TryCanonicalizeTaskReportCandidate(text.AsMemory(start, end - start), out canonical, out failure)) return true;
         }
         canonical = null;
         return false;
     }
 
-    private static bool TryCanonicalizeTaskReportCandidate(ReadOnlyMemory<char> candidate, out string? canonical)
+    private static bool TryCanonicalizeTaskReportCandidate(ReadOnlyMemory<char> candidate, out string? canonical, out string failure)
     {
         try
         {
             using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { MaxDepth = 32 });
-            return ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _);
+            if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _))
+            {
+                failure = string.Empty;
+                return true;
+            }
+            failure = "report-shape";
+            return false;
         }
         catch (JsonException)
         {
             canonical = null;
+            failure = "json-parse";
             return false;
         }
     }

@@ -514,6 +514,9 @@ public sealed class WorkerOrientationTests
     [InlineData("nested")]
     [InlineData("open-fence")]
     [InlineData("fenced-trailing")]
+    [InlineData("lone-fence")]
+    [InlineData("unbalanced-prefix")]
+    [InlineData("mid-line")]
     public async Task TaskSubmitRejectsAmbiguousFinalReportSuffixes(string scenario)
     {
         var report = """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
@@ -523,10 +526,13 @@ public sealed class WorkerOrientationTests
             "nested" => "{\"wrapper\":" + report + "}",
             "open-fence" => "progress\n```json\n" + report,
             "fenced-trailing" => "```json\n" + report + "\n``` trailing",
+            "lone-fence" => "```",
+            "unbalanced-prefix" => "```\nopen prose\n```json\n" + report + "\n```",
+            "mid-line" => "prose ```json\n" + report + "\n```",
             _ => throw new InvalidOperationException(),
         };
         var failed = await RunTaskReportCaptureAsync(text);
-        Assert.Equal("{\"category\":\"model-report-invalid\"}", failed.OutcomeJson);
+        Assert.Contains("\"category\":\"model-report-invalid\"", failed.OutcomeJson, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -541,9 +547,9 @@ public sealed class WorkerOrientationTests
     [Fact]
     public async Task TaskSubmitAcceptsAClosedFinalJsonFenceAsUnverifiedModelEvidence()
     {
-        var report = """{"summary":"fenced","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var report = """{"limitations":["z","a"],"deniedAction":null,"tests":[],"changedPaths":["z.cs","a.cs"],"summary":"fenced"}""";
         var completed = await RunTaskReportCaptureAsync("progress\n```json\n" + report + "\n```\n");
-        Assert.Equal(report, completed.OutcomeJson);
+        Assert.Equal("""{"summary":"fenced","changedPaths":["a.cs","z.cs"],"tests":[],"deniedAction":null,"limitations":["a","z"]}""", completed.OutcomeJson);
     }
 
     [Theory]
@@ -578,7 +584,7 @@ public sealed class WorkerOrientationTests
 
         await WaitForRequestState(store, "req-task-invalid", "failed");
         var failed = store.GetRequest("req-task-invalid")!;
-        Assert.Equal("{\"category\":\"model-report-invalid\"}", failed.OutcomeJson);
+        Assert.Contains("\"category\":\"model-report-invalid\"", failed.OutcomeJson, StringComparison.Ordinal);
         Assert.DoesNotContain(text[..Math.Min(text.Length, 32)], failed.OutcomeJson, StringComparison.Ordinal);
     }
 
