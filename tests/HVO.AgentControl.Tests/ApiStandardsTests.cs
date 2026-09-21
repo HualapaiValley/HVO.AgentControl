@@ -390,6 +390,10 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
             Program.WorkerControlValidatedScope,
             infoOperation.GetProperty("description").GetString(),
             StringComparison.Ordinal);
+        Assert.Contains(
+            Program.TaskControlValidatedScope,
+            infoOperation.GetProperty("description").GetString(),
+            StringComparison.Ordinal);
         var infoSchema = infoOperation.GetProperty("responses").GetProperty("200")
             .GetProperty("content").GetProperty("application/json").GetProperty("schema");
         var schemaRef = infoSchema.GetProperty("$ref").GetString()!;
@@ -399,9 +403,9 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
             .GetProperty("workerControlValidatedScope");
         Assert.Equal("string", scopeProperty.GetProperty("type").GetString());
 
-        // The task-control capability flags are exposed in the same schema, and
-        // the scope property is a string because #220 is now operationally
-        // validated with the exact accepted scope.
+        // The task-control capability flags are exposed in the same schema. The
+        // DTO keeps the scope nullable by contract, while the current response
+        // supplies the exact non-null accepted scope asserted by BaselineTests.
         var taskProperties = root.GetProperty("components").GetProperty("schemas")
             .GetProperty(schemaName).GetProperty("properties");
         Assert.Equal("boolean", taskProperties.GetProperty("taskControlImplemented").GetProperty("type").GetString());

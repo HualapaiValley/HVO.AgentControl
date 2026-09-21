@@ -709,9 +709,9 @@ globally rejected.
 The owner accepted the profile-based design on 2026-09-18. #258 (profiles) and
 #259 (per-host builds) are shipped; #260 (this section) adds the approval,
 managed-employee creation, provisioning and orientation slice, and #261 adds the
-explicit data-preserving rebuild. This section describes **code capability**. No
-live owner-approved hire has been executed on any host, the `home-docker`
- deployment evidence is now live: employee `emp-933d24fc110222a5` reached `Ready`
+explicit data-preserving rebuild. This section describes the code capability, and
+the live `home-docker` local managed hire completed: employee
+`emp-933d24fc110222a5` reached `Ready`
  with one container/four persistent volumes and live-model comprehension, with no
  duplicate after restart/recovery. The #257 rebuild completed r1→r2 as `Applied`
  (epoch 600→604), preserving home/workspace/session hashes and one container/four
@@ -915,7 +915,7 @@ termination/scheduling policy are out of scope. The live local managed hire did
 complete on `home-docker`, but approval is a host record of a verified selection
 and is not itself a provisioned employee.
 
-### 10.3 Local-only managed hiring through the privileged Docker helper (#272; code capability plus a local dev-machine run)
+### 10.3 Local-only managed hiring through the privileged Docker helper (#272; code capability plus a live local managed hire)
 
 #272 freezes a managed hire to the **controller-local Docker target** and moves
 every Docker operation for it out of the controller into a privileged helper.
@@ -1154,23 +1154,25 @@ hiring.
   authoritative native session, confirm the load, and run the bounded tool-free
   comprehension. **No image build occurs.** Stale orientation continues to block
   dispatch through the existing holds.
-- **Capability truth.** `/api/info` reports `TaskControlImplemented=true`,
-  `TaskControlOperationallyValidated=true` and
-  `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
- The capability is operationally validated as of 2026-09-21: the first local
- managed employee ran two bounded tasks end to end and each reached `Verified`
- through independent host verification on the controller-local Docker target,
- across a control restart (worker container ID/start time unchanged), a
- cancellation/hold exercise (cancelled task `Cancelled`/`cancellation-observed`;
- a fresh-key dispatch under manual hold returned `409`), an orientation revision
- delivery/comprehension with no image rebuild, and an exact uncertainty recovery
- with no duplicate intent or resources. There is still no
- scheduler: a task is a single owner-triggered bounded action, never automatic.
- The scope excludes any scheduler, multi-agent routing, production
- repository/GitHub write and release publication. Several live attempts failed
- first on protocol/report-shape and task-input-scope defects that are now
- corrected; the successful acceptance depended on explicit exact test-object
- guidance.
+- **Capability truth.** In this evidence change `/api/info` reports
+  `TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
+  `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`;
+  the currently deployed `cae2ebc` build, on which the evidence was collected,
+  still reports the task flags false until this evidence change is promoted.
+  The capability is operationally validated as of 2026-09-21: the first local
+  managed employee ran two bounded tasks end to end and each reached `Verified`
+  through independent host verification on the controller-local Docker target,
+  across a control restart (worker container ID/start time unchanged), a
+  cancellation/hold exercise (cancelled task `Cancelled`/`cancellation-observed`;
+  a fresh-key dispatch under manual hold returned `409`), an orientation revision
+  delivery/comprehension with no image rebuild, and an exact uncertainty recovery
+  with no duplicate intent or resources. There is still no
+  scheduler: a task is a single owner-triggered bounded action, never automatic.
+  The scope excludes any scheduler, multi-agent routing, production
+  repository/GitHub write and release publication. Several live attempts failed
+  first on protocol/report-shape and task-input-scope defects that are now
+  corrected; the successful acceptance depended on explicit exact test-object
+  guidance.
 - `GET /api/employees/{id}/tasks`, `GET /api/tasks/{id}` and the additive
   `recentTasks` on `GET /api/employees/{id}` expose the same read models the
   employee page consumes. The employee page never shows raw secrets.
@@ -1209,9 +1211,9 @@ by `GET /api/employees/{id}/rebuilds`. The employee page reports newer revisions
 without action and displays Applied/Uncertain/Failed history with only the stored
 sanitized failure summary. Controller secrets are never projected.
 
-This is code capability with hermetic validation. No live employee rebuild has
-run on a deployment host. `home-docker` is on promoted `main` `7d4078b` / schema v12, and
-`WorkerControl` remains disabled by default.
+This is code capability with hermetic validation plus the live #257 rebuild that
+completed on `home-docker`. `home-docker` is on promoted `main` `cae2ebc` / schema v13,
+and `WorkerControl` remains disabled by default.
 
 ## 13. Fresh disposable teardown/rebuild test
 

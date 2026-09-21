@@ -87,10 +87,12 @@ revision-bound Sync/Cancel/Verify controls, and revision-bound manual
 dispatch-hold set/clear controls. The same employee-scoped, revision-bound
 routes re-deliver current orientation and run comprehension for an existing
 managed employee by reusing the hire coordination machinery and a deliberate
-container replacement, with no image build. `/api/info` reports the capability
-separately as `TaskControlImplemented=true`,
+container replacement, with no image build. In this evidence change, `/api/info`
+reports the capability separately as `TaskControlImplemented=true`,
 `TaskControlOperationallyValidated=true` and
-`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`;
+the currently deployed `cae2ebc` build still reports
+`TaskControlOperationallyValidated=false` until this evidence change is promoted.
 The #217 hermetic controller records are retained in the current schema-v13 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
@@ -125,8 +127,8 @@ permission handling covered `[once, always, reject]` and safe-reject
 `[reject]`, with a same-lease reject moving pending→decided and the prompt
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
-control portal on `home-docker` is deployed from promoted `main` `7d4078b`, with
-schema v12. `quick_check` is clean and foreign-key errors are zero. WorkerControl
+control portal on `home-docker` is deployed from promoted `main` `cae2ebc`, with
+schema v13. `quick_check` is clean and foreign-key errors are zero. WorkerControl
 is enabled through the ignored Compose override; product/Compose remains `true` by
 default.
 
@@ -190,19 +192,18 @@ first Task 2 attempt `tsk-1a0f…` that `Completed` but host verification `Faile
 because the spec allowed only `Directory.Build.targets` and the verifier copy
 omitted project inputs — a correct independent failure, not a success.
 `/api/info` reports `TaskControlOperationallyValidated=true` with
-`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`;
-the task capability is never folded into the worker-control flags. There is no scheduler: a task is a single owner-triggered bounded action, and an
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
+in this evidence change once promoted; the currently deployed `cae2ebc` build,
+where the evidence was collected, still reports the flags false. The task
+capability is never folded into the worker-control flags. A task is a single owner-triggered bounded action, and an
 employee's independent host verification — not the model report and not turn
 completion — is the only path to `Verified`. Cancellation is not rollback; a
-worker restart does not resume a vanished tool stack; there is no multi-agent
-routing, production repository or GitHub write, and **no release publication**.
+worker restart does not resume a vanished tool stack. There is no scheduler, multi-agent routing, production repository/GitHub write or release publication.
 The successful acceptance depended on explicit exact test-object guidance; that
 dependence is a recorded limitation. This completes #220 Phase 1 acceptance, not
 a release.
 
-The live `home-docker` hire and rebuild results do not validate key rotation or
-compromise re-enrollment. They do not authorize production managed
-hiring/provisioning at scale. The accepted path does not validate key rotation or compromise re-enrollment. The accepted path does not authorize production managed hiring/provisioning.
+The accepted path does not validate key rotation or compromise re-enrollment and does not authorize production managed hiring/provisioning.
 
 ### Run locally
 

@@ -163,21 +163,28 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
         var root = FindRepositoryRoot();
         var docs = new[]
         {
+            Path.Combine(root, "AGENTS.md"),
+            Path.Combine(root, "CHANGELOG.md"),
             Path.Combine(root, "README.md"),
             Path.Combine(root, "docs", "ARCHITECTURE.md"),
+            Path.Combine(root, "docs", "DEVELOPMENT.md"),
+            Path.Combine(root, "docs", "PHASE-1-CONTRACTS.md"),
             Path.Combine(root, "docs", "ROADMAP.md"),
         };
 
         foreach (var path in docs)
         {
             var text = File.ReadAllText(path);
+            var normalized = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
             Assert.Contains("2026-09-21", text, StringComparison.Ordinal);
             Assert.Contains(
                 "first-local-managed-two-task-restart-verification",
                 text,
                 StringComparison.Ordinal);
-            Assert.Contains("no scheduler", text, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("release publication", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("no scheduler", normalized, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("multi-agent routing", normalized, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("production repository/GitHub write", normalized, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("release publication", normalized, StringComparison.OrdinalIgnoreCase);
         }
     }
 

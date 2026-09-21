@@ -9,7 +9,7 @@ Status reflects the active code, not the standalone POC.
    portal, owner Basic auth, embedded terminal, one owned OpenCode ACP runtime,
    loopback native HTTP, and an authoritative SQLite organization/session store
    at `/control-data/control.db` (with `runtime.json` retained as evidence).
-3. **Durable controller — partial:** schema v12 preserves organization/session
+3. **Durable controller — partial:** schema v13 preserves organization/session
    and #213 policy identity and adds remote host/enrollment, cursor, task/request,
    provisioning/resource and recovery-obligation records with exact-signature
    chained migration and verified v3–v9 backups. Durable hire request creation
@@ -41,10 +41,11 @@ Status reflects the active code, not the standalone POC.
    action selects a newer verified same-profile build, preserves workspace/home
    by default, requires exact typed confirmation for resets, and synchronously
    drives a durable single-flight, dispatch-held, epoch-fenced staged operation.
-   It never auto-adopts a profile revision. No live rebuild has run on a
-    deployment host. The live #257 rebuild completed r1→r2 as `Applied`, epoch
-    600→604, preserving home/workspace/session hashes and one container/four
-    volumes. `home-docker` is promoted `main` `7d4078b` / schema v12. #220
+   It never auto-adopts a profile revision. The live #257 rebuild completed
+   r1→r2 as `Applied`, epoch 600→604, preserving home/workspace/session hashes
+   and one container/four volumes; it was code capability with hermetic coverage
+   plus that live rebuild on `home-docker`. `home-docker` is promoted `main`
+   `cae2ebc` / schema v13. #220
    (schema v13) adds the durable bounded task domain: an owner-only,
    same-origin, employee-revision-bound bounded task specification with a
    canonical normalized shape, a captured model report explicitly labeled
@@ -59,10 +60,12 @@ Status reflects the active code, not the standalone POC.
    through independent host verification on the controller-local Docker target,
    across a control restart, a cancellation/hold exercise, an orientation
    revision delivery/comprehension and an exact uncertainty recovery, with one
-   container/four volumes and unchanged persistence hashes. `/api/info` reports
-   `TaskControlImplemented=true`,
+   container/four volumes and unchanged persistence hashes. In this evidence
+   change `/api/info` reports `TaskControlImplemented=true`,
    `TaskControlOperationallyValidated=true`,
-   `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
+   `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
+   once promoted; the currently deployed `cae2ebc` build where the evidence was
+   collected still reports the task flags false.
    There is no scheduler, multi-agent routing, production repository/GitHub write
    or release publication; several live attempts failed first on
    protocol/report-shape and task-input-scope defects that are now corrected, and
@@ -80,12 +83,13 @@ Status reflects the active code, not the standalone POC.
    employee-ID-bound same-origin terminal are live for the single owned control
    host. Durable pending requested hires are visible and the `/hiring` page
    supports profile-revision/ready-host selection, approve/reject and frozen
-   approval display; the approval action itself is code capability and has no
-   live operational evidence (see item 3). The employee detail page also shows
-   the bounded task/recent-task read model and the manual hold state; the task
-   capability is now backed by the 2026-09-21 first local managed two-task
-   restart verification. Worker lifecycle,
-   hiring, tasks, proxied native web and multi-host routing remain future work.
+   approval display; the approval action itself was code capability and is now
+   backed by the live local managed hire (see item 3). The employee detail page
+   also shows the bounded task/recent-task read model and the manual hold state;
+   the task capability is backed by the 2026-09-21 first local managed two-task
+   restart verification, so the completed local accepted path is evidenced.
+   Production-scale worker lifecycle, autonomous task scheduling, proxied native
+   web and multi-agent routing remain future work.
 7. **Development workflow — not implemented:** manager delegation, independent
    review, exact-head evidence, GitHub App integration and bounded write
    authorization. Developer provisioning and task routing are absent.
