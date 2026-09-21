@@ -354,10 +354,11 @@ public sealed class WorkerRuntime : IAsyncDisposable
     /// recognizes only <c>session/update</c> notifications whose
     /// <c>sessionId</c> matches, whose <c>sessionUpdate</c> is
     /// <c>agent_message_chunk</c>, and whose text is a string; the buffer is
-    /// bounded and overflows closed. It seals on the response frame whose id
-    /// matches the bound request, so late chunks cannot corrupt a completed turn.
+    /// bounded. Orientation capture overflows closed; task reports retain only a
+    /// bounded UTF-8 tail. It seals on the response frame whose id matches the
+    /// bound request, so late chunks cannot corrupt a completed turn.
     /// </summary>
-    private sealed class TurnTextCapture(string sessionId, int maximumBytes)
+    private sealed class TurnTextCapture(string sessionId, int maximumBytes, bool retainTail = false)
     {
         private readonly object _gate = new();
         private readonly StringBuilder _buffer = new();
@@ -414,9 +415,24 @@ public sealed class WorkerRuntime : IAsyncDisposable
             {
                 if (_sealed || _overflowed) return;
                 var bytes = System.Text.Encoding.UTF8.GetByteCount(text);
-                if (_bytes > maximumBytes - bytes) { _overflowed = true; _buffer.Clear(); return; }
-                _buffer.Append(text);
-                _bytes += bytes;
+                if (!retainTail)
+                {
+                    if (_bytes > maximumBytes - bytes) { _overflowed = true; _buffer.Clear(); return; }
+                    _buffer.Append(text);
+                    _bytes += bytes;
+                    return;
+                }
+                if (_bytes <= maximumBytes - bytes)
+                {
+                    _buffer.Append(text);
+                    _bytes += bytes;
+                    return;
+                }
+                var combined = System.Text.Encoding.UTF8.GetBytes(_buffer.ToString() + text);
+                var start = Math.Max(0, combined.Length - maximumBytes);
+                while (start < combined.Length && (combined[start] & 0xc0) == 0x80) start++;
+                _buffer.Clear().Append(System.Text.Encoding.UTF8.GetString(combined.AsSpan(start)));
+                _bytes = combined.Length - start;
             }
         }
 
@@ -545,7 +561,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
             if (prompt)
             {
                 promptContext = new ActivePromptContext(requestId, registered.TurnId, registered.ProcessGeneration, registered.OwnershipEpoch, correlationId.Value, registered.SessionId);
-                reportCapture = captureTaskReport ? new TurnTextCapture(registered.SessionId, WorkerProtocol.MaxModelTaskReportBytes) : null;
+                reportCapture = captureTaskReport ? new TurnTextCapture(registered.SessionId, WorkerProtocol.MaxModelTaskReportBytes, retainTail: true) : null;
                 reportCapture?.BindRequest(correlationId.Value);
                 lock (_activePromptGate)
                 {
@@ -579,21 +595,12 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 }
                 else
                 {
-                    try
-                    {
-                        using var document = JsonDocument.Parse(captured.Text, new JsonDocumentOptions { MaxDepth = 32 });
-                        if (!ModelTaskReportShape.TryCanonicalize(document.RootElement, out var canonical, out _))
-                        {
-                            state = "failed";
-                            outcome = TaskReportFailureOutcome();
-                        }
-                        else outcome = canonical!;
-                    }
-                    catch (JsonException)
+                    if (!TryCanonicalizeFinalTaskReport(captured.Text, out var canonical))
                     {
                         state = "failed";
                         outcome = TaskReportFailureOutcome();
                     }
+                    else outcome = canonical!;
                 }
             }
             else outcome = SanitizeOutcome(result, state);
@@ -841,6 +848,38 @@ public sealed class WorkerRuntime : IAsyncDisposable
     }
     private static string TaskReportFailureOutcome() => JsonSerializer.Serialize(new { category = "model-report-invalid" }, WorkerProtocol.JsonOptions);
     private static string CancelledOutcome() => JsonSerializer.Serialize(new { category = "cancelled" }, WorkerProtocol.JsonOptions);
+
+    private static bool TryCanonicalizeFinalTaskReport(string text, out string? canonical)
+    {
+        canonical = null;
+        var end = text.Length;
+        while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
+        if (end == 0) return false;
+        for (var start = text.LastIndexOf('{', end - 1); start >= 0; start = start == 0 ? -1 : text.LastIndexOf('{', start - 1))
+        {
+            if (HasUnbalancedFence(text.AsSpan(0, start))) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(text.AsMemory(start, end - start), new JsonDocumentOptions { MaxDepth = 32 });
+                if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _)) return true;
+            }
+            catch (JsonException) { }
+        }
+        canonical = null;
+        return false;
+    }
+
+    private static bool HasUnbalancedFence(ReadOnlySpan<char> prefix)
+    {
+        var count = 0;
+        for (var index = prefix.IndexOf("```", StringComparison.Ordinal); index >= 0;)
+        {
+            count++;
+            prefix = prefix[(index + 3)..];
+            index = prefix.IndexOf("```", StringComparison.Ordinal);
+        }
+        return (count & 1) != 0;
+    }
 
     private static string SanitizeOutcome(JsonElement result, string state)
     {
