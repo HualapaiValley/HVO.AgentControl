@@ -27,10 +27,11 @@ Status reflects the active code, not the standalone POC.
    managed hire to the controller-local Docker target (`local-docker`): approval
    takes no host input and Docker operations run through the privileged
    `docker-helper`, while the control image has neither the daemon socket nor a
-   Docker CLI. It has **not** run a live owner-approved hire on any host and
-   `WorkerControl` is enabled through the ignored Compose override; product/Compose remains `true` by default, so it is
-   not operationally validated; the local managed path did reach `Ready` once on
-   a development machine, which is not a deployment result. The three worker
+   Docker CLI. The live local managed hire completed on `home-docker` and
+   `WorkerControl` is enabled through the ignored Compose override; product/Compose
+   remains `true` by default. The local managed path reached `Ready` on a
+   development machine and the live `home-docker` hire is deployment evidence. The
+   three worker
    classes stay distinct: automatic controller-local managed employees through the
    helper; manually operated remote Docker workers reached by controller-initiated
    pinned SSH + `docker exec`, never created by hiring; and future manually
@@ -53,12 +54,20 @@ Status reflects the active code, not the standalone POC.
    dispatch-hold set/clear controls that never clear stale or policy holds;
    employee-scoped orientation re-delivery and comprehension reuse the hire
    machinery with a deliberate container replacement and no image build. The
-    task path remains not deployed and not operationally validated: no live
-    bounded task, restart reconciliation, cancellation/hold acceptance,
-    independent host verification, or second task, and
-   `/api/info` reports `TaskControlImplemented=true`,
-   `TaskControlOperationallyValidated=false`, `TaskControlValidatedScope=null`.
-   There is no scheduler. The schema
+   task path is now operationally validated (2026-09-21): the first local
+   managed employee ran two bounded tasks end to end and each reached `Verified`
+   through independent host verification on the controller-local Docker target,
+   across a control restart, a cancellation/hold exercise, an orientation
+   revision delivery/comprehension and an exact uncertainty recovery, with one
+   container/four volumes and unchanged persistence hashes. `/api/info` reports
+   `TaskControlImplemented=true`,
+   `TaskControlOperationallyValidated=true`,
+   `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`.
+   There is no scheduler, multi-agent routing, production repository/GitHub write
+   or release publication; several live attempts failed first on
+   protocol/report-shape and task-input-scope defects that are now corrected, and
+   the successful acceptance depended on explicit exact test-object guidance.
+   The schema
    also has a sanitized deduplicated controller event inbox, conditional
    request/cancellation/provisioning transitions, exact recovery markers and
    restart reconciliation. The first managed disposable two-host path was
@@ -74,7 +83,8 @@ Status reflects the active code, not the standalone POC.
    approval display; the approval action itself is code capability and has no
    live operational evidence (see item 3). The employee detail page also shows
    the bounded task/recent-task read model and the manual hold state; the task
-   capability itself has no live evidence. Worker lifecycle,
+   capability is now backed by the 2026-09-21 first local managed two-task
+   restart verification. Worker lifecycle,
    hiring, tasks, proxied native web and multi-host routing remain future work.
 7. **Development workflow — not implemented:** manager delegation, independent
    review, exact-head evidence, GitHub App integration and bounded write

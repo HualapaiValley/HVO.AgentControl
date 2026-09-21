@@ -269,9 +269,14 @@ if (app.Environment.IsEnvironment("ExceptionPathTests"))
 // Task-control capability truth (#220). TaskControlImplemented is true because
 // the bounded task specification, employee-scoped dispatch, model-report capture
 // and typed independent verification slices are implemented and hermetically
-// tested. TaskControlOperationallyValidated is false and its scope is null: no
-// live bounded task has been dispatched, run and host-verified on a deployment
-// host. It is never collapsed into the worker-control flags above.
+// tested. TaskControlOperationallyValidated is now true: on 2026-09-21 the first
+// local managed employee ran two bounded tasks end to end and each was host-
+// verified, across a control restart, a cancellation/hold exercise and an
+// employee orientation revision, on the controller-local Docker target. The
+// scope is TaskControlValidatedScope, which names exactly the accepted path and
+// excludes any scheduler, multi-agent routing, production repository/GitHub
+// writes or release publication. It is never collapsed into the worker-control
+// flags above.
 app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     "HVO.AgentControl",
     2,
@@ -282,8 +287,8 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     WorkerControlOperationallyValidated: true,
     WorkerControlValidatedScope: Program.WorkerControlValidatedScope,
     TaskControlImplemented: true,
-    TaskControlOperationallyValidated: false,
-    TaskControlValidatedScope: null)))
+    TaskControlOperationallyValidated: true,
+    TaskControlValidatedScope: Program.TaskControlValidatedScope)))
     .WithName("GetInfo")
     .WithTags("Control")
     .WithSummary("Describes the control-host baseline.")
@@ -300,8 +305,12 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
         "workerControlEnabled is the separate deployment/configuration gate and is " +
         "false in the default configuration. taskControlImplemented reports the " +
         "bounded employee-task code capability; taskControlOperationallyValidated " +
-        "is false and taskControlValidatedScope is null because no live bounded task " +
-        "has been dispatched, run and host-verified on a deployment host.")
+        $"is true and taskControlValidatedScope is " +
+        $"\"{Program.TaskControlValidatedScope}\", covering only the first local " +
+        "managed two-task restart verification on the controller-local Docker target. " +
+        "It excludes any scheduler, multi-agent routing, production repository/GitHub " +
+        "writes and release publication; several failed live attempts exposed " +
+        "protocol/report-shape and task-input-scope defects that are now corrected.")
     .Produces<InfoResponse>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
 
@@ -2195,6 +2204,17 @@ public partial class Program
     /// hiring/provisioning.
     /// </summary>
     public const string WorkerControlValidatedScope = "first-managed-disposable-two-host";
+
+    /// <summary>
+    /// Exact, stable scope label reported by <c>/api/info</c> for the bounded
+    /// employee-task capability that <see cref="InfoResponse.TaskControlImplemented"/>
+    /// and <see cref="InfoResponse.TaskControlOperationallyValidated"/> describe. It
+    /// names only the 2026-09-21 first local managed two-task restart verification on
+    /// the controller-local Docker target; it does not include a scheduler,
+    /// multi-agent routing, production repository/GitHub writes or release
+    /// publication.
+    /// </summary>
+    public const string TaskControlValidatedScope = "first-local-managed-two-task-restart-verification";
 
     /// <summary>
     /// Returns true for paths whose HTTP error contract is always RFC 9457 JSON

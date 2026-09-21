@@ -28,7 +28,7 @@ requires no SSH host input, and every Docker operation runs through a privileged
 `docker-helper` over a Unix socket. The control image has neither the Docker
 daemon socket nor a Docker CLI; the helper is the only service that mounts the
 socket and the only writer of the shared helper-socket volume. A live owner-approved managed hire has completed on `home-docker`: employee
-`emp-933d24fc110222a` reached `Ready`, with one worker container and four
+`emp-933d24fc110222a5` reached `Ready`, with one worker container and four
 persistent volumes, live-model orientation comprehension, and no duplicates after
 restart/recovery. `WorkerControl` is enabled through the ignored Compose override;
 product/Compose remains `true` by default. Approval is an explicit owner act
@@ -43,10 +43,13 @@ require recovery. There is no termination or scheduling policy. #220 adds the
 bounded employee task code capability (schema v13): a canonical normalized task
 specification, employee-scoped owner dispatch and read models, a captured model
 report explicitly labeled unverified, and typed independent host verification as
-the only path to `Verified`. It is **not operationally validated**: no live
-bounded task has been dispatched, run and host-verified on any deployment host,
-`/api/info` reports `TaskControlImplemented=true`,
-`TaskControlOperationallyValidated=false` and `TaskControlValidatedScope=null`,
+the only path to `Verified`. It is **operationally validated** as of 2026-09-21:
+the first local managed employee (`emp-933d24fc110222a5`) ran two bounded tasks
+end to end and each reached `Verified` through independent host verification on
+the controller-local Docker target, across a control restart, a cancellation/hold
+exercise and an employee orientation revision. `/api/info` reports
+`TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
+`TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`,
 and there is no scheduler. The task flags are never collapsed into the
 worker-control flags. Keep the three worker classes
 distinct: (1) automatic controller-local managed employees provisioned through
@@ -67,10 +70,37 @@ gate and is false by default. Key rotation and compromise re-enrollment, and
 production managed hires/provisioning, are **not** validated by this evidence.
 The live #257 rebuild completed r1→r2 as `Applied`, advancing epoch `600 → 604`,
 preserving home/workspace/session hashes and retaining one worker container and
-four persistent volumes. The #220 bounded task capability remains **not deployed
-and not operationally validated**: no live bounded task, controller-restart task
-reconciliation, cancellation/hold acceptance, independent host task verification,
-or second task. Distinguish code capability from operationally tested behavior.
+four persistent volumes. The #220 bounded task capability is now **operationally
+validated** (2026-09-21): the first local managed employee ran two bounded tasks
+end to end, each independently host-verified to `Verified`, while a control
+restart left the worker container ID/start time unchanged, a cancellation/hold
+exercise was observed (`Cancelled`/`cancellation-observed`, a fresh-key dispatch
+refused `409`), and an orientation revision was delivered and comprehended with
+no image rebuild. Evidence: promoted/deployed `main` evolved through `fa81286`,
+`5854601`, `579783f`, `3e496c4` and `cae2ebc` while live defects were reviewed and
+promoted; the current code line for these evidence docs is development `98b8f30`
+and the final production line will be a later promotion. Schema is v13; the
+pre-deploy full snapshot `agentcontrol-v2-backup-pre-fa81286` verified 35 files /
+9,399,203 bytes with exact schema-v12 DB hash `59f05e4…`; helper socket
+`1002:1001` `0660`. Accepted Task 1 `tsk-2b4bcf5890861fe123ea207f` (`req-d1218e7aed229aa650f8f0e3`,
+turn `turn-83f091d0fd0cfbe589a5e9ac`) reached `Verified` at epoch `638`/gen 9
+with model-report hash `e1a83e…`, verifier `tvr-cf4438483146fb8b` Passed, manifest
+`f0ad444b…` and test summary `b8d09017…`; accepted Task 2
+`tsk-1d8bb1474fb1ddb302c3a90b` (`req-27ce67e444e9f10e33aad2c5`, turn
+`turn-cf6c6c9b2c373e84e8cac406`) reached `Verified` at epoch `652`/gen 11 with
+model-report hash `1c17a95f…`, verifier `tvr-854e8cbda6f52f18` Passed, manifest
+`b67e63e7…` and test summary `94bedb7f…`. Several live attempts failed first and
+remain visible: an initial task exposed the ACP prompt string-vs-content-block
+defect; a restart-spanning task created project/build but produced an invalid
+model report (progress/report capture); a first Task 2 attempt `tsk-1a0f…`
+`Completed` but host verification `Failed` because the spec allowed only
+`Directory.Build.targets` and the verifier copy omitted project inputs — a
+correct independent failure, not a success. The successful acceptance depended on
+explicit exact test-object guidance; that dependence is a recorded limitation.
+Cancellation is not rollback; a worker restart does not resume a vanished tool
+stack; there is no scheduler, multi-agent routing, production repository/GitHub
+write or release publication. This completes #220 Phase 1 acceptance, not a
+release. Distinguish code capability from operationally tested behavior.
 
 ## Repository layout
 

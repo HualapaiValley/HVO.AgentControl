@@ -399,8 +399,9 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
             .GetProperty("workerControlValidatedScope");
         Assert.Equal("string", scopeProperty.GetProperty("type").GetString());
 
-        // The task-control capability flags are exposed in the same schema, and the
-        // scope property is nullable because #220 is not operationally validated.
+        // The task-control capability flags are exposed in the same schema, and
+        // the scope property is a string because #220 is now operationally
+        // validated with the exact accepted scope.
         var taskProperties = root.GetProperty("components").GetProperty("schemas")
             .GetProperty(schemaName).GetProperty("properties");
         Assert.Equal("boolean", taskProperties.GetProperty("taskControlImplemented").GetProperty("type").GetString());

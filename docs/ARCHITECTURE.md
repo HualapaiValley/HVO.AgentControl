@@ -38,18 +38,23 @@ from the `generation = 2` identity.
   against one verified profile build on one ready host and atomically creates the
   managed employee identity and DeveloperContainer binding. Approval does not
   provision or orient — that is a separate trigger and the request stays
-  `Approved` until it runs. **No live owner-approved hire has been executed on any
-  host**, the `home-docker` execution-host enrollment is held by the owner, and
-  `WorkerControl` is disabled by default, so this is not operationally validated
-   and is never represented as completed employee creation. The employee detail
+  `Approved` until it runs. The live local managed hire completed on
+  `home-docker`: employee `emp-933d24fc110222a5` reached `Ready` with one worker
+  container and four persistent volumes, live-model orientation comprehension and
+  no duplicates after restart/recovery. `WorkerControl` is enabled through the
+  ignored Compose override and remains the deployment gate, so this is evidence
+  for the controller-local managed path, not a production deployment. The employee detail
   read model also exposes the current profile revision/digest and a newer verified
   target without acting. `POST /api/employees/{id}/rebuild` is owner-only,
   same-origin and employee-revision-bound. It synchronously drives the bounded,
   idempotent coordinator after durable intent creation, preserving workspace and
   home unless the exact reset phrase is supplied. The rebuild is single-flight,
   holds dispatch, applies only after a fresh ownership epoch, and leaves uncertain
-  effects recoverable rather than retrying blind. No live rebuild has run on a
-  deployment host.
+  effects recoverable rather than retrying blind. The live #257 rebuild ran on
+  the local managed host (`Applied`, epoch 600→604) preserving home/workspace/
+  session hashes; #220 also exercised an uncertainty rebuild recovery
+  (`rbld-88f4472d02d3ba55`, epoch 636→637). Production-scale rebuild remains
+  unproven.
 - **Persistence:** `/control-data/control.db` is the authoritative SQLite store.
   Schema v13 adds the durable bounded task specification, model report and typed
   independent host-verification domain (`worker_tasks` rebuilt with the canonical
@@ -95,9 +100,10 @@ from the `generation = 2` identity.
 
 The runtime is disabled by default for host development; Compose enables it.
 This slice records, rejects and (as code capability) approves owner hire requests,
-and can create the managed employee identity and binding from an approval, but it
-has no live owner-approved hire, does not route tasks, and does not implement the
-full organization lifecycle. `WorkerControl` remains the deployment gate and is
+and can create the managed employee identity and binding from an approval; the
+live local managed hire completed on `home-docker` and #220 routes bounded tasks
+as an owner action, but there is no scheduler and the full organization lifecycle
+is not implemented. `WorkerControl` remains the deployment gate and is
 false by default.
 Remote-worker reconciliation-integrity failures return a sanitized `502`
 ProblemDetails response titled `Remote worker reconciliation is invalid`; the
@@ -378,26 +384,29 @@ approved base digest is empty. `AGENTCONTROL_DOCKER_HELPER_APPROVED_BASE_DIGEST`
 and the daemon `AGENTCONTROL_DOCKER_GID` are deployment inputs.
 
 **Still not implemented or operationally validated:** key rotation/compromise
-re-enrollment, production managed hiring/provisioning at scale, and the approval
-and managed-provisioning/orientation slice (#260) itself, which is code-complete
-and hermetically tested but has never run a live owner-approved hire on a host
-(see `docs/PHASE-1-CONTRACTS.md` §10.2/§10.3). The bounded task capability (#220,
-schema v13) is likewise code-complete and hermetically tested but no live bounded
-task has been dispatched, run and host-verified on any deployment host; the
-employee-scoped task surface is a single owner-triggered bounded action, there is
-no scheduler, and only the typed independent host verification — never a model
-report and never turn completion — moves a task to `Verified`. The local managed
-path has been
+re-enrollment and production managed hiring/provisioning at scale. The #260
+approval and managed-provisioning/orientation slice was code-complete and is now
+backed by the live `home-docker` local managed hire (see
+`docs/PHASE-1-CONTRACTS.md` §10.2/§10.3). The bounded task capability (#220,
+schema v13) is code-complete, hermetically tested and now **operationally
+validated** (2026-09-21): the first local managed employee ran two bounded tasks
+end to end, each reaching `Verified` through independent host verification on the
+controller-local Docker target, across a control restart, a cancellation/hold
+exercise and an orientation revision. The employee-scoped task surface is a
+single owner-triggered bounded action, there is no scheduler, and only the typed
+independent host verification — never a model report and never turn completion —
+moves a task to `Verified`. The local managed path was
 exercised end to end on one development machine — a generic-employee build, a
 real helper-provisioned container, real OpenCode orientation and a hire reaching
-`Ready` in about 1m50s — but that is a local dev-machine result only, not a
-`home-docker` deployment and not the accepted two-host path. `/api/info` reports
+`Ready` in about 1m50s — and the live `home-docker` hire completed; that is the
+accepted local managed path. `/api/info` reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
 covering only the first managed disposable two-host path, and carries
 `workerControlValidatedScope="first-managed-disposable-two-host"` as the in-band
 bound on exactly that claim; it separately reports
-`TaskControlImplemented=true`, `TaskControlOperationallyValidated=false` and
-`TaskControlValidatedScope=null` for the bounded task capability.
+`TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
+`taskControlValidatedScope="first-local-managed-two-task-restart-verification"`
+for the bounded task capability.
 `WorkerControlEnabled`
 remains the deployment/configuration gate and is false by default. The optional Compose worker profile is disabled by default, has
 no published port or Docker socket, is read-only outside named volumes/tmpfs,
@@ -821,7 +830,15 @@ promised. V2 starts with new state and explicitly provisioned environments.
 The accepted path does not validate key rotation or compromise re-enrollment and
 does not authorize production managed hiring/provisioning. The #260 approval and
 managed-provisioning/orientation paths, the #272 controller-local helper path,
-the #261 data-preserving rebuild path, and the #220 bounded task path exist as
-tested code but have no live owner-approved hire, rebuild or bounded-task
-evidence on any deployment host. `home-docker` is on promoted `main` `7d4078b` /
-schema v12; #220 remains not deployed and not operationally validated.
+the #261 data-preserving rebuild path and the #220 bounded task path are now
+backed by live evidence: the `home-docker` hire and #257 rebuild, and the
+2026-09-21 first local managed two-task restart verification on the
+controller-local Docker target. Promoted/deployed `main` evolved through
+`fa81286`, `5854601`, `579783f`, `3e496c4` and `cae2ebc` while live defects were
+reviewed and promoted; the current code line for these evidence docs is
+development `98b8f30`, schema v13, and the final production line will be a later
+promotion. There is still no scheduler, multi-agent routing, production
+repository/GitHub write or release publication; several live #220 attempts failed
+first on protocol/report-shape and task-input-scope defects that are now
+corrected, and the successful acceptance depended on explicit exact test-object
+guidance. `home-docker` is on promoted `main` `7d4078b` / schema v12.

@@ -40,13 +40,18 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
             Program.WorkerControlValidatedScope,
             body.RootElement.GetProperty("workerControlValidatedScope").GetString());
         Assert.Equal("first-managed-disposable-two-host", Program.WorkerControlValidatedScope);
-        // #220 task control is implemented and hermetically tested, but no live
-        // bounded task has run and been host-verified on a deployment host, so the
-        // capability is not operationally validated and carries no scope. It is
-        // never collapsed into the worker-control flags above.
+        // #220 task control is implemented, hermetically tested and, as of
+        // 2026-09-21, operationally validated: the first local managed employee
+        // ran two bounded tasks end to end and each was host-verified across a
+        // control restart, a cancellation/hold exercise and an orientation
+        // revision on the controller-local Docker target. The in-band scope is
+        // exact and stable and is never collapsed into the worker-control flags.
         Assert.True(body.RootElement.GetProperty("taskControlImplemented").GetBoolean());
-        Assert.False(body.RootElement.GetProperty("taskControlOperationallyValidated").GetBoolean());
-        Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("taskControlValidatedScope").ValueKind);
+        Assert.True(body.RootElement.GetProperty("taskControlOperationallyValidated").GetBoolean());
+        Assert.Equal(
+            Program.TaskControlValidatedScope,
+            body.RootElement.GetProperty("taskControlValidatedScope").GetString());
+        Assert.Equal("first-local-managed-two-task-restart-verification", Program.TaskControlValidatedScope);
     }
 
     [Fact]
@@ -144,6 +149,35 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
             Assert.Contains(AcceptancePhrase, text, StringComparison.Ordinal);
             Assert.Contains(KeyRotationExclusion, text, StringComparison.Ordinal);
             Assert.Contains(ProductionHiringExclusion, text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TaskAcceptanceDocsBoundTheAcceptedPathWithExclusions()
+    {
+        // Capability truth: wherever the 2026-09-21 first local managed two-task
+        // restart verification is marked accepted, the same document must also
+        // state that no scheduler, multi-agent routing, production repository or
+        // GitHub writes, or release publication is claimed, so the accepted task
+        // path is never read as broader than it is.
+        var root = FindRepositoryRoot();
+        var docs = new[]
+        {
+            Path.Combine(root, "README.md"),
+            Path.Combine(root, "docs", "ARCHITECTURE.md"),
+            Path.Combine(root, "docs", "ROADMAP.md"),
+        };
+
+        foreach (var path in docs)
+        {
+            var text = File.ReadAllText(path);
+            Assert.Contains("2026-09-21", text, StringComparison.Ordinal);
+            Assert.Contains(
+                "first-local-managed-two-task-restart-verification",
+                text,
+                StringComparison.Ordinal);
+            Assert.Contains("no scheduler", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("release publication", text, StringComparison.OrdinalIgnoreCase);
         }
     }
 
