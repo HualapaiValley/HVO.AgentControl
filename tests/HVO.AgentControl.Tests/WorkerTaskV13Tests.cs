@@ -179,10 +179,10 @@ public sealed class WorkerTaskV13Tests
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
         var task = CompleteTask(fixture);
 
-        Assert.Throws<OrganizationValidationException>(() => fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1"));
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1"));
 
         task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", ["src/a.cs"], [new ModelTaskTestReport(WorkerTaskTestRecipes.DotnetTestRelease, "passed", "dotnet test passed")], null, []));
-        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
+        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
         Assert.Equal("Pending", verification.State);
         Assert.Equal(task.Id, verification.TaskId);
 
@@ -204,7 +204,7 @@ public sealed class WorkerTaskV13Tests
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
         var task = CompleteTask(fixture);
         task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
-        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
+        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
 
         Assert.Throws<OrganizationValidationException>(() => fixture.Store.CompleteWorkerTaskVerification(verification.Id, verification.Revision, new HostTaskVerification(WorkerTaskVerificationStates.Passed, null, null, null, null)));
 
@@ -217,45 +217,67 @@ public sealed class WorkerTaskV13Tests
     }
 
     [Fact]
-    public void HostVerificationIsUniquePerTaskAndImmutableWithNoDelete()
+    public void HostVerificationRetriesPreserveImmutableAttemptsAndReadLatest()
     {
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
         var task = CompleteTask(fixture);
         task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
-        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
-        var replay = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
+        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
+        var replay = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
         Assert.Equal(verification.Id, replay.Id);
-        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/2"));
+        Assert.Equal("workspace-task-verify-v1.1", verification.VerifierVersion);
+        Assert.Throws<OrganizationValidationException>(() => fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "other-verifier"));
+        fixture.Store.CompleteWorkerTaskVerification(verification.Id, verification.Revision, new HostTaskVerification(
+            WorkerTaskVerificationStates.Failed, null, null, null, "first failed"));
+
+        var retry = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
+        Assert.NotEqual(verification.Id, retry.Id);
+        Assert.Equal("workspace-task-verify-v1.2", retry.VerifierVersion);
+        Assert.Equal(retry.Id, fixture.Store.GetWorkerTaskVerification(task.Id)!.Id);
 
         using var connection = Raw(fixture.DatabasePath);
+        using (var count = connection.CreateCommand())
+        {
+            count.CommandText = "SELECT COUNT(*) FROM worker_task_verifications";
+            Assert.Equal(2L, Convert.ToInt64(count.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+        }
         Assert.Throws<SqliteException>(() => Execute(connection, $"UPDATE worker_task_verifications SET task_id='other' WHERE id='{verification.Id}'"));
         Assert.Throws<SqliteException>(() => Execute(connection, $"DELETE FROM worker_task_verifications WHERE id='{verification.Id}'"));
-        Assert.Throws<SqliteException>(() => Execute(connection, $"INSERT INTO worker_task_verifications (id, task_id, state, verifier_version, created_at, updated_at, revision) VALUES ('{verification.Id}', '{task.Id}', 'Pending', 'host/1', '2026-01-01T00:00:00.0000000+00:00', '2026-01-01T00:00:00.0000000+00:00', 1)"));
-    }
-
-    // --------------------------------------------------------- cancellation ----
-
-    [Fact]
-    public void CancellationIsReachableFromRequestedRunningAndUncertainAndSanitized()
-    {
-        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
-        var request = fixture.CreateEligibleRequest();
-        var task = fixture.Store.GetWorkerTask(request.TaskId)!;
-        var cancelled = fixture.Store.MarkWorkerTaskCancelled(task.Id, task.Revision, "operator\u0007 stop");
-        Assert.Equal("Cancelled", cancelled.State);
-        Assert.Equal("operator stop", cancelled.FailureDetail);
-        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.MarkWorkerTaskCancelled(task.Id, cancelled.Revision));
-    }
-
-    [Fact]
-    public void CancellationIsNotReachableFromCompletedOrVerified()
-    {
-        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
-        var task = CompleteTask(fixture);
-        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.MarkWorkerTaskCancelled(task.Id, task.Revision));
+        Assert.Throws<SqliteException>(() => Execute(connection, $"INSERT INTO worker_task_verifications (id, task_id, state, verifier_version, created_at, updated_at, revision) VALUES ('{verification.Id}', '{task.Id}', 'Pending', 'workspace-task-verify-v1.3', '2026-01-01T00:00:00.0000000+00:00', '2026-01-01T00:00:00.0000000+00:00', 1)"));
     }
 
     // -------------------------------------------------------- migration v12 ----
+
+    [Fact]
+    public void FaultAfterV12BackupBeforeV13MigrationRetainsRecoveryEvidenceAndRestartsCleanly()
+    {
+        using var root = new TempDirectory();
+        var path = System.IO.Path.Combine(root.Path, "control.db");
+        using (var store = new OrganizationStore(path))
+            store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        DowngradeToCanonicalV12(path);
+
+        using (var faulted = new OrganizationStore(path))
+        {
+            faulted.AfterMigrationBackup = () => throw new InvalidOperationException("simulated v12 migration interruption");
+            Assert.Throws<InvalidOperationException>(() =>
+                faulted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
+        }
+
+        var backup = System.IO.Path.Combine(root.Path, OrganizationStore.SchemaV12BackupFileName);
+        var hash = System.IO.Path.Combine(root.Path, OrganizationStore.SchemaV12BackupHashFileName);
+        var retained = File.ReadAllBytes(backup);
+        var retainedHash = File.ReadAllBytes(hash);
+        Assert.Equal(12L, RawScalar(path, "SELECT version FROM schema_version"));
+        Assert.False(File.Exists(backup + "-wal"));
+        Assert.False(File.Exists(backup + "-shm"));
+
+        using (var restarted = new OrganizationStore(path))
+            restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
+        Assert.Equal(13L, RawScalar(path, "SELECT version FROM schema_version"));
+        Assert.Equal(retained, File.ReadAllBytes(backup));
+        Assert.Equal(retainedHash, File.ReadAllBytes(hash));
+    }
 
     [Fact]
     public void ExactSchemaV12MigratesToV13WithVerifiedBackupAndPreservesLegacyTaskAndRequest()
@@ -298,7 +320,7 @@ public sealed class WorkerTaskV13Tests
             // A new task can be verified on the rebuilt table.
             var fresh = migrated.GetWorkerTask(task.Id)!;
             fresh = migrated.RecordWorkerTaskModelReport(fresh.Id, fresh.Revision, new ModelTaskReport("migrated", [], [], null, []));
-            var verification = migrated.BeginWorkerTaskVerification(fresh.Id, fresh.Revision, "host/1");
+            var verification = migrated.BeginWorkerTaskVerification(fresh.Id, fresh.Revision, "workspace-task-verify-v1");
             migrated.CompleteWorkerTaskVerification(verification.Id, verification.Revision, new HostTaskVerification(
                 WorkerTaskVerificationStates.Passed, """{"ok":true}""", """{"passed":1}""", null, null));
             Assert.Equal("Verified", migrated.GetWorkerTask(task.Id)!.State);

@@ -113,25 +113,6 @@ public static class WorkerTaskStates
     public static bool IsDefined(string state) =>
         state is Requested or Uncertain or Running or Completed or Failed or Cancelled or Verified;
 
-    /// <summary>The states a cancellation may be recorded from.</summary>
-    public static bool IsCancellable(string state) => state is Requested or Running or Uncertain;
-
-    public static bool CanTransition(string from, string to) => (from, to) switch
-    {
-        (Requested, Running) => true,
-        (Requested, Cancelled) => true,
-        (Running, Completed) => true,
-        (Running, Failed) => true,
-        (Running, Uncertain) => true,
-        (Running, Cancelled) => true,
-        (Uncertain, Running) => true,
-        (Uncertain, Completed) => true,
-        (Uncertain, Failed) => true,
-        (Uncertain, Cancelled) => true,
-        // The host-verified terminal edge is the only path to Verified.
-        (Completed, Verified) => true,
-        _ => false,
-    };
 }
 
 public static class WorkerTaskVerificationStates
@@ -212,7 +193,7 @@ public sealed partial class OrganizationStore
             description_hash TEXT NOT NULL,
             task_spec_json TEXT NOT NULL CHECK (length(task_spec_json) BETWEEN 2 AND 32768),
             task_spec_hash TEXT NOT NULL CHECK (length(task_spec_hash) = 71 AND substr(task_spec_hash, 1, 7) = 'sha256:'),
-            model_report_json TEXT CHECK (model_report_json IS NULL OR length(model_report_json) <= 32768),
+            model_report_json TEXT CHECK (model_report_json IS NULL OR length(model_report_json) <= 16384),
             model_report_hash TEXT CHECK (model_report_hash IS NULL OR (length(model_report_hash) = 71 AND substr(model_report_hash, 1, 7) = 'sha256:')),
             model_reported_at TEXT,
             failure_detail TEXT CHECK (failure_detail IS NULL OR length(failure_detail) <= 512),
@@ -234,7 +215,7 @@ public sealed partial class OrganizationStore
         """
         CREATE TABLE worker_task_verifications (
             id TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL UNIQUE REFERENCES worker_tasks(id) ON DELETE RESTRICT,
+            task_id TEXT NOT NULL REFERENCES worker_tasks(id) ON DELETE RESTRICT,
             state TEXT NOT NULL CHECK (state IN ('Pending', 'Passed', 'Failed', 'Uncertain')),
             manifest_json TEXT CHECK (manifest_json IS NULL OR length(manifest_json) <= 65536),
             manifest_hash TEXT CHECK (manifest_hash IS NULL OR (length(manifest_hash) = 71 AND substr(manifest_hash, 1, 7) = 'sha256:')),
@@ -248,6 +229,7 @@ public sealed partial class OrganizationStore
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             revision INTEGER NOT NULL CHECK (revision >= 1),
+            UNIQUE (task_id, verifier_version),
             -- A Passed verification must carry its manifest, its test summary and a
             -- verification timestamp; other states may omit all three.
             CHECK (

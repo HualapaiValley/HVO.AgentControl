@@ -18,7 +18,7 @@ public sealed class LocalDockerHelperClient(IOptions<WorkerControlOptions> confi
     public Task<RemoteOperationResult> BuildImageAsync(ExecutionTarget target, ImageBuildSpec spec, byte[] contextTar, CancellationToken token) => RequestAsync(target, new("request", Id(), DockerOperation.ImageBuild, ImageBuild: spec, BinaryLength: contextTar.Length, TimeoutSeconds: Timeout(DockerOperation.ImageBuild)), contextTar, token);
     public async Task<HostTaskVerification> WorkspaceVerifyAsync(ExecutionTarget target, WorkspaceVerifySpec spec, CancellationToken token)
     {
-        var result = await RequestAsync(target, new("request", Id(), DockerOperation.WorkspaceVerify, WorkspaceVerify: spec, TimeoutSeconds: spec.MaximumSeconds), null, token).ConfigureAwait(false);
+        var result = await RequestAsync(target, new("request", Id(), DockerOperation.WorkspaceVerify, WorkspaceVerify: spec, TimeoutSeconds: checked(spec.MaximumSeconds + DockerHelperProtocol.WorkspaceVerifyOverheadSeconds)), null, token).ConfigureAwait(false);
         if (result.ExitCode != 0) return new(result.ErrorCategory == "timeout" ? WorkerTaskVerificationStates.Uncertain : WorkerTaskVerificationStates.Failed, null, null, null, result.ErrorCategory == "timeout" ? "verification-timeout-uncertain" : "verification-command-failed");
         try
         {

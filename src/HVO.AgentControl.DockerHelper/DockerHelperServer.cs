@@ -195,7 +195,7 @@ public sealed class DockerHelperServer(DockerHelperOptions options, IPeerCredent
                     || !labels.TryGetProperty("agentcontrol.base-digest", out var baseDigest) || baseDigest.GetString() != options.Policy.ApprovedBaseDigest))
                 throw new DockerGrammarException("Workspace verification image provenance is invalid.");
         }
-        return await _runner.RunAsync(request.Id, request.Operation, DockerArgv.BuildWorkspaceVerify(spec, options.Policy), null, TimeSpan.FromSeconds(request.TimeoutSeconds), token).ConfigureAwait(false);
+        return await _runner.RunAsync(request.Id, request.Operation, DockerArgv.BuildWorkspaceVerify(spec, options.Policy), null, TimeSpan.FromSeconds(spec.MaximumSeconds + DockerHelperProtocol.WorkspaceVerifyOverheadSeconds), token).ConfigureAwait(false);
     }
 
     private static void ValidateEnvelope(DockerHelperRequest request) { if (request.Type != "request" || request.Id is not { Length: >= 1 and <= 128 } || request.Id.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_' and not '.' and not ':') || request.TimeoutSeconds is < 1 or > DockerHelperProtocol.MaxTimeoutSeconds || request.BinaryLength is < 0 or > DockerHelperProtocol.MaxBinaryBytes) throw new InvalidDataException(); var needsBinary = request.Operation is DockerOperation.Bootstrap or DockerOperation.ImageBuild; if (needsBinary != (request.BinaryLength > 0)) throw new InvalidDataException(); if (request.Operation is DockerOperation.Connector or DockerOperation.Viewer && request.BinaryLength != 0) throw new InvalidDataException(); }

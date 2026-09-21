@@ -126,6 +126,7 @@ public static class DispatchHoldReasons
     public const string PolicyUpdate = "policy-update";
     public const string OrientationReloadRequired = "orientation-reload-required";
     public const string Manual = "manual";
+    public const string TaskVerification = "task-verification";
 }
 
 public enum OrientationEvidenceSource

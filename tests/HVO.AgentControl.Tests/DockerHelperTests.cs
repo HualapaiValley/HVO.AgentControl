@@ -217,7 +217,7 @@ public sealed class DockerHelperTests
     [Fact]
     public void WorkspaceVerificationGrammarIsTypedReadOnlyAndBounded()
     {
-        var spec = new WorkspaceVerifySpec(Identity("prev-0123456789abcdef"), "agentcontrol-workspace-x", "project", ["src", "tests"], "dotnet-test-release", 300, 1024, 64L * 1024 * 1024, Digest, "linux/amd64", [Digest], 512L * 1024 * 1024, 1);
+        var spec = new WorkspaceVerifySpec(Identity("prev-0123456789abcdef"), "agentcontrol-workspace-x", "project", ["src", "tests"], "dotnet-test-release", 300, 384, 64L * 1024 * 1024, Digest, "linux/amd64", [Digest], 512L * 1024 * 1024, 1);
         var argv = DockerArgv.BuildWorkspaceVerify(spec, Policy);
         var command = string.Join(' ', argv);
         Assert.Contains("--pull never", command, StringComparison.Ordinal);
@@ -232,7 +232,7 @@ public sealed class DockerHelperTests
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { AllowedPaths = ["src", "../secret"] }, Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { TestRecipeId = "shell" }, Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { TargetImageDigest = "latest" }, Policy));
-        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { MaxFiles = 1025 }, Policy));
+        Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { MaxFiles = 385 }, Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { MaxBytes = 64L * 1024 * 1024 + 1 }, Policy));
     }
 

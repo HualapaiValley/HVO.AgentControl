@@ -136,8 +136,6 @@ public sealed partial class OrganizationStore : IDisposable
     public const string SchemaV11BackupHashFileName = "control.schema-v11.sha256";
     public const string SchemaV12BackupFileName = "control.schema-v12.db";
     public const string SchemaV12BackupHashFileName = "control.schema-v12.sha256";
-    public const string SchemaV13BackupFileName = "control.schema-v13.db";
-    public const string SchemaV13BackupHashFileName = "control.schema-v13.sha256";
 
     /// <summary>Maximum accepted organization display-name length.</summary>
     public const int MaxDisplayNameLength = 128;
@@ -443,7 +441,7 @@ public sealed partial class OrganizationStore : IDisposable
         CREATE TABLE dispatch_holds (
             id TEXT PRIMARY KEY,
             runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
-            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
+            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual', 'task-verification')),
             active INTEGER NOT NULL CHECK (active IN (0, 1)),
             detail TEXT,
             created_at TEXT NOT NULL,

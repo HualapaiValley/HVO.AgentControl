@@ -16,6 +16,7 @@ public sealed partial class OrganizationStore
     private const int MaxModelReportLimitationCount = 32;
     private const int MaxModelReportLimitationsLength = 1024;
     private const int MaxVerifierVersionLength = 64;
+    private const string WorkspaceVerifierFamily = "workspace-task-verify-v1";
 
     /// <summary>
     /// Atomically persists one normalized task specification and its request.
@@ -302,8 +303,8 @@ public sealed partial class OrganizationStore
     {
         if (!IsBoundedIdentifier(taskId, "tsk-") || expectedTaskRevision < 1)
             throw new OrganizationValidationException("A stable task id and current revision are required.");
-        var version = SanitizeBounded(verifierVersion, MaxVerifierVersionLength)
-            ?? throw new OrganizationValidationException("A verifier version is required.");
+        if (!string.Equals(verifierVersion, WorkspaceVerifierFamily, StringComparison.Ordinal))
+            throw new OrganizationValidationException("The verifier identity is not recognized.");
 
         return TranslateStoreFaults(() =>
         {
@@ -323,17 +324,36 @@ public sealed partial class OrganizationStore
                     throw new OrganizationConcurrencyException("The worker task changed; reload and retry with its current revision.");
 
                 var existing = ReadWorkerTaskVerificationIn(connection, transaction, taskId);
-                if (existing is not null)
+                if (existing?.State is WorkerTaskVerificationStates.Pending or WorkerTaskVerificationStates.Passed)
                 {
-                    if (string.Equals(existing.VerifierVersion, version, StringComparison.Ordinal))
-                    {
-                        transaction.Commit();
-                        return existing;
-                    }
-
-                    throw new OrganizationConcurrencyException("The task already has a host verification from a different verifier.");
+                    transaction.Commit();
+                    return existing;
                 }
 
+                using (var gate = connection.CreateCommand())
+                {
+                    gate.Transaction = transaction;
+                    gate.CommandText =
+                        """
+                        SELECT COUNT(*)
+                        FROM worker_requests r
+                        JOIN worker_enrollments w ON w.worker_id=r.worker_id AND w.runtime_binding_id=r.runtime_binding_id
+                        JOIN acp_sessions s ON s.id=r.session_id AND s.native_session_id=r.native_session_id AND s.employee_id=r.employee_id
+                        WHERE r.task_id=$task AND r.employee_id=$employee AND r.runtime_binding_id=$binding AND r.worker_id=$worker
+                          AND r.state IN ('Completed','Failed') AND w.enabled=1 AND w.lifecycle_status='enrolled'
+                          AND w.ownership_epoch=r.ownership_epoch AND w.process_generation=r.process_generation
+                          AND NOT EXISTS (
+                              SELECT 1 FROM worker_requests active
+                              WHERE active.worker_id=r.worker_id AND active.state IN ('Intent','Forwarding','Forwarded','Uncertain','Interrupted'))
+                        """;
+                    Add(gate, ("$task", task.Id), ("$employee", task.EmployeeId), ("$binding", task.RuntimeBindingId), ("$worker", task.WorkerId));
+                    if (Convert.ToInt64(gate.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
+                        throw new OrganizationConcurrencyException("Host verification requires the exact terminal request, enrollment ownership, session, and no active worker request.");
+                }
+
+                var attempt = existing is null ? 1 : VerifierAttempt(existing.VerifierVersion) + 1;
+                var version = WorkspaceVerifierFamily + "." + attempt.ToString(CultureInfo.InvariantCulture);
+                if (version.Length > MaxVerifierVersionLength) throw new OrganizationStoreCorruptException("The verifier attempt identity exceeded its bound.");
                 var id = OrganizationIds.NewTaskVerificationId();
                 var now = Timestamp();
                 Execute(connection, transaction,
@@ -342,11 +362,16 @@ public sealed partial class OrganizationStore
                         id, task_id, state, manifest_json, manifest_hash, test_summary_json,
                         test_summary_hash, denied_action_json, denied_action_hash,
                         verifier_version, failure_detail, verified_at, created_at, updated_at, revision)
-                    VALUES ($id, $task, 'Pending', NULL, NULL, NULL, NULL, NULL, NULL, $version, NULL, NULL, $now, $now, 1)
+                    VALUES ($id, $task, 'Pending', NULL, NULL, NULL, NULL, NULL, NULL, $version, NULL, NULL, $now, $now, 1);
+                    INSERT INTO dispatch_holds (id,runtime_binding_id,reason,active,detail,created_at,cleared_at,revision)
+                    VALUES ($hold,$binding,'task-verification',1,$detail,$now,NULL,1)
+                    ON CONFLICT(runtime_binding_id,reason) DO UPDATE SET
+                        active=1,detail=excluded.detail,cleared_at=NULL,revision=dispatch_holds.revision+1
                     """,
-                    ("$id", id), ("$task", taskId), ("$version", version), ("$now", now));
+                    ("$id", id), ("$task", taskId), ("$version", version), ("$now", now),
+                    ("$hold", OrganizationIds.NewHoldId()), ("$binding", task.RuntimeBindingId), ("$detail", id));
                 transaction.Commit();
-                return ReadWorkerTaskVerificationIn(connection, null, taskId)!;
+                return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
             }
         });
     }
@@ -447,52 +472,11 @@ public sealed partial class OrganizationStore
                         throw new OrganizationConcurrencyException("The task was not completed and could not be verified.");
                 }
 
+                Execute(connection, transaction,
+                    "UPDATE dispatch_holds SET active=0,detail=NULL,cleared_at=$now,revision=revision+1 WHERE runtime_binding_id=$binding AND reason='task-verification' AND active=1 AND detail=$verification",
+                    ("$now", now), ("$binding", task.RuntimeBindingId), ("$verification", current.Id));
                 transaction.Commit();
                 return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
-            }
-        });
-    }
-
-    /// <summary>
-    /// Explicitly cancels a task from <c>Requested</c>, <c>Running</c> or
-    /// <c>Uncertain</c>. Cancellation is not rollback: any request effect already
-    /// applied remotely remains, and no recovery obligation is cleared here.
-    /// </summary>
-    public WorkerTaskRecord MarkWorkerTaskCancelled(string taskId, int expectedRevision, string? detail = null)
-    {
-        if (!IsBoundedIdentifier(taskId, "tsk-") || expectedRevision < 1)
-            throw new OrganizationValidationException("A stable task id and current revision are required.");
-        var sanitizedDetail = StripBounded(detail, MaxFailureDetailLength);
-
-        return TranslateStoreFaults(() =>
-        {
-            ThrowIfDisposed();
-            RequireOpen();
-            lock (_gate)
-            {
-                using var connection = OpenConnection();
-                using var transaction = connection.BeginTransaction();
-                var task = ReadWorkerTaskIn(connection, transaction, taskId)
-                    ?? throw new OrganizationNotFoundException($"Worker task '{taskId}' does not exist.");
-                if (task.Revision != expectedRevision)
-                    throw new OrganizationConcurrencyException("The worker task changed; reload and retry with its current revision.");
-                if (!WorkerTaskStates.IsCancellable(task.State))
-                    throw new OrganizationConcurrencyException("Only a requested, running or uncertain task may be cancelled.");
-
-                var affected = Execute(connection, transaction,
-                    """
-                    UPDATE worker_tasks
-                    SET state = 'Cancelled',
-                        failure_detail = COALESCE($detail, failure_detail),
-                        updated_at = $now,
-                        revision = revision + 1
-                    WHERE id = $id AND revision = $revision AND state IN ('Requested', 'Running', 'Uncertain')
-                    """,
-                    ("$detail", sanitizedDetail), ("$now", Timestamp()), ("$id", taskId), ("$revision", expectedRevision));
-                if (affected != 1)
-                    throw new OrganizationConcurrencyException("The worker task changed before cancellation.");
-                transaction.Commit();
-                return ReadWorkerTaskIn(connection, null, taskId)!;
             }
         });
     }
@@ -597,6 +581,16 @@ public sealed partial class OrganizationStore
         return result;
     }
 
+    private static int VerifierAttempt(string version)
+    {
+        var prefix = WorkspaceVerifierFamily + ".";
+        if (!version.StartsWith(prefix, StringComparison.Ordinal)
+            || !int.TryParse(version.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var attempt)
+            || attempt < 1)
+            throw new OrganizationStoreCorruptException("A persisted verifier attempt identity is invalid.");
+        return attempt;
+    }
+
     private static WorkerTaskVerificationRecord? ReadWorkerTaskVerificationIn(
         SqliteConnection c,
         SqliteTransaction? tx,
@@ -609,7 +603,8 @@ public sealed partial class OrganizationStore
             "SELECT id, task_id, state, manifest_json, manifest_hash, test_summary_json, test_summary_hash, "
             + "denied_action_json, denied_action_hash, verifier_version, failure_detail, verified_at, "
             + "created_at, updated_at, revision FROM worker_task_verifications WHERE "
-            + (id is not null ? "id = $id" : "task_id = $task");
+            + (id is not null ? "id = $id" : "task_id = $task")
+            + (id is null ? " ORDER BY created_at DESC, id DESC LIMIT 1" : string.Empty);
         q.Parameters.AddWithValue(id is not null ? "$id" : "$task", id ?? taskId!);
         using var reader = q.ExecuteReader();
         if (!reader.Read()) return null;
@@ -726,15 +721,6 @@ public sealed partial class OrganizationStore
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
         return normalized;
-    }
-
-    private static string? NormalizeReportOptional(string? value, int maximum, string kind)
-    {
-        if (value is null) return null;
-        var normalized = SanitizeBounded(value, maximum);
-        return string.IsNullOrEmpty(normalized)
-            ? throw new OrganizationValidationException($"A model report {kind} must not be blank when present.")
-            : normalized;
     }
 
     private static string HashText(string value) =>

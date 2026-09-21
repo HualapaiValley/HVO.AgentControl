@@ -563,9 +563,14 @@ public sealed class WorkerRuntime : IAsyncDisposable
             var result = await completion.Task.ConfigureAwait(false);
             var state = result.TryGetProperty("error", out _) ? "failed" : "completed";
             string outcome;
-            if (captureTaskReport && state == "completed")
+            var stopReason = result.TryGetProperty("result", out var resultBody) && resultBody.ValueKind == JsonValueKind.Object && resultBody.TryGetProperty("stopReason", out var stop) ? stop.GetString() : null;
+            if (captureTaskReport && promptContext?.CancellationRequested == true && !string.Equals(stopReason, "end_turn", StringComparison.Ordinal))
             {
-                var stopReason = result.TryGetProperty("result", out var resultBody) && resultBody.ValueKind == JsonValueKind.Object && resultBody.TryGetProperty("stopReason", out var stop) ? stop.GetString() : null;
+                state = "failed";
+                outcome = CancelledOutcome();
+            }
+            else if (captureTaskReport && state == "completed")
+            {
                 var captured = reportCapture!.Complete();
                 if (!string.Equals(stopReason, "end_turn", StringComparison.Ordinal) || captured.Overflowed || string.IsNullOrWhiteSpace(captured.Text))
                 {
@@ -647,6 +652,11 @@ public sealed class WorkerRuntime : IAsyncDisposable
         try
         {
             await WriteAcpAsync(envelope, _lifetime.Token).ConfigureAwait(false);
+            lock (_activePromptGate)
+            {
+                if (_activePrompt is { } active && string.Equals(active.RequestId, registered.TargetRequestId, StringComparison.Ordinal))
+                    active.CancellationRequested = true;
+            }
             _store.MarkCancellationForwarded(registered.CancellationId);
             TryAppendObservation("cancel-forwarded", JsonSerializer.Serialize(new { registered.CancellationId, registered.TargetRequestId }, WorkerProtocol.JsonOptions));
             return _store.GetCancellation(registered.CancellationId)!;
@@ -829,6 +839,7 @@ public sealed class WorkerRuntime : IAsyncDisposable
         return JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(value, WorkerProtocol.JsonOptions));
     }
     private static string TaskReportFailureOutcome() => JsonSerializer.Serialize(new { category = "model-report-invalid" }, WorkerProtocol.JsonOptions);
+    private static string CancelledOutcome() => JsonSerializer.Serialize(new { category = "cancelled" }, WorkerProtocol.JsonOptions);
 
     private static string SanitizeOutcome(JsonElement result, string state)
     {
@@ -870,7 +881,16 @@ public sealed class WorkerRuntime : IAsyncDisposable
         finally { _writeLock.Release(); }
     }
     internal bool IsTransportHealthy => Volatile.Read(ref _transportFailed) == 0;
-    private sealed record ActivePromptContext(string RequestId, string TurnId, long ProcessGeneration, long OwnershipEpoch, long CorrelationId, string SessionId);
+    private sealed class ActivePromptContext(string requestId, string turnId, long processGeneration, long ownershipEpoch, long correlationId, string sessionId)
+    {
+        public string RequestId { get; } = requestId;
+        public string TurnId { get; } = turnId;
+        public long ProcessGeneration { get; } = processGeneration;
+        public long OwnershipEpoch { get; } = ownershipEpoch;
+        public long CorrelationId { get; } = correlationId;
+        public string SessionId { get; } = sessionId;
+        public bool CancellationRequested { get; set; }
+    }
     private sealed class OperationHandle(TaskCompletionSource<StoredRequest> forwarded)
     {
         public TaskCompletionSource<StoredRequest> Forwarded { get; } = forwarded;

@@ -99,13 +99,13 @@ public static class DockerArgv
         RequirePrefix(spec.WorkspaceVolumeName, "agentcontrol-workspace-");
         RequireApprovedImage(spec.TargetImageDigest, spec.Platform, spec.ApprovedDigests, policy, allowApprovedSet: true);
         if (spec.TestRecipeId != "dotnet-test-release") throw new DockerGrammarException("Workspace verification recipe is not approved.");
-        if (spec.MaximumSeconds is < 1 or > 1800 || spec.MaxFiles is < 1 or > 1024 || spec.MaxBytes is < 1 or > 64L * 1024 * 1024) throw new DockerGrammarException("Workspace verification bounds are invalid.");
+        if (spec.MaximumSeconds is < 1 or > 1800 || spec.MaxFiles is < 1 or > 384 || spec.MaxBytes is < 1 or > 64L * 1024 * 1024) throw new DockerGrammarException("Workspace verification bounds are invalid.");
         if (spec.MemoryBytes <= 0 || spec.MemoryBytes > policy.MaxMemoryBytes || spec.CpuLimit <= 0 || spec.CpuLimit > policy.MaxCpu) throw new DockerGrammarException("Workspace verification resource limits exceed helper policy.");
         var root = ValidRelativePath(spec.WorkspaceRoot, allowDot: false);
         if (spec.AllowedPaths is not { Count: >= 1 and <= 32 }) throw new DockerGrammarException("Workspace verification allowed paths are invalid.");
         var allowed = spec.AllowedPaths.Select(path => ValidRelativePath(path, allowDot: true)).Distinct(StringComparer.Ordinal).OrderBy(path => path, StringComparer.Ordinal).ToArray();
         if (allowed.Length != spec.AllowedPaths.Count) throw new DockerGrammarException("Workspace verification allowed paths must be unique.");
-        var parts = new List<string> { "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", Number(spec.MemoryBytes), "--cpus", Number(spec.CpuLimit), "--user", "1102:1102", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m", "--mount", $"type=volume,src={ValidResource(spec.WorkspaceVolumeName)},dst=/workspace,readonly,volume-nocopy", "--platform", ValidPlatform(spec.Platform), "--entrypoint", "/usr/bin/python3" };
+        var parts = new List<string> { "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", Number(spec.MemoryBytes), "--cpus", Number(spec.CpuLimit), "--user", "1102:1102", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m", "--mount", $"type=volume,src={ValidResource(spec.WorkspaceVolumeName)},dst=/workspace,readonly,volume-nocopy", "--platform", ValidPlatform(spec.Platform), "--entrypoint", "/usr/bin/python3" };
         foreach (var label in ExactLabels(spec.Identity)) { parts.Add("--label"); parts.Add(Label(label.Key, label.Value)); }
         parts.Add(ValidDigest(spec.TargetImageDigest));
         parts.AddRange(["-I", "-S", "/usr/local/bin/workspace-task-verify", "--root", root, "--recipe", spec.TestRecipeId, "--maximum-seconds", Number(spec.MaximumSeconds), "--max-files", Number(spec.MaxFiles), "--max-bytes", Number(spec.MaxBytes)]);

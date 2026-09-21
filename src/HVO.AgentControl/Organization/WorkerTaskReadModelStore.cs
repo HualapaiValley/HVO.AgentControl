@@ -72,7 +72,9 @@ public sealed partial class OrganizationStore
             LEFT JOIN worker_requests r ON r.id = (
                 SELECT r2.id FROM worker_requests r2 WHERE r2.task_id = t.id
                 ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1)
-            LEFT JOIN worker_task_verifications v ON v.task_id = t.id
+            LEFT JOIN worker_task_verifications v ON v.id = (
+                SELECT v2.id FROM worker_task_verifications v2 WHERE v2.task_id = t.id
+                ORDER BY v2.created_at DESC, v2.id DESC LIMIT 1)
             WHERE 1=1
             """
             + (employeeId is not null ? " AND t.employee_id = $employee" : string.Empty)

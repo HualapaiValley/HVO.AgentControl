@@ -581,7 +581,13 @@ app.MapPost("/api/employees/{id}/tasks", async (HttpContext context, AcpControlH
     try { return Results.Ok(await coordinator.CreateAsync(id, request, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("CreateEmployeeTask").WithTags("Employee tasks");
+    .WithName("CreateEmployeeTask").WithTags("Employee tasks")
+    .WithSummary("Dispatches one bounded task to the exact ready managed employee using an idempotency key.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapGet("/api/employees/{id}/tasks", (AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, int? limit) =>
 {
@@ -593,7 +599,11 @@ app.MapGet("/api/employees/{id}/tasks", (AcpControlHost host, HVO.AgentControl.R
     try { return Results.Ok(coordinator.Recent(id, limit ?? HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator.DefaultRecentLimit)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("ListEmployeeTasks").WithTags("Employee tasks");
+    .WithName("ListEmployeeTasks").WithTags("Employee tasks")
+    .WithSummary("Returns the bounded newest-first task history for one employee.")
+    .Produces<IReadOnlyList<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapGet("/api/tasks/{taskId}", (AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId) =>
 {
@@ -603,7 +613,11 @@ app.MapGet("/api/tasks/{taskId}", (AcpControlHost host, HVO.AgentControl.RemoteW
     try { return Results.Ok(coordinator.Get(taskId)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("GetWorkerTaskDetail").WithTags("Employee tasks");
+    .WithName("GetWorkerTaskDetail").WithTags("Employee tasks")
+    .WithSummary("Returns one durable task, its exact request, model report, and latest host-verification attempt.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPost("/api/tasks/{taskId}/sync", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskSync request) =>
 {
@@ -614,7 +628,13 @@ app.MapPost("/api/tasks/{taskId}/sync", async (HttpContext context, AcpControlHo
     try { return Results.Ok(await coordinator.SyncAsync(taskId, request, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("SynchronizeWorkerTask").WithTags("Employee tasks");
+    .WithName("SynchronizeWorkerTask").WithTags("Employee tasks")
+    .WithSummary("Reconciles one exact durable task request without resubmitting the remote effect.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskSyncDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPost("/api/tasks/{taskId}/verify", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskVerify request) =>
 {
@@ -625,7 +645,13 @@ app.MapPost("/api/tasks/{taskId}/verify", async (HttpContext context, AcpControl
     try { return Results.Ok(await coordinator.VerifyAsync(taskId, request.ExpectedTaskRevision, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("VerifyWorkerTask").WithTags("Employee tasks");
+    .WithName("VerifyWorkerTask").WithTags("Employee tasks")
+    .WithSummary("Runs the fixed independent verifier against a private copy of the task workspace using its applied profile image.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPost("/api/tasks/{taskId}/cancel", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string taskId, HVO.AgentControl.RemoteWorker.EmployeeTaskCancel request) =>
 {
@@ -636,7 +662,13 @@ app.MapPost("/api/tasks/{taskId}/cancel", async (HttpContext context, AcpControl
     try { return Results.Ok(await coordinator.CancelAsync(taskId, request, context.RequestAborted)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("CancelWorkerTask").WithTags("Employee tasks");
+    .WithName("CancelWorkerTask").WithTags("Employee tasks")
+    .WithSummary("Forwards cancellation for the task's exact active request; terminal observation is recorded by synchronization.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeTaskCancellationDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status502BadGateway)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 app.MapPut("/api/employees/{id}/dispatch-hold", (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, HVO.AgentControl.RemoteWorker.EmployeeDispatchHoldUpdate request) =>
 {
@@ -647,7 +679,12 @@ app.MapPut("/api/employees/{id}/dispatch-hold", (HttpContext context, AcpControl
     try { return Results.Ok(coordinator.SetDispatchHold(id, request)); }
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
-    .WithName("SetEmployeeDispatchHold").WithTags("Employee tasks");
+    .WithName("SetEmployeeDispatchHold").WithTags("Employee tasks")
+    .WithSummary("Sets or clears only the owner's manual dispatch hold for one managed employee.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeDispatchHoldDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized).ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound).ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity).ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 // Owner-only, employee-scoped orientation control for a managed employee. These
 // reuse the same remote coordination machinery a hire drives: compose the current
@@ -2503,6 +2540,7 @@ public partial class Program
             or HVO.AgentControl.RemoteWorker.WorkerReadUncertainException
             or HVO.AgentControl.RemoteWorker.WorkerRemoteException
             or HVO.AgentControl.RemoteWorker.WorkerReconciliationInvalidException
+            or HVO.AgentControl.RemoteWorker.ForeignResourceException
             or HVO.AgentControl.Worker.WorkerOperationUncertainException
             or KeyNotFoundException;
 
@@ -2540,6 +2578,10 @@ public partial class Program
             statusCode: StatusCodes.Status409Conflict,
             title: "Worker control configuration is invalid.",
             detail: "Worker control is enabled but its configuration is not usable, so no task was dispatched."),
+        HVO.AgentControl.RemoteWorker.ForeignResourceException => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Worker resource ownership conflicted.",
+            detail: "The resource is not exactly owned by this controller operation."),
         HVO.AgentControl.RemoteWorker.RemoteWorkerUnavailableException unavailable => Results.Problem(
             statusCode: unavailable.Transport ? StatusCodes.Status502BadGateway : StatusCodes.Status503ServiceUnavailable,
             title: unavailable.Transport ? "Worker execution target is unreachable." : "Worker execution target is unavailable.",

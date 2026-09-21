@@ -427,8 +427,12 @@ public static class PortalOrganizationReadModel
     /// task has been recorded. Never throws for an unknown employee and never
     /// mutates anything.
     /// </summary>
-    private static IReadOnlyList<EmployeeTaskDetail> BuildRecentTasks(OrganizationStore? store, string employeeId) =>
-        store is null ? [] : store.ListEmployeeTaskDetails(employeeId, 10);
+    private static IReadOnlyList<EmployeeTaskDetail> BuildRecentTasks(OrganizationStore? store, string employeeId)
+    {
+        if (store is null) return [];
+        try { return store.ListEmployeeTaskDetails(employeeId, 10); }
+        catch (OrganizationStoreCorruptException) { return []; }
+    }
 
     /// <summary>
     /// The profile revision status for one employee, or an all-null projection

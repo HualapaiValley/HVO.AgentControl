@@ -118,21 +118,36 @@ public sealed class EmployeeTaskCoordinator(AcpControlHost control, WorkerConnec
         var volumeResource = store.ListWorkerResources(enrollment.WorkerId).SingleOrDefault(resource => resource.ResourceKind == "volume" && resource.ResourceName == enrollment.WorkspaceVolumeName && resource.State == "present")
             ?? throw new OrganizationConcurrencyException("The exact workspace volume is not durably present.");
         var baseDigest = configured?.Value.ApprovedImageDigest ?? string.Empty;
+        if (string.IsNullOrEmpty(baseDigest)) throw new WorkerControlConfigurationException("The approved worker base digest is unavailable.");
         // Named-volume ownership labels are immutable from initial provisioning;
         // a later profile rebuild replaces only the container and image target.
         var volumeProfileRevision = resources.ApprovedImageDigest == baseDigest ? null : resources.ApprovedProfileRevisionId;
         var identity = new WorkerResourceIdentity(enrollment.OrganizationId, enrollment.ControllerId, enrollment.HostId, enrollment.WorkerId, enrollment.RuntimeBindingId, volumeResource.OperationId, volumeProfileRevision);
         var relativeRoot = detail.Spec.WorkspaceRoot[OrganizationStore.TaskWorkspaceRootPrefix.Length..];
-        if (string.IsNullOrEmpty(baseDigest)) throw new WorkerControlConfigurationException("The approved worker base digest is unavailable.");
+        var applied = store.ListEmployeeRebuilds(enrollment.WorkerId)
+            .Where(item => item.State == EmployeeRebuildStates.Applied)
+            .OrderByDescending(item => item.UpdatedAt)
+            .ThenByDescending(item => item.Id, StringComparer.Ordinal)
+            .FirstOrDefault();
+        var targetDigest = applied?.ToImageDigest ?? enrollment.ExpectedImageDigest;
+        var targetPlatform = applied?.ToPlatform ?? enrollment.ExpectedPlatform;
+        var targetRevision = applied?.ToProfileRevisionId
+            ?? (targetDigest == baseDigest ? null : resources.ApprovedProfileRevisionId);
+        if (targetRevision is null)
+            throw new OrganizationValidationException("Task verification requires a verified profile image, not the worker base image.");
         var approved = store.ListApprovedImageDigests(enrollment.HostId, baseDigest);
         var pending = store.BeginWorkerTaskVerification(taskId, expectedTaskRevision, "workspace-task-verify-v1");
         HostTaskVerification outcome;
         try
         {
-            var spec = new WorkspaceVerifySpec(identity, enrollment.WorkspaceVolumeName, relativeRoot, detail.Spec.AllowedPaths, detail.Spec.TestRecipeId, detail.Spec.MaximumSeconds, 1024, 64L * 1024 * 1024, enrollment.ExpectedImageDigest, enrollment.ExpectedPlatform, approved, resources.MemoryLimitMiB * 1024L * 1024L, resources.CpuLimit);
+            var spec = new WorkspaceVerifySpec(identity, enrollment.WorkspaceVolumeName, relativeRoot, detail.Spec.AllowedPaths, detail.Spec.TestRecipeId, detail.Spec.MaximumSeconds, 384, 64L * 1024 * 1024, targetDigest, targetPlatform, approved, resources.MemoryLimitMiB * 1024L * 1024L, resources.CpuLimit);
             outcome = await (provisioner ?? throw new WorkerControlConfigurationException("Workspace verification operations are unavailable.")).WorkspaceVerifyAsync(new ExecutionTarget(ExecutionHosts.LocalDockerId, "local-docker", null), spec, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            CompleteVerificationSafely(store, pending, new(WorkerTaskVerificationStates.Uncertain, null, null, null, "verification-cancelled-uncertain"));
+            throw;
+        }
         catch (WorkerControlConfigurationException)
         {
             outcome = new(WorkerTaskVerificationStates.Failed, null, null, null, "verification-request-refused");
@@ -141,7 +156,7 @@ public sealed class EmployeeTaskCoordinator(AcpControlHost control, WorkerConnec
         {
             outcome = new(WorkerTaskVerificationStates.Uncertain, null, null, null, "verification-transport-uncertain");
         }
-        store.CompleteWorkerTaskVerification(pending.Id, pending.Revision, outcome with { DeniedActionJson = null });
+        CompleteVerificationSafely(store, pending, outcome with { DeniedActionJson = null });
         return store.GetEmployeeTaskDetail(taskId) ?? throw new OrganizationStoreCorruptException("The verified task could not be re-read.");
     }
 
@@ -191,6 +206,19 @@ public sealed class EmployeeTaskCoordinator(AcpControlHost control, WorkerConnec
         return new EmployeeTaskCancellationDetail(cancellation, updated);
     }
 
+    private static void CompleteVerificationSafely(OrganizationStore store, WorkerTaskVerificationRecord pending, HostTaskVerification outcome)
+    {
+        try
+        {
+            store.CompleteWorkerTaskVerification(pending.Id, pending.Revision, outcome);
+        }
+        catch (OrganizationValidationException) when (outcome.State != WorkerTaskVerificationStates.Uncertain)
+        {
+            store.CompleteWorkerTaskVerification(pending.Id, pending.Revision, new HostTaskVerification(
+                WorkerTaskVerificationStates.Uncertain, null, null, null, "verification-evidence-invalid"));
+        }
+    }
+
     private static void EnsurePreReadEligible(OrganizationStore store, EmployeeSummary employee, RemoteWorkerSnapshot remote)
     {
         if (employee.Orientation?.State != OrientationStates.Comprehended)
@@ -208,7 +236,11 @@ public sealed class EmployeeTaskCoordinator(AcpControlHost control, WorkerConnec
             throw new OrganizationConcurrencyException("The worker is not enrolled, authenticated, running and free of recovery obligations.");
     }
 
-    private static WorkerTaskSpec BuildSpec(EmployeeTaskSpecInput input) => OrganizationStore.NormalizeWorkerTaskSpec(new WorkerTaskSpec(
+    private static WorkerTaskSpec BuildSpec(EmployeeTaskSpecInput input)
+    {
+        if (string.Equals(input.WorkspaceRoot?.Trim(), "/workspace/legacy-request", StringComparison.Ordinal))
+            throw new OrganizationValidationException("The legacy compatibility workspace is not accepted by the public task API.");
+        return OrganizationStore.NormalizeWorkerTaskSpec(new WorkerTaskSpec(
         input.Description ?? string.Empty,
         input.WorkspaceRoot ?? string.Empty,
         input.AllowedPaths ?? [],
@@ -218,6 +250,7 @@ public sealed class EmployeeTaskCoordinator(AcpControlHost control, WorkerConnec
         input.TestRecipeId,
         Version: 1,
         MaximumTurns: 1));
+    }
 
     private OrganizationStore Store() => control.Organization ?? throw new OrganizationStoreException("Organization store unavailable.");
 

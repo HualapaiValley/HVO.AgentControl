@@ -29,6 +29,22 @@ public sealed class EmployeeTaskCoordinatorTests
             WorkerTaskTestRecipes.DotnetTestRelease);
 
     [Fact]
+    public async Task PublicTaskInputRejectsTheLegacyCompatibilityWorkspace()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        await using var manager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var coordinator = Coordinator(fixture, manager);
+        var legacy = SpecInput() with { WorkspaceRoot = "/workspace/legacy-request" };
+
+        await Assert.ThrowsAsync<OrganizationValidationException>(() => coordinator.CreateAsync(
+            fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-legacy", legacy), CancellationToken.None));
+        Assert.Equal(0, session.SubmitCount);
+    }
+
+    [Fact]
     public async Task SuccessfulDispatchPersistsTheCanonicalSpecAndLeavesTheTaskRunning()
     {
         using var fixture = new RemoteStoreFixture();
@@ -195,7 +211,7 @@ public sealed class EmployeeTaskCoordinatorTests
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarded", "Completed");
         var task = fixture.Store.GetWorkerTask(request.TaskId)!;
         task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", ["src/a.cs"], [new ModelTaskTestReport(WorkerTaskTestRecipes.DotnetTestRelease, "passed", "dotnet test passed")], null, []));
-        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "host/1");
+        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
 
         var detail = Assert.Single(fixture.Store.ListEmployeeTaskDetails(fixture.EmployeeId, 10));
 

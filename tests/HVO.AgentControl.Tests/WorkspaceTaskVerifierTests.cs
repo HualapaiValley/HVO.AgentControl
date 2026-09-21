@@ -35,6 +35,28 @@ public sealed class WorkspaceTaskVerifierTests
         Assert.Equal("file-bytes-exceeded", Run(workspace, fake, "project", ["src"], 10, 1).GetProperty("failureDetail").GetString());
     }
 
+    [Fact]
+    public void VerifierRunsRealDotnetAgainstWritableCopyOfReadOnlySource()
+    {
+        if (!File.Exists("/usr/bin/dotnet")) return;
+        using var temp = new TemporaryDirectory();
+        var workspace = Path.Combine(temp.Path, "workspace");
+        var project = Path.Combine(workspace, "project");
+        Directory.CreateDirectory(project);
+        File.WriteAllText(Path.Combine(project, "CopyFixture.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        File.WriteAllText(Path.Combine(project, "Class1.cs"), "public static class Class1 { public static int Value => 1; }");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(Path.Combine(project, "CopyFixture.csproj"), UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+            File.SetUnixFileMode(Path.Combine(project, "Class1.cs"), UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        }
+
+        var result = RunReal(workspace, "project", ["."], 20, 1024 * 1024, 60);
+        Assert.Equal("passed", result.GetProperty("state").GetString());
+        Assert.False(Directory.Exists(Path.Combine(project, "obj")));
+        Assert.False(Directory.Exists(Path.Combine(project, "bin")));
+    }
+
     [Theory]
     [InlineData("pass", 0, "passed", false)]
     [InlineData("fail", 0, "failed", false)]
@@ -58,9 +80,13 @@ public sealed class WorkspaceTaskVerifierTests
     private static JsonElement Run(string workspace, string fakeDotnet, string root, string[] allowed, int maxFiles, long maxBytes, int timeout = 10, string mode = "pass")
     {
         var script = Path.Combine(ControllerIsolationLayoutTests.RepositoryRoot(), "src/container/workspace-task-verify.py");
-        var shadow = Path.Combine(Path.GetDirectoryName(fakeDotnet)!, "shadow.py");
+        var testRoot = Directory.GetParent(workspace)!.FullName;
+        var shadow = Path.Combine(testRoot, "shadow.py");
+        var copyRoot = Path.Combine(testRoot, "copy-" + Guid.NewGuid().ToString("N"));
         var text = File.ReadAllText(script).Replace("WORKSPACE = \"/workspace\"", $"WORKSPACE = {JsonSerializer.Serialize(workspace)}", StringComparison.Ordinal)
-            .Replace("\"/opt/dotnet-sdk/dotnet\"", JsonSerializer.Serialize(fakeDotnet), StringComparison.Ordinal);
+            .Replace("COPY_ROOT = \"/tmp/workspace-copy\"", $"COPY_ROOT = {JsonSerializer.Serialize(copyRoot)}", StringComparison.Ordinal)
+            .Replace("DOTNET = \"/usr/bin/dotnet\"", "DOTNET = \"/usr/bin/python3\"", StringComparison.Ordinal)
+            .Replace("argv = [DOTNET, \"test\", \"--configuration\", \"Release\"]", $"argv = [DOTNET, {JsonSerializer.Serialize(fakeDotnet)}]", StringComparison.Ordinal);
         File.WriteAllText(shadow, text);
         using var process = new Process { StartInfo = new ProcessStartInfo("python3") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false } };
         foreach (var value in new[] { "-I", "-S", shadow, "--root", root, "--recipe", "dotnet-test-release", "--maximum-seconds", timeout.ToString(), "--max-files", maxFiles.ToString(), "--max-bytes", maxBytes.ToString() }) process.StartInfo.ArgumentList.Add(value);
@@ -76,19 +102,46 @@ public sealed class WorkspaceTaskVerifierTests
         return JsonDocument.Parse(output).RootElement.Clone();
     }
 
+    private static JsonElement RunReal(string workspace, string root, string[] allowed, int maxFiles, long maxBytes, int timeout)
+    {
+        var script = Path.Combine(ControllerIsolationLayoutTests.RepositoryRoot(), "src/container/workspace-task-verify.py");
+        var shadow = Path.Combine(Path.GetDirectoryName(workspace)!, "real-shadow.py");
+        var copyRoot = Path.Combine(Path.GetDirectoryName(workspace)!, "real-copy");
+        var text = File.ReadAllText(script)
+            .Replace("WORKSPACE = \"/workspace\"", $"WORKSPACE = {JsonSerializer.Serialize(workspace)}", StringComparison.Ordinal)
+            .Replace("COPY_ROOT = \"/tmp/workspace-copy\"", $"COPY_ROOT = {JsonSerializer.Serialize(copyRoot)}", StringComparison.Ordinal)
+            .Replace("value.st_uid != 0", "value.st_uid != os.stat(DOTNET).st_uid", StringComparison.Ordinal);
+        File.WriteAllText(shadow, text);
+        using var process = new Process { StartInfo = new ProcessStartInfo("python3") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false } };
+        foreach (var value in new[] { "-I", "-S", shadow, "--root", root, "--recipe", "dotnet-test-release", "--maximum-seconds", timeout.ToString(), "--max-files", maxFiles.ToString(), "--max-bytes", maxBytes.ToString() }) process.StartInfo.ArgumentList.Add(value);
+        foreach (var path in allowed) { process.StartInfo.ArgumentList.Add("--allowed-path"); process.StartInfo.ArgumentList.Add(path); }
+        process.Start();
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        Assert.True(process.WaitForExit((timeout + 10) * 1000), "real verifier timed out");
+        Assert.Equal(string.Empty, error);
+        return JsonDocument.Parse(output).RootElement.Clone();
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory() { Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "workspace-verifier-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Path); }
         public string Path { get; }
-        public void Dispose() { try { Directory.Delete(Path, true); } catch (IOException) { } }
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(Path, true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     private static string FakeDotnet(string directory, string mode)
     {
         _ = mode;
-        var source = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fake-dotnet.py");
-        var path = Path.Combine(directory, "dotnet");
-        File.CreateSymbolicLink(path, source);
-        return path;
+        _ = directory;
+        return Path.Combine(ControllerIsolationLayoutTests.RepositoryRoot(), "tests/HVO.AgentControl.Tests/Fixtures/fake-dotnet.py");
     }
 }
