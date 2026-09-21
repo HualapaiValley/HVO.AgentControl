@@ -316,6 +316,23 @@ public sealed partial class OrganizationStore
                 using var transaction = connection.BeginTransaction();
                 var task = ReadWorkerTaskIn(connection, transaction, taskId)
                     ?? throw new OrganizationNotFoundException($"Worker task '{taskId}' does not exist.");
+
+                // The current attempt is resolved before the eligibility checks so
+                // a Pending or Passed replay is idempotent and never depends on the
+                // hold, the task revision, or any other task's verification state.
+                var existing = ReadWorkerTaskVerificationIn(connection, transaction, taskId);
+                if (existing?.State is WorkerTaskVerificationStates.Pending or WorkerTaskVerificationStates.Passed)
+                {
+                    // A Pending replay owns the exact binding hold. If the hold was
+                    // cleared out from under it (for example an operator action),
+                    // reacquire the same reason/detail so dispatch stays fenced for
+                    // the whole pending attempt rather than silently freeing it.
+                    if (existing.State == WorkerTaskVerificationStates.Pending)
+                        UpsertTaskVerificationHold(connection, transaction, task.RuntimeBindingId, existing.VerifierVersion);
+                    transaction.Commit();
+                    return existing;
+                }
+
                 if (!string.Equals(task.State, WorkerTaskStates.Completed, StringComparison.Ordinal))
                     throw new OrganizationValidationException("Only a completed task can begin host verification.");
                 if (task.ModelReportHash is null)
@@ -323,11 +340,25 @@ public sealed partial class OrganizationStore
                 if (task.Revision != expectedTaskRevision)
                     throw new OrganizationConcurrencyException("The worker task changed; reload and retry with its current revision.");
 
-                var existing = ReadWorkerTaskVerificationIn(connection, transaction, taskId);
-                if (existing?.State is WorkerTaskVerificationStates.Pending or WorkerTaskVerificationStates.Passed)
+                // A binding carries at most one Pending verification: its single
+                // task-verification hold fences the whole binding. Before creating a
+                // new attempt, reject any Pending verification whose task resolves to
+                // the same binding. This is checked inside the transaction after the
+                // binding's task lock is taken, so concurrent Begin calls serialize
+                // on SQLite's single writer and cannot both observe an empty set.
+                using (var conflict = connection.CreateCommand())
                 {
-                    transaction.Commit();
-                    return existing;
+                    conflict.Transaction = transaction;
+                    conflict.CommandText =
+                        """
+                        SELECT COUNT(*)
+                        FROM worker_task_verifications v
+                        JOIN worker_tasks other ON other.id=v.task_id
+                        WHERE v.state='Pending' AND v.task_id<>$task AND other.runtime_binding_id=$binding
+                        """;
+                    Add(conflict, ("$task", task.Id), ("$binding", task.RuntimeBindingId));
+                    if (Convert.ToInt64(conflict.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                        throw new OrganizationConcurrencyException("Another host verification is already pending for this binding.");
                 }
 
                 using (var gate = connection.CreateCommand())
@@ -344,7 +375,7 @@ public sealed partial class OrganizationStore
                           AND w.ownership_epoch=r.ownership_epoch AND w.process_generation=r.process_generation
                           AND NOT EXISTS (
                               SELECT 1 FROM worker_requests active
-                              WHERE active.worker_id=r.worker_id AND active.state IN ('Intent','Forwarding','Forwarded','Uncertain','Interrupted'))
+                              WHERE active.worker_id=r.worker_id AND active.state IN ('Intent','Forwarding','Forwarded','Uncertain'))
                         """;
                     Add(gate, ("$task", task.Id), ("$employee", task.EmployeeId), ("$binding", task.RuntimeBindingId), ("$worker", task.WorkerId));
                     if (Convert.ToInt64(gate.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
@@ -362,18 +393,38 @@ public sealed partial class OrganizationStore
                         id, task_id, state, manifest_json, manifest_hash, test_summary_json,
                         test_summary_hash, denied_action_json, denied_action_hash,
                         verifier_version, failure_detail, verified_at, created_at, updated_at, revision)
-                    VALUES ($id, $task, 'Pending', NULL, NULL, NULL, NULL, NULL, NULL, $version, NULL, NULL, $now, $now, 1);
-                    INSERT INTO dispatch_holds (id,runtime_binding_id,reason,active,detail,created_at,cleared_at,revision)
-                    VALUES ($hold,$binding,'task-verification',1,$detail,$now,NULL,1)
-                    ON CONFLICT(runtime_binding_id,reason) DO UPDATE SET
-                        active=1,detail=excluded.detail,cleared_at=NULL,revision=dispatch_holds.revision+1
+                    VALUES ($id, $task, 'Pending', NULL, NULL, NULL, NULL, NULL, NULL, $version, NULL, NULL, $now, $now, 1)
                     """,
-                    ("$id", id), ("$task", taskId), ("$version", version), ("$now", now),
-                    ("$hold", OrganizationIds.NewHoldId()), ("$binding", task.RuntimeBindingId), ("$detail", version));
+                    ("$id", id), ("$task", taskId), ("$version", version), ("$now", now));
+                UpsertTaskVerificationHold(connection, transaction, task.RuntimeBindingId, version);
                 transaction.Commit();
                 return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
             }
         });
+    }
+
+    /// <summary>
+    /// Activates the single internal <c>task-verification</c> hold for a binding
+    /// with the exact verifier version as its detail. The reason is unique per
+    /// binding, so a replayed Pending attempt reacquires (and a new attempt
+    /// replaces) the same row rather than accumulating holds. Completion and
+    /// restart reconciliation clear the hold only on the exact detail match.
+    /// </summary>
+    private static void UpsertTaskVerificationHold(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string bindingId,
+        string verifierVersion)
+    {
+        Execute(connection, transaction,
+            """
+            INSERT INTO dispatch_holds (id,runtime_binding_id,reason,active,detail,created_at,cleared_at,revision)
+            VALUES ($hold,$binding,'task-verification',1,$detail,$now,NULL,1)
+            ON CONFLICT(runtime_binding_id,reason) DO UPDATE SET
+                active=1,detail=excluded.detail,cleared_at=NULL,revision=dispatch_holds.revision+1
+            """,
+            ("$hold", OrganizationIds.NewHoldId()), ("$binding", bindingId),
+            ("$detail", verifierVersion), ("$now", Timestamp()));
     }
 
     /// <summary>

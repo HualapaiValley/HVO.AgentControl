@@ -1129,7 +1129,12 @@ hiring.
   `.task-nuget`, `bin` and `obj` files are never reported as authored changes.
   Only its `Passed` outcome moves the task to `Verified`; the store persists
   bounded manifest and test-summary hashes plus a sanitized failure, never the
-  raw evidence bytes or any secret.
+  raw evidence bytes or any secret. A pending attempt holds the whole binding: at
+  most one verification may be pending for a binding at a time, a second task's
+  attempt is refused before it creates any row, and the hold is cleared only when
+  that exact attempt completes or restart reconciliation marks it `Uncertain`.
+  `Interrupted` is a terminal request state, so a request stranded by a controller
+  restart never fences a later verification.
 - **Manual dispatch hold.** `PUT /api/employees/{id}/dispatch-hold` is
   owner-only, same-origin and employee-revision-bound. It sets or clears only
   the owner manual hold and never implies that stale or policy/recovery holds are

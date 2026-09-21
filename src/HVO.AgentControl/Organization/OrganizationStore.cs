@@ -571,7 +571,7 @@ public sealed partial class OrganizationStore : IDisposable
     // adds the host verification table. The frozen v12 statements stay intact for
     // exact-signature migration.
     private static readonly string[] OrientationSchemaV13Statements =
-        [.. OrientationSchemaV3Statements[..10], DispatchHoldsSchemaV13Statement, .. OrientationSchemaV3Statements[11..]];
+        ReplaceSchemaStatement(OrientationSchemaV3Statements, "dispatch_holds", DispatchHoldsSchemaV13Statement);
 
     private static readonly string[] RemoteWorkerSchemaV13Statements =
         [
@@ -624,19 +624,7 @@ public sealed partial class OrganizationStore : IDisposable
         var expected = new Dictionary<(string Type, string Name), string>();
         foreach (var statement in statements)
         {
-            var match = System.Text.RegularExpressions.Regex.Match(
-                statement,
-                @"^\s*CREATE\s+(?:UNIQUE\s+)?(?<type>TABLE|INDEX|TRIGGER)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase
-                | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
-            if (!match.Success)
-            {
-                throw new InvalidOperationException(
-                    "Every schema statement must begin with CREATE TABLE, CREATE [UNIQUE] INDEX or CREATE TRIGGER.");
-            }
-
-            var type = match.Groups["type"].Value.ToLowerInvariant();
-            var name = match.Groups["name"].Value;
+            var (type, name) = SchemaStatementIdentity(statement);
             if (!expected.TryAdd((type, name), NormalizeSchemaSql(statement)))
             {
                 throw new InvalidOperationException(
@@ -645,6 +633,58 @@ public sealed partial class OrganizationStore : IDisposable
         }
 
         return expected;
+    }
+
+    /// <summary>
+    /// Returns a copy of <paramref name="statements"/> with the single statement
+    /// defining the named object replaced by <paramref name="replacement"/> at the
+    /// same position. Replacing by object name instead of a positional index keeps
+    /// the splice correct when unrelated statements are inserted before it.
+    /// </summary>
+    private static string[] ReplaceSchemaStatement(
+        IReadOnlyList<string> statements,
+        string name,
+        string replacement)
+    {
+        var result = statements.ToArray();
+        var found = -1;
+        for (var i = 0; i < result.Length; i++)
+        {
+            var (_, candidate) = SchemaStatementIdentity(result[i]);
+            if (!string.Equals(candidate, name, StringComparison.Ordinal)) continue;
+            if (found >= 0)
+            {
+                throw new InvalidOperationException(
+                    $"Schema statements contain duplicate object '{name}'.");
+            }
+
+            found = i;
+        }
+
+        if (found < 0)
+        {
+            throw new InvalidOperationException(
+                $"Schema statements do not contain an object named '{name}'.");
+        }
+
+        result[found] = replacement;
+        return result;
+    }
+
+    private static (string Type, string Name) SchemaStatementIdentity(string statement)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            statement,
+            @"^\s*CREATE\s+(?:UNIQUE\s+)?(?<type>TABLE|INDEX|TRIGGER)\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            throw new InvalidOperationException(
+                "Every schema statement must begin with CREATE TABLE, CREATE [UNIQUE] INDEX or CREATE TRIGGER.");
+        }
+
+        return (match.Groups["type"].Value.ToLowerInvariant(), match.Groups["name"].Value);
     }
 
     private static string NormalizeSchemaSql(string sql) =>

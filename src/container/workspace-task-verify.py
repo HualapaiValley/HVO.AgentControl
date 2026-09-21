@@ -17,6 +17,14 @@ OUTPUT_LIMIT = 64 * 1024
 MANIFEST_LIMIT = 64 * 1024
 MAX_FILES_LIMIT = 384
 MAX_COPY_FILES_LIMIT = 4096
+# The copy tree and the dotnet restore/build outputs share the verifier's /tmp
+# tmpfs (COPY_ROOT, NUGET_PACKAGES, TMPDIR), which Docker sizes at 256 MiB and
+# which counts against the verification container's --memory (the worker's own
+# frozen memory limit, which can be as low as 512 MiB). Raising this cap toward
+# 256 MiB would need a >=512 MiB tmpfs and would risk the memory cgroup before
+# the bounded #220 acceptance project (small authored sources plus generated
+# restore inputs) could ever reach it. Keep 128 MiB: large enough for the
+# accepted project and safely inside both the tmpfs and the smallest container.
 MAX_COPY_BYTES_LIMIT = 128 * 1024 * 1024
 EXCLUDED_MANIFEST_DIRECTORIES = {".git", ".task-nuget", "bin", "obj"}
 GENERATED_DIRECTORIES = {".task-nuget", "bin", "obj"}

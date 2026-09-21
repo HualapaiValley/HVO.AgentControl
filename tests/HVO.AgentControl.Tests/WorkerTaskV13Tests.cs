@@ -296,8 +296,155 @@ public sealed class WorkerTaskV13Tests
         Assert.Throws<SqliteException>(() => Execute(connection, $"INSERT INTO worker_task_verifications (id, task_id, state, verifier_version, created_at, updated_at, revision) VALUES ('{verification.Id}', '{task.Id}', 'Pending', 'workspace-task-verify-v1.3', '2026-01-01T00:00:00.0000000+00:00', '2026-01-01T00:00:00.0000000+00:00', 1)"));
     }
 
-    // -------------------------------------------------------- migration v12 ----
+    // ------------------------------------------- binding verification fencing ----
 
+    [Fact]
+    public void PassedVerificationIsIdempotentAfterTheTaskIsVerified()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        var task = CompleteTask(fixture);
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
+        var verification = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
+        var passed = fixture.Store.CompleteWorkerTaskVerification(verification.Id, verification.Revision, new HostTaskVerification(
+            WorkerTaskVerificationStates.Passed, """{"files":0}""", """{"passed":0}""", null, null));
+        Assert.Equal("Verified", fixture.Store.GetWorkerTask(task.Id)!.State);
+
+        // A replay returns the same Passed attempt even though the task is now
+        // Verified and its revision has advanced.
+        var replay = fixture.Store.BeginWorkerTaskVerification(task.Id, fixture.Store.GetWorkerTask(task.Id)!.Revision, "workspace-task-verify-v1");
+        Assert.Equal(passed.Id, replay.Id);
+        Assert.Equal(WorkerTaskVerificationStates.Passed, replay.State);
+        Assert.Equal(1L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM worker_task_verifications WHERE task_id='" + task.Id + "'"));
+    }
+
+    [Fact]
+    public void InterruptedIsTerminalAndNeverBlocksAVerification()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        fixture.CreateEnrolledAndReady();
+
+        // The first task's Intent is stranded by a controller restart: it becomes
+        // the terminal Interrupted request and its task becomes Uncertain.
+        var interrupted = fixture.BeginRequest("sha256:" + new string('d', 64));
+        Assert.Equal("Intent", interrupted.State);
+        Assert.Equal(1, fixture.Store.ReconcileControllerStartup());
+        var interruptedRequest = fixture.Store.GetWorkerRequest(interrupted.Id)!;
+        Assert.Equal("Interrupted", interruptedRequest.State);
+        Assert.Equal(WorkerTaskStates.Uncertain, fixture.Store.GetWorkerTask(interrupted.TaskId)!.State);
+
+        // A later task completes normally. The terminal Interrupted request is not
+        // an active request, so it must not fence the exact terminal request's
+        // verification.
+        var second = CompleteAnotherTask(fixture, "idem-after-interrupt-2", "second done");
+        var secondVerification = fixture.Store.BeginWorkerTaskVerification(second.Id, second.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, secondVerification.State);
+        fixture.Store.CompleteWorkerTaskVerification(secondVerification.Id, secondVerification.Revision, new HostTaskVerification(
+            WorkerTaskVerificationStates.Failed, null, null, null, "second-failed"));
+
+        // A third task likewise.
+        var third = CompleteAnotherTask(fixture, "idem-after-interrupt-3", "third done");
+        var thirdVerification = fixture.Store.BeginWorkerTaskVerification(third.Id, third.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, thirdVerification.State);
+
+        // The stranded Interrupted row is still present and was simply not treated
+        // as active; the exact terminal Completed request is what the gate requires.
+        Assert.Equal(1L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM worker_requests WHERE state='Interrupted'"));
+        Assert.Equal("Completed", fixture.Store.GetEmployeeTaskDetail(third.Id)!.Request!.State);
+    }
+
+    [Fact]
+    public void GenuinelyActiveRequestsStillBlockVerification()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        fixture.CreateEnrolledAndReady();
+        var completed = CompleteAnotherTask(fixture, "idem-active-block", "completed done");
+
+        // A genuinely active request for the same worker (Intent, Forwarding,
+        // Forwarded or Uncertain) still fences verification of an otherwise
+        // eligible completed task. Interrupted was removed from that set because
+        // it is terminal.
+        var active = fixture.Store.BeginWorkerRequest(new(
+            fixture.EmployeeId, fixture.BindingId, "wrk-a", fixture.SessionId, fixture.NativeSessionId,
+            "idem-active", "sha256:" + new string('d', 64), "sha256:" + new string('f', 64), 1, 1, "turn-active"), Spec());
+
+        Assert.Throws<OrganizationConcurrencyException>(() =>
+            fixture.Store.BeginWorkerTaskVerification(completed.Id, completed.Revision, "workspace-task-verify-v1"));
+
+        active = fixture.Store.TransitionWorkerRequest(active.Id, active.Revision, "Intent", "Forwarding");
+        Assert.Throws<OrganizationConcurrencyException>(() =>
+            fixture.Store.BeginWorkerTaskVerification(completed.Id, completed.Revision, "workspace-task-verify-v1"));
+
+        active = fixture.Store.TransitionWorkerRequest(active.Id, active.Revision, "Forwarding", "Forwarded");
+        Assert.Throws<OrganizationConcurrencyException>(() =>
+            fixture.Store.BeginWorkerTaskVerification(completed.Id, completed.Revision, "workspace-task-verify-v1"));
+
+        active = fixture.Store.TransitionWorkerRequest(active.Id, active.Revision, "Forwarded", "Uncertain");
+        Assert.Throws<OrganizationConcurrencyException>(() =>
+            fixture.Store.BeginWorkerTaskVerification(completed.Id, completed.Revision, "workspace-task-verify-v1"));
+
+        // Once the request reaches a terminal state the fence lifts.
+        fixture.Store.TransitionWorkerRequest(active.Id, active.Revision, "Uncertain", "Failed");
+        var verification = fixture.Store.BeginWorkerTaskVerification(completed.Id, completed.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, verification.State);
+    }
+
+    [Fact]
+    public void PendingVerificationFencesTheBindingAgainstASecondTask()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        fixture.CreateEnrolledAndReady();
+        var first = CompleteAnotherTask(fixture, "idem-fence-first", "first done");
+        var second = CompleteAnotherTask(fixture, "idem-fence-second", "second done");
+
+        var pending = fixture.Store.BeginWorkerTaskVerification(first.Id, first.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, pending.State);
+        Assert.Equal(1L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM dispatch_holds WHERE runtime_binding_id='" + fixture.BindingId + "' AND reason='task-verification' AND active=1 AND detail='" + pending.VerifierVersion + "'"));
+
+        // Dispatch is blocked for the whole pending attempt.
+        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.BeginWorkerRequest(new(
+            fixture.EmployeeId, fixture.BindingId, "wrk-a", fixture.SessionId, fixture.NativeSessionId,
+            "idem-blocked-by-held-verification", "sha256:" + new string('d', 64), "sha256:" + new string('f', 64), 1, 1, "turn-blocked"), Spec()));
+
+        // A second task on the same binding cannot begin while another task's
+        // verification holds it, and it must leave no attempt behind.
+        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.BeginWorkerTaskVerification(second.Id, second.Revision, "workspace-task-verify-v1"));
+        Assert.Null(fixture.Store.GetWorkerTaskVerification(second.Id));
+
+        // Completing the first attempt clears the hold and lets the second begin.
+        fixture.Store.CompleteWorkerTaskVerification(pending.Id, pending.Revision, new HostTaskVerification(
+            WorkerTaskVerificationStates.Failed, null, null, null, "first-failed"));
+        Assert.Equal(0L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM dispatch_holds WHERE runtime_binding_id='" + fixture.BindingId + "' AND reason='task-verification' AND active=1"));
+
+        var secondVerification = fixture.Store.BeginWorkerTaskVerification(second.Id, second.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, secondVerification.State);
+        Assert.Throws<OrganizationConcurrencyException>(() => fixture.Store.BeginWorkerRequest(new(
+            fixture.EmployeeId, fixture.BindingId, "wrk-a", fixture.SessionId, fixture.NativeSessionId,
+            "idem-blocked-by-second-verification", "sha256:" + new string('d', 64), "sha256:" + new string('f', 64), 1, 1, "turn-blocked-2"), Spec()));
+    }
+
+    [Fact]
+    public void StartupReconciliationClearsAPendingVerificationAndLetsAnotherTaskBegin()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        fixture.CreateEnrolledAndReady();
+        var first = CompleteAnotherTask(fixture, "idem-restart-first", "first done");
+        var second = CompleteAnotherTask(fixture, "idem-restart-second", "second done");
+
+        var pending = fixture.Store.BeginWorkerTaskVerification(first.Id, first.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, pending.State);
+
+        Assert.Equal(1, fixture.Store.ReconcileControllerStartup());
+        var recovered = fixture.Store.GetWorkerTaskVerification(first.Id)!;
+        Assert.Equal(WorkerTaskVerificationStates.Uncertain, recovered.State);
+        Assert.Equal("controller-restart-during-verification", recovered.FailureDetail);
+        Assert.Equal(0L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM dispatch_holds WHERE runtime_binding_id='" + fixture.BindingId + "' AND reason='task-verification' AND active=1"));
+
+        var secondVerification = fixture.Store.BeginWorkerTaskVerification(second.Id, second.Revision, "workspace-task-verify-v1");
+        Assert.Equal(WorkerTaskVerificationStates.Pending, secondVerification.State);
+        Assert.Equal(0L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM worker_task_verifications WHERE task_id='" + first.Id + "' AND state='Pending'"));
+    }
+
+    // -------------------------------------------------------- migration v12 ----
     [Fact]
     public void FaultAfterV12BackupBeforeV13MigrationRetainsRecoveryEvidenceAndRestartsCleanly()
     {
@@ -513,6 +660,23 @@ public sealed class WorkerTaskV13Tests
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
         request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarded", "Completed");
         return fixture.Store.GetWorkerTask(request.TaskId)!;
+    }
+
+    /// <summary>
+    /// Starts one additional task on the fixture's binding, advances its exact
+    /// request to Completed and records a model report, returning the completed
+    /// task. The caller must have already made the fixture eligible.
+    /// </summary>
+    private static WorkerTaskRecord CompleteAnotherTask(RemoteWorkerControlTests.RemoteStoreFixture fixture, string key, string reportSummary)
+    {
+        var request = fixture.Store.BeginWorkerRequest(new(
+            fixture.EmployeeId, fixture.BindingId, "wrk-a", fixture.SessionId, fixture.NativeSessionId,
+            key, "sha256:" + new string('d', 64), "sha256:" + new string('f', 64), 1, 1, "turn-" + key), Spec());
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Intent", "Forwarding");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarding", "Forwarded");
+        request = fixture.Store.TransitionWorkerRequest(request.Id, request.Revision, "Forwarded", "Completed");
+        var task = fixture.Store.GetWorkerTask(request.TaskId)!;
+        return fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport(reportSummary, [], [], null, []));
     }
 
     private static SqliteConnection Raw(string path)

@@ -566,11 +566,11 @@ app.MapGet("/api/employees/{id}", (AcpControlHost host, IRemoteWorkerStatusProvi
     .ProducesProblem(StatusCodes.Status404NotFound)
     .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
-// Owner-only employee-scoped task surface (#220 slice B). The caller states the
-// employee revision it acted on and an idempotency key; the controller resolves
-// the exact managed binding, session, worker and ownership epoch server-side and
-// dispatches a host-generated prompt from the bounded task specification. No
-// caller-supplied binding, worker or session identity is accepted anywhere here.
+// Owner-only employee-scoped task surface (#220). The caller states the employee
+// revision it acted on and an idempotency key; the controller resolves the exact
+// managed binding, session, worker and ownership epoch server-side and dispatches
+// a host-generated prompt from the bounded task specification. No caller-supplied
+// binding, worker or session identity is accepted by these endpoints.
 app.MapPost("/api/employees/{id}/tasks", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeTaskCoordinator coordinator, string id, HVO.AgentControl.RemoteWorker.EmployeeTaskCreate request) =>
 {
     if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedEmployeeRevision < 1
