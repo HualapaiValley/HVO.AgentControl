@@ -14,6 +14,7 @@ public sealed class WorkspaceTaskVerifierTests
         Assert.Contains("DOTNET_ROOT = \"/opt/dotnet-sdk\"", script, StringComparison.Ordinal);
         Assert.Contains("\"--no-restore\"", script, StringComparison.Ordinal);
         Assert.Contains("NUGET_PACKAGES\": os.path.join(root, \".task-nuget\")", script, StringComparison.Ordinal);
+        Assert.Contains("value.st_uid != 0 or value.st_mode & 0o022", script, StringComparison.Ordinal);
         Assert.DoesNotContain("DOTNET = \"/usr/bin/dotnet\"", script, StringComparison.Ordinal);
     }
 
@@ -143,7 +144,7 @@ public sealed class WorkspaceTaskVerifierTests
             .Replace("COPY_ROOT = \"/tmp/workspace-copy\"", $"COPY_ROOT = {JsonSerializer.Serialize(copyRoot)}", StringComparison.Ordinal)
             .Replace("DOTNET = \"/opt/dotnet-sdk/dotnet\"", $"DOTNET = {JsonSerializer.Serialize(hostDotnet)}", StringComparison.Ordinal)
             .Replace("DOTNET_ROOT = \"/opt/dotnet-sdk\"", $"DOTNET_ROOT = {JsonSerializer.Serialize(dotnetRoot)}", StringComparison.Ordinal)
-            .Replace("value.st_uid != 0", "value.st_uid != os.stat(DOTNET).st_uid", StringComparison.Ordinal);
+            .Replace("value.st_uid != 0 or value.st_mode & 0o022", "False", StringComparison.Ordinal);
         File.WriteAllText(shadow, text);
         using var process = new Process { StartInfo = new ProcessStartInfo("python3") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false } };
         foreach (var value in new[] { "-I", "-S", shadow, "--root", root, "--recipe", "dotnet-test-release", "--maximum-seconds", timeout.ToString(), "--max-files", maxFiles.ToString(), "--max-bytes", maxBytes.ToString() }) process.StartInfo.ArgumentList.Add(value);
