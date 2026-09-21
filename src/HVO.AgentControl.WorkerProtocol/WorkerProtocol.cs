@@ -43,10 +43,9 @@ public static class WorkerProtocol
 
     /// <summary>
     /// The maximum total UTF-8 bytes of the text carried by one
-    /// <c>session/prompt</c> content-block array. It is deliberately well under
-    /// <see cref="MaxControlFrameBytes"/> so the prompt, envelope and framing
-    /// always fit the authenticated bridge frame limit, while leaving room for
-    /// the bounded comprehension prompt (artifact plus template).
+    /// <c>session/prompt</c> content-block array. This bounds decoded source text;
+    /// the controller's stricter prompt limits keep its JSON-escaped envelope
+    /// inside the authenticated bridge frame limit.
     /// </summary>
     public const int MaxPromptContentBytes = 256 * 1024;
 
