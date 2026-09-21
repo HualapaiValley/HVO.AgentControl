@@ -399,6 +399,19 @@ public sealed class ApiStandardsTests : IClassFixture<DisabledRuntimeFactory>
             .GetProperty("workerControlValidatedScope");
         Assert.Equal("string", scopeProperty.GetProperty("type").GetString());
 
+        // The task-control capability flags are exposed in the same schema, and the
+        // scope property is nullable because #220 is not operationally validated.
+        var taskProperties = root.GetProperty("components").GetProperty("schemas")
+            .GetProperty(schemaName).GetProperty("properties");
+        Assert.Equal("boolean", taskProperties.GetProperty("taskControlImplemented").GetProperty("type").GetString());
+        Assert.Equal("boolean", taskProperties.GetProperty("taskControlOperationallyValidated").GetProperty("type").GetString());
+        var taskScope = taskProperties.GetProperty("taskControlValidatedScope");
+        var taskScopeType = taskScope.GetProperty("type");
+        var taskScopeIsString = taskScopeType.ValueKind == JsonValueKind.String
+            ? taskScopeType.GetString() == "string"
+            : taskScopeType.EnumerateArray().Any(item => item.GetString() == "string");
+        Assert.True(taskScopeIsString, taskScope.GetRawText());
+
         // No owner auth configured, so no security scheme and no global requirement.
         Assert.False(root.TryGetProperty("components", out var components)
             && components.TryGetProperty("securitySchemes", out _));

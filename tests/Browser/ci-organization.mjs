@@ -185,13 +185,21 @@ try {
   await page.press('[data-employee-search]', 'Enter');
   record('pressing Enter in employee filters preserves URL, state, and results', page.url() === directoryUrl && await page.inputValue('[data-employee-search]') === 'no matching employee' && (await page.locator('[data-employee-directory]').innerText()).includes('No employees match'), { directoryUrl, currentUrl: page.url() });
   await page.fill('[data-employee-search]', ''); const employeeDetailPath = await page.locator('[data-employee-directory] a').first().getAttribute('href');
-  const routedEmployeeId = employeeDetailPath.split('/').pop(); let rebuildBody = null;
+  const routedEmployeeId = employeeDetailPath.split('/').pop(); let rebuildBody = null; let taskBody = null; let taskActionPaths = []; let holdBody = null;
   await page.route(`**/api/employees/${routedEmployeeId}`, async (route) => {
     const response = await route.fetch(); const body = await response.json();
     await route.fulfill({ response, json: { ...body, revision: 1, profileStatus: { currentProfileId: 'prof-browser', currentProfileDisplayName: 'Browser profile', currentProfileRevisionId: 'prev-browser-1', currentRevisionNumber: 1, currentImageDigest: `sha256:${'1'.repeat(64)}`, currentPlatform: 'linux/amd64', workerId: 'wrk-browser', hostId: 'local-docker', newerRevisionAvailable: true, newerRevisionId: 'prev-browser-2', newerRevisionNumber: 2, activeRebuildState: null, activeRebuildId: null } } });
   });
   await page.route(`**/api/employees/${routedEmployeeId}/rebuilds`, (route) => route.fulfill({ json: [{ id: 'reb-browser-applied', state: 'Applied', toProfileRevisionId: 'prev-browser-2', resetWorkspace: false, resetHome: false, failureSummary: null, updatedAt: '2026-09-19T00:00:00Z' }] }));
   await page.route(`**/api/employees/${routedEmployeeId}/rebuild`, async (route) => { rebuildBody = route.request().postDataJSON(); await route.fulfill({ json: { rebuild: { id: 'reb-browser-new', state: 'Applied' }, profileStatus: {} } }); });
+  await page.route(`**/api/employees/${routedEmployeeId}/tasks`, async (route) => {
+    if (route.request().method() === 'POST') { taskBody = route.request().postDataJSON(); return route.fulfill({ json: { task: { id: 'tsk-browser-new', state: 'Running', revision: 1, createdAt: '2026-09-19T00:00:00Z', updatedAt: '2026-09-19T00:00:00Z', modelReportJson: null, modelReportHash: null, failureDetail: null, workerId: 'wrk-browser' }, spec: {}, request: { id: 'req-browser-new', state: 'Forwarded', nativeSessionId: 'session-browser', ownershipEpoch: 1, processGeneration: 1 }, verification: null, displayState: 'running' } }); }
+    return route.continue();
+  });
+  await page.route(`**/api/tasks/**`, async (route) => { taskActionPaths.push(new URL(route.request().url()).pathname); await route.fulfill({ json: { task: { id: 'tsk-browser', state: 'Completed', revision: 4 }, cancellation: { state: 'Forwarded' }, verification: { state: 'Passed' }, detail: 'remote-completed' } }); });
+  await page.route(`**/api/employees/${routedEmployeeId}/dispatch-hold`, async (route) => { holdBody = route.request().postDataJSON(); await route.fulfill({ json: { employee: {}, status: { state: 'delivered' } } }); });
+  await page.route(`**/api/employees/${routedEmployeeId}/orientation/deliver`, (route) => route.fulfill({ json: { status: { state: 'delivered' } } }));
+  await page.route(`**/api/employees/${routedEmployeeId}/orientation/comprehension/run`, (route) => route.fulfill({ json: { status: { state: 'comprehended' } } }));
   await page.goto(`${base}${employeeDetailPath}`); await page.waitForSelector('[data-employee-content]:not([hidden])');
   const employeeId = await page.locator('[data-employee-detail]').getAttribute('data-employee-id');
   record('detail loads exact URL employee and terminal module', await page.locator('[data-selected-employee-name]').first().innerText() !== '—' && await page.locator('[data-terminal]').count() === 1, { employeeId });
@@ -203,7 +211,6 @@ try {
   await page.fill('[data-reset-confirmation]', 'reset-home'); await page.click('[data-rebuild-submit]');
   await page.waitForFunction(() => document.querySelector('[data-rebuild-receipt]').dataset.status === 'ok');
   record('employee rebuild sends expected employee revision and target revision', rebuildBody?.expectedRevision === 1 && rebuildBody?.targetProfileRevisionId === 'prev-browser-2' && rebuildBody?.resetConfirmation === 'reset-home', rebuildBody || {});
-
 
   // Enabled-fixture terminal surface: exact route assets, restored mount class,
   // CSS geometry that fills the stage, focus affordance, and live regions.
@@ -366,6 +373,54 @@ try {
   });
   record('terminal mount shows a focus affordance when the session is focused',
     focusRing.focused && /inset/.test(focusRing.boxShadow), focusRing);
+
+  // Managed employee task, hold and orientation controls are routed, enabled for
+  // a ready managed employee, and keep report and host verification separate.
+  // This runs after the terminal fault-injection block so its own control fetches
+  // cannot consume that block's injected fault. The managed runtime projection is
+  // registered last (Playwright routes are LIFO) and removed afterwards so the
+  // earlier host-owned projection still governs the terminal block.
+  await page.route(`**/api/employees/${routedEmployeeId}`, async (route) => {
+    const response = await route.fetch(); const body = await response.json();
+    await route.fulfill({ response, json: { ...body, revision: 1, runtime: { ...body.runtime, hostOwned: false, remoteOwned: true, placement: 'DeveloperContainer', nativeSessionId: 'session-browser', controlStatus: 'authenticated', sessionState: 'running' }, orientation: { assignmentId: 'assign-browser', orientationVersion: 1, state: 'delivered', revision: 2, restartRequired: false, dispatchHeld: false, holdReasons: [], evidenceSource: 'owner', lastError: null }, recentTasks: [{ task: { id: 'tsk-browser', state: 'Completed', revision: 3, createdAt: '2026-09-19T00:00:00Z', updatedAt: '2026-09-19T00:02:00Z', modelReportJson: '{"summary":"bounded"}', modelReportHash: `sha256:${'a'.repeat(64)}`, failureDetail: null, workerId: 'wrk-browser' }, spec: { description: 'Bounded task', workspaceRoot: '/workspace/acceptance-220', allowedPaths: ['src'], allowedTools: ['read'], forbiddenActions: ['network egress'], maximumSeconds: 300, testRecipeId: 'dotnet-test-release' }, request: { id: 'req-browser', state: 'Completed', nativeSessionId: 'session-browser', ownershipEpoch: 1, processGeneration: 1, forwardedAt: '2026-09-19T00:00:30Z', completedAt: '2026-09-19T00:01:30Z' }, verification: { id: 'ver-browser', state: 'Passed', verifierVersion: 'workspace-task-verify-v1', manifestHash: `sha256:${'b'.repeat(64)}`, testSummaryHash: `sha256:${'c'.repeat(64)}`, deniedActionHash: null, failureDetail: null, verifiedAt: '2026-09-19T00:03:00Z', revision: 1 }, displayState: 'verified' }], profileStatus: { currentProfileId: 'prof-browser', currentProfileDisplayName: 'Browser profile', currentProfileRevisionId: 'prev-browser-1', currentRevisionNumber: 1, currentImageDigest: `sha256:${'1'.repeat(64)}`, currentPlatform: 'linux/amd64', workerId: 'wrk-browser', hostId: 'local-docker', newerRevisionAvailable: true, newerRevisionId: 'prev-browser-2', newerRevisionNumber: 2, activeRebuildState: null, activeRebuildId: null } } });
+  });
+  await page.goto(`${base}${employeeDetailPath}`); await page.waitForSelector('[data-employee-tasks]:not([hidden])');
+  const heldTaskCard = page.locator('[data-task-list] .task-card').first();
+  const taskCardText = await heldTaskCard.innerText();
+  record('managed employee page renders the bounded task card with id, state and timestamps',
+    taskCardText.includes('tsk-browser') && /Created/.test(taskCardText) && /updated/.test(taskCardText), { taskCardText });
+  record('task card separates the unverified model report from the independent host verification',
+    taskCardText.includes('Model-reported (unverified)') && taskCardText.includes('Host verification (independent)') && taskCardText.includes('Passed') && taskCardText.includes('workspace-task-verify-v1'), { taskCardText });
+  record('task card keeps the cancellation-is-not-rollback help text', taskCardText.includes('never a rollback'));
+  record('the task form is enabled for a managed ready employee and prefills the acceptance workspace',
+    await page.inputValue('[data-task-workspace]') === '/workspace/acceptance-220',
+    { workspace: await page.inputValue('[data-task-workspace]') });
+  await page.fill('[data-task-description]', 'Bounded browser task');
+  await page.fill('[data-task-paths]', 'src');
+  await page.fill('[data-task-forbidden]', 'network egress');
+  await page.check('[data-task-tool="read"]');
+  await page.click('[data-task-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-task-receipt]').dataset.status === 'ok');
+  record('task create sends the bounded spec, an idempotency key and the employee revision',
+    taskBody?.expectedEmployeeRevision === 1 && typeof taskBody?.idempotencyKey === 'string' && taskBody.idempotencyKey.length > 0
+      && taskBody?.taskSpec?.workspaceRoot === '/workspace/acceptance-220' && taskBody?.taskSpec?.testRecipeId === 'dotnet-test-release',
+    taskBody || {});
+  await page.click('[data-task-list] .task-card [data-task-action="sync"]');
+  await page.waitForFunction(() => document.querySelector('[data-task-receipt]').textContent.includes('Synced'));
+  record('task sync reaches the exact task sync route', taskActionPaths.some((path) => /\/api\/tasks\/[^/]+\/sync$/.test(path)), { taskActionPaths });
+  await page.click('[data-orientation-hold]');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]').dataset.status === 'ok');
+  record('manual hold writes the employee revision and never implies clearing other holds',
+    holdBody?.expectedEmployeeRevision === 1 && typeof holdBody?.held === 'boolean'
+      && (await page.locator('[data-hold-note]').innerText()).includes('never cleared here'),
+    { holdBody, holdNote: await page.locator('[data-hold-note]').innerText() });
+  await page.click('[data-orientation-deliver]');
+  await page.waitForFunction(() => document.querySelector('[data-orientation-receipt]').dataset.status === 'ok');
+  record('orientation deliver uses the employee-scoped revision-bound route',
+    (await page.locator('[data-orientation-receipt]').innerText()).includes('Saved. State: delivered'),
+    { receipt: await page.locator('[data-orientation-receipt]').innerText() });
+  await page.unroute(`**/api/employees/${routedEmployeeId}`);
+  await page.unroute(`**/api/tasks/**`);
 
   // Delayed authoritative read: system forms stay hidden and every control
   // disabled until the response arrives, then become visible and enabled.

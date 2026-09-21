@@ -35,12 +35,19 @@ const EMPLOYEE = {
   roleId: 'role-ops', roleSlug: 'ops', roleDisplayName: 'Operations / IT',
   purpose: 'Keep operations healthy.', instructions: 'Do the work.', rules: 'Be careful.', restrictions: 'No deletes.',
   availability: 'ready',
-  runtime: { bindingId: 'binding-1', placement: 'InternalSharedContainer', hostOwned: true, remoteOwned: false, remoteHostId: null, nativeSessionId: 'session-1', sessionTitle: 'Ops session', controlModel: 'stub/model', controlStatus: 'authenticated', sessionState: 'running', terminalAvailable: true, sanitizedError: null },
+  runtime: { bindingId: 'binding-1', placement: 'DeveloperContainer', hostOwned: false, remoteOwned: true, remoteHostId: 'local-docker', nativeSessionId: 'session-1', sessionTitle: 'Ops session', controlModel: null, controlStatus: 'authenticated', sessionState: 'running', terminalAvailable: true, sanitizedError: null },
   orientation: { assignmentId: 'assign-1', orientationVersion: 1, state: 'delivered', revision: 2, restartRequired: false, dispatchHeld: false, holdReasons: [], evidenceSource: 'owner', lastError: null },
   revision: 3,
   terminal: { supported: true, available: true, reason: '', url: '/terminal/emp-1' },
   recentLogs: { supported: false, reason: 'Recent logs are not supported.' },
   profileStatus: { currentProfileId: 'prof-1', currentProfileDisplayName: 'Developer', currentProfileRevisionId: 'prev-current', currentRevisionNumber: 1, currentImageDigest: `sha256:${'1'.repeat(64)}`, currentPlatform: 'linux/amd64', workerId: 'wrk-1', hostId: 'local-docker', newerRevisionAvailable: true, newerRevisionId: 'prev-newer', newerRevisionNumber: 2, activeRebuildState: null, activeRebuildId: null },
+  recentTasks: [{
+    task: { id: 'tsk-1', state: 'Running', revision: 2, createdAt: '2026-09-19T00:00:00Z', updatedAt: '2026-09-19T00:01:00Z', modelReportJson: null, modelReportHash: null, failureDetail: null, workerId: 'wrk-1' },
+    spec: { description: 'Add a bounded health endpoint', workspaceRoot: '/workspace/acceptance-220', allowedPaths: ['src', 'tests'], allowedTools: ['read', 'edit', 'test'], forbiddenActions: ['network egress'], maximumSeconds: 300, testRecipeId: 'dotnet-test-release' },
+    request: { id: 'req-1', state: 'Forwarded', nativeSessionId: 'session-1', ownershipEpoch: 1, processGeneration: 1, forwardedAt: '2026-09-19T00:00:30Z', completedAt: null },
+    verification: null,
+    displayState: 'running',
+  }],
 };
 
 const DEPARTMENT = { id: 'dept-ops', slug: 'operations', displayName: 'Operations' };
@@ -57,7 +64,22 @@ const EMPLOYEE_HARNESS = `<!doctype html><html lang="en"><head><meta charset="ut
     <button type="button" data-orientation-deliver disabled>Recompose &amp; deliver</button>
     <button type="button" data-orientation-comprehension disabled>Run comprehension</button>
     <button type="button" data-orientation-hold disabled>Set manual hold</button>
+    <p class="hold-note" data-hold-note hidden></p>
     <p class="receipt" data-orientation-receipt role="status" aria-live="polite"></p>
+    <section class="employee-tasks" data-employee-tasks hidden>
+      <form class="panel-form" data-task-form>
+        <textarea name="description" data-task-description></textarea>
+        <input type="text" name="workspaceRoot" data-task-workspace value="/workspace/acceptance-220" />
+        <textarea name="allowedPaths" data-task-paths></textarea>
+        <fieldset><label><input type="checkbox" data-task-tool="read" /> read</label><label><input type="checkbox" data-task-tool="edit" /> edit</label><label><input type="checkbox" data-task-tool="test" /> test</label></fieldset>
+        <textarea name="forbiddenActions" data-task-forbidden></textarea>
+        <input type="number" name="maximumSeconds" data-task-seconds value="300" />
+        <select name="testRecipeId" data-task-recipe><option value="dotnet-test-release">dotnet-test-release</option></select>
+        <button type="submit" class="btn btn-primary" data-task-submit disabled>Dispatch bounded task</button>
+      </form>
+      <p class="receipt" data-task-receipt role="status" aria-live="polite"></p>
+      <div class="request-list" data-task-list></div>
+    </section>
     <section class="control-deck" data-portal></section>
     <span data-selected-employee-name>—</span>
   </div>
@@ -109,7 +131,10 @@ const state = {
   buildPlans: [],
   rebuildPlans: [],
   rebuildHistory: [{ id: 'reb-applied', state: 'Applied', toProfileRevisionId: 'prev-newer', resetWorkspace: false, resetHome: false, failureSummary: null, updatedAt: '2026-09-19T00:00:00Z' }],
+  taskPlans: [],
+  taskActionPlans: [],
   lastRebuildBody: null,
+  lastTaskBody: null,
   mutationDelayMs: 0,
   createDelayMs: 0,
   profileCreateDelayMs: 0,
@@ -133,15 +158,47 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/__stub' && req.method === 'POST') {
     const patch = JSON.parse((await readBody(req)) || '{}');
-    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'approvePlans', 'profilePlans', 'profileCreatePlans', 'buildPlans', 'rebuildPlans'];
+    const keys = ['employeePlans', 'mutationPlans', 'hirePlans', 'createPlans', 'rejectPlans', 'approvePlans', 'profilePlans', 'profileCreatePlans', 'buildPlans', 'rebuildPlans', 'taskPlans', 'taskActionPlans'];
     if (patch.resetPlans) for (const key of keys) state[key].length = 0;
+    if (patch.resetPlans) state.employee = null;
     for (const key of keys) if (patch[key]) state[key].push(...patch[key]);
     if (typeof patch.mutationDelayMs === 'number') state.mutationDelayMs = patch.mutationDelayMs;
     if (typeof patch.createDelayMs === 'number') state.createDelayMs = patch.createDelayMs;
     if (typeof patch.profileCreateDelayMs === 'number') state.profileCreateDelayMs = patch.profileCreateDelayMs;
     if (typeof patch.approveDelayMs === 'number') state.approveDelayMs = patch.approveDelayMs;
     if (patch.rebuildHistory) state.rebuildHistory = patch.rebuildHistory;
-    return send(res, 200, { ok: true, lastRebuildBody: state.lastRebuildBody });
+    if (patch.employee) state.employee = patch.employee;
+    return send(res, 200, { ok: true, lastRebuildBody: state.lastRebuildBody, lastTaskBody: state.lastTaskBody });
+  }
+  if (url.pathname === '/api/employees/emp-1/tasks' && req.method === 'GET') {
+    const plan = consume(state.taskPlans, null);
+    if (plan) return send(res, plan.status || 200, plan.body || []);
+    return send(res, 200, (state.employee || EMPLOYEE).recentTasks || []);
+  }
+  if (url.pathname === '/api/employees/emp-1/tasks' && req.method === 'POST') {
+    state.lastTaskBody = JSON.parse((await readBody(req)) || '{}');
+    const plan = consume(state.taskPlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || {}) : send(res, 200, { task: { id: 'tsk-created', state: 'Running', revision: 1, createdAt: '2026-09-19T00:00:00Z', updatedAt: '2026-09-19T00:00:00Z', modelReportJson: null, modelReportHash: null, failureDetail: null, workerId: 'wrk-1' }, spec: {}, request: { id: 'req-new', state: 'Forwarded', nativeSessionId: 'session-1', ownershipEpoch: 1, processGeneration: 1 }, verification: null, displayState: 'running' });
+  }
+  if (url.pathname.startsWith('/api/tasks/') && req.method === 'POST' && /^\/api\/tasks\/[^/]+\/(sync|cancel|verify)$/.test(url.pathname)) {
+    const plan = consume(state.taskActionPlans, null);
+    if (plan) return send(res, plan.status || 200, plan.body || {});
+    return send(res, 200, { task: { id: 'tsk-1', state: 'Completed', revision: 3 }, cancellation: { state: 'Forwarded' }, verification: { state: 'Passed' }, detail: 'remote-completed' });
+  }
+  if (url.pathname === '/api/employees/emp-1/orientation/deliver' && req.method === 'POST') {
+    if (state.mutationDelayMs) await sleep(state.mutationDelayMs);
+    const plan = consume(state.mutationPlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || { status: { state: 'delivered' } }) : send(res, 200, { status: { state: 'delivered' } });
+  }
+  if (url.pathname === '/api/employees/emp-1/orientation/comprehension/run' && req.method === 'POST') {
+    if (state.mutationDelayMs) await sleep(state.mutationDelayMs);
+    const plan = consume(state.mutationPlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || { status: { state: 'comprehended' } }) : send(res, 200, { status: { state: 'comprehended' } });
+  }
+  if (url.pathname === '/api/employees/emp-1/dispatch-hold' && req.method === 'PUT') {
+    if (state.mutationDelayMs) await sleep(state.mutationDelayMs);
+    const plan = consume(state.mutationPlans, null);
+    return plan ? send(res, plan.status || 200, plan.body || { employee: EMPLOYEE, status: { state: 'delivered' } }) : send(res, 200, { employee: EMPLOYEE, status: { state: 'delivered' } });
   }
   if (url.pathname === '/api/employees/emp-1/rebuilds' && req.method === 'GET') return send(res, 200, state.rebuildHistory);
   if (url.pathname === '/api/employees/emp-1/rebuild' && req.method === 'POST') {
@@ -151,8 +208,8 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/api/employees/emp-1' && req.method === 'GET') {
     const plan = consume(state.employeePlans, null);
-    if (plan) return plan.status >= 400 ? send(res, plan.status, plan.body || { title: 'unavailable' }) : send(res, 200, plan.employee || EMPLOYEE);
-    return send(res, 200, EMPLOYEE);
+    if (plan) return plan.status >= 400 ? send(res, plan.status, plan.body || { title: 'unavailable' }) : send(res, 200, plan.employee || state.employee || EMPLOYEE);
+    return send(res, 200, state.employee || EMPLOYEE);
   }
   if (url.pathname === '/api/organization/portal' && req.method === 'GET') return send(res, 200, OVERVIEW);
   if (url.pathname === '/api/hire-requests' && req.method === 'GET') {
@@ -271,6 +328,83 @@ try {
   record('a successful mutation after a failure clears the receipt to ok',
     (await statusAttr('[data-orientation-receipt]')) === 'ok' && (await receiptText()).includes('Saved. State: delivered'),
     { status: await statusAttr('[data-orientation-receipt]'), receipt: await receiptText() });
+
+  // ---- bounded task section -------------------------------------------
+  await stub({ resetPlans: true });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-employee-tasks]:not([hidden])');
+  const taskCardText = await page.locator('[data-task-list] .task-card').first().innerText();
+  record('task card shows id, display state and timestamps',
+    taskCardText.includes('tsk-1') && taskCardText.includes('running') && /Created/.test(taskCardText) && /updated/.test(taskCardText),
+    { taskCardText });
+  record('task card labels the model report as Model-reported (unverified) and separates host verification',
+    taskCardText.includes('Model-reported (unverified)') === false
+      ? taskCardText.includes('No host verification recorded.') && taskCardText.includes('Host verification (independent)')
+      : taskCardText.includes('Model-reported (unverified)'),
+    { taskCardText });
+  record('task card keeps the cancellation-is-not-rollback help text',
+    taskCardText.includes('never a rollback'),
+    { taskCardText });
+  record('the create form is enabled for a ready managed employee and prefills the acceptance workspace',
+    await page.inputValue('[data-task-workspace]') === '/workspace/acceptance-220',
+    { workspace: await page.inputValue('[data-task-workspace]') });
+
+  await page.fill('[data-task-description]', 'Add a bounded health endpoint');
+  await page.fill('[data-task-paths]', 'src\ntests');
+  await page.fill('[data-task-forbidden]', 'network egress');
+  await page.check('[data-task-tool="read"]'); await page.check('[data-task-tool="edit"]'); await page.check('[data-task-tool="test"]');
+  const taskSubmitEnabled = !(await page.locator('[data-task-submit]').isDisabled());
+  record('a bounded task submission becomes enabled once the required spec is complete', taskSubmitEnabled);
+  await stub({ resetPlans: true });
+  await page.click('[data-task-submit]');
+  await page.waitForFunction(() => document.querySelector('[data-task-receipt]').dataset.status === 'ok');
+  const taskStub = await (await fetch(`${base}/__stub`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+  const taskBody = taskStub.lastTaskBody;
+  record('task create sends the bounded spec, client idempotency key and employee revision',
+    taskBody.expectedEmployeeRevision === 3
+      && typeof taskBody.idempotencyKey === 'string' && taskBody.idempotencyKey.length > 0
+      && taskBody.taskSpec.description === 'Add a bounded health endpoint'
+      && taskBody.taskSpec.workspaceRoot === '/workspace/acceptance-220'
+      && taskBody.taskSpec.allowedPaths.join('|') === 'src|tests'
+      && taskBody.taskSpec.allowedTools.join('|') === 'read|edit|test'
+      && taskBody.taskSpec.forbiddenActions.join('|') === 'network egress'
+      && taskBody.taskSpec.maximumSeconds === 300
+      && taskBody.taskSpec.testRecipeId === 'dotnet-test-release',
+    taskBody || {});
+
+  // Sync/cancel/verify each hit the exact task action route and report a receipt.
+  await stub({ resetPlans: true });
+  await page.click('[data-task-list] .task-card [data-task-action="sync"]');
+  await page.waitForFunction(() => document.querySelector('[data-task-receipt]').dataset.status === 'ok');
+  record('task sync posts to the exact sync route and reports a receipt',
+    (await page.locator('[data-task-receipt]').innerText()).includes('Synced tsk-1'),
+    { receipt: await page.locator('[data-task-receipt]').innerText() });
+  await stub({ resetPlans: true });
+  await page.click('[data-task-list] .task-card [data-task-action="cancel"]');
+  await page.waitForFunction(() => document.querySelector('[data-task-receipt]').dataset.status === 'ok');
+  record('task cancel posts and never claims a rollback',
+    (await page.locator('[data-task-receipt]').innerText()).includes('Cancellation') && (await page.locator('[data-task-list]').innerText()).includes('never a rollback'),
+    { receipt: await page.locator('[data-task-receipt]').innerText() });
+
+  // A completed task with a model report offers Verify and renders the report
+  // and the independent verification as separate blocks.
+  await stub({ resetPlans: true, employee: { ...EMPLOYEE, recentTasks: [{
+    task: { id: 'tsk-2', state: 'Completed', revision: 3, createdAt: '2026-09-19T00:00:00Z', updatedAt: '2026-09-19T00:02:00Z', modelReportJson: '{"summary":"done"}', modelReportHash: 'sha256:' + 'a'.repeat(64), failureDetail: null, workerId: 'wrk-1' },
+    spec: { description: 'Report', workspaceRoot: '/workspace/acceptance-220', allowedPaths: ['src'], allowedTools: ['read'], forbiddenActions: ['network egress'], maximumSeconds: 300, testRecipeId: 'dotnet-test-release' },
+    request: { id: 'req-2', state: 'Completed', nativeSessionId: 'session-1', ownershipEpoch: 1, processGeneration: 1, forwardedAt: '2026-09-19T00:00:30Z', completedAt: '2026-09-19T00:01:30Z' },
+    verification: { id: 'ver-1', state: 'Passed', verifierVersion: 'workspace-task-verify-v1', manifestHash: 'sha256:' + 'b'.repeat(64), testSummaryHash: 'sha256:' + 'c'.repeat(64), deniedActionHash: null, failureDetail: null, verifiedAt: '2026-09-19T00:03:00Z', revision: 1 },
+    displayState: 'verified',
+  }] } });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('[data-task-list] .task-card[data-task-id="tsk-2"]');
+  const completedText = await page.locator('[data-task-list] .task-card[data-task-id="tsk-2"]').innerText();
+  record('a completed task shows the model report labeled unverified and the host verification separately',
+    completedText.includes('Model-reported (unverified)') && completedText.includes('Host verification (independent)') && completedText.includes('Passed') && completedText.includes('workspace-task-verify-v1'),
+    { completedText });
+  record('a verified task no longer offers Verify and never exposes raw secret bytes',
+    await page.locator('[data-task-list] .task-card[data-task-id="tsk-2"] [data-task-action="verify"]').count() === 0
+      && !completedText.includes('modelReportJson'),
+    { completedText });
 
   // ---- hiring ---------------------------------------------------------
   await page.goto(`${base}/hiring`, { waitUntil: 'domcontentloaded' });

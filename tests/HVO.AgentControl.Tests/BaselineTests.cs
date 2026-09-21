@@ -40,6 +40,13 @@ public sealed class BaselineTests : IClassFixture<WebApplicationFactory<Program>
             Program.WorkerControlValidatedScope,
             body.RootElement.GetProperty("workerControlValidatedScope").GetString());
         Assert.Equal("first-managed-disposable-two-host", Program.WorkerControlValidatedScope);
+        // #220 task control is implemented and hermetically tested, but no live
+        // bounded task has run and been host-verified on a deployment host, so the
+        // capability is not operationally validated and carries no scope. It is
+        // never collapsed into the worker-control flags above.
+        Assert.True(body.RootElement.GetProperty("taskControlImplemented").GetBoolean());
+        Assert.False(body.RootElement.GetProperty("taskControlOperationallyValidated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("taskControlValidatedScope").ValueKind);
     }
 
     [Fact]

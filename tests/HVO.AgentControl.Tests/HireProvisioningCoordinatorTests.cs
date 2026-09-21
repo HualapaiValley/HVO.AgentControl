@@ -300,6 +300,52 @@ public sealed class HireProvisioningCoordinatorTests
     }
 
     [Fact]
+    public async Task OwnerRedeliversOrientationAndRunsComprehensionForAnExistingManagedEmployee()
+    {
+        using var fixture = new Fixture();
+        var enrollment = await fixture.EnrollAsync();
+        var employee = fixture.Store.GetOverview().Employees.Single(x => x.Id == fixture.EmployeeId);
+        var installsBefore = fixture.OrientationSession.Invocations.Count(x => x.Operation == "install-orientation");
+
+        var delivered = await fixture.EmployeeOrientation.DeliverAsync(fixture.Store, fixture.EmployeeId, employee.Revision, CancellationToken.None);
+
+        Assert.Equal(OrientationStates.Delivered, delivered.Status.State);
+        Assert.False(delivered.Status.RestartRequired);
+        Assert.Equal(fixture.NativeSessionId, delivered.Status.SessionId);
+        Assert.True(delivered.Status.LoadedRuntimeGeneration >= delivered.Status.RequiredRuntimeGeneration);
+        Assert.Equal(installsBefore + 1, fixture.OrientationSession.Invocations.Count(x => x.Operation == "install-orientation"));
+        // A re-delivery is orientation-only: it needs no hire and no image build,
+        // and the deliberate replacement is the single container effect.
+        Assert.Equal(2, fixture.Provisioner.Containers.Count);
+    }
+
+    [Fact]
+    public async Task OwnerRedeliveryIsRevisionBoundAndRefusesStaleEmployee()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        var employee = fixture.Store.GetOverview().Employees.Single(x => x.Id == fixture.EmployeeId);
+
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            fixture.EmployeeOrientation.DeliverAsync(fixture.Store, fixture.EmployeeId, employee.Revision + 10, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ComprehensionRequiresADeliveredLoadedOrientation()
+    {
+        using var fixture = new Fixture();
+        await fixture.EnrollAsync();
+        var artifact = fixture.Store.ComposeAndAssignCurrentOrientation(fixture.EmployeeId);
+        var assigned = fixture.Store.GetOrientationStatus(fixture.EmployeeId);
+        Assert.Equal(OrientationStates.Assigned, assigned.State);
+
+        await Assert.ThrowsAsync<OrganizationConcurrencyException>(() =>
+            fixture.EmployeeOrientation.RunComprehensionAsync(fixture.Store, fixture.EmployeeId, assigned.Revision, CancellationToken.None));
+        Assert.NotEqual(OrientationStates.Comprehended, fixture.Store.GetOrientationStatus(fixture.EmployeeId).State);
+        Assert.NotNull(artifact.AssignmentId);
+    }
+
+    [Fact]
     public async Task OwnerResumeOfFailedHireRefusesMalformedResourceTopology()
     {
         using var fixture = new Fixture();
@@ -692,7 +738,8 @@ public sealed class HireProvisioningCoordinatorTests
         public FakeSession VerificationSession { get; }
         public RemoteWorkerProvisioningCoordinator Provisioning { get; }
         public RemoteOrientationCoordinator Orientation { get; }
-        public HireProvisioningCoordinator Coordinator => new(_control, Provisioning, Orientation, Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<HireProvisioningCoordinator>.Instance);
+        public EmployeeOrientationCoordinator EmployeeOrientation => new(Provisioning, Orientation);
+        public HireProvisioningCoordinator Coordinator => new(_control, Provisioning, EmployeeOrientation, Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<HireProvisioningCoordinator>.Instance);
         public EmployeeRebuildCoordinator RebuildCoordinator => new(_control, Provisioning, Microsoft.Extensions.Options.Options.Create(BuildOptions()), NullLogger<EmployeeRebuildCoordinator>.Instance);
         public string NativeSessionId { get; } = "native-managed";
         public string HireId { get; private set; } = string.Empty;

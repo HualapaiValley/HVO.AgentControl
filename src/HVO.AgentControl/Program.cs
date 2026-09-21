@@ -265,6 +265,13 @@ if (app.Environment.IsEnvironment("ExceptionPathTests"))
 // and stays false by default; the live acceptance ran an explicitly enabled,
 // disposable isolation. WorkerControlValidatedScope carries the exact bound in
 // band so a client can distinguish the accepted path from the excluded ones.
+//
+// Task-control capability truth (#220). TaskControlImplemented is true because
+// the bounded task specification, employee-scoped dispatch, model-report capture
+// and typed independent verification slices are implemented and hermetically
+// tested. TaskControlOperationallyValidated is false and its scope is null: no
+// live bounded task has been dispatched, run and host-verified on a deployment
+// host. It is never collapsed into the worker-control flags above.
 app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     "HVO.AgentControl",
     2,
@@ -273,7 +280,10 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
     WorkerControlCodeAvailable: true,
     WorkerControlEnabled: workerControlEnabled,
     WorkerControlOperationallyValidated: true,
-    WorkerControlValidatedScope: Program.WorkerControlValidatedScope)))
+    WorkerControlValidatedScope: Program.WorkerControlValidatedScope,
+    TaskControlImplemented: true,
+    TaskControlOperationallyValidated: false,
+    TaskControlValidatedScope: null)))
     .WithName("GetInfo")
     .WithTags("Control")
     .WithSummary("Describes the control-host baseline.")
@@ -288,7 +298,10 @@ app.MapGet("/api/info", () => Results.Ok(new InfoResponse(
         "authorized disposable topology). They explicitly exclude key rotation and " +
         "compromise re-enrollment and production managed hiring/provisioning. " +
         "workerControlEnabled is the separate deployment/configuration gate and is " +
-        "false in the default configuration.")
+        "false in the default configuration. taskControlImplemented reports the " +
+        "bounded employee-task code capability; taskControlOperationallyValidated " +
+        "is false and taskControlValidatedScope is null because no live bounded task " +
+        "has been dispatched, run and host-verified on a deployment host.")
     .Produces<InfoResponse>(StatusCodes.Status200OK)
     .ProducesProblem(StatusCodes.Status401Unauthorized);
 
@@ -635,6 +648,56 @@ app.MapPut("/api/employees/{id}/dispatch-hold", (HttpContext context, AcpControl
     catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
 })
     .WithName("SetEmployeeDispatchHold").WithTags("Employee tasks");
+
+// Owner-only, employee-scoped orientation control for a managed employee. These
+// reuse the same remote coordination machinery a hire drives: compose the current
+// artifact, install it over the bridge, replace the container to load it, and run
+// the bounded comprehension. They never build an image or provision resources.
+app.MapPost("/api/employees/{id}/orientation/deliver", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeOrientationCoordinator orientation, string id, HVO.AgentControl.RemoteWorker.EmployeeOrientationDeliver request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedEmployeeRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid orientation delivery.", detail: "A bounded employee id and current employee revision are required.");
+    if (Program.RejectCrossOrigin(context, "Employee orientation delivery") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var result = await orientation.DeliverAsync(store, id, request.ExpectedEmployeeRevision, context.RequestAborted);
+        return Results.Ok(new HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail(result.Status));
+    }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("DeliverEmployeeOrientation").WithTags("Employee tasks")
+    .WithSummary("Composes, installs and loads the current orientation for one managed employee without an image rebuild.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
+
+app.MapPost("/api/employees/{id}/orientation/comprehension/run", async (HttpContext context, AcpControlHost host, HVO.AgentControl.RemoteWorker.EmployeeOrientationCoordinator orientation, string id, HVO.AgentControl.RemoteWorker.EmployeeOrientationComprehension request) =>
+{
+    if (!Program.IsValidEmployeeId(id) || request is null || request.ExpectedOrientationRevision < 1)
+        return Results.Problem(statusCode: StatusCodes.Status422UnprocessableEntity, title: "Invalid orientation comprehension.", detail: "A bounded employee id and current orientation revision are required.");
+    if (Program.RejectCrossOrigin(context, "Employee orientation comprehension") is { } rejection) return rejection;
+    if (host.Organization is not { } store) return Program.WorkerStoreUnavailable();
+    try
+    {
+        var status = await orientation.RunComprehensionAsync(store, id, request.ExpectedOrientationRevision, context.RequestAborted);
+        return Results.Ok(new HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail(status));
+    }
+    catch (Exception exception) when (Program.IsEmployeeTaskFailure(exception)) { return Program.EmployeeTaskProblem(exception); }
+})
+    .WithName("RunEmployeeOrientationComprehension").WithTags("Employee tasks")
+    .WithSummary("Runs the bounded tool-free comprehension for a delivered and loaded employee orientation.")
+    .Produces<HVO.AgentControl.RemoteWorker.EmployeeOrientationDetail>(StatusCodes.Status200OK)
+    .ProducesProblem(StatusCodes.Status401Unauthorized)
+    .ProducesProblem(StatusCodes.Status403Forbidden)
+    .ProducesProblem(StatusCodes.Status404NotFound)
+    .ProducesProblem(StatusCodes.Status409Conflict)
+    .ProducesProblem(StatusCodes.Status422UnprocessableEntity)
+    .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
 
 // Rebuilds run synchronously after BeginEmployeeRebuild commits the durable
 // intent. The coordinator is bounded, idempotent and resumable; a second hosted
@@ -2660,7 +2723,7 @@ public sealed record RoleInstructionsUpdate(string? StandingInstructions, int? R
 public sealed record ManualHoldUpdate(bool Held, string? Detail);
 public sealed record GrantRevokeRequest(int ExpectedRevision);
 
-public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated, string WorkerControlValidatedScope);
+public sealed record InfoResponse(string Name, int Generation, string Status, bool WorkerControlImplemented, bool WorkerControlCodeAvailable, bool WorkerControlEnabled, bool WorkerControlOperationallyValidated, string WorkerControlValidatedScope, bool TaskControlImplemented, bool TaskControlOperationallyValidated, string? TaskControlValidatedScope);
 
 public sealed record ModelResponse(string Model);
 

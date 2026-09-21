@@ -38,7 +38,28 @@
             <button type="button" class="btn" data-orientation-comprehension disabled>Run comprehension</button>
             <button type="button" class="btn" data-orientation-hold disabled>Set manual hold</button>
         </div>
+        <p class="hold-note" data-hold-note hidden></p>
         <p class="receipt" data-orientation-receipt role="status" aria-live="polite"></p>
+        <section class="employee-tasks" data-employee-tasks hidden>
+            <h2>Bounded tasks</h2>
+            <p class="task-note">A task is a bounded specification, not an arbitrary prompt. The controller resolves the exact binding, worker and session server-side. Running, completion and a model report are never proof of success; only an independent host verification can move a task to Verified. Cancellation stops the turn when observed and is never a rollback of effects already applied.</p>
+            <form class="panel-form" data-task-form>
+                <label>Description<textarea name="description" data-task-description maxlength="2048" required></textarea></label>
+                <label>Workspace root<input type="text" name="workspaceRoot" data-task-workspace value="/workspace/acceptance-220" required /></label>
+                <label>Allowed paths (one per line)<textarea name="allowedPaths" data-task-paths required></textarea></label>
+                <fieldset><legend>Allowed tools</legend>
+                    <label><input type="checkbox" name="toolRead" data-task-tool="read" checked /> read</label>
+                    <label><input type="checkbox" name="toolEdit" data-task-tool="edit" /> edit</label>
+                    <label><input type="checkbox" name="toolTest" data-task-tool="test" /> test</label>
+                </fieldset>
+                <label>Forbidden actions (one per line)<textarea name="forbiddenActions" data-task-forbidden required></textarea></label>
+                <label>Maximum seconds<input type="number" name="maximumSeconds" data-task-seconds min="1" max="1800" value="300" required /></label>
+                <label>Test recipe<select name="testRecipeId" data-task-recipe><option value="dotnet-test-release">dotnet-test-release</option></select></label>
+                <button type="submit" class="btn btn-primary" data-task-submit disabled>Dispatch bounded task</button>
+            </form>
+            <p class="receipt" data-task-receipt role="status" aria-live="polite"></p>
+            <div class="request-list" data-task-list></div>
+        </section>
         <section class="control-deck" data-portal data-runtime-state="unknown">
             <p class="error-banner" data-field="error-banner" role="alert" hidden><span class="error-tag">Runtime fault</span><span class="error-text" data-field="error"></span></p>
             <section class="telemetry"><h2 class="panel-title">Exact employee control</h2><dl class="telemetry-grid"><div class="telemetry-row"><dt>Employee</dt><dd data-selected-employee-name>—</dd></div><div class="telemetry-row"><dt>Runtime state</dt><dd><span class="state-pill" data-field="state-detail" data-state="unknown">Synchronizing</span></dd></div><div class="telemetry-row"><dt>Native session</dt><dd><code data-field="sessionId">—</code></dd></div><div class="telemetry-row telemetry-row--model"><dt><label for="model-select">Host session model</label></dt><dd><select id="model-select" data-model-select disabled><option value="">Synchronizing…</option></select><p data-model-receipt role="status" aria-live="polite" hidden></p><p data-model-host-note hidden>Model selection controls only the control host session and is unavailable for a remote employee.</p><p data-model-sync-note hidden>OpenCode's TUI picker is client-local; web selection remains unavailable until synchronization is supported.</p></dd></div><div class="telemetry-row"><dt>Last sync</dt><dd><time data-field="syncedAt">—</time></dd></div></dl><div class="controls" role="group" aria-label="Terminal controls"><button type="button" class="btn btn-primary" data-action="reconnect" disabled>Reconnect terminal</button><button type="button" class="btn" data-action="detach" disabled>Detach</button><button type="button" class="btn" data-action="clear" disabled>Clear view</button><button type="button" class="btn btn-interrupt" data-action="interrupt" disabled>Interrupt turn</button></div><p class="control-note" data-remote-cancel-note hidden>Remote turn cancellation is unavailable from this console.</p><p data-field="receipt" role="status" aria-live="polite"></p></section>

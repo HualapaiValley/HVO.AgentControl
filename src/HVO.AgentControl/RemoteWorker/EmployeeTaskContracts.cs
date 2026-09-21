@@ -37,6 +37,19 @@ public sealed record EmployeeTaskVerify(int ExpectedTaskRevision);
 /// <summary>The owner-controlled manual dispatch hold for any managed employee.</summary>
 public sealed record EmployeeDispatchHoldUpdate(int ExpectedEmployeeRevision, bool Held, string? Detail);
 
+/// <summary>
+/// The revision-bound request to deliver the current orientation artifact to one
+/// managed employee and restart its process to load it. The caller names only the
+/// employee it acted on; binding, worker and session are resolved server-side.
+/// </summary>
+public sealed record EmployeeOrientationDeliver(int ExpectedEmployeeRevision);
+
+/// <summary>The revision-bound request to run comprehension for a delivered orientation.</summary>
+public sealed record EmployeeOrientationComprehension(int ExpectedOrientationRevision);
+
+/// <summary>The orientation status after an employee-scoped delivery or comprehension.</summary>
+public sealed record EmployeeOrientationDetail(HVO.AgentControl.Organization.OrientationStatus Status);
+
 /// <summary>The result of one exact synchronization pass and authoritative re-read.</summary>
 public sealed record EmployeeTaskSyncDetail(EmployeeTaskDetail Task, DateTimeOffset SynchronizedAt, string Detail);
 

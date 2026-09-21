@@ -72,8 +72,25 @@ building it, or approving a hire does **not** provision or orient a worker:
 approval leaves the request `Approved` and provisioning is a separate, resumable
 trigger that drives `Approved → Provisioning → Orienting → Ready`. The owner
 accepted the profile-based employee-creation design (epic #257); the explicit
-data-preserving rebuild (#261) is now implemented as code capability. The #217
-hermetic controller records are retained in the current schema-v12 store, including
+data-preserving rebuild (#261) is now implemented as code capability. Control
+schema v13 adds the durable bounded task domain: a canonical, normalized task
+specification, a captured model report, and typed independent host verification.
+`POST /api/employees/{id}/tasks` accepts an owner-revision-bound specification
+and a caller idempotency key — never a binding, worker or session identity — and
+the controller resolves those server-side and renders a host-generated prompt.
+The task state machine is explicit (`Requested → Running
+→ Completed/Failed/Uncertain/Cancelled`, with `Completed → Verified` the only
+host-verified edge); a model report is labeled **Model-reported (unverified)**
+and never promotes a task, and cancellation is an observation, never a rollback.
+The employee page offers the bounded task form, current/recent task cards,
+revision-bound Sync/Cancel/Verify controls, and revision-bound manual
+dispatch-hold set/clear controls. The same employee-scoped, revision-bound
+routes re-deliver current orientation and run comprehension for an existing
+managed employee by reusing the hire coordination machinery and a deliberate
+container replacement, with no image build. `/api/info` reports the capability
+separately as `TaskControlImplemented=true`,
+`TaskControlOperationallyValidated=false` and `TaskControlValidatedScope=null`.
+The #217 hermetic controller records are retained in the current schema-v13 store, including
 enrollment/cursor/event/request/cancellation/recovery APIs, durable
 intent-first dispatch and cancellation, authenticated replay synchronization,
 uncertain-write reconciliation, typed provisioning and reverse cleanup, and
@@ -107,9 +124,10 @@ permission handling covered `[once, always, reject]` and safe-reject
 `[reject]`, with a same-lease reject moving pending→decided and the prompt
 completing; the compatibility fix is PR #255. Cleanup was exact: zero labeled
 containers, volumes or tags remained and the local key was removed. The worker
-control portal on `home-docker` currently runs `802eb6f` (schema v9; this branch's
-schema v10/v11/v12 and the helper are not deployed there) and is irrelevant to worker
-flags except portal inspection.
+control portal on `home-docker` is deployed from promoted `main` `7d4078b`, with
+schema v12. `quick_check` is clean and foreign-key errors are zero. WorkerControl
+is enabled through the ignored Compose override; product/Compose remains `true` by
+default.
 
 This path remains disabled by default. `/api/info` now reports
 `WorkerControlImplemented=true` and `WorkerControlOperationallyValidated=true`,
@@ -133,25 +151,29 @@ untrusted networks or the Internet.
 The authorization to run the first managed disposable two-host path does not
 extend to a production live owner-approved hire: the #260 approval,
 managed-provisioning
-and orientation slice is implemented and hermetically tested, but **no live
-owner-approved hire has been executed on any host**, the `home-docker`
-execution-host enrollment remains held by the owner, and `WorkerControl` remains
-disabled by default. Approval commits the request to `Provisioning` and queues
-the remote workflow durably; the work itself runs asynchronously and is resumed
-from persisted state after a restart, so a queued hire is never lost and never
-repeated. The #261 data-preserving rebuild is implemented and hermetically
-covered, but no live rebuild has run on a deployment host. Any
-termination/scheduling policy remains out of scope.
+and orientation slice has live `home-docker` evidence: employee
+`emp-933d24fc110222a` reached `Ready` with one worker container and four
+persistent volumes, live-model orientation comprehension, and no duplicates after
+restart/recovery. The #257 live rebuild completed r1→r2 as `Applied`, advancing
+epoch `600 → 604` while preserving home/workspace/session hashes and one
+container/four volumes. Any termination/scheduling policy remains out of scope.
 
-The local managed path has additionally been exercised end to end on one
-development machine: a generic-employee profile build, a real container
-provision through the `docker-helper`, real OpenCode ACP orientation delivery and
-comprehension, and a hire reaching `Ready` in about 1m50s. That is a **local
-development-machine** result only. It is **not** a `home-docker` deployment
-(this work is not deployed there), `WorkerControl` is still off by default
-there, and it does not lift any exclusion below. The accepted path
-does not validate key rotation or compromise re-enrollment
-and does not authorize production managed hiring/provisioning.
+The bounded task capability (#220) remains **not deployed and not operationally
+validated**. There has been no live bounded task, controller-restart task
+reconciliation, cancellation/hold acceptance, independent host task
+verification, or second task, so `/api/info` reports
+`TaskControlOperationallyValidated=false`
+with `TaskControlValidatedScope=null`; the task capability is never folded into
+the worker-control flags. There is no task scheduler: a task is a single
+owner-triggered bounded action, and an employee's independent host verification —
+not the model report, and not turn completion — is the only path to `Verified`.
+
+The live `home-docker` hire and rebuild results do not validate key rotation or
+compromise re-enrollment. They do not authorize production managed
+hiring/provisioning at scale or the unvalidated #220 task
+capability described above.
+The accepted path does not validate key rotation or compromise re-enrollment.
+The accepted path does not authorize production managed hiring/provisioning.
 
 ### Run locally
 
@@ -463,7 +485,7 @@ container loopback. Nothing starts or migrates the archived V1 deployment.
 - `/api/control`: runtime/session/terminal status
 - `/api/control/model`: model selection, same-origin only
 - `/api/control/cancel`: bounded ACP cancellation request, not completion proof
-- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics. Hire approval is implemented as a revision-bound owner action (`POST /api/hire-requests/{id}/approve`) that freezes one verified profile-revision build on a ready host, creates the managed employee identity and binding, and durably queues provisioning and orientation to Ready; no live owner-approved hire has run (see the capability note above). `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
+- `/api/organization`: owner-protected authoritative store overview; `/api/organization/portal` adds host-computed employee availability, durable pending requested-hire counts, and actionable safe diagnostics. Hire approval is implemented as a revision-bound owner action (`POST /api/hire-requests/{id}/approve`) that freezes one verified profile-revision build on a ready host, creates the managed employee identity and binding, and durably queues provisioning and orientation to Ready; the live owner-approved hire completed (see the capability note above). `/api/employees/{id}` returns exact employee detail by stable ID, exposing only the current sanitized runtime error (recent logs are unsupported because no employee-scoped safe log contract exists). Same-origin revision-guarded organization/basic-instruction and role-instruction updates mark orientation stale.
 - `/api/orientation`: assigned version, lifecycle timestamps, artifact metadata, evidence provenance and dispatch holds; when configuration changes before recomposition it returns the latest Stale assignment with readiness false rather than becoming unavailable
 - `/api/orientation/deliver`, `/api/orientation/comprehension`, `/api/orientation/comprehension/run`, `/api/orientation/manual-hold`: same-origin owner operations for exact delivery, host-validated structured evidence, an explicitly triggered bounded ACP JSON demonstration, and independent manual hold
 - `/api/permissions/grants`: same-origin owner-only staged scoped grant creation; `/{id}/revoke` revokes under optimistic revision. Grants are persisted/audited but not executable through Phase 1 ACP callbacks.

@@ -316,6 +316,40 @@ public sealed class EmployeeTaskApiRuntimeTests : IClassFixture<EmployeeTaskRunt
     }
 
     [Fact]
+    public async Task EmployeeOrientationEndpointsRequireAuthOriginAndBoundedRevision()
+    {
+        var (client, seed) = await ReadyAsync();
+
+        using var anonymous = _factory.CreateClient();
+        using var deliverAnonymous = await anonymous.PostAsync($"/api/employees/{seed.EmployeeId}/orientation/deliver", new StringContent("""{"expectedEmployeeRevision":1}""", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Unauthorized, deliverAnonymous.StatusCode);
+        using var comprehensionAnonymous = await anonymous.PostAsync($"/api/employees/{seed.EmployeeId}/orientation/comprehension/run", new StringContent("""{"expectedOrientationRevision":1}""", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Unauthorized, comprehensionAnonymous.StatusCode);
+
+        // A malformed or unbounded revision is rejected before any remote effect.
+        using var zeroRevision = await PostAsync(client, $"/api/employees/{seed.EmployeeId}/orientation/deliver", """{"expectedEmployeeRevision":0}""");
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, zeroRevision.StatusCode);
+        using var zeroOrientation = await PostAsync(client, $"/api/employees/{seed.EmployeeId}/orientation/comprehension/run", """{"expectedOrientationRevision":0}""");
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, zeroOrientation.StatusCode);
+        using var malformed = await PostAsync(client, "/api/employees/not-an-employee/orientation/deliver", """{"expectedEmployeeRevision":1}""");
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, malformed.StatusCode);
+
+        // A stale employee revision is a conflict, not a silent re-delivery.
+        using var stale = await PostAsync(client, $"/api/employees/{seed.EmployeeId}/orientation/deliver", """{"expectedEmployeeRevision":99}""");
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+
+        // A cross-origin mutation is refused before the store or the bridge.
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Post, $"/api/employees/{seed.EmployeeId}/orientation/deliver")
+        {
+            Content = new StringContent("""{"expectedEmployeeRevision":1}""", Encoding.UTF8, "application/json"),
+        };
+        crossOrigin.Headers.Add("Origin", "https://other.example");
+        crossOrigin.Headers.Authorization = RemoteWorkerApi.Basic("owner", EnabledRuntimeFactory.OwnerPassword);
+        using var rejected = await client.SendAsync(crossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, rejected.StatusCode);
+    }
+
+    [Fact]
     public async Task NonManagedSeedEmployeeHasAnEmptyRecentTasksArray()
     {
         using var factory = new EnabledRuntimeFactory();
@@ -673,6 +707,22 @@ public sealed class EmployeeTaskApiDisabledRuntimeTests : IClassFixture<Disabled
         };
         create.Headers.Add("Origin", "https://other.example");
         using var response = await client.SendAsync(create);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await RemoteWorkerApi.ProblemAsync(response);
+    }
+
+    [Theory]
+    [InlineData("/api/employees/emp-test/orientation/deliver", """{"expectedEmployeeRevision":1}""")]
+    [InlineData("/api/employees/emp-test/orientation/comprehension/run", """{"expectedOrientationRevision":1}""")]
+    public async Task CrossOriginOrientationMutationsAre403BeforeStore(string path, string body)
+    {
+        using var client = _factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("Origin", "https://other.example");
+        using var response = await client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         await RemoteWorkerApi.ProblemAsync(response);
     }

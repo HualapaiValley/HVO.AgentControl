@@ -711,8 +711,12 @@ The owner accepted the profile-based design on 2026-09-18. #258 (profiles) and
 managed-employee creation, provisioning and orientation slice, and #261 adds the
 explicit data-preserving rebuild. This section describes **code capability**. No
 live owner-approved hire has been executed on any host, the `home-docker`
-execution-host enrollment remains held by the owner, and `WorkerControl` remains
-disabled by default, so none of it is operationally validated.
+ deployment evidence is now live: employee `emp-933d24fc110222a` reached `Ready`
+ with one container/four persistent volumes and live-model comprehension, with no
+ duplicate after restart/recovery. The #257 rebuild completed r1→r2 as `Applied`
+ (epoch 600→604), preserving home/workspace/session hashes and one container/four
+ volumes. WorkerControl is enabled through the ignored Compose override;
+ product/Compose remains `true` by default.
 
 **Approval freeze (schema v10).** An approval is one immutable, atomic freeze of
 one hire request revision against one profile build verified on one ready host.
@@ -986,7 +990,7 @@ Separately, the full local managed path has been exercised on one development
 machine: a generic-employee profile build, a real container provision through
 the helper, real OpenCode ACP orientation delivery and comprehension, and a hire
 reaching `Ready` in about 1m50s. That result is local to that dev machine; it is
-not a `home-docker` deployment, `WorkerControl` remains off by default, and it
+not a `home-docker` deployment, `WorkerControl` is enabled through the ignored Compose override; product/Compose remains `true` by default, and it
 does not validate key rotation, compromise re-enrollment or production managed
 hiring.
 
@@ -1084,6 +1088,64 @@ hiring.
   completion. The Overview shows company summary, employee counts by department
   and state, pending approvals, and linked failures needing owner attention.
 
+### 12.1 Bounded task contract (#220, schema v13; implemented as code capability)
+
+- **Bounded specification.** `WorkerTaskSpec` version 1 carries a bounded
+  description; an absolute workspace root strictly under `/workspace/`; 1–32
+  distinct safe relative allowed paths; 1–16 distinct allowed tools from the
+  closed `read`/`edit`/`test` vocabulary; 1–32 bounded forbidden actions;
+  `maximumSeconds` 1–1800 with exactly one turn; and an optional closed test
+  recipe (`dotnet-test-release`), never a command. Arrays are trimmed,
+  de-duplicated first-wins and ordinally sorted, and the canonical JSON and
+  SHA-256 are stable across runs. Anything unbounded or outside the closed
+  vocabularies is rejected, not coerced.
+- **Owner action, server-resolved identities.** `POST /api/employees/{id}/tasks`
+  is owner-only, same-origin and employee-revision-bound. It accepts a caller
+  idempotency key and the bounded specification and **never** a binding, worker,
+  session, ownership epoch or process generation; the controller resolves those
+  server-side from the exact managed enrollment and active session and renders a
+  host-generated prompt from the canonical specification. A repeated idempotency
+  key returns the existing task and never submits twice; a changed specification
+  under the same key is a conflict.
+- **State machine.** `Requested → Running → Completed/Failed/Uncertain/Cancelled`,
+  with `Completed → Verified` as the only host-verified terminal edge. A model
+  report is captured in an all-or-nothing report/hash/timestamp triplet and is
+  labeled **Model-reported (unverified)** in every surface; it never promotes a
+  task. Turn completion is not verified success.
+- **Synchronization and cancellation.** `POST /api/tasks/{id}/sync` is
+  revision-bound, reconciles the exact durable request and never resubmits.
+  `POST /api/tasks/{id}/cancel` forwards the exact request and records an
+  observation; cancellation is **not** a rollback and the UI says so.
+- **Independent host verification.** `POST /api/tasks/{id}/verify` requires a
+  completed task with a model report and a supported recipe, and runs the fixed
+  verifier against the exact persisted workspace volume and approved image on
+  the controller-local Docker target. Only its `Passed` outcome moves the task to
+  `Verified`; the store persists bounded manifest and test-summary hashes plus a
+  sanitized failure, never the raw evidence bytes or any secret.
+- **Manual dispatch hold.** `PUT /api/employees/{id}/dispatch-hold` is
+  owner-only, same-origin and employee-revision-bound. It sets or clears only
+  the owner manual hold and never implies that stale or policy/recovery holds are
+  cleared.
+- **Employee-scoped orientation re-delivery.** `POST
+  /api/employees/{id}/orientation/deliver` and `POST
+  /api/employees/{id}/orientation/comprehension/run` are owner-only, same-origin
+  and revision-bound. They reuse the hire coordination machinery
+  (`EmployeeOrientationCoordinator`) to compose and install the current
+  orientation, mark it delivered with the required next process generation,
+  deliberately replace the container preserving the four volumes and the
+  authoritative native session, confirm the load, and run the bounded tool-free
+  comprehension. **No image build occurs.** Stale orientation continues to block
+  dispatch through the existing holds.
+- **Capability truth.** `/api/info` reports `TaskControlImplemented=true`,
+  `TaskControlOperationallyValidated=false` and `TaskControlValidatedScope=null`.
+ The capability remains not deployed and not operationally validated: no live
+ bounded task, controller-restart reconciliation, cancellation/hold acceptance,
+ independent host verification, or second task has occurred. There is no
+ scheduler: a task is a single owner-triggered bounded action, never automatic.
+- `GET /api/employees/{id}/tasks`, `GET /api/tasks/{id}` and the additive
+  `recentTasks` on `GET /api/employees/{id}` expose the same read models the
+  employee page consumes. The employee page never shows raw secrets.
+
 ### 10.4 Data-preserving employee rebuild (#261)
 
 A profile revision is never auto-adopted. The owner must explicitly select a
@@ -1119,7 +1181,7 @@ without action and displays Applied/Uncertain/Failed history with only the store
 sanitized failure summary. Controller secrets are never projected.
 
 This is code capability with hermetic validation. No live employee rebuild has
-run on a deployment host. `home-docker` remains on `802eb6f` / schema v9, and
+run on a deployment host. `home-docker` is on promoted `main` `7d4078b` / schema v12, and
 `WorkerControl` remains disabled by default.
 
 ## 13. Fresh disposable teardown/rebuild test
@@ -1193,7 +1255,7 @@ These are open and must not be presented as decided or owner-accepted:
   capability (§10.2), and #272 freezes approval to the controller-local helper
   target under no SSH host input (§10.3); both are hermetically tested, and the
   local managed path additionally reached `Ready` on one development machine, but
-  **no live owner-approved hire has been executed on any host** and the
+  **the live owner-approved hire completed on `home-docker`** and the
   `home-docker` execution-host
   enrollment remains held by the owner, so it is not operationally validated.
   #261 (data-preserving rebuild) and any termination/scheduling policy remain

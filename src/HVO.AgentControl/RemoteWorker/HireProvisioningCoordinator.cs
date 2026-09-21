@@ -38,7 +38,7 @@ public sealed record HireProvisioningResult(
 public sealed class HireProvisioningCoordinator(
     AcpControlHost control,
     RemoteWorkerProvisioningCoordinator provisioning,
-    RemoteOrientationCoordinator orientation,
+    EmployeeOrientationCoordinator orientation,
     IOptions<WorkerControlOptions> configured,
     ILogger<HireProvisioningCoordinator> logger)
 {
@@ -177,71 +177,25 @@ public sealed class HireProvisioningCoordinator(
         // carries the exact assignment, version, content and authoritative session.
         var artifact = store.ComposeAndAssignCurrentOrientation(creation.EmployeeId);
 
-        // Deliver the artifact over the authenticated bridge and read the exact
-        // process generation that will require a restart to load it.
-        var preStatus = await orientation.ReadStatusAsync(enrollment, cancellationToken).ConfigureAwait(false);
-        _ = await orientation.DeliverAsync(enrollment, artifact, cancellationToken).ConfigureAwait(false);
-
-        var sessionId = artifact.SessionId;
-        if (sessionId is null) throw new OrganizationConcurrencyException("The current orientation has no authoritative session to deliver against.");
-        // The artifact must be loaded by a process strictly newer than the one that
-        // was running when it was installed: the restart requirement is the next
-        // process generation.
-        var requiredGeneration = preStatus.ProcessGeneration + 1;
-        store.MarkOrientationDelivered(
-            artifact.AssignmentId,
-            artifact.OrientationVersion,
-            sessionId,
-            artifact.AssignmentRevision,
-            requiredRuntimeGeneration: requiredGeneration);
-
-        // Replace the container so a fresh process loads the installed artifact and
-        // the authoritative session. Volumes are preserved and the session is loaded
-        // by the replacement verification.
-        var replacement = await provisioning.ReplaceContainerForOrientationAsync(enrollment.WorkerId, cancellationToken).ConfigureAwait(false);
-        ValidateReplacementStatus(replacement, artifact, sessionId, requiredGeneration);
-
-        // Confirm the replacement process generation loaded the delivered
-        // assignment, then re-read the exact orientation status.
-        var orientationStatus = store.ConfirmOrientationLoaded(
-            creation.EmployeeId,
-            artifact.AssignmentId,
-            artifact.OrientationVersion,
-            sessionId,
-            replacement.ProcessGeneration);
+        // Install the artifact over the authenticated bridge, mark it delivered with
+        // the next required process generation, deliberately replace the container
+        // so a fresh process loads it (volumes preserved, authoritative session
+        // reloaded), and confirm the loaded generation. This is the same shared
+        // step an owner re-delivery of orientation uses.
+        var delivery = await orientation.InstallAndReplaceAsync(store, enrollment, artifact, cancellationToken).ConfigureAwait(false);
+        var orientationStatus = delivery.Status;
 
         // The worker returns only one bounded structured evidence object, never a
         // transcript. The store remains the authority over every fact and rejects
         // any mismatch before Comprehended/Ready.
-        var replaced = store.GetWorkerEnrollment(enrollment.WorkerId)!;
-        var evidence = await orientation.RunComprehensionAsync(replaced, orientationStatus, cancellationToken).ConfigureAwait(false);
-        orientationStatus = store.ValidateAndRecordComprehension(evidence, OrientationEvidenceSource.LiveModel);
+        var evidence = await orientation.RunComprehensionAsync(store, creation.EmployeeId, orientationStatus.Revision, cancellationToken).ConfigureAwait(false);
+        orientationStatus = evidence;
         if (!orientationStatus.Ready) throw new OrganizationConcurrencyException("The managed employee did not reach orientation readiness.");
 
         var orientingHire = store.GetHireRequest(hireId)!;
         var finalHire = store.TransitionHireRequestState(hireId, orientingHire.Revision, HireRequestStates.Orienting, HireRequestStates.Ready);
         var finalEnrollment = store.GetWorkerEnrollment(enrollment.WorkerId)!;
         return new HireProvisioningResult(finalHire, creation, finalEnrollment, orientationStatus);
-    }
-
-    /// <summary>
-    /// Requires the replacement status to prove the artifact was installed in the
-    /// new process, the generation advanced past the delivery, and the exact
-    /// authoritative native session was loaded.
-    /// </summary>
-    private static void ValidateReplacementStatus(ContainerReplacementResult replacement, OrientationArtifact artifact, string nativeSessionId, long requiredGeneration)
-    {
-        var status = replacement.Status;
-        if (status.ProcessState != "running" || !status.AcpInitialized)
-            throw new OrganizationConcurrencyException("The replacement worker process is not running and initialized.");
-        if (status.ProcessGeneration <= requiredGeneration - 1)
-            throw new OrganizationConcurrencyException("The replacement worker process generation did not advance.");
-        if (!string.Equals(status.OrientationAssignmentId, artifact.AssignmentId, StringComparison.Ordinal)
-            || !string.Equals(status.OrientationVersion, artifact.OrientationVersion, StringComparison.Ordinal))
-            throw new OrganizationConcurrencyException("The replacement worker did not report the delivered orientation artifact.");
-        if (!string.Equals(status.SessionId, nativeSessionId, StringComparison.Ordinal)
-            || !string.Equals(replacement.NativeSessionId, nativeSessionId, StringComparison.Ordinal))
-            throw new OrganizationConcurrencyException("The replacement worker did not load the authoritative native session.");
     }
 
     /// <summary>
