@@ -855,18 +855,40 @@ public sealed class WorkerRuntime : IAsyncDisposable
         var end = text.Length;
         while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
         if (end == 0) return false;
+        if (text.AsSpan(0, end).EndsWith("```", StringComparison.Ordinal))
+        {
+            var closing = end - 3;
+            var opening = text.LastIndexOf("```json", closing - 1, StringComparison.Ordinal);
+            if (opening >= 0)
+            {
+                var jsonStart = opening + "```json".Length;
+                while (jsonStart < closing && char.IsWhiteSpace(text[jsonStart])) jsonStart++;
+                var jsonEnd = closing;
+                while (jsonEnd > jsonStart && char.IsWhiteSpace(text[jsonEnd - 1])) jsonEnd--;
+                if (TryCanonicalizeTaskReportCandidate(text.AsMemory(jsonStart, jsonEnd - jsonStart), out canonical)) return true;
+            }
+        }
         for (var start = text.LastIndexOf('{', end - 1); start >= 0; start = start == 0 ? -1 : text.LastIndexOf('{', start - 1))
         {
             if (HasUnbalancedFence(text.AsSpan(0, start))) continue;
-            try
-            {
-                using var document = JsonDocument.Parse(text.AsMemory(start, end - start), new JsonDocumentOptions { MaxDepth = 32 });
-                if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _)) return true;
-            }
-            catch (JsonException) { }
+            if (TryCanonicalizeTaskReportCandidate(text.AsMemory(start, end - start), out canonical)) return true;
         }
         canonical = null;
         return false;
+    }
+
+    private static bool TryCanonicalizeTaskReportCandidate(ReadOnlyMemory<char> candidate, out string? canonical)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { MaxDepth = 32 });
+            return ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _);
+        }
+        catch (JsonException)
+        {
+            canonical = null;
+            return false;
+        }
     }
 
     private static bool HasUnbalancedFence(ReadOnlySpan<char> prefix)

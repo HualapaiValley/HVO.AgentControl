@@ -512,7 +512,8 @@ public sealed class WorkerOrientationTests
     [Theory]
     [InlineData("trailing")]
     [InlineData("nested")]
-    [InlineData("fenced")]
+    [InlineData("open-fence")]
+    [InlineData("fenced-trailing")]
     public async Task TaskSubmitRejectsAmbiguousFinalReportSuffixes(string scenario)
     {
         var report = """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
@@ -520,7 +521,8 @@ public sealed class WorkerOrientationTests
         {
             "trailing" => report + " trailing prose",
             "nested" => "{\"wrapper\":" + report + "}",
-            "fenced" => "progress\n```json\n" + report,
+            "open-fence" => "progress\n```json\n" + report,
+            "fenced-trailing" => "```json\n" + report + "\n``` trailing",
             _ => throw new InvalidOperationException(),
         };
         var failed = await RunTaskReportCaptureAsync(text);
@@ -536,10 +538,17 @@ public sealed class WorkerOrientationTests
         Assert.Equal(last, completed.OutcomeJson);
     }
 
+    [Fact]
+    public async Task TaskSubmitAcceptsAClosedFinalJsonFenceAsUnverifiedModelEvidence()
+    {
+        var report = """{"summary":"fenced","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
+        var completed = await RunTaskReportCaptureAsync("progress\n```json\n" + report + "\n```\n");
+        Assert.Equal(report, completed.OutcomeJson);
+    }
+
     [Theory]
     [InlineData("malformed")]
     [InlineData("overflow")]
-    [InlineData("fenced")]
     [InlineData("bad-denial")]
     public async Task TaskSubmitFailsClosedWhenReportIsInvalid(string scenario)
     {
@@ -557,12 +566,10 @@ public sealed class WorkerOrientationTests
         await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-invalid", envelope.RootElement, "turn-task-invalid", CancellationToken.None, captureTaskReport: true);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
-        var valid = """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":null,"limitations":[]}""";
         var text = scenario switch
         {
             "malformed" => "{not-json",
             "overflow" => new string('x', WorkerProtocol.MaxModelTaskReportBytes + 1),
-            "fenced" => "```json\n" + valid + "\n```",
             "bad-denial" => """{"summary":"done","changedPaths":[],"tests":[],"deniedAction":{"requested":"secret","action":"read","result":"denied","noSideEffect":false},"limitations":[]}""",
             _ => throw new InvalidOperationException(),
         };
