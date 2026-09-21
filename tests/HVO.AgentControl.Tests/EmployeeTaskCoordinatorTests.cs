@@ -290,6 +290,27 @@ public sealed class EmployeeTaskCoordinatorTests
     }
 
     [Fact]
+    public async Task PreviouslyObservedCancellationStillMakesLaterFailedRemoteOutcomeCancelled()
+    {
+        using var fixture = new RemoteStoreFixture();
+        var enrollment = fixture.CreateEnrolledAndReady();
+        MarkAuthenticated(fixture, enrollment.WorkerId);
+        var session = new TaskFakeBridgeSession(enrollment.ControllerId);
+        await using var manager = fixture.CreateManager(new TaskFakeBridgeSessionFactory(session));
+        var coordinator = Coordinator(fixture, manager);
+        var running = await coordinator.CreateAsync(fixture.EmployeeId, new EmployeeTaskCreate(1, "idem-cancel-already-observed", SpecInput()), CancellationToken.None);
+        await coordinator.CancelAsync(running.Task.Id, new EmployeeTaskCancel(running.Task.Revision), CancellationToken.None);
+        var cancellation = fixture.Store.ListWorkerCancellations().Single();
+        fixture.Store.TransitionWorkerCancellation(cancellation.Id, cancellation.Revision, "Forwarded", "Observed");
+        session.Fail(running.Request!.Id);
+
+        var synchronized = await coordinator.SyncAsync(running.Task.Id, new EmployeeTaskSync(running.Task.Revision), CancellationToken.None);
+
+        Assert.Equal(WorkerTaskStates.Cancelled, synchronized.Task.Task.State);
+        Assert.Equal("Observed", fixture.Store.ListWorkerCancellations().Single().State);
+    }
+
+    [Fact]
     public async Task NormalCompletionAfterCancellationIsPreservedWithDiagnostic()
     {
         using var fixture = new RemoteStoreFixture();

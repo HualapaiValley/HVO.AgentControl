@@ -674,7 +674,83 @@ public sealed partial class OrganizationStore
             return GetWorkerRecoveryObligation(obligationId)!;
         }
     }
-    public int ReconcileControllerStartup() { lock (_gate) { RequireOpen(); using var c = OpenConnection(_databasePath); using var tx = c.BeginTransaction(); var forwarding = new List<(string Id, string Worker)>(); using (var read = c.CreateCommand()) { read.Transaction = tx; read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'"; using var r = read.ExecuteReader(); while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1))); } long intents; using (var count = c.CreateCommand()) { count.Transaction = tx; count.CommandText = "SELECT COUNT(*) FROM worker_requests WHERE state='Intent'"; intents = Convert.ToInt64(count.ExecuteScalar(), CultureInfo.InvariantCulture); } using (var q = c.CreateCommand()) { q.Transaction = tx; q.CommandText = "UPDATE worker_requests SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1 WHERE state='Intent'; UPDATE worker_requests SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1 WHERE state='Forwarding'; UPDATE worker_tasks SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain')); UPDATE worker_cancellations SET state='Uncertain',updated_at=$now,revision=revision+1 WHERE state='Forwarded'"; q.Parameters.AddWithValue("$now", Now()); q.ExecuteNonQuery(); } foreach (var item in forwarding) AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id)); tx.Commit(); return checked((int)(intents + forwarding.Count)); } }
+    public int ReconcileControllerStartup()
+    {
+        lock (_gate)
+        {
+            RequireOpen();
+            using var c = OpenConnection(_databasePath);
+            using var tx = c.BeginTransaction();
+            var forwarding = new List<(string Id, string Worker)>();
+            using (var read = c.CreateCommand())
+            {
+                read.Transaction = tx;
+                read.CommandText = "SELECT id,worker_id FROM worker_requests WHERE state='Forwarding'";
+                using var r = read.ExecuteReader();
+                while (r.Read()) forwarding.Add((r.GetString(0), r.GetString(1)));
+            }
+
+            long intents;
+            long pendingVerifications;
+            using (var count = c.CreateCommand())
+            {
+                count.Transaction = tx;
+                count.CommandText = "SELECT (SELECT COUNT(*) FROM worker_requests WHERE state='Intent'), (SELECT COUNT(*) FROM worker_task_verifications WHERE state='Pending')";
+                using var reader = count.ExecuteReader();
+                _ = reader.Read();
+                intents = reader.GetInt64(0);
+                pendingVerifications = reader.GetInt64(1);
+            }
+
+            var now = Now();
+            using (var q = c.CreateCommand())
+            {
+                q.Transaction = tx;
+                q.CommandText =
+                    """
+                    UPDATE worker_requests
+                    SET state='Interrupted',outcome_category='controller-restarted-before-forwarding',completed_at=$now,updated_at=$now,revision=revision+1
+                    WHERE state='Intent';
+                    UPDATE worker_requests
+                    SET state='Uncertain',outcome_category='controller-restarted-during-forwarding',updated_at=$now,revision=revision+1
+                    WHERE state='Forwarding';
+                    UPDATE worker_tasks
+                    SET state='Uncertain',updated_at=$now,revision=revision+1
+                    WHERE id IN(SELECT task_id FROM worker_requests WHERE state IN('Interrupted','Uncertain'));
+                    UPDATE worker_cancellations
+                    SET state='Uncertain',updated_at=$now,revision=revision+1
+                    WHERE state='Forwarded';
+                    UPDATE worker_task_verifications
+                    SET state='Uncertain',failure_detail='controller-restart-during-verification',updated_at=$now,revision=revision+1
+                    WHERE state='Pending';
+                    UPDATE dispatch_holds
+                    SET active=0,detail=NULL,cleared_at=$now,revision=revision+1
+                    WHERE reason='task-verification' AND active=1
+                      AND EXISTS (
+                          SELECT 1
+                          FROM worker_task_verifications v
+                          JOIN worker_tasks t ON t.id=v.task_id
+                          JOIN worker_requests r ON r.id=(
+                              SELECT latest.id FROM worker_requests latest
+                              WHERE latest.task_id=t.id
+                              ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)
+                          WHERE v.state='Uncertain'
+                            AND v.failure_detail='controller-restart-during-verification'
+                            AND v.updated_at=$now
+                            AND t.runtime_binding_id=dispatch_holds.runtime_binding_id
+                            AND r.task_id=t.id
+                            AND dispatch_holds.detail=v.verifier_version);
+                    """;
+                q.Parameters.AddWithValue("$now", now);
+                q.ExecuteNonQuery();
+            }
+
+            foreach (var item in forwarding)
+                AddRecovery(c, tx, item.Worker, "controller", "request-uncertain", Hash(item.Id), 0, 0, Hash(item.Id), RequestUncertainMarker(item.Id));
+            tx.Commit();
+            return checked((int)(intents + forwarding.Count + pendingVerifications));
+        }
+    }
 
     /// <summary>
     /// A provisioning step left in <c>Applying</c> by a previous process has an

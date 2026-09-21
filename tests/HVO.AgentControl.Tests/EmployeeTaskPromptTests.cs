@@ -43,6 +43,11 @@ public sealed class EmployeeTaskPromptTests
         Assert.Contains("300 seconds", prompt, StringComparison.Ordinal);
         Assert.Contains("exactly one turn", prompt, StringComparison.Ordinal);
         Assert.Contains(WorkerTaskTestRecipes.DotnetTestRelease, prompt, StringComparison.Ordinal);
+        Assert.Contains(".task-nuget", prompt, StringComparison.Ordinal);
+        Assert.Contains("obj/project.assets.json", prompt, StringComparison.Ordinal);
+        Assert.Contains("--no-restore", prompt, StringComparison.Ordinal);
+        Assert.Contains("no network", prompt, StringComparison.Ordinal);
+        Assert.Contains("Do not place credentials", prompt, StringComparison.Ordinal);
         Assert.Contains("organization and employee orientation", prompt, StringComparison.Ordinal);
         Assert.Contains("Do not commit", prompt, StringComparison.Ordinal);
         Assert.Contains("do not push", prompt, StringComparison.Ordinal);

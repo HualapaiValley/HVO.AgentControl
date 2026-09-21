@@ -11,11 +11,15 @@ import subprocess
 
 WORKSPACE = "/workspace"
 COPY_ROOT = "/tmp/workspace-copy"
-DOTNET = "/usr/bin/dotnet"
+DOTNET = "/opt/dotnet-sdk/dotnet"
+DOTNET_ROOT = "/opt/dotnet-sdk"
 OUTPUT_LIMIT = 64 * 1024
 MANIFEST_LIMIT = 64 * 1024
 MAX_FILES_LIMIT = 384
-EXCLUDED_DIRECTORIES = {".git", "bin", "obj"}
+MAX_COPY_FILES_LIMIT = 4096
+MAX_COPY_BYTES_LIMIT = 128 * 1024 * 1024
+EXCLUDED_MANIFEST_DIRECTORIES = {".git", ".task-nuget", "bin", "obj"}
+GENERATED_DIRECTORIES = {".task-nuget", "bin", "obj"}
 
 
 def canonical(value):
@@ -59,32 +63,46 @@ def regular_reader(path):
     return descriptor, value
 
 
+def add_tree(root, path, names):
+    value = os.lstat(path)
+    if stat.S_ISLNK(value.st_mode):
+        raise ValueError("symlink-refused")
+    if stat.S_ISREG(value.st_mode):
+        relative_name = os.path.relpath(path, root)
+        names[relative_name] = not any(
+            part in EXCLUDED_MANIFEST_DIRECTORIES for part in relative_name.split("/"))
+        return
+    if not stat.S_ISDIR(value.st_mode):
+        raise ValueError("non-regular-path-refused")
+    for directory, directories, files in os.walk(path, followlinks=False):
+        directories.sort()
+        files.sort()
+        retained = []
+        for name in directories:
+            item = os.path.join(directory, name)
+            if stat.S_ISLNK(os.lstat(item).st_mode):
+                raise ValueError("symlink-refused")
+            if name != ".git":
+                retained.append(name)
+        directories[:] = retained
+        for name in files:
+            relative_name = os.path.relpath(os.path.join(directory, name), root)
+            names[relative_name] = not any(
+                part in EXCLUDED_MANIFEST_DIRECTORIES for part in relative_name.split("/"))
+
+
 def candidates(root, allowed_paths):
-    names = set()
+    names = {}
     for allowed in sorted(set(allowed_paths)):
-        path = checked_join(root, allowed)
-        value = os.lstat(path)
-        if stat.S_ISREG(value.st_mode):
-            relative_name = os.path.relpath(path, root)
-            if not any(part in EXCLUDED_DIRECTORIES for part in relative_name.split("/")):
-                names.add(relative_name)
-            continue
-        if not stat.S_ISDIR(value.st_mode):
-            raise ValueError("non-regular-path-refused")
-        for directory, directories, files in os.walk(path, followlinks=False):
-            directories.sort()
-            files.sort()
-            retained = []
-            for name in directories:
-                item = os.path.join(directory, name)
-                if stat.S_ISLNK(os.lstat(item).st_mode):
-                    raise ValueError("symlink-refused")
-                if name not in EXCLUDED_DIRECTORIES:
-                    retained.append(name)
-            directories[:] = retained
-            for name in files:
-                names.add(os.path.relpath(os.path.join(directory, name), root))
-    return sorted(names)
+        add_tree(root, checked_join(root, allowed), names)
+    # Generated restore/build inputs are verifier inputs rather than authored
+    # evidence. Copy root-local instances even when allowed paths name only source
+    # subtrees, but never include them in the source manifest.
+    for name in sorted(GENERATED_DIRECTORIES):
+        path = os.path.join(root, name)
+        if os.path.lexists(path):
+            add_tree(root, checked_join(root, name), names)
+    return sorted(names.items())
 
 
 def copy_and_manifest(root, destination, allowed_paths, max_files, max_bytes):
@@ -92,17 +110,26 @@ def copy_and_manifest(root, destination, allowed_paths, max_files, max_bytes):
         shutil.rmtree(destination)
     os.makedirs(destination, mode=0o700)
     entries = []
-    total = 0
-    for relative_name in candidates(root, allowed_paths):
+    manifest_total = 0
+    copy_total = 0
+    copied_files = 0
+    for relative_name, include_in_manifest in candidates(root, allowed_paths):
         relative(relative_name)
-        if len(entries) >= max_files:
-            raise ValueError("file-count-exceeded")
+        if copied_files >= MAX_COPY_FILES_LIMIT:
+            raise ValueError("copy-file-count-exceeded")
         source = checked_join(root, relative_name)
         descriptor, before = regular_reader(source)
         try:
-            total += before.st_size
-            if total > max_bytes:
-                raise ValueError("file-bytes-exceeded")
+            copied_files += 1
+            copy_total += before.st_size
+            if copy_total > MAX_COPY_BYTES_LIMIT:
+                raise ValueError("copy-file-bytes-exceeded")
+            if include_in_manifest:
+                if len(entries) >= max_files:
+                    raise ValueError("file-count-exceeded")
+                manifest_total += before.st_size
+                if manifest_total > max_bytes:
+                    raise ValueError("file-bytes-exceeded")
             target = os.path.join(destination, relative_name)
             os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
             digest = hashlib.sha256()
@@ -117,10 +144,11 @@ def copy_and_manifest(root, destination, allowed_paths, max_files, max_bytes):
             after = os.fstat(descriptor)
             if copied != before.st_size or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
                 raise ValueError("source-changed")
-            entries.append({"path": relative_name, "bytes": copied, "sha256": digest.hexdigest()})
+            if include_in_manifest:
+                entries.append({"path": relative_name, "bytes": copied, "sha256": digest.hexdigest()})
         finally:
             os.close(descriptor)
-    manifest = {"files": entries, "fileCount": len(entries), "totalBytes": total}
+    manifest = {"files": entries, "fileCount": len(entries), "totalBytes": manifest_total}
     if len(canonical(manifest).encode("utf-8")) > MANIFEST_LIMIT:
         raise ValueError("manifest-json-exceeded")
     return manifest
@@ -134,17 +162,17 @@ def run_test(root, recipe, maximum_seconds):
         raise ValueError("dotnet-contract-invalid")
     environment = {
         "HOME": "/tmp",
-        "PATH": "/usr/bin:/bin",
-        "DOTNET_ROOT": "/usr/share/dotnet",
+        "PATH": DOTNET_ROOT + ":/usr/bin:/bin",
+        "DOTNET_ROOT": DOTNET_ROOT,
         "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
         "DOTNET_NOLOGO": "1",
         "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
         "DOTNET_MULTILEVEL_LOOKUP": "0",
-        "NUGET_PACKAGES": "/tmp/nuget-packages",
+        "NUGET_PACKAGES": os.path.join(root, ".task-nuget"),
         "TMPDIR": "/tmp",
         "LANG": "C.UTF-8",
     }
-    argv = [DOTNET, "test", "--configuration", "Release"]
+    argv = [DOTNET, "test", "--configuration", "Release", "--no-restore"]
     try:
         completed = subprocess.run(argv, cwd=root, env=environment, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,

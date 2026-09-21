@@ -228,6 +228,9 @@ public sealed class DockerHelperTests
         Assert.Contains("type=volume,src=agentcontrol-workspace-x,dst=/workspace,readonly,volume-nocopy", argv);
         Assert.DoesNotContain("type=bind", command, StringComparison.Ordinal);
         Assert.Equal("/usr/local/bin/workspace-task-verify", argv[Array.IndexOf(argv, "-S") + 1]);
+        var verifier = File.ReadAllText(Path.Combine(ControllerIsolationLayoutTests.RepositoryRoot(), "src/container/workspace-task-verify.py"));
+        Assert.Contains("/opt/dotnet-sdk/dotnet", verifier, StringComparison.Ordinal);
+        Assert.Contains("--no-restore", verifier, StringComparison.Ordinal);
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { WorkspaceRoot = "../etc" }, Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { AllowedPaths = ["src", "../secret"] }, Policy));
         Assert.Throws<DockerGrammarException>(() => DockerArgv.BuildWorkspaceVerify(spec with { TestRecipeId = "shell" }, Policy));

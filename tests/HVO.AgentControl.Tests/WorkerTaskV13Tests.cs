@@ -217,6 +217,56 @@ public sealed class WorkerTaskV13Tests
     }
 
     [Fact]
+    public void StartupReconciliationMakesPendingVerificationUncertainClearsOnlyMatchingHoldAndAllowsRetry()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        var task = CompleteTask(fixture);
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
+        var pending = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
+        using (var connection = Raw(fixture.DatabasePath))
+        {
+            Execute(connection, $"INSERT INTO dispatch_holds(id,runtime_binding_id,reason,active,detail,created_at,cleared_at,revision) VALUES('hold-manual-restart','{fixture.BindingId}','manual',1,'operator','2026-09-20T00:00:00.0000000+00:00',NULL,1)");
+        }
+
+        Assert.Equal(1, fixture.Store.ReconcileControllerStartup());
+
+        var recovered = fixture.Store.GetWorkerTaskVerification(task.Id)!;
+        Assert.Equal(pending.Id, recovered.Id);
+        Assert.Equal(WorkerTaskVerificationStates.Uncertain, recovered.State);
+        Assert.Equal("controller-restart-during-verification", recovered.FailureDetail);
+        Assert.Equal(WorkerTaskStates.Completed, fixture.Store.GetWorkerTask(task.Id)!.State);
+        Assert.Equal(0L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM dispatch_holds WHERE reason='task-verification' AND active=1"));
+        Assert.Equal(1L, RawScalar(fixture.DatabasePath, "SELECT COUNT(*) FROM dispatch_holds WHERE reason='manual' AND active=1 AND detail='operator'"));
+        Assert.Equal(0, fixture.Store.ReconcileControllerStartup());
+
+        using (var connection = Raw(fixture.DatabasePath))
+            Execute(connection, "UPDATE dispatch_holds SET active=0,cleared_at='2026-09-20T00:01:00.0000000+00:00',revision=revision+1 WHERE reason='manual'");
+        var retry = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
+        Assert.Equal("workspace-task-verify-v1.2", retry.VerifierVersion);
+        fixture.Store.CompleteWorkerTaskVerification(retry.Id, retry.Revision, new HostTaskVerification(
+            WorkerTaskVerificationStates.Failed, null, null, null, "retry-failed"));
+        var dispatched = fixture.Store.BeginWorkerRequest(new(
+            fixture.EmployeeId, fixture.BindingId, "wrk-a", fixture.SessionId, fixture.NativeSessionId,
+            "idem-after-verification-restart", "sha256:" + new string('7', 64), "sha256:" + new string('8', 64), 1, 1, "turn-after-verification-restart"), Spec());
+        Assert.Equal("Intent", dispatched.State);
+    }
+
+    [Fact]
+    public void StartupReconciliationLeavesCompletedVerificationAndTaskUntouched()
+    {
+        using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
+        var task = CompleteTask(fixture);
+        task = fixture.Store.RecordWorkerTaskModelReport(task.Id, task.Revision, new ModelTaskReport("done", [], [], null, []));
+        var pending = fixture.Store.BeginWorkerTaskVerification(task.Id, task.Revision, "workspace-task-verify-v1");
+        var failed = fixture.Store.CompleteWorkerTaskVerification(pending.Id, pending.Revision, new HostTaskVerification(
+            WorkerTaskVerificationStates.Failed, null, null, null, "test-failed"));
+
+        Assert.Equal(0, fixture.Store.ReconcileControllerStartup());
+        Assert.Equal(failed, fixture.Store.GetWorkerTaskVerification(task.Id));
+        Assert.Equal(WorkerTaskStates.Completed, fixture.Store.GetWorkerTask(task.Id)!.State);
+    }
+
+    [Fact]
     public void HostVerificationRetriesPreserveImmutableAttemptsAndReadLatest()
     {
         using var fixture = new RemoteWorkerControlTests.RemoteStoreFixture();
@@ -256,10 +306,12 @@ public sealed class WorkerTaskV13Tests
         using (var store = new OrganizationStore(path))
             store.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         DowngradeToCanonicalV12(path);
+        ExecuteRaw(path, "INSERT INTO dispatch_holds(id,runtime_binding_id,reason,active,detail,created_at,cleared_at,revision) SELECT 'hold-v12-preserved',id,'manual',1,'v12 detail','2026-09-20T00:00:00.0000000+00:00',NULL,7 FROM runtime_bindings LIMIT 1;");
+        Assert.DoesNotContain("task-verification", Raw(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_holds'"), StringComparison.Ordinal);
 
         using (var faulted = new OrganizationStore(path))
         {
-            faulted.AfterMigrationBackup = () => throw new InvalidOperationException("simulated v12 migration interruption");
+            faulted.BeforeMigrationCommit = () => throw new InvalidOperationException("simulated v12 migration interruption");
             Assert.Throws<InvalidOperationException>(() =>
                 faulted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         }
@@ -269,12 +321,21 @@ public sealed class WorkerTaskV13Tests
         var retained = File.ReadAllBytes(backup);
         var retainedHash = File.ReadAllBytes(hash);
         Assert.Equal(12L, RawScalar(path, "SELECT version FROM schema_version"));
+        Assert.DoesNotContain("task-verification", Raw(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_holds'"), StringComparison.Ordinal);
+        Assert.Equal(1L, RawScalar(path, "SELECT COUNT(*) FROM dispatch_holds WHERE id='hold-v12-preserved' AND revision=7"));
         Assert.False(File.Exists(backup + "-wal"));
         Assert.False(File.Exists(backup + "-shm"));
+        Assert.DoesNotContain("task-verification", RawReadOnly(backup, "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_holds'"), StringComparison.Ordinal);
+        Assert.Equal(1L, RawScalarReadOnly(backup, "SELECT COUNT(*) FROM dispatch_holds WHERE id='hold-v12-preserved' AND revision=7"));
+        SqliteConnection.ClearAllPools();
+        if (File.Exists(backup + "-wal")) File.Delete(backup + "-wal");
+        if (File.Exists(backup + "-shm")) File.Delete(backup + "-shm");
 
         using (var restarted = new OrganizationStore(path))
             restarted.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
         Assert.Equal(13L, RawScalar(path, "SELECT version FROM schema_version"));
+        Assert.Contains("task-verification", Raw(path, "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_holds'"), StringComparison.Ordinal);
+        Assert.Equal(1L, RawScalar(path, "SELECT COUNT(*) FROM dispatch_holds WHERE id='hold-v12-preserved' AND reason='manual' AND active=1 AND detail='v12 detail' AND revision=7"));
         Assert.Equal(retained, File.ReadAllBytes(backup));
         Assert.Equal(retainedHash, File.ReadAllBytes(hash));
     }
@@ -338,6 +399,7 @@ public sealed class WorkerTaskV13Tests
         Assert.False(File.Exists(backup + "-shm"));
         Assert.Equal(12L, RawScalar(backup, "SELECT version FROM schema_version"));
         Assert.Equal(0L, RawScalar(backup, "SELECT COUNT(*) FROM pragma_table_info('worker_tasks') WHERE name='task_spec_json'"));
+        Assert.DoesNotContain("task-verification", RawReadOnly(backup, "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_holds'"), StringComparison.Ordinal);
         Assert.Equal(1L, RawScalar(backup, "SELECT COUNT(*) FROM worker_tasks WHERE id='tsk-legacy'"));
         Assert.Equal(1L, RawScalar(backup, "SELECT COUNT(*) FROM worker_requests WHERE id='req-legacy'"));
         Assert.Equal(
@@ -353,8 +415,10 @@ public sealed class WorkerTaskV13Tests
         Assert.Equal(retained, File.ReadAllBytes(backup));
     }
 
-    [Fact]
-    public void UnknownSchemaV12ShapeFailsBeforeBackupOrMigration()
+    [Theory]
+    [InlineData("ALTER TABLE worker_tasks ADD COLUMN unknown_v12_value TEXT;")]
+    [InlineData("PRAGMA foreign_keys=OFF; CREATE TABLE dispatch_holds_changed (id TEXT PRIMARY KEY,runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged','stale','failed','policy-update','orientation-reload-required','manual','task-verification')),active INTEGER NOT NULL CHECK (active IN (0,1)),detail TEXT,created_at TEXT NOT NULL,cleared_at TEXT,revision INTEGER NOT NULL,UNIQUE(runtime_binding_id,reason)); INSERT INTO dispatch_holds_changed SELECT * FROM dispatch_holds; DROP TABLE dispatch_holds; ALTER TABLE dispatch_holds_changed RENAME TO dispatch_holds; PRAGMA foreign_keys=ON;")]
+    public void UnknownSchemaV12ShapeFailsBeforeBackupOrMigration(string mutation)
     {
         using var root = new TempDirectory();
         var path = System.IO.Path.Combine(root.Path, "control.db");
@@ -364,7 +428,7 @@ public sealed class WorkerTaskV13Tests
         }
 
         DowngradeToCanonicalV12(path);
-        ExecuteRaw(path, "ALTER TABLE worker_tasks ADD COLUMN unknown_v12_value TEXT;");
+        ExecuteRaw(path, mutation);
         using var reopened = new OrganizationStore(path);
         Assert.Throws<OrganizationStoreCorruptException>(() => reopened.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh"));
         Assert.Equal(12L, RawScalar(path, "SELECT version FROM schema_version"));
@@ -386,6 +450,22 @@ public sealed class WorkerTaskV13Tests
             DROP TRIGGER worker_task_verifications_no_delete;
             DROP TRIGGER worker_task_verifications_no_replace;
             DROP TABLE worker_task_verifications;
+            CREATE TABLE dispatch_holds_v12 (
+                id TEXT PRIMARY KEY,
+                runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+                reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
+                active INTEGER NOT NULL CHECK (active IN (0, 1)),
+                detail TEXT,
+                created_at TEXT NOT NULL,
+                cleared_at TEXT,
+                revision INTEGER NOT NULL,
+                UNIQUE (runtime_binding_id, reason)
+            );
+            INSERT INTO dispatch_holds_v12 (id, runtime_binding_id, reason, active, detail, created_at, cleared_at, revision)
+                SELECT id, runtime_binding_id, reason, active, detail, created_at, cleared_at, revision FROM dispatch_holds
+                WHERE reason <> 'task-verification';
+            DROP TABLE dispatch_holds;
+            ALTER TABLE dispatch_holds_v12 RENAME TO dispatch_holds;
             CREATE TABLE worker_tasks_v12 (id TEXT PRIMARY KEY, employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT, runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, description_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('Requested','Uncertain','Running','Completed','Failed','Cancelled','Verified')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL);
             INSERT INTO worker_tasks_v12 (id, employee_id, runtime_binding_id, worker_id, description_hash, state, created_at, updated_at, revision)
                 SELECT id, employee_id, runtime_binding_id, worker_id, description_hash, state, created_at, updated_at, revision FROM worker_tasks;
@@ -466,6 +546,18 @@ public sealed class WorkerTaskV13Tests
 
     private static string Raw(string path, string sql) =>
         Convert.ToString(RawScalar(path, sql), System.Globalization.CultureInfo.InvariantCulture)!;
+
+    private static object? RawScalarReadOnly(string path, string sql)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar();
+    }
+
+    private static string RawReadOnly(string path, string sql) =>
+        Convert.ToString(RawScalarReadOnly(path, sql), System.Globalization.CultureInfo.InvariantCulture)!;
 
     private sealed class TempDirectory : IDisposable
     {

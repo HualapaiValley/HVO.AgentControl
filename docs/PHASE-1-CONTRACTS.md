@@ -1118,10 +1118,18 @@ hiring.
   observation; cancellation is **not** a rollback and the UI says so.
 - **Independent host verification.** `POST /api/tasks/{id}/verify` requires a
   completed task with a model report and a supported recipe, and runs the fixed
-  verifier against the exact persisted workspace volume and approved image on
-  the controller-local Docker target. Only its `Passed` outcome moves the task to
-  `Verified`; the store persists bounded manifest and test-summary hashes plus a
-  sanitized failure, never the raw evidence bytes or any secret.
+  verifier against the exact persisted workspace volume and approved profile
+  image on the controller-local Docker target. For `dotnet-test-release`, the
+  employee must run restore/test during its task turn and leave
+  `obj/project.assets.json` plus any packages in workspace-local `.task-nuget`;
+  credentials must never be placed there. The verifier remains `--network none`,
+  copies bounded generated inputs separately from the source manifest, sets
+  `NUGET_PACKAGES` to that copied cache, and runs fixed
+  `/opt/dotnet-sdk/dotnet test --configuration Release --no-restore`. Generated
+  `.task-nuget`, `bin` and `obj` files are never reported as authored changes.
+  Only its `Passed` outcome moves the task to `Verified`; the store persists
+  bounded manifest and test-summary hashes plus a sanitized failure, never the
+  raw evidence bytes or any secret.
 - **Manual dispatch hold.** `PUT /api/employees/{id}/dispatch-hold` is
   owner-only, same-origin and employee-revision-bound. It sets or clears only
   the owner manual hold and never implies that stale or policy/recovery holds are

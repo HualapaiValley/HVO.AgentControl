@@ -54,7 +54,7 @@
                 </fieldset>
                 <label>Forbidden actions (one per line)<textarea name="forbiddenActions" data-task-forbidden required></textarea></label>
                 <label>Maximum seconds<input type="number" name="maximumSeconds" data-task-seconds min="1" max="1800" value="300" required /></label>
-                <label>Test recipe<select name="testRecipeId" data-task-recipe><option value="dotnet-test-release">dotnet-test-release</option></select></label>
+                <label>Test recipe<select name="testRecipeId" data-task-recipe><option value="dotnet-test-release">dotnet-test-release (prepare local restore inputs; verifier uses no network/no restore)</option></select></label>
                 <button type="submit" class="btn btn-primary" data-task-submit disabled>Dispatch bounded task</button>
             </form>
             <p class="receipt" data-task-receipt role="status" aria-live="polite"></p>

@@ -37,6 +37,11 @@ public static class WorkerTaskPrompt
         builder.Append("Forbidden actions: ").AppendLine(string.Join(", ", normalized.ForbiddenActions));
         builder.Append("Budget: at most ").Append(normalized.MaximumSeconds).AppendLine(" seconds and exactly one turn.");
         builder.Append("Test recipe: ").AppendLine(normalized.TestRecipeId is null ? "none" : normalized.TestRecipeId + " (the host selects the exact command)");
+        if (normalized.TestRecipeId == WorkerTaskTestRecipes.DotnetTestRelease)
+        {
+            builder.AppendLine("- Before finishing, run restore and the Release test yourself, then leave obj/project.assets.json and every required package under the workspace-local .task-nuget directory.");
+            builder.AppendLine("- The independent verifier has no network and runs dotnet test --configuration Release --no-restore against a writable copy. Do not place credentials in generated inputs.");
+        }
         builder.AppendLine();
         builder.AppendLine("Hard rules, always in force:");
         builder.AppendLine("- Work only inside the declared workspace root and the allowed paths; never escape it.");

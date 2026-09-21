@@ -1602,6 +1602,7 @@ public sealed class OrganizationStoreTests
         Assert.Equal(12, RawScalar(v12Backup, "SELECT version FROM schema_version;"));
         Assert.Equal(0, RawScalar(v12Backup, "SELECT COUNT(*) FROM pragma_table_info('worker_tasks') WHERE name = 'task_spec_json';"));
         Assert.Equal(0, RawScalar(v12Backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'worker_task_verifications';"));
+        Assert.DoesNotContain("task-verification", RawScalarString(v12Backup, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dispatch_holds';"), StringComparison.Ordinal);
         Assert.Equal(1, RawScalar(v12Backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'employee_rebuilds';"));
         Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v12Backup))).ToLowerInvariant(), File.ReadAllText(v12Hash).Trim());
 
@@ -1741,6 +1742,7 @@ public sealed class OrganizationStoreTests
         AssertNoBackupSidecars(v12Backup);
         Assert.Equal(12, RawScalar(v12Backup, "SELECT version FROM schema_version;"));
         Assert.Equal(0, RawScalar(v12Backup, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'worker_task_verifications';"));
+        Assert.DoesNotContain("task-verification", RawScalarString(v12Backup, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dispatch_holds';"), StringComparison.Ordinal);
         Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(v12Backup))).ToLowerInvariant(), File.ReadAllText(v12Hash).Trim());
 
         var retained = File.ReadAllBytes(v11Backup);
@@ -2006,6 +2008,22 @@ public sealed class OrganizationStoreTests
             DROP TRIGGER worker_task_verifications_no_delete;
             DROP TRIGGER worker_task_verifications_no_replace;
             DROP TABLE worker_task_verifications;
+            CREATE TABLE dispatch_holds_v12 (
+                id TEXT PRIMARY KEY,
+                runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+                reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
+                active INTEGER NOT NULL CHECK (active IN (0, 1)),
+                detail TEXT,
+                created_at TEXT NOT NULL,
+                cleared_at TEXT,
+                revision INTEGER NOT NULL,
+                UNIQUE (runtime_binding_id, reason)
+            );
+            INSERT INTO dispatch_holds_v12 (id, runtime_binding_id, reason, active, detail, created_at, cleared_at, revision)
+                SELECT id, runtime_binding_id, reason, active, detail, created_at, cleared_at, revision FROM dispatch_holds
+                WHERE reason <> 'task-verification';
+            DROP TABLE dispatch_holds;
+            ALTER TABLE dispatch_holds_v12 RENAME TO dispatch_holds;
             CREATE TABLE worker_tasks_v12 (id TEXT PRIMARY KEY, employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE RESTRICT, runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT, worker_id TEXT NOT NULL REFERENCES worker_enrollments(worker_id) ON DELETE RESTRICT, description_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN('Requested','Uncertain','Running','Completed','Failed','Cancelled','Verified')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL);
             INSERT INTO worker_tasks_v12 (id, employee_id, runtime_binding_id, worker_id, description_hash, state, created_at, updated_at, revision)
                 SELECT id, employee_id, runtime_binding_id, worker_id, description_hash, state, created_at, updated_at, revision FROM worker_tasks;

@@ -441,7 +441,7 @@ public sealed partial class OrganizationStore : IDisposable
         CREATE TABLE dispatch_holds (
             id TEXT PRIMARY KEY,
             runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
-            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual', 'task-verification')),
+            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
             active INTEGER NOT NULL CHECK (active IN (0, 1)),
             detail TEXT,
             created_at TEXT NOT NULL,
@@ -551,10 +551,28 @@ public sealed partial class OrganizationStore : IDisposable
     private static readonly string[] SchemaV12Statements =
         [.. SchemaV11Statements, .. RebuildSchemaV12Statements];
 
-    // v13 rebuilds worker_tasks in place with the bounded task specification and
-    // model report, and adds the host verification table. The frozen v12
-    // statements stay intact for exact-signature migration; the v13 remote-worker
-    // list replaces only the worker_tasks statement.
+    private const string DispatchHoldsSchemaV13Statement =
+        """
+        CREATE TABLE dispatch_holds (
+            id TEXT PRIMARY KEY,
+            runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+            reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual', 'task-verification')),
+            active INTEGER NOT NULL CHECK (active IN (0, 1)),
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            cleared_at TEXT,
+            revision INTEGER NOT NULL,
+            UNIQUE (runtime_binding_id, reason)
+        )
+        """;
+
+    // v13 rebuilds worker_tasks and dispatch_holds in place with the bounded task
+    // specification/model report and the new internal task-verification hold, and
+    // adds the host verification table. The frozen v12 statements stay intact for
+    // exact-signature migration.
+    private static readonly string[] OrientationSchemaV13Statements =
+        [.. OrientationSchemaV3Statements[..10], DispatchHoldsSchemaV13Statement, .. OrientationSchemaV3Statements[11..]];
+
     private static readonly string[] RemoteWorkerSchemaV13Statements =
         [
             ExecutionHostsSchemaV11Statement,
@@ -564,7 +582,7 @@ public sealed partial class OrganizationStore : IDisposable
         ];
 
     private static readonly string[] SchemaV13Statements =
-        [.. SchemaV3Statements, .. RemoteWorkerSchemaV13Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements, .. RebuildSchemaV12Statements, .. WorkerTaskVerificationSchemaV13Statements];
+        [.. SchemaV2Statements, .. OrientationSchemaV13Statements, .. RemoteWorkerSchemaV13Statements, .. ContainerProfileSchemaV8Statements, .. HireRequestSchemaV10Statements, .. ContainerProfileImmutabilityV8Statements, .. ProfileBuildSchemaV9Statements, .. HireApprovalSchemaV10Statements, .. RebuildSchemaV12Statements, .. WorkerTaskVerificationSchemaV13Statements];
 
     private static readonly IReadOnlyDictionary<(string Type, string Name), string> ExpectedSchemaV3 =
         BuildExpectedSchema(SchemaV3Statements);
@@ -2199,15 +2217,14 @@ public sealed partial class OrganizationStore : IDisposable
     }
 
     /// <summary>
-    /// Rebuilds <c>worker_tasks</c> with the bounded v13 specification and model
-    /// report and adds the host verification table. <c>worker_requests</c>
-    /// references <c>worker_tasks(id)</c>, so the replacement is built under a
-    /// staging name, the existing rows are copied with a deterministic legacy
-    /// specification derived from each row's description hash, the old table is
-    /// dropped and the staging table is renamed into place while foreign keys are
-    /// briefly disabled. Every child reference keeps naming <c>worker_tasks</c>
-    /// and resolves to the rebuilt table; <c>PRAGMA foreign_key_check</c> proves
-    /// it before the migration is accepted.
+    /// Rebuilds <c>worker_tasks</c> with the bounded v13 specification/model report
+    /// and <c>dispatch_holds</c> with the new internal task-verification reason,
+    /// then adds the host verification table. Both replacements are built under
+    /// staging names and swapped while foreign keys are disabled, preserving every
+    /// old row, timestamp and revision. Existing v12 hold rows cannot carry the new
+    /// reason because its frozen CHECK rejected it. Child foreign keys keep naming
+    /// the canonical tables; <c>PRAGMA foreign_key_check</c> proves them after the
+    /// transaction.
     /// </summary>
     private void MigrateV12ToV13(SqliteConnection connection)
     {
@@ -2254,6 +2271,22 @@ public sealed partial class OrganizationStore : IDisposable
 
             Execute(connection, transaction, "DROP TABLE worker_tasks");
             Execute(connection, transaction, "ALTER TABLE worker_tasks_v13 RENAME TO worker_tasks");
+
+            var holdsStaging = DispatchHoldsSchemaV13Statement.Replace(
+                "CREATE TABLE dispatch_holds (",
+                "CREATE TABLE dispatch_holds_v13 (",
+                StringComparison.Ordinal);
+            Execute(connection, transaction, holdsStaging);
+            Execute(connection, transaction,
+                """
+                INSERT INTO dispatch_holds_v13 (
+                    id, runtime_binding_id, reason, active, detail, created_at, cleared_at, revision)
+                SELECT id, runtime_binding_id, reason, active, detail, created_at, cleared_at, revision
+                FROM dispatch_holds
+                """);
+            Execute(connection, transaction, "DROP TABLE dispatch_holds");
+            Execute(connection, transaction, "ALTER TABLE dispatch_holds_v13 RENAME TO dispatch_holds");
+
             foreach (var statement in WorkerTaskVerificationSchemaV13Statements)
             {
                 Execute(connection, transaction, statement);

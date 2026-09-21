@@ -269,7 +269,7 @@ public sealed partial class OrganizationStore
                     ("$state", taskState), ("$report", reportJson), ("$reportHash", reportHash),
                     ("$failure", StripBounded(failure, MaxFailureDetailLength)), ("$now", now), ("$task", task.Id));
                 if (taskRows != 1) throw new OrganizationConcurrencyException("The worker task changed or carries a conflicting model report.");
-                if (cancellation is not null)
+                if (cancellation is not null && cancellation.State != "Observed")
                 {
                     var cancellationRows = Execute(connection, transaction,
                         "UPDATE worker_cancellations SET state='Observed',updated_at=$now,revision=revision+1 WHERE id=$id AND revision=$revision AND state IN ('Forwarded','Uncertain')",
@@ -287,7 +287,7 @@ public sealed partial class OrganizationStore
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT id,request_id,payload_hash,state,ownership_epoch,process_generation,revision FROM worker_cancellations WHERE request_id=$request AND state IN ('Forwarded','Uncertain') ORDER BY created_at DESC,id DESC LIMIT 1";
+        command.CommandText = "SELECT id,request_id,payload_hash,state,ownership_epoch,process_generation,revision FROM worker_cancellations WHERE request_id=$request AND state IN ('Forwarded','Uncertain','Observed') ORDER BY created_at DESC,id DESC LIMIT 1";
         command.Parameters.AddWithValue("$request", requestId);
         using var reader = command.ExecuteReader();
         return reader.Read() ? new WorkerCancellationRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt32(6)) : null;
@@ -369,7 +369,7 @@ public sealed partial class OrganizationStore
                         active=1,detail=excluded.detail,cleared_at=NULL,revision=dispatch_holds.revision+1
                     """,
                     ("$id", id), ("$task", taskId), ("$version", version), ("$now", now),
-                    ("$hold", OrganizationIds.NewHoldId()), ("$binding", task.RuntimeBindingId), ("$detail", id));
+                    ("$hold", OrganizationIds.NewHoldId()), ("$binding", task.RuntimeBindingId), ("$detail", version));
                 transaction.Commit();
                 return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
             }
@@ -473,8 +473,8 @@ public sealed partial class OrganizationStore
                 }
 
                 Execute(connection, transaction,
-                    "UPDATE dispatch_holds SET active=0,detail=NULL,cleared_at=$now,revision=revision+1 WHERE runtime_binding_id=$binding AND reason='task-verification' AND active=1 AND detail=$verification",
-                    ("$now", now), ("$binding", task.RuntimeBindingId), ("$verification", current.Id));
+                    "UPDATE dispatch_holds SET active=0,detail=NULL,cleared_at=$now,revision=revision+1 WHERE runtime_binding_id=$binding AND reason='task-verification' AND active=1 AND detail=$version",
+                    ("$now", now), ("$binding", task.RuntimeBindingId), ("$version", current.VerifierVersion));
                 transaction.Commit();
                 return ReadWorkerTaskVerificationIn(connection, null, id: id)!;
             }

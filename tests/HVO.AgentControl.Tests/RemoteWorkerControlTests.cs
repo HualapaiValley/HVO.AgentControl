@@ -101,7 +101,26 @@ public sealed class RemoteWorkerControlTests
             foreach (var index in new[] { "one_active_profile_build_per_revision_host", "one_verified_profile_build_per_revision_host" }) connection.Execute($"DROP INDEX {index}");
             foreach (var trigger in new[] { "profile_builds_identity_immutable", "profile_builds_no_delete", "profile_builds_no_replace", "container_profile_revisions_immutable", "container_profile_revisions_no_delete", "container_profiles_no_delete", "container_profile_revisions_no_replace", "container_profiles_no_replace", "container_profiles_identity_immutable", "container_profiles_no_update_replace" }) connection.Execute($"DROP TRIGGER {trigger}");
             foreach (var table in new[] { "profile_builds", "hire_request_events", "hire_requests", "container_profile_revisions", "container_profiles", "worker_event_retention", "remote_terminal_viewers", "worker_recovery_audit", "worker_pending_permissions", "worker_events", "worker_recovery_obligations", "resource_records", "provisioning_operations", "worker_cancellations", "worker_requests", "worker_tasks", "worker_cursors", "worker_enrollments", "execution_hosts" }) connection.Execute($"DROP TABLE {table}");
-            connection.Execute("UPDATE schema_version SET version=3");
+            connection.Execute(
+                """
+                PRAGMA foreign_keys=OFF;
+                CREATE TABLE dispatch_holds_v3 (
+                    id TEXT PRIMARY KEY,
+                    runtime_binding_id TEXT NOT NULL REFERENCES runtime_bindings(id) ON DELETE RESTRICT,
+                    reason TEXT NOT NULL CHECK (reason IN ('orientation-unacknowledged', 'stale', 'failed', 'policy-update', 'orientation-reload-required', 'manual')),
+                    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+                    detail TEXT,
+                    created_at TEXT NOT NULL,
+                    cleared_at TEXT,
+                    revision INTEGER NOT NULL,
+                    UNIQUE (runtime_binding_id, reason)
+                );
+                INSERT INTO dispatch_holds_v3 SELECT * FROM dispatch_holds WHERE reason <> 'task-verification';
+                DROP TABLE dispatch_holds;
+                ALTER TABLE dispatch_holds_v3 RENAME TO dispatch_holds;
+                UPDATE schema_version SET version=3;
+                PRAGMA foreign_keys=ON;
+                """);
         }
         var policyBefore = Raw(path, "SELECT version || ':' || revision || ':' || summary FROM permission_policies");
         using (var migrated = new OrganizationStore(path)) migrated.OpenAndAdopt("AgentControl Development", "owner-approved:test", null, "seed://fresh");
