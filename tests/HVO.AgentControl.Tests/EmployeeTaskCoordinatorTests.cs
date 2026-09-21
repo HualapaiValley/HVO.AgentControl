@@ -434,7 +434,7 @@ public sealed class EmployeeTaskCoordinatorTests
             var requestId = root.GetProperty("requestId").GetString()!;
             var turnId = root.GetProperty("turnId").GetString()!;
             LastPrompt = root.GetProperty("envelope").GetProperty("params").GetProperty("prompt").Clone();
-            if (LastPrompt.ValueKind != JsonValueKind.Array) throw new HVO.AgentControl.Worker.WorkerProtocolException("ACP prompt must be a content-block array.");
+            if (LastPrompt.ValueKind != JsonValueKind.Array) throw new InvalidOperationException("Fake worker: ACP prompt must be a content-block array.");
             SubmitCount++;
             _requests[requestId] = (turnId, 1, 1, "forwarded", null);
             return Stored(requestId, turnId, "forwarded", null);

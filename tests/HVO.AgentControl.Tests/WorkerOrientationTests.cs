@@ -474,7 +474,7 @@ public sealed class WorkerOrientationTests
         runtime.Start();
         var lease = store.AcquireLease("controller-test", Nonce(3));
         store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
-        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":"bounded task"}}""");
+        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"text","text":"bounded task"}]}}""");
         await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-invalid", envelope.RootElement, "turn-task-invalid", CancellationToken.None, captureTaskReport: true);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
@@ -508,7 +508,7 @@ public sealed class WorkerOrientationTests
         runtime.Start();
         var lease = store.AcquireLease("controller-test", Nonce(4));
         store.Heartbeat(lease.Epoch, lease.ConnectionNonce);
-        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":"bounded task"}}""");
+        using var envelope = JsonDocument.Parse("""{"method":"session/prompt","params":{"sessionId":"ses-test","prompt":[{"type":"text","text":"bounded task"}]}}""");
         await runtime.SubmitAsync(lease.Epoch, lease.ConnectionNonce, "req-task-cancel", envelope.RootElement, "turn-task-cancel", CancellationToken.None, captureTaskReport: true);
         await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var acpId = JsonDocument.Parse(output.Text).RootElement.GetProperty("id").GetInt64();
