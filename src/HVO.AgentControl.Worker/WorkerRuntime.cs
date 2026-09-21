@@ -579,21 +579,12 @@ public sealed class WorkerRuntime : IAsyncDisposable
                 }
                 else
                 {
-                    try
-                    {
-                        using var document = JsonDocument.Parse(captured.Text, new JsonDocumentOptions { MaxDepth = 32 });
-                        if (!ModelTaskReportShape.TryCanonicalize(document.RootElement, out var canonical, out _))
-                        {
-                            state = "failed";
-                            outcome = TaskReportFailureOutcome();
-                        }
-                        else outcome = canonical!;
-                    }
-                    catch (JsonException)
+                    if (!TryCanonicalizeFinalTaskReport(captured.Text, out var canonical))
                     {
                         state = "failed";
                         outcome = TaskReportFailureOutcome();
                     }
+                    else outcome = canonical!;
                 }
             }
             else outcome = SanitizeOutcome(result, state);
@@ -841,6 +832,25 @@ public sealed class WorkerRuntime : IAsyncDisposable
     }
     private static string TaskReportFailureOutcome() => JsonSerializer.Serialize(new { category = "model-report-invalid" }, WorkerProtocol.JsonOptions);
     private static string CancelledOutcome() => JsonSerializer.Serialize(new { category = "cancelled" }, WorkerProtocol.JsonOptions);
+
+    private static bool TryCanonicalizeFinalTaskReport(string text, out string? canonical)
+    {
+        canonical = null;
+        var end = text.Length;
+        while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
+        if (end == 0) return false;
+        for (var start = text.LastIndexOf('{', end - 1); start >= 0; start = start == 0 ? -1 : text.LastIndexOf('{', start - 1))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(text[start..end], new JsonDocumentOptions { MaxDepth = 32 });
+                if (ModelTaskReportShape.TryCanonicalize(document.RootElement, out canonical, out _)) return true;
+            }
+            catch (JsonException) { }
+        }
+        canonical = null;
+        return false;
+    }
 
     private static string SanitizeOutcome(JsonElement result, string state)
     {
