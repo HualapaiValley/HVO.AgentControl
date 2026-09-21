@@ -1154,11 +1154,11 @@ hiring.
   authoritative native session, confirm the load, and run the bounded tool-free
   comprehension. **No image build occurs.** Stale orientation continues to block
   dispatch through the existing holds.
-- **Capability truth.** In this evidence change `/api/info` reports
-  `TaskControlImplemented=true`, `TaskControlOperationallyValidated=true` and
-  `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`;
-  the currently deployed `cae2ebc` build, on which the evidence was collected,
-  still reports the task flags false until this evidence change is promoted.
+- **Capability truth.** The deployed `home-docker` build (promoted `main`
+  `59d0d68`) reports `TaskControlImplemented=true`,
+  `TaskControlOperationallyValidated=true` and
+  `TaskControlValidatedScope="first-local-managed-two-task-restart-verification"`
+  live; the evidence itself was collected on the then-deployed `cae2ebc` build.
   The capability is operationally validated as of 2026-09-21: the first local
   managed employee ran two bounded tasks end to end and each reached `Verified`
   through independent host verification on the controller-local Docker target,
@@ -1212,7 +1212,7 @@ without action and displays Applied/Uncertain/Failed history with only the store
 sanitized failure summary. Controller secrets are never projected.
 
 This is code capability with hermetic validation plus the live #257 rebuild that
-completed on `home-docker`. `home-docker` is on promoted `main` `cae2ebc` / schema v13,
+completed on `home-docker`. `home-docker` is on promoted `main` `59d0d68` / schema v13,
 and `WorkerControl` remains disabled by default.
 
 ## 13. Fresh disposable teardown/rebuild test
