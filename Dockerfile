@@ -6,9 +6,9 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.402@sha256:0d99ebf1ccad15037b5c98c9fe8979
 WORKDIR /source
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
-RUN dotnet publish src/HVO.AgentControl/HVO.AgentControl.csproj -c Release -nodeReuse:false -p:UseSharedCompilation=false -o /app
-RUN dotnet publish src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj -c Release -nodeReuse:false -p:UseSharedCompilation=false -o /worker-app
-RUN dotnet publish src/HVO.AgentControl.DockerHelper/HVO.AgentControl.DockerHelper.csproj -c Release -nodeReuse:false -p:UseSharedCompilation=false -o /docker-helper-app
+RUN dotnet publish src/HVO.AgentControl/HVO.AgentControl.csproj -c Release -o /app
+RUN dotnet publish src/HVO.AgentControl.Worker/HVO.AgentControl.Worker.csproj -c Release -o /worker-app
+RUN dotnet publish src/HVO.AgentControl.DockerHelper/HVO.AgentControl.DockerHelper.csproj -c Release -o /docker-helper-app
 
 # The privileged launcher is the container's only setuid component. It is built
 # from source in its own stage so the runtime image never carries a compiler,
