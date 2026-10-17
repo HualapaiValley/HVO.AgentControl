@@ -20,7 +20,7 @@ public sealed class WorkerImageContractTests
         var dockerfile = File.ReadAllText(Path.Combine(root, "Dockerfile"));
         var compose = File.ReadAllText(Path.Combine(root, "compose.yaml"));
         var supervisor = File.ReadAllText(Path.Combine(root, "src/container/worker-supervisor.py"));
-        Assert.Contains("FROM mcr.microsoft.com/dotnet/sdk:10.0.401", dockerfile);
+        Assert.Contains("FROM mcr.microsoft.com/dotnet/sdk:10.0.402", dockerfile);
         Assert.Contains("ARG OPENCODE_VERSION=1.18.30", dockerfile);
         Assert.Contains(" AS worker", dockerfile);
         Assert.Contains("--uid 1101", dockerfile); Assert.Contains("--uid 1102", dockerfile);
@@ -361,7 +361,7 @@ public sealed class WorkerImageContractTests
             HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.StandardOutput);
 
             // The generic profile's toolchain is really there, as the employee would see it.
-            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "/opt/dotnet-sdk/dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
+            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "/opt/dotnet-sdk/dotnet --list-sdks | grep -q '^10\\.0\\.402' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
             Assert.True(tools.ExitCode == 0, tools.Output);
 
             // Hostile fragments are built the same way and must be rejected by the same,

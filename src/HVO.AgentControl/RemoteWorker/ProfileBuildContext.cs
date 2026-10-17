@@ -49,7 +49,7 @@ public static class ProfileBuildContext
     public const string PinRepository = "agentcontrol-worker-base";
 
     /// <summary>The SDK the dotnet feature installs: the repository's pinned SDK (global.json).</summary>
-    public const string DotnetSdkVersion = "10.0.401";
+    public const string DotnetSdkVersion = "10.0.402";
 
     /// <summary>SHA-256 of Microsoft's dotnet-install.sh as pinned for the recipe; a changed script fails the build.</summary>
     public const string DotnetInstallScriptSha256 = "082f7685e156738a1b2e2ed8381a621870d4ce8e8c59278034556f05c186eb2e";

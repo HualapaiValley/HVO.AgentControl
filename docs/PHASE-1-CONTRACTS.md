@@ -1262,7 +1262,7 @@ These are open and must not be presented as decided or owner-accepted:
   keys and a busy timeout are configured on every writer connection; the bounded
   cross-process single-writer lock, the controller-only `0600` database/WAL/SHM
   modes and fail-closed validation are covered by local and container tests, and
-  `Microsoft.Data.Sqlite` is pinned centrally to the matching `10.0.12` servicing
+  `Microsoft.Data.Sqlite` is pinned centrally to the matching `10.0.13` servicing
   band. **Not yet validated:** WAL/`synchronous=FULL` crash durability on the
   actual Docker volume filesystem has not been crash-tested; the evidence is the
   configured pragmas and the local/container test filesystems only.

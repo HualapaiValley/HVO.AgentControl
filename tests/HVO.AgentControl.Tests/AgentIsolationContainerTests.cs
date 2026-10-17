@@ -161,7 +161,7 @@ public sealed class AgentIsolationContainerTests
         // The pinned SDK has a single source; a doc that names a different one
         // is stale rather than historical unless it is describing a past bump.
         var globalJson = File.ReadAllText(Path.Combine(root, "global.json"));
-        Assert.Contains("10.0.401", globalJson, StringComparison.Ordinal);
+        Assert.Contains("10.0.402", globalJson, StringComparison.Ordinal);
         foreach (var name in new[] { "CHANGELOG.md", "README.md" })
         {
             Assert.DoesNotContain(
