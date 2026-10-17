@@ -31,6 +31,15 @@ Changes after the first portal release are collected here.
 
 ### Changed
 
+- Update the active SDK to .NET `10.0.402` and runtime-aligned Microsoft
+  packages to `10.0.13` (#331, superseding Dependabot #326, #327 and #328).
+  Pin the `dotnet/sdk:10.0.402`, `dotnet/aspnet:10.0.13` and
+  `dotnet/runtime:10.0.13` base images by patch tag and multi-architecture
+  index digest. Batch Playwright `1.64.0`, xunit.runner.visualstudio `4.0.1`,
+  actions/setup-node `7.1.0` and actions/upload-artifact `7.0.2`.
+  Set `RuntimeFrameworkVersion` to `10.0.13`, raising the minimum
+  Microsoft.NETCore.App (and Microsoft.AspNetCore.App where used) runtime
+  required for binaries run outside the shipped images.
 - Adopted the HualapaiValley development model for changes to this repository (2026-09-18): `development/v1` is the default daily-integration branch under a fast required gate (`Development v1 / Preflight` hosted; `Development v1 / Build and Unit` on the organization's self-hosted `hvo-linux-x64` runners: restore, warning-clean build, format, hermetic test selection); `main` is the stable line, moved only by the nightly promotion PR that `promote-main.yml` opens as `hvo-agentcontrol[bot]` and the operator merges with a merge commit after `V2 CI` passes. Independent reviews, finding threads and `VERIFIED_*` replies are posted as the bot through `agentcontrol.yml` (`post-review`, `post-finding`, `reply-thread`) from dispatch inputs bound to the exact head SHA; review text is never committed to the PR branch. `docs/REVIEW-PROTOCOL.md` is now the v1 review rulebook (replacing the policy-lane protocol used through PR #262), with `docs/development-v1.md`, `docs/runbooks/pull-request-walkthrough.md` and `docs/runbooks/repository-setup.md`; issue and PR templates, `scripts/review:v1` and the `review:*`/`risk:*`/`workflow:*` labels were added. 133 V1-era branches were archived to an operator-held bundle and deleted. This is repository process, not the managed-employee review the product implements.
 - Repository transferred to `HualapaiValley/HVO.AgentControl` (2026-09-18) and made public; branch protection, secret scanning/push protection and Dependabot security updates were re-applied after the move. In-repo references (CI badge, GHCR image name `ghcr.io/hualapaivalley/hvo.agentcontrol` in the never-dispatched release workflow, sibling HVO repository links, repository-admin notes) now point at the organization. No image has ever been published under the old name. GitHub Actions are pinned to full-length commit SHAs (with version comments) to satisfy the organization's actions policy; the resolved versions are unchanged (`checkout` v7.0.1, `setup-dotnet` v6.0.0, `setup-node` v7.0.0, `setup-python` v7.0.0, `upload-artifact` v7.0.1, `setup-buildx-action` v4.4.1, `build-push-action` v7.4.0, `login-action` v4.6.0).
 
