@@ -527,7 +527,7 @@ public sealed class ProfileBuildTests : IDisposable
 
     private static ApprovedExecutionHost LocalHost() => new() { Id = "host-a", Hostname = "host-a.example", Port = 22, Username = "roys", KnownHostsPath = "/dev/null", IdentityFilePath = "/dev/zero" };
 
-    private static readonly string[] BaseEnvironment = ["APP_UID=1654", "ASPNETCORE_HTTP_PORTS=8080", "DOTNET_RUNNING_IN_CONTAINER=true", "DOTNET_VERSION=10.0.12", "LANG=C.UTF-8", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"];
+    private static readonly string[] BaseEnvironment = ["APP_UID=1654", "ASPNETCORE_HTTP_PORTS=8080", "DOTNET_RUNNING_IN_CONTAINER=true", "DOTNET_VERSION=10.0.13", "LANG=C.UTF-8", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"];
     private static readonly string[] IsolatedEntrypoint = ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"];
 
     private static string BaseInspect(string id = Base) => JsonSerializer.Serialize(new[] { new { Id = id, Os = "linux", Architecture = "amd64", Config = new { Labels = (object?)null, Entrypoint = IsolatedEntrypoint, Env = BaseEnvironment, WorkingDir = "/workspace", Cmd = (string[]?)null }, RootFS = new { Type = "layers", Layers = BaseLayers } } });

@@ -9,7 +9,7 @@ namespace HVO.AgentControl.Tests;
 [Trait("Category", "DockerWorker")]
 public sealed class WorkerImageContractTests
 {
-    private const string Image = "hvo-agentcontrol:worker-tests";
+    private static readonly string Image = Environment.GetEnvironmentVariable("AGENTCONTROL_WORKER_IMAGE") ?? "hvo-agentcontrol:worker-tests";
     private static readonly bool Required = Environment.GetEnvironmentVariable("AGENTCONTROL_DOCKER_REQUIRED") == "1";
     private static readonly Lazy<bool> Available = new(Build);
 
@@ -20,7 +20,7 @@ public sealed class WorkerImageContractTests
         var dockerfile = File.ReadAllText(Path.Combine(root, "Dockerfile"));
         var compose = File.ReadAllText(Path.Combine(root, "compose.yaml"));
         var supervisor = File.ReadAllText(Path.Combine(root, "src/container/worker-supervisor.py"));
-        Assert.Contains("FROM mcr.microsoft.com/dotnet/sdk:10.0.401", dockerfile);
+        Assert.Contains("FROM mcr.microsoft.com/dotnet/sdk:10.0.402", dockerfile);
         Assert.Contains("ARG OPENCODE_VERSION=1.18.30", dockerfile);
         Assert.Contains(" AS worker", dockerfile);
         Assert.Contains("--uid 1101", dockerfile); Assert.Contains("--uid 1102", dockerfile);
@@ -77,10 +77,10 @@ public sealed class WorkerImageContractTests
             Assert.True(bootstrap.ExitCode == 0, bootstrap.Output);
             var start = Run(["run", "-d", "--name", name, "--network", "none", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL", "--security-opt", "no-new-privileges", "-v", volume + ":/control", "-e", "WORKER_ID=test-worker", "-e", "WORKER_CONTROLLER_ID=test-controller", Image]);
             Assert.True(start.ExitCode == 0, start.Output);
-            _ = WaitForAcpListeners(name) ?? throw new Xunit.Sdk.XunitException("the fixed ACP process and its loopback:4096 listener did not appear within the bound.");
+            var listeners = WaitForAcpListeners(name) ?? throw new Xunit.Sdk.XunitException("the fixed ACP process and its loopback:4096 listener did not appear within the bound.");
             var pid = Run(["inspect", "-f", "{{.State.Pid}}", name]);
             Assert.True(pid.ExitCode == 0, pid.Output);
-            var process = Run(["exec", name, "sh", "-c", "set -e; test $(cat /proc/1/comm) = python3; test $(ps -eo stat= | awk '$1 ~ /^Z/ {n++} END {print n+0}') = 0; p=$(pgrep -f '^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$'); test -n \"$p\"; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_USERNAME=opencode$'; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_PASSWORD='; ! runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^WORKER_CONTROLLER_ID='; runuser -u employee -- sh -c '! test -r /run/worker-supervisor.sock; ! test -w /run/worker-supervisor.sock'"]);
+            var process = Run(["exec", name, "sh", "-c", "set -e; test $(cat /proc/1/comm) = python3; test $(ps -eo stat= | awk '$1 ~ /^Z/ {n++} END {print n+0}') = 0; p=" + listeners.Pid + "; test -n \"$p\"; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_USERNAME=opencode$'; runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^OPENCODE_SERVER_PASSWORD='; ! runuser -u employee -- sh -c \"tr '\\0' '\\n' </proc/$p/environ\" | grep -q '^WORKER_CONTROLLER_ID='; runuser -u employee -- sh -c '! test -r /run/worker-supervisor.sock; ! test -w /run/worker-supervisor.sock'"]);
             Assert.True(process.ExitCode == 0, process.Output);
             var network = Run(["inspect", "-f", "{{.HostConfig.NetworkMode}}", name]);
             Assert.True(network.ExitCode == 0 && network.Output.Trim() == "none", network.Output);
@@ -361,7 +361,7 @@ public sealed class WorkerImageContractTests
             HVO.AgentControl.RemoteWorker.ImageContractVerifier.CheckRuntime(verify.StandardOutput);
 
             // The generic profile's toolchain is really there, as the employee would see it.
-            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "/opt/dotnet-sdk/dotnet --list-sdks | grep -q '^10\\.0\\.401' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
+            var tools = Run(["run", "--rm", "--network", "none", "--user", "1102:1102", "--entrypoint", "/bin/sh", tag, "-c", "/opt/dotnet-sdk/dotnet --list-sdks | grep -q '^10\\.0\\.402' && /usr/bin/dotnet --list-runtimes | grep -q NETCore && python3 --version && gh --version | head -1 && node --version"]);
             Assert.True(tools.ExitCode == 0, tools.Output);
 
             // Hostile fragments are built the same way and must be rejected by the same,
@@ -545,18 +545,35 @@ public sealed class WorkerImageContractTests
     /// </summary>
     private sealed record ListenerResult(bool Readable, string[] Values, string Error);
 
-    private static (ListenerResult IPv4, ListenerResult IPv6)? WaitForAcpListeners(string container, int timeoutSeconds = 30)
+    private static (ListenerResult IPv4, ListenerResult IPv6, string Pid)? WaitForAcpListeners(string container, int timeoutSeconds = 30)
     {
+        // Read the PID recorded by the supervisor, then verify that exact
+        // process's argv. Never infer ownership from a process-name pattern.
+        const string statusScript = """
+            import json, socket
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(1)
+                connection.connect("/run/worker-supervisor.sock")
+                connection.sendall(b'{"operation":"status"}\n')
+                status = json.loads(connection.makefile("rb").readline(4096))
+            pid = status.get("pid")
+            if status.get("state") == "running" and isinstance(pid, int) and pid > 0:
+                with open(f"/proc/{pid}/cmdline", "rb") as command:
+                    argv = command.read().rstrip(b"\0").split(b"\0")
+                assert argv == [b"/usr/local/bin/opencode", b"acp", b"--port", b"4096",
+                                b"--hostname", b"127.0.0.1", b"--cwd", b"/workspace", b"--pure"]
+                print(pid)
+            """;
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
         while (DateTime.UtcNow < deadline)
         {
-            var found = Run(["exec", container, "pgrep", "-f", "^/usr/local/bin/opencode acp --port 4096 --hostname 127.0.0.1 --cwd /workspace --pure$"]);
-            if (found.ExitCode == 0 && found.Output.Trim().Length > 0)
+            var found = Run(["exec", "--user", "1101:1101", container, "/usr/bin/python3", "-I", "-S", "-c", statusScript]);
+            var pid = found.Output.Trim();
+            if (found.ExitCode == 0 && int.TryParse(pid, out var processId) && processId > 0)
             {
-                var pid = found.Output.Trim().Split('\n')[0].Trim();
                 var ipv4 = Listeners(container, pid, "tcp");
                 var ipv6 = Listeners(container, pid, "tcp6");
-                if (ipv4.Readable && ipv4.Values.Length > 0) return (ipv4, ipv6);
+                if (ipv4.Readable && ipv4.Values.Length > 0) return (ipv4, ipv6, pid);
             }
             Thread.Sleep(250);
         }

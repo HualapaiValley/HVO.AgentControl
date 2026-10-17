@@ -18,16 +18,19 @@ than a machine-wide latest.
 
 | Tool | Pin | Source of truth |
 | --- | --- | --- |
-| .NET SDK | `10.0.401` (stable only, `rollForward: disable`) | [`global.json`](../global.json) |
+| .NET SDK | `10.0.402` (stable only, `rollForward: disable`) | [`global.json`](../global.json) |
+| Runtime baseline | `10.0.13` | [`Directory.Build.props`](../Directory.Build.props), [`Dockerfile`](../Dockerfile) |
 | Target framework | `net10.0` | [`Directory.Build.props`](../Directory.Build.props) |
 | NuGet package versions | centralized, no per-project `Version` | [`Directory.Packages.props`](../Directory.Packages.props) |
 | Node.js | `22` in CI/browser jobs; `engines.node >= 20` | [`.github/workflows/build.yml`](../.github/workflows/build.yml), [`tests/Browser/package.json`](../tests/Browser/package.json) |
-| Playwright | `1.63.0` | [`tests/Browser/package.json`](../tests/Browser/package.json) |
+| Playwright | `1.64.0` | [`tests/Browser/package.json`](../tests/Browser/package.json) |
 | Python | `3.12` for CI/release validation | [`.github/workflows/build.yml`](../.github/workflows/build.yml), [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
 | Docker / Compose | Compose v2 (`docker compose`); buildx for release | [`compose.yaml`](../compose.yaml), [`.github/workflows/release.yml`](../.github/workflows/release.yml) |
-| Runtime base images | `mcr.microsoft.com/dotnet/sdk:10.0.401`, `mcr.microsoft.com/dotnet/aspnet:10.0`, `node:22-bookworm-slim` | [`Dockerfile`](../Dockerfile) |
+| Runtime base images | `mcr.microsoft.com/dotnet/sdk:10.0.402`, `mcr.microsoft.com/dotnet/aspnet:10.0.13`, `mcr.microsoft.com/dotnet/runtime:10.0.13`, `node:22-bookworm-slim` | [`Dockerfile`](../Dockerfile) |
 | OpenCode | `1.18.30` | [`Dockerfile`](../Dockerfile) (`OPENCODE_VERSION`) |
 | Runtime `python3` / `tmux` | provided by the runtime base image (no separate pin); verified `Python 3.12.3` and `tmux 3.4` in the local CI image | [`Dockerfile`](../Dockerfile) |
+
+The .NET base images also pin their multi-architecture index digests in `Dockerfile`.
 
 OpenCode is a runtime/container dependency and is not required on the host for
 standard tests. The .NET suite requires `tmux` for isolated real-command tests
@@ -48,7 +51,7 @@ ecosystems remain enabled.
 
 Prerequisites for host-side development:
 
-- .NET SDK `10.0.401` (the `global.json` pin refuses other SDKs)
+- .NET SDK `10.0.402` (the `global.json` pin refuses other SDKs)
 - Node.js 22 for the browser checks
 - Python 3.12 for the PTY-bridge contract test
 - tmux (validated with 3.4) for isolated command integration tests
@@ -58,7 +61,7 @@ Prerequisites for host-side development:
 Verify the SDK before doing anything else:
 
 ```bash
-dotnet --version   # must print 10.0.401
+dotnet --version   # must print 10.0.402
 ```
 
 ### Build, test, format

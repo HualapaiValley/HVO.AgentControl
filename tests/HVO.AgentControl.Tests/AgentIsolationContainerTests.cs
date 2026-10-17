@@ -161,7 +161,7 @@ public sealed class AgentIsolationContainerTests
         // The pinned SDK has a single source; a doc that names a different one
         // is stale rather than historical unless it is describing a past bump.
         var globalJson = File.ReadAllText(Path.Combine(root, "global.json"));
-        Assert.Contains("10.0.401", globalJson, StringComparison.Ordinal);
+        Assert.Contains("10.0.402", globalJson, StringComparison.Ordinal);
         foreach (var name in new[] { "CHANGELOG.md", "README.md" })
         {
             Assert.DoesNotContain(
@@ -1714,9 +1714,13 @@ public sealed class AgentIsolationContainerTests
         var result = RunInContainer(
             """
             export Control__OwnerPasswordFile=""
-            # No controller is running in this shell, yet the usual pattern-match
-            # one-liner still reports a PID: its own.
-            echo "PGREP_SELF_MATCH=$(sh -c 'pgrep -o -f HVO.AgentControl.dll')"
+            # No controller is running, but HVO.AgentControl.dll is in this
+            # inspecting shell's argv. A command-line pattern would match it.
+            if tr '\0' '\n' </proc/$$/cmdline | grep -Fq HVO.AgentControl.dll; then
+              echo INSPECTING_SHELL_NAME_MATCH=1
+            else
+              echo INSPECTING_SHELL_NAME_MATCH=0
+            fi
             echo "INSPECTING_SHELL=$$"
 
             /usr/local/bin/control-entrypoint /bin/sh -c '
@@ -1733,12 +1737,9 @@ public sealed class AgentIsolationContainerTests
 
         var output = result.StandardOutput;
 
-        // Hazard 2: pgrep is installed, and it answers with a PID even though no
-        // controller exists here - so a documented pgrep recipe would send an
-        // operator to inspect the wrong process's capabilities.
-        Assert.False(
-            string.IsNullOrWhiteSpace(Extract(output, "PGREP_SELF_MATCH=")),
-            "pgrep -f matched nothing; the self-match hazard this PID file avoids no longer exists");
+        // Hazard 2: the inspecting shell itself carries the controller name,
+        // so matching argv would not prove that the controller is running.
+        Assert.Equal("1", Extract(output, "INSPECTING_SHELL_NAME_MATCH="));
 
         // `exec` keeps the PID, so what the entrypoint recorded is the process
         // that is actually running as the controller.
