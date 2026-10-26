@@ -2,7 +2,7 @@ FROM node:22-bookworm-slim AS opencode
 ARG OPENCODE_VERSION=1.18.30
 RUN npm install --global opencode-ai@${OPENCODE_VERSION}
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0.402@sha256:0d99ebf1ccad15037b5c98c9fe8979d6b8dbac23812feae2277a0b277b5c5ffa AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.403@sha256:de4fe90a98845d75910b9769662465c84de1a934665c431279d1382b2bddc02b AS build
 WORKDIR /source
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
@@ -23,7 +23,7 @@ RUN gcc -std=c11 -O2 -static -Wall -Wextra -Werror -Wformat=2 -Wconversion \
         -o /agentcontrol-launch /src/agentcontrol-launch.c \
     && strip /agentcontrol-launch
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.13@sha256:d5633778c754e89a386882eddf8dbee6942447a8a4b8267c19cf1e1158d0b0ac AS control-runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.14@sha256:de0ee358cdd672f7017a003bed21e9ac9ed48a27c922a59b18175b6e82fa7fee AS control-runtime
 RUN apt-get update && apt-get install -y --no-install-recommends python3 tmux tini ca-certificates git util-linux \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=opencode /usr/local/bin/node /usr/local/bin/node
@@ -116,7 +116,7 @@ FROM control-runtime AS control
 # Independent worker artifact. It is not used by the control service unless the
 # optional Compose profile is explicitly selected. PID 1 is the fixed-operation
 # root supervisor; bridge and employee processes are distinct unprivileged UIDs.
-FROM mcr.microsoft.com/dotnet/runtime:10.0.13@sha256:939555726cae4c916d212323ac3c0792996dcac2614f00e82cc40fcf059e1af3 AS worker
+FROM mcr.microsoft.com/dotnet/runtime:10.0.14@sha256:a3f9f81954b9c810af2ed18849716c8dc74a4707bd0907fdbd69be81554c0f30 AS worker
 RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates git tmux util-linux \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=opencode /usr/local/bin/node /usr/local/bin/node
@@ -146,7 +146,7 @@ ENTRYPOINT ["/usr/bin/python3", "-I", "-S", "/usr/local/bin/worker-supervisor"]
 # Privileged daemon helper: the only service with the Docker socket. Debian's
 # docker.io package supplies the CLI from the same signed distribution archive
 # used by the base image, avoiding an additional third-party apt trust root.
-FROM mcr.microsoft.com/dotnet/runtime:10.0.13@sha256:939555726cae4c916d212323ac3c0792996dcac2614f00e82cc40fcf059e1af3 AS docker-helper
+FROM mcr.microsoft.com/dotnet/runtime:10.0.14@sha256:a3f9f81954b9c810af2ed18849716c8dc74a4707bd0907fdbd69be81554c0f30 AS docker-helper
 # The empty named socket volume copies the mountpoint metadata on first use.
 # GID 1001 is the controller group; the helper keeps UID 1002 and Compose adds
 # the host Docker-socket gid only as a supplementary group.
